@@ -102,7 +102,11 @@ defmodule ZtlpNs.CertAuthorityTest do
       assert File.exists?(Path.join(dir, "root.pem"))
       assert File.exists?(Path.join(dir, "root.key.enc"))
       assert File.exists?(Path.join(dir, "intermediate.pem"))
-      assert File.exists?(Path.join(dir, "intermediate.key"))
+      # CWE-327 xye-tnwl: intermediate key is now encrypted at rest
+      # (was a plaintext "intermediate.key" PEM before this fix).
+      assert File.exists?(Path.join(dir, "intermediate.key.enc"))
+      refute File.exists?(Path.join(dir, "intermediate.key")),
+        "intermediate CA key must never be written in plaintext"
       assert File.exists?(Path.join(dir, "chain.pem"))
     end
   end
@@ -237,6 +241,37 @@ defmodule ZtlpNs.CertAuthorityTest do
       plaintext = "test secret key data"
       encrypted = CertAuthority.encrypt_key(plaintext, "right-passphrase")
       assert {:error, :decryption_failed} = CertAuthority.decrypt_key(encrypted, "wrong-passphrase")
+    end
+
+    # CWE-327 jwj-eghu regression tests: the KDF was a single unsalted
+    # SHA-256 hash with no work factor. Verify the fixed PBKDF2+salt
+    # derivation actually behaves like one (unique salt per encryption,
+    # same passphrase produces different ciphertext each time).
+    test "encrypting the same plaintext+passphrase twice yields different ciphertext (salt is unique per call)" do
+      plaintext = "test secret key data"
+      passphrase = "same-passphrase"
+
+      encrypted_a = CertAuthority.encrypt_key(plaintext, passphrase)
+      encrypted_b = CertAuthority.encrypt_key(plaintext, passphrase)
+
+      refute encrypted_a == encrypted_b,
+        "encrypting twice with the same passphrase must not reuse the same salt/IV/ciphertext"
+
+      # Both must still independently decrypt correctly with the same passphrase.
+      assert {:ok, ^plaintext} = CertAuthority.decrypt_key(encrypted_a, passphrase)
+      assert {:ok, ^plaintext} = CertAuthority.decrypt_key(encrypted_b, passphrase)
+    end
+
+    test "encrypted output carries a random salt distinct from a fixed-length legacy unsalted format" do
+      # Old format: iv(12) || tag(16) || ciphertext -- no salt at all.
+      # New format: salt(16) || iv(12) || tag(16) || ciphertext.
+      # This test locks in the new format's minimum length so a future
+      # regression back to the old unsalted format would be caught by
+      # length alone, even before checking the salt is actually random.
+      plaintext = "x"
+      encrypted = CertAuthority.encrypt_key(plaintext, "passphrase")
+      # 16 (salt) + 12 (iv) + 16 (tag) + 1 (ciphertext byte) = 45
+      assert byte_size(encrypted) >= 16 + 12 + 16 + byte_size(plaintext)
     end
   end
 

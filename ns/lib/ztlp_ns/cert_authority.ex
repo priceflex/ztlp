@@ -15,11 +15,11 @@ defmodule ZtlpNs.CertAuthority do
 
   ```
   ~/.ztlp/ca/
-  ├── root.key.enc       # Root CA private key (AES-256-GCM encrypted)
-  ├── root.pem           # Root CA certificate (PEM)
-  ├── intermediate.key   # Intermediate CA private key (PEM, protected by file perms)
-  ├── intermediate.pem   # Intermediate CA certificate (PEM)
-  └── chain.pem          # Certificate chain (intermediate + root)
+  ├── root.key.enc         # Root CA private key (AES-256-GCM encrypted)
+  ├── root.pem             # Root CA certificate (PEM)
+  ├── intermediate.key.enc # Intermediate CA private key (AES-256-GCM encrypted -- fixed CWE-327 xye-tnwl, was plaintext)
+  ├── intermediate.pem     # Intermediate CA certificate (PEM)
+  └── chain.pem            # Certificate chain (intermediate + root)
   ```
 
   ## Key Types
@@ -291,7 +291,7 @@ defmodule ZtlpNs.CertAuthority do
     # Save to disk
     save_root_key(ca_dir, root_priv, passphrase)
     File.write!(Path.join(ca_dir, "root.pem"), root_cert_pem)
-    save_intermediate_key(ca_dir, inter_priv)
+    save_intermediate_key(ca_dir, inter_priv, passphrase)
     File.write!(Path.join(ca_dir, "intermediate.pem"), inter_cert_pem)
     File.write!(Path.join(ca_dir, "chain.pem"), chain_pem)
 
@@ -353,7 +353,13 @@ defmodule ZtlpNs.CertAuthority do
 
     # Save to disk
     ca_dir = state.ca_dir
-    save_intermediate_key(ca_dir, inter_priv)
+    # [CWE-327 xye-tnwl] Rotation has no passphrase in scope from its
+    # caller (do_rotate_intermediate/2's opts don't carry one) -- use
+    # the same resolution path load_ca/try_load_ca use elsewhere in this
+    # module, consistent with the single-passphrase trust model this CA
+    # already assumes.
+    passphrase = default_passphrase()
+    save_intermediate_key(ca_dir, inter_priv, passphrase)
     File.write!(Path.join(ca_dir, "intermediate.pem"), inter_cert_pem)
     File.write!(Path.join(ca_dir, "chain.pem"), chain_pem)
 
@@ -395,18 +401,43 @@ defmodule ZtlpNs.CertAuthority do
     end
   end
 
-  defp save_intermediate_key(ca_dir, private_key) do
+  # [CWE-327 xye-tnwl] The intermediate CA private key signs every
+  # service/client certificate day-to-day, but was previously written to
+  # disk as a PLAINTEXT PEM file relying solely on chmod 0o600 for
+  # protection. Unlike the root key (encrypted at rest, albeit with a
+  # weak KDF fixed separately -- see jwj-eghu below), the intermediate
+  # key had NO encryption whatsoever -- any filesystem-level access
+  # (container escape, backup exposure, misconfigured volume mount,
+  # privileged user) yielded the raw signing key with zero decryption
+  # step needed, enabling forged certificates for any service/client in
+  # the network.
+  #
+  # Fix: encrypt the intermediate key at rest using the SAME
+  # encrypt_key/decrypt_key primitives already used for the root key, so
+  # this doesn't introduce a second crypto implementation to audit. The
+  # NS process needs a passphrase to derive the encryption key for BOTH
+  # keys; reuse the same passphrase resolution path (root CA passphrase)
+  # rather than introducing a second passphrase concept -- this matches
+  # the existing trust model where the same operator manages both keys.
+  defp save_intermediate_key(ca_dir, private_key, passphrase) do
     key_pem = ZtlpNs.X509.private_key_to_pem(private_key)
-    path = Path.join(ca_dir, "intermediate.key")
-    File.write!(path, key_pem)
-    # Set restrictive permissions
+    encrypted = encrypt_key(key_pem, passphrase)
+    path = Path.join(ca_dir, "intermediate.key.enc")
+    File.write!(path, encrypted)
+    # Still restrict permissions as defense-in-depth even though the
+    # contents are now encrypted -- unnecessary exposure of ciphertext
+    # (and the derive_key salt work factor) is still worth avoiding.
     File.chmod(path, 0o600)
   end
 
-  defp load_intermediate_key(ca_dir) do
-    path = Path.join(ca_dir, "intermediate.key")
+  defp load_intermediate_key(ca_dir, passphrase) do
+    path = Path.join(ca_dir, "intermediate.key.enc")
     case File.read(path) do
-      {:ok, pem} -> ZtlpNs.X509.pem_to_private_key(pem)
+      {:ok, encrypted} ->
+        case decrypt_key(encrypted, passphrase) do
+          {:ok, key_pem} -> ZtlpNs.X509.pem_to_private_key(key_pem)
+          error -> error
+        end
       error -> error
     end
   end
@@ -415,27 +446,40 @@ defmodule ZtlpNs.CertAuthority do
 
   @doc false
   def encrypt_key(plaintext, passphrase) do
-    key = derive_key(passphrase)
+    salt = :crypto.strong_rand_bytes(16)
+    key = derive_key(passphrase, salt)
     iv = :crypto.strong_rand_bytes(12)
     {ciphertext, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", true)
-    # Format: iv(12) || tag(16) || ciphertext
-    iv <> tag <> ciphertext
+    # Format: salt(16) || iv(12) || tag(16) || ciphertext
+    salt <> iv <> tag <> ciphertext
   end
 
   @doc false
   def decrypt_key(encrypted, passphrase) do
-    key = derive_key(passphrase)
-    <<iv::binary-12, tag::binary-16, ciphertext::binary>> = encrypted
+    <<salt::binary-16, iv::binary-12, tag::binary-16, ciphertext::binary>> = encrypted
+    key = derive_key(passphrase, salt)
     case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ciphertext, "", tag, false) do
       :error -> {:error, :decryption_failed}
       plaintext -> {:ok, plaintext}
     end
   end
 
-  defp derive_key(passphrase) when is_binary(passphrase) do
-    # PBKDF2-like derivation using SHA-256
-    # In production, use proper PBKDF2 with salt and iterations
-    :crypto.hash(:sha256, passphrase)
+  # [CWE-327 jwj-eghu] Previously a single unsalted SHA-256 hash of the
+  # passphrase -- no work factor, no salt. Combined with a hardcoded
+  # default passphrase ("ztlp-default-passphrase"), the root CA key was
+  # decryptable instantly; even a custom passphrase was vulnerable to an
+  # unthrottled offline brute force (billions of SHA-256 evals/sec on
+  # commodity hardware). Replaced with PBKDF2-HMAC-SHA256, a per-key
+  # random salt (defends against rainbow tables / precomputation and
+  # ensures re-encrypting the same passphrase never reuses a derived
+  # key), and 600,000 iterations (OWASP's current PBKDF2-SHA256
+  # recommendation as of this fix, chosen to impose a real computational
+  # work factor while still completing in well under a second for the
+  # legitimate one-time key-load-at-boot path).
+  @pbkdf2_iterations 600_000
+
+  defp derive_key(passphrase, salt) when is_binary(passphrase) and is_binary(salt) do
+    :crypto.pbkdf2_hmac(:sha256, passphrase, salt, @pbkdf2_iterations, 32)
   end
 
   # ── Internal: Loading from Disk ────────────────────────────────────
@@ -448,7 +492,7 @@ defmodule ZtlpNs.CertAuthority do
          {:ok, inter_cert_pem} <- File.read(Path.join(ca_dir, "intermediate.pem")),
          {:ok, inter_cert_der} <- ZtlpNs.X509.pem_to_der(inter_cert_pem),
          {:ok, chain_pem} <- File.read(Path.join(ca_dir, "chain.pem")),
-         {:ok, inter_key} <- load_intermediate_key(ca_dir),
+         {:ok, inter_key} <- load_intermediate_key(ca_dir, default_passphrase()),
          {:ok, root_info} <- ZtlpNs.X509.parse_cert(root_cert_der),
          {:ok, inter_info} <- ZtlpNs.X509.parse_cert(inter_cert_der) do
 

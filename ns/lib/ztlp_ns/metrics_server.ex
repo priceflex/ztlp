@@ -12,11 +12,15 @@ defmodule ZtlpNs.MetricsServer do
   @default_port 9103
   @default_bind "127.0.0.1"
 
-  # ── DoS mitigation ───────────────────────────────────────────────
-  # Global cap on concurrent metric-acceptor processes. Each
-  # `spawn/1` in the accept loop holds one slot until the request
-  # completes. Exceeding this cap closes the socket immediately
-  # without spawning. Tunable via `:max_connections` (app env).
+  # ── DoS mitigation — CWE-770 (same pattern as eia-oazy/cfg-fwqs) ────
+  #
+  # Max concurrent metric-acceptor processes. Each handler holds one slot
+  # until the HTTP request completes and the socket is closed. Exceeding
+  # this cap closes the socket immediately without spawning a process.
+  # A Task.Supervisor with max_children provides an orthogonal second
+  # cap: even if the counter-based check races and lets one extra
+  # connection through, the supervisor refuses start_child once its own
+  # max_children is hit.
   @max_connections 32
 
   # Per-IP burst window (seconds) and max connections per IP within
@@ -42,28 +46,55 @@ defmodule ZtlpNs.MetricsServer do
     # listener even when the global `:metrics_enabled` config is false.
     enabled = Keyword.get(opts, :enabled, metrics_enabled?())
     port_override = Keyword.get(opts, :port)
+    max_conn = max_connections()
 
     if enabled do
       port = port_override || metrics_port()
       bind = metrics_bind()
-      case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128, ip: to_charlist(bind)]) do
-        {:ok, ls} ->
-          {:ok, actual_port} = :inet.port(ls)
-          Logger.info("[metrics] NS Prometheus endpoint on port #{actual_port}")
-          send(self(), :accept)
-          {:ok, %{socket: ls, port: actual_port}}
+
+      supervisor_opts = [
+        max_children: max_conn,
+        max_restarts: max_conn,
+        max_seconds: 60
+      ]
+
+      case Task.Supervisor.start_link(supervisor_opts) do
+        {:ok, sup} ->
+          # [pre-existing bug, found+fixed alongside eia-oazy/cfg-fwqs]
+          # :gen_tcp's :ip option requires an erlang ip-address tuple
+          # (e.g. {127,0,0,1}), NOT a charlist — the original
+          # to_charlist(bind) always raised :badarg the moment this
+          # listener actually tried to bind.
+          bind_ip =
+            case :inet.parse_address(to_charlist(bind)) do
+              {:ok, ip} -> ip
+              {:error, _} -> {127, 0, 0, 1}
+            end
+
+          case :gen_tcp.listen(port, [:binary, packet: :http_bin, active: false, reuseaddr: true, backlog: 128, ip: bind_ip]) do
+            {:ok, ls} ->
+              {:ok, actual_port} = :inet.port(ls)
+              Logger.info("[metrics] NS Prometheus endpoint on port #{actual_port}")
+              send(self(), :accept)
+              {:ok, %{socket: ls, port: actual_port, supervisor: sup}}
+            {:error, reason} ->
+              Supervisor.stop(sup, :normal)
+              Logger.error("[metrics] Failed to start on port #{port}: #{inspect(reason)}")
+              {:ok, %{socket: nil, port: port, supervisor: nil}}
+          end
+
         {:error, reason} ->
-          Logger.error("[metrics] Failed to start on port #{port}: #{inspect(reason)}")
-          {:ok, %{socket: nil, port: port}}
+          Logger.error("[metrics] Task.Supervisor failed to start: #{inspect(reason)}")
+          {:ok, %{socket: nil, port: port, supervisor: nil}}
       end
     else
-      {:ok, %{socket: nil, port: nil}}
+      {:ok, %{socket: nil, port: nil, supervisor: nil}}
     end
   end
 
   @impl true
   def handle_info(:accept, %{socket: nil} = state), do: {:noreply, state}
-  def handle_info(:accept, %{socket: ls} = state) do
+  def handle_info(:accept, %{socket: ls, supervisor: sup} = state) do
     case :gen_tcp.accept(ls, 100) do
       {:ok, client} ->
         peer_ip = peer_ip_for(client)
@@ -72,13 +103,28 @@ defmodule ZtlpNs.MetricsServer do
         if maybe_bump_conn_count() do
           # DoS gate 2: per-IP rate limit
           if maybe_burst_check(peer_ip) do
-            spawn_link(fn ->
-              try do
-                handle_request(client, peer_ip)
-              after
+            # Dispatch to supervised task — crashes are contained, no
+            # risk to the accept loop.  [CWE-770]
+            case Task.Supervisor.start_child(sup, fn ->
+                 try do
+                   handle_request(client, peer_ip)
+                 after
+                   untrack_conn()
+                 end
+               end) do
+              {:ok, _pid} ->
+                :ok
+
+              {:error, {:max_children, _}} ->
+                Logger.warning("[metrics] Connection rejected: supervisor max_children reached")
+                :gen_tcp.close(client)
                 untrack_conn()
-              end
-            end)
+
+              {:error, reason} ->
+                Logger.warning("[metrics] Task.Supervisor failed: #{inspect(reason)}")
+                :gen_tcp.close(client)
+                untrack_conn()
+            end
           else
             # Per-IP rate limited — close the socket, no process spawned
             :inet.setopts(client, [packet: :raw])
@@ -87,6 +133,7 @@ defmodule ZtlpNs.MetricsServer do
           end
         else
           # Global cap hit — close immediately, no process spawned
+          Logger.warning("[metrics] Connection rejected: max_connections (#{max_connections()}) reached")
           :gen_tcp.close(client)
         end
 
@@ -191,8 +238,12 @@ defmodule ZtlpNs.MetricsServer do
   def handle_call(:port, _from, %{port: p} = state), do: {:reply, p, state}
 
   @impl true
-  def terminate(_reason, %{socket: nil}), do: :ok
-  def terminate(_reason, %{socket: s}), do: :gen_tcp.close(s)
+  def terminate(_reason, %{socket: nil, supervisor: nil}), do: :ok
+  def terminate(_reason, %{socket: nil, supervisor: sup}), do: Supervisor.stop(sup, :normal)
+  def terminate(_reason, %{socket: s, supervisor: sup}) do
+    if sup, do: Supervisor.stop(sup, :normal, 5000)
+    :gen_tcp.close(s)
+  end
 
   defp handle_request(socket, peer_ip) do
     case :gen_tcp.recv(socket, 0, 5_000) do

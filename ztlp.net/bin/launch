@@ -160,9 +160,26 @@ cmd_list() {
   local any=0
   for env in "$INSTANCE_ROOT"/*/instance.env; do
     any=1
-    # shellcheck disable=SC1090
-    source "$env"
-    printf '%-24s %-32s %-36s %s\n' "$ZTLP_INSTANCE_SLUG" "$ZTLP_ZONE" "$ZTLP_ADMIN_EMAIL" "${ZTLP_CREATED_AT:-}"
+    # [SAST fix: btp-qmrx] Previously used `source "$env"`, which
+    # executes the ENTIRE file as shell code, not just KEY=VALUE
+    # assignments. instance.env is written from public,
+    # untrusted-actor-supplied onboarding fields (org/email/zone/slug
+    # via `launch create --org ... --email ...`). write_instance()
+    # does shell-escape values with printf '%q' (see line 56-61),
+    # which mitigates direct injection through THAT write path, but
+    # sourcing is still architecturally unsafe: a directory-level
+    # write primitive, compromised backup, symlink race, or a future
+    # refactor that drops %q escaping would all turn into arbitrary
+    # command execution as whoever runs `launch list`. Parse
+    # KEY=VALUE safely with grep+cut instead — this reads the values
+    # as literal text without ever invoking the shell on file
+    # content the operator does not control.
+    local slug zone email created
+    slug=$(grep '^ZTLP_INSTANCE_SLUG=' "$env" | head -1 | cut -d= -f2-)
+    zone=$(grep '^ZTLP_ZONE=' "$env" | head -1 | cut -d= -f2-)
+    email=$(grep '^ZTLP_ADMIN_EMAIL=' "$env" | head -1 | cut -d= -f2-)
+    created=$(grep '^ZTLP_CREATED_AT=' "$env" | head -1 | cut -d= -f2-)
+    printf '%-24s %-32s %-36s %s\n' "$slug" "$zone" "$email" "${created:-}"
   done
   if [[ "$any" -eq 0 ]]; then
     echo "No Launch instances found."

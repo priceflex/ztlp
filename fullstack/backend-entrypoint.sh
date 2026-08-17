@@ -10,12 +10,13 @@ echo "════════════════════════�
 echo "  Backend SSH Server"
 echo "═══════════════════════════════════════════════════════"
 
-# Create test user with a random password (logged to stderr so it doesn't leak into logs)
+# Create test user. Password is fixed (matches the client's SSHPASS=ztlptest)
+# unless BACKEND_SSH_PASS overrides it, so the tunnel tests can authenticate.
+TEST_PASS="${BACKEND_SSH_PASS:-ztlptest}"
 if ! id testuser >/dev/null 2>&1; then
-    TEST_PASS=$(openssl rand -base64 12)
     useradd -m -s /bin/bash testuser
     echo "testuser:${TEST_PASS}" | chpasswd 2>/dev/null
-    echo "  Created user 'testuser' (password generated at runtime — see container logs)" >&2
+    echo "  Created user 'testuser' (password set via BACKEND_SSH_PASS, default ztlptest)" >&2
 fi
 
 # Generate host keys if missing

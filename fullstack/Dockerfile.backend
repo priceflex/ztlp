@@ -5,7 +5,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server python3-minimal \
+    openssh-server python3-minimal python3 openssl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
 

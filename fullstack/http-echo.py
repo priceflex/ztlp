@@ -155,7 +155,7 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    server = http.server.ThreadedHTTPServer(("0.0.0.0", PORT), EchoHandler)
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), EchoHandler)
     print(f"═══════════════════════════════════════════════════════")
     print(f"  ZTLP HTTP Echo Server")
     print(f"  Listening on port {PORT}")

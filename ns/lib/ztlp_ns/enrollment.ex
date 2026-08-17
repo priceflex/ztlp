@@ -190,7 +190,12 @@ defmodule ZtlpNs.Enrollment do
   defp check_usage(%{nonce: nonce, max_uses: max_uses}) do
     init()
 
-    case :ets.update_counter(@table, nonce, -1, max_uses) do
+    # The 4th arg to ets:update_counter/4 is the default entry to insert when
+    # the nonce is not yet in the table. For a :set table it must be a
+    # {object, counter} TUPLE — passing a bare integer raises
+    # "4th argument: not a tuple". (Bug: this was `max_uses`, an integer, which
+    # crashed every first-use of a fresh max_uses token.)
+    case :ets.update_counter(@table, nonce, -1, {nonce, max_uses}) do
       remaining when is_integer(remaining) and remaining >= 0 ->
         :ok
 

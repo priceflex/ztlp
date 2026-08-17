@@ -177,8 +177,19 @@ defmodule ZtlpNs.MetricsServerTest do
   describe "/token_status (CWE-200 / CWE-79)" do
     setup do
       ZtlpNs.Enrollment.init()
-      :ets.delete_all_objects(:ztlp_enrollment_log)
-      on_exit(fn -> :ets.delete_all_objects(:ztlp_enrollment_log) end)
+
+      # Tolerate the table not existing (another test may have cleared it, or
+      # the GenServer lifecycle may have dropped it).
+      if :ets.whereis(:ztlp_enrollment_log) != :undefined do
+        :ets.delete_all_objects(:ztlp_enrollment_log)
+      end
+
+      on_exit(fn ->
+        if :ets.whereis(:ztlp_enrollment_log) != :undefined do
+          :ets.delete_all_objects(:ztlp_enrollment_log)
+        end
+      end)
+
       :ok
     end
 

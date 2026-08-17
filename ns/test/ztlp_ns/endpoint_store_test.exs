@@ -1,5 +1,5 @@
 defmodule ZtlpNs.EndpointStoreTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.EndpointStore
 

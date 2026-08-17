@@ -120,13 +120,30 @@ defmodule ZtlpNs.Server do
             request_size = byte_size(data)
 
             worker_fn = fn ->
-              reply = process_query(data, {ip, port, socket})
-              # Amplification prevention: for unauthenticated name queries (0x01),
-              # cap response size to request size. Pubkey queries (0x05) are
-              # exempt — they require knowledge of a valid 32-byte key and are
-              # not viable amplification vectors.
-              reply = maybe_truncate_reply(data, reply, request_size)
-              :gen_udp.send(socket, ip, port, reply)
+              # A malformed/adversarial UDP packet must never crash the NS
+              # Server. process_query/2 runs inline (when the QuerySupervisor
+              # isn't started) or in a worker Task — either way an unhandled
+              # exception here would either kill the Task or, worse, crash the
+              # Server process itself (inline path). Wrap the whole handler in
+              # a rescue so any bad packet is dropped silently (consistent with
+              # the rate-limit / oversized-packet silent-drop policy).
+              try do
+                reply = process_query(data, {ip, port, socket})
+                # Amplification prevention: for unauthenticated name queries
+                # (0x01), cap response size to request size. Pubkey queries
+                # (0x05) are exempt — they require knowledge of a valid
+                # 32-byte key and are not viable amplification vectors.
+                reply = maybe_truncate_reply(data, reply, request_size)
+                :gen_udp.send(socket, ip, port, reply)
+              rescue
+                e ->
+                  StructuredLog.debug(
+                    :dropped_malformed_packet,
+                    source_ip: format_ip(ip),
+                    packet_size: byte_size(data),
+                    error: Exception.message(e)
+                  )
+              end
             end
 
             # Use Task.Supervisor if started, otherwise run inline.

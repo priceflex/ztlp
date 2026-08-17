@@ -1,5 +1,5 @@
 defmodule ZtlpNs.AntiEntropyTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{AntiEntropy, Crypto, Record, Store}
 

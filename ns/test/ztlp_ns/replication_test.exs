@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ReplicationTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, Record, Replication, Store}
 

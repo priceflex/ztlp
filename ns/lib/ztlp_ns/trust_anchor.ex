@@ -46,6 +46,7 @@ defmodule ZtlpNs.TrustAnchor do
   """
   @spec add(String.t(), Crypto.public_key()) :: :ok
   def add(label, public_key) when is_binary(label) and is_binary(public_key) do
+    ensure_table()
     :ets.insert(@table, {label, public_key})
     :ok
   end
@@ -59,6 +60,7 @@ defmodule ZtlpNs.TrustAnchor do
   """
   @spec trusted?(Crypto.public_key()) :: boolean()
   def trusted?(public_key) when is_binary(public_key) do
+    ensure_table()
     # Scan the table for any entry with this public key.
     # This is O(n) but the trust anchor table is tiny (< 10 entries).
     :ets.foldl(fn {_label, pk}, acc -> acc or pk == public_key end, false, @table)
@@ -67,12 +69,14 @@ defmodule ZtlpNs.TrustAnchor do
   @doc "List all trust anchors as `{label, public_key}` tuples."
   @spec list() :: [{String.t(), Crypto.public_key()}]
   def list do
+    ensure_table()
     :ets.tab2list(@table)
   end
 
   @doc "Remove a trust anchor by label."
   @spec remove(String.t()) :: :ok
   def remove(label) when is_binary(label) do
+    ensure_table()
     :ets.delete(@table, label)
     :ok
   end
@@ -85,6 +89,20 @@ defmodule ZtlpNs.TrustAnchor do
       _ -> :ets.delete_all_objects(@table)
     end
     :ok
+  end
+
+  # Ensure the trust anchor ETS table exists. It's normally created in init/1
+  # when the TrustAnchor GenServer starts, but tests may call the public API
+  # when the GenServer is stopped or before it starts. Recreating on demand is
+  # idempotent and safe (the table is a :set keyed by label).
+  defp ensure_table do
+    case :ets.whereis(@table) do
+      :undefined ->
+        :ets.new(@table, [:named_table, :set, :public, read_concurrency: true])
+
+      _tid ->
+        :ok
+    end
   end
 
   # ── GenServer callbacks ────────────────────────────────────────────

@@ -1,5 +1,5 @@
 defmodule ZtlpNs.QueryTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, Record, Store, TrustAnchor, Query, ZoneAuthority}
 

@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ClusterTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Cluster, Config, Crypto, Record, Store}
 

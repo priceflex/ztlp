@@ -1,5 +1,5 @@
 defmodule ZtlpNs.RegistrationErrorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false, async: true
 
   alias ZtlpNs.RegistrationError
 

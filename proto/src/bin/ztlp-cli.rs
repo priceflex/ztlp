@@ -213,6 +213,11 @@ enum Commands {
         key: Option<PathBuf>,
 
         /// Relay address to route through (host:port)
+        ///
+        /// **Deprecated (removed in 0.36):** routing through relays is
+        /// handled by the default QUIC path (CLIENT_ROUTE via NS). This
+        /// flag only enables the legacy raw-UDP tunnel path, which emits
+        /// a deprecation warning at connect time.
         #[arg(short, long)]
         relay: Option<String>,
 
@@ -224,6 +229,10 @@ enum Commands {
         #[arg(long)]
         ns_server: Option<String>,
         /// Use QUIC transport instead of ZTLP reliable UDP
+        ///
+        /// **No-op since the QUIC migration:** QUIC is now the default
+        /// `ztlp connect` path. The flag is retained for backward
+        /// compatibility and is ignored.
         #[arg(long)]
         quic: bool,
 
@@ -250,6 +259,11 @@ enum Commands {
         stun_server: Option<String>,
 
         /// Enable NAT traversal (STUN discovery + hole punching)
+        ///
+        /// **Deprecated (removed in 0.36):** part of the legacy raw-UDP
+        /// tunnel path. The default QUIC path handles NAT'd peers via
+        /// NS candidate resolution; emitting the deprecation warning at
+        /// connect time.
         #[arg(long)]
         nat_assist: bool,
 
@@ -258,6 +272,11 @@ enum Commands {
         no_relay_fallback: bool,
 
         /// Enable NS-coordinated hole punching (auto-on when --ns-server is set in v0.30.12+)
+        ///
+        /// **Deprecated (removed in 0.36):** part of the legacy raw-UDP
+        /// tunnel path. The default QUIC path handles NAT'd peers via
+        /// NS candidate resolution; setting this flag emits the
+        /// deprecation warning at connect time.
         #[arg(long)]
         punch: bool,
 
@@ -274,6 +293,11 @@ enum Commands {
         punch_timeout: Option<Duration>,
 
         /// Enable multi-relay failover via probe pool (auto-on when --ns-server is set in v0.30.12+)
+        ///
+        /// **Deprecated (removed in 0.36):** part of the legacy raw-UDP
+        /// tunnel path. The default QUIC path handles relay-routed
+        /// connects via CLIENT_ROUTE; setting this flag emits the
+        /// deprecation warning at connect time.
         #[arg(long)]
         relay_pool: bool,
 
@@ -361,6 +385,10 @@ enum Commands {
         #[arg(long)]
         gateway: bool,
         /// Use QUIC transport instead of ZTLP reliable UDP
+        ///
+        /// **No-op since the QUIC migration:** QUIC is now the default
+        /// transport. The flag is retained for backward compatibility
+        /// and is ignored.
         #[arg(long)]
         quic: bool,
 
@@ -2878,6 +2906,17 @@ async fn cmd_connect(
 
     if want_legacy_path {
         // Legacy UDP fallback for NAT traversal / relays
+        //
+        // DEPRECATED (0.35.x, removed in 0.36): the hand-rolled raw-UDP
+        // tunnel stack is superseded by the default QUIC path. Keep the
+        // code compiling through the 0.35.x release for legacy
+        // NAT-traversal compatibility; warn once (not per-packet).
+        eprintln!(
+            "{}",
+            c_yellow("WARNING: legacy raw-UDP tunnel path is DEPRECATED (removed in 0.36). \
+Use the default QUIC path \u{2014} drop --relay/--punch/--nat-assist/--relay-pool. \
+Only enable for legacy NAT-traversal compatibility.")
+        );
 
         let identity = load_or_generate_identity(key)?;
 
@@ -4078,35 +4117,92 @@ async fn cmd_connect(
                     return;
                 }
             };
+            // v0.36.0 (quic-pump-throughput): pump TCP->QUIC and QUIC->TCP in
+            // TWO INDEPENDENT tasks. The pre-fix single `tokio::select!` coupled
+            // both directions: when a large transfer saturated the TCP->QUIC
+            // direction (ssh pushing multi-MB payloads) and the QUIC write
+            // momentarily stalled on flow control / stream window / slow peer
+            // ack, the QUIC->TCP arm could never poll `read_ztlp_frame`, so a
+            // stalled forward write starved the reverse reader and (once the
+            // TCP read side also wedged or the peer aborted the data channel)
+            // the transfer truncated at a variable point and ssh exited 255.
+            //
+            // One task per direction means forward backpressure can never
+            // block the reverse read, and vice versa. Byte-exactness and the
+            // existing shutdown semantics are preserved:
+            //   * TCP EOF (read == 0)          -> finish() the QUIC send side
+            //   * QUIC recv stream finished/err -> drain + shut down the TCP
+            //     write side (half-close, so the ssh client sees EOF instead
+            //     of an abrupt reset when the remote side ends first)
             let (mut t_read, mut t_write) = tcp.into_split();
-            let mut read_buf = vec![0u8; 65000];
-            loop {
-                tokio::select! {
-                    res = tokio::io::AsyncReadExt::read(&mut t_read, &mut read_buf) => {
-                        match res {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                println!("TCP->QUIC Read {} bytes", n);
-                                if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
-                                    println!("TCP->QUIC Write Error");
-                                    break;
-                                }
+            // Sent by the TCP->QUIC task once it has drained TCP (EOF or
+            // error) and finished the QUIC send side. The QUIC->TCP task
+            // uses it to know when to stop, breaking the two directions'
+            // dependency on each other.
+            let (pump_up_done_tx, pump_up_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+            // Direction 1: TCP -> QUIC
+            let pump_up = tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                use ztlp_proto::quic_transport::noise_stream;
+                let mut read_buf = vec![0u8; 65000];
+                loop {
+                    match t_read.read(&mut read_buf).await {
+                        Ok(0) => break, // TCP EOF
+                        Ok(n) => {
+                            // No per-chunk println here: logging every 64KB
+                            // chunk through a line-buffered stdout writer on
+                            // the hot pump path throttled large transfers.
+                            if noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n])
+                                .await
+                                .is_err()
+                            {
+                                eprintln!("TCP->QUIC write error; closing pump");
+                                break;
                             }
-                            Err(_) => break,
                         }
-                    }
-                    res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
-                        match res {
-                            Ok(frame) => {
-                                if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
+                        Err(e) => {
+                            eprintln!("TCP read error: {e}; closing pump");
+                            break;
                         }
                     }
                 }
-            }
+                // TCP side is finished: close the QUIC send side so the peer
+                // sees a clean FIN (EOF) on its data channel.
+                let _ = q_send.finish();
+                let _ = pump_up_done_tx.send(());
+            });
+
+            // Direction 2: QUIC -> TCP
+            let pump_down = tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                use ztlp_proto::quic_transport::noise_stream;
+                loop {
+                    // The QUIC frame read is the only true source of
+                    // reverse-direction data, so a plain loop is correct:
+                    // a stalled write_all here cannot starve the
+                    // TCP->QUIC direction because it runs in its own task.
+                    match noise_stream::read_ztlp_frame(&mut q_recv).await {
+                        Ok(frame) => {
+                            if t_write.write_all(&frame).await.is_err() {
+                                break;
+                            }
+                        }
+                        // Peer closed the stream (or errored): done.
+                        Err(_) => break,
+                    }
+                }
+                // Local TCP->QUIC direction is done (EOF/error) AND the
+                // remote has also finished sending: the session is over.
+                let _ = pump_up_done_rx.await;
+                // Signal the local TCP peer (the ssh client) that we are
+                // done writing: half-close so it sees EOF instead of an
+                // abrupt reset when the remote side ends first.
+                let _ = t_write.shutdown().await;
+            });
+
+            let _ = pump_up.await;
+            let _ = pump_down.await;
         });
     }
 }
@@ -5332,7 +5428,7 @@ async fn cmd_listen(
                     let map = admin_map.clone();
 
                     tokio::spawn(async move {
-                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        use tokio::io::AsyncWriteExt;
 
                         if http_inject_headers_copy {
                             if let Ok(frame) =
@@ -5369,35 +5465,68 @@ async fn cmd_listen(
                         }
 
                         let mut read_buf = vec![0u8; 65000];
-                        loop {
-                            tokio::select! {
-                                res = t_read.read(&mut read_buf) => {
-                                    match res {
-                                        Ok(0) => break,
+
+                        // TWO INDEPENDENT pump tasks (mirrors the client-side
+                        // fix). A single `tokio::select!` here coupled the two
+                        // directions: if the backend TCP write stalled (channel
+                        // full), the QUIC read starved and large transfers
+                        // (>=1MB) deadlocked until the SSH keepalive dropped
+                        // the connection. Splitting into two tasks lets each
+                        // direction drain independently. Also removed the
+                        // per-chunk `println!` (line-buffered stdout on the hot
+                        // path throttled throughput — the same bug fixed on
+                        // the client side).
+                        //
+                        // Each direction owns its half of the stream:
+                        //   backend -> client:  t_read (ReadHalf)  -> q_send
+                        //   client -> backend:  q_recv             -> t_write
+                        let pump_backend_to_quic =
+                            tokio::spawn(async move {
+                                use tokio::io::AsyncReadExt;
+                                use ztlp_proto::quic_transport::noise_stream;
+                                loop {
+                                    match t_read.read(&mut read_buf).await {
+                                        Ok(0) => break, // backend EOF
                                         Ok(n) => {
-                                            println!("TCP->QUIC Read {} bytes", n);
-                                            if ztlp_proto::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &read_buf[..n]).await.is_err() {
-                                                println!("TCP->QUIC Write Error");
+                                            if noise_stream::write_ztlp_frame(
+                                                &mut q_send,
+                                                &read_buf[..n],
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                eprintln!("gateway TCP->QUIC write error; closing pump");
                                                 break;
                                             }
                                         }
-                                        Err(_) => break,
+                                        Err(_) => {
+                                            eprintln!("gateway TCP read error; closing pump");
+                                            break;
+                                        }
                                     }
                                 }
-                                res = ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv) => {
-                                    match res {
-                                        Ok(frame) => {
-                                            println!("QUIC->TCP Read {} bytes", frame.len());
-                                            if tokio::io::AsyncWriteExt::write_all(&mut t_write, &frame).await.is_err() {
-                                                println!("QUIC->TCP Write Error");
-                                                break;
-                                            }
+                                let _ = q_send.finish();
+                            });
+
+                        let pump_quic_to_backend = tokio::spawn(async move {
+                            use tokio::io::AsyncWriteExt;
+                            use ztlp_proto::quic_transport::noise_stream;
+                            loop {
+                                match noise_stream::read_ztlp_frame(&mut q_recv).await {
+                                    Ok(frame) => {
+                                        if t_write.write_all(&frame).await.is_err() {
+                                            eprintln!("gateway QUIC->TCP write error; closing pump");
+                                            break;
                                         }
-                                        Err(_) => break,
                                     }
+                                    Err(_) => break, // client closed the stream
                                 }
                             }
-                        }
+                            let _ = t_write.shutdown().await;
+                        });
+
+                        let _ = pump_backend_to_quic.await;
+                        let _ = pump_quic_to_backend.await;
                     });
                 } else {
                     break;

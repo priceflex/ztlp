@@ -184,6 +184,53 @@ pub mod tokio_endpoint {
         });
     }
 
+    /// Apply ZTLP transport tuning to a `quinn::TransportConfig`.
+    ///
+    /// Throughput fix (v0.35.x, quic-pump-throughput): the default quinn
+    /// stream receive window (~64 KiB) caused large transfers (>~256 KiB
+    /// through a relay) to stall — the sender filled the window and waited
+    /// for the peer's `MAX_STREAM_DATA` / `FLOW_CONTROL` updates, which
+    /// arrived too slowly over the relay hop, so the transfer truncated and
+    /// aborted (reproduced on the AWS box: 32–256 KiB pass byte-exact,
+    /// 512 KiB+ truncate at a variable point).
+    ///
+    /// Fix: raise the per-stream and connection-level receive windows so a
+    /// multi-MB transfer stays in flight, and allow many concurrent
+    /// bidirectional streams (each ZTLP tunnel stream is a bidi stream).
+    /// We keep quinn's built-in congestion control (cubic) — we do NOT
+    /// hand-roll a custom CC; quinn's `congestion` trait is the supported
+    /// swap point if we later want BBR.
+    ///
+    /// `max_idle_timeout_ms` / `keep_alive_interval_ms` are carried over from
+    /// the existing v0.29.3 tuning (idle timeout / keepalive so gateway-side
+    /// tunnels survive the 60 s relay-sweeper tick).
+    fn apply_ztlp_transport_tuning(
+        mut tc: quinn::TransportConfig,
+        max_idle_timeout_ms: Option<u32>,
+        keep_alive_interval_ms: Option<u32>,
+    ) -> quinn::TransportConfig {
+        // Throughput: generous flow-control windows.
+        // Per-stream receive window: 4 MiB (lets a single large file transfer
+        // stay in flight without stalling on a 64 KiB default).
+        tc.stream_receive_window(quinn::VarInt::from_u32(4 * 1024 * 1024));
+        // Connection-level receive window: 16 MiB (aggregate across the
+        // parallel streams a browser / multi-tool load opens).
+        tc.receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
+        // Allow up to 256 concurrent bidi/uni streams (initiated), so 8+
+        // parallel tunnel streams never hit the stream-count cap.
+        tc.max_concurrent_bidi_streams(quinn::VarInt::from_u32(256));
+        tc.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
+
+        // Preserve the existing idle/keepalive tuning (v0.29.3 idiom).
+        if let Some(idle_ms) = max_idle_timeout_ms {
+            tc.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
+        }
+        if let Some(ka_ms) = keep_alive_interval_ms {
+            tc.keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
+        }
+        tc
+    }
+
     /// [SAST fix: lqq-wjuo] TOFU (Trust On First Use) certificate
     /// verifier for the QUIC transport layer. Replaces the previous
     /// NoCertVerifier, which unconditionally accepted ANY certificate
@@ -459,14 +506,11 @@ pub mod tokio_endpoint {
             // gateway-side tunnels survive a 60s relay-sweeper tick and don't
             // get torn down by Quinn defaults under the relay's added RTT.
             // See QuicEndpointConfig field docs.
-            let mut transport_config = quinn::TransportConfig::default();
-            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
-                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
-            }
-            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
-                transport_config
-                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
-            }
+            let mut transport_config = apply_ztlp_transport_tuning(
+                quinn::TransportConfig::default(),
+                cfg.max_idle_timeout_ms,
+                cfg.keep_alive_interval_ms,
+            );
             server_config.transport_config(Arc::new(transport_config));
 
             // Quinn requires the socket be non-blocking for the tokio runtime.
@@ -511,14 +555,11 @@ pub mod tokio_endpoint {
                 quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap(),
             ));
 
-            let mut transport_config = quinn::TransportConfig::default();
-            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
-                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
-            }
-            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
-                transport_config
-                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
-            }
+            let transport_config = apply_ztlp_transport_tuning(
+                quinn::TransportConfig::default(),
+                cfg.max_idle_timeout_ms,
+                cfg.keep_alive_interval_ms,
+            );
             server_config.transport_config(Arc::new(transport_config));
 
             std_socket.set_nonblocking(true)?;
@@ -555,14 +596,11 @@ pub mod tokio_endpoint {
 
             // v0.29.3: matching transport tuning for the client side. See
             // QuicEndpointConfig field docs for rationale.
-            let mut transport_config = quinn::TransportConfig::default();
-            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
-                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
-            }
-            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
-                transport_config
-                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
-            }
+            let transport_config = apply_ztlp_transport_tuning(
+                quinn::TransportConfig::default(),
+                cfg.max_idle_timeout_ms,
+                cfg.keep_alive_interval_ms,
+            );
             client_config.transport_config(Arc::new(transport_config));
 
             std_socket.set_nonblocking(true)?;
@@ -596,14 +634,11 @@ pub mod tokio_endpoint {
 
             // v0.29.3: matching transport tuning for the OS-socket-managed
             // client path.
-            let mut transport_config = quinn::TransportConfig::default();
-            if let Some(idle_ms) = cfg.max_idle_timeout_ms {
-                transport_config.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));
-            }
-            if let Some(ka_ms) = cfg.keep_alive_interval_ms {
-                transport_config
-                    .keep_alive_interval(Some(std::time::Duration::from_millis(ka_ms as u64)));
-            }
+            let transport_config = apply_ztlp_transport_tuning(
+                quinn::TransportConfig::default(),
+                cfg.max_idle_timeout_ms,
+                cfg.keep_alive_interval_ms,
+            );
             client_config.transport_config(Arc::new(transport_config));
 
             let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());

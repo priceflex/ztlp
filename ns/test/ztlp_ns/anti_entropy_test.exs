@@ -29,10 +29,14 @@ defmodule ZtlpNs.AntiEntropyTest do
     Application.ensure_all_started(:ztlp_ns)
 
     on_exit(fn ->
+      # Clean up, then restore Mnesia + NS app so subsequent tests that share
+      # the Mnesia tables / ZtlpNs.Server don't hit 'no process' / missing
+      # table errors (stopping Mnesia here would drop the shared tables).
       Application.stop(:ztlp_ns)
-      Application.stop(:mnesia)
       File.rm_rf!(test_dir)
       File.rm_rf!(mnesia_dir)
+      Application.ensure_all_started(:mnesia)
+      Application.ensure_all_started(:ztlp_ns)
     end)
 
     Store.clear()

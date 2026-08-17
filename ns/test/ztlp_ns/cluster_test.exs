@@ -31,10 +31,16 @@ defmodule ZtlpNs.ClusterTest do
     Application.ensure_all_started(:ztlp_ns)
 
     on_exit(fn ->
+      # Clean up the temp dirs, then restore Mnesia + the NS app so
+      # subsequent tests (which share the Mnesia tables and the ZtlpNs.Server)
+      # don't hit 'no process' / missing-table errors. Stopping Mnesia here
+      # would drop the tables that other async/serial tests depend on.
       Application.stop(:ztlp_ns)
-      Application.stop(:mnesia)
       File.rm_rf!(test_dir)
       File.rm_rf!(mnesia_dir)
+      # Restore Mnesia + NS app for the rest of the suite.
+      Application.ensure_all_started(:mnesia)
+      Application.ensure_all_started(:ztlp_ns)
     end)
     :ok
   end

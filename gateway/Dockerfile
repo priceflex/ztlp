@@ -2,8 +2,8 @@
 # ZTLP Gateway — Elixir OTP release (multi-stage)
 # Zero external deps — pure Elixir/OTP
 #
-# Build context must be repo root (gateway depends on ../ns at test time):
-#   docker build -f gateway/Dockerfile -t ztlp-gateway .
+# Build context is the gateway/ directory (consistent with relay/NS):
+#   docker build -t ztlp-gateway ./gateway
 # ─────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build ──────────────────────────────────────────
@@ -15,10 +15,12 @@ WORKDIR /build
 RUN mix local.hex --force && mix local.rebar --force
 
 # Copy gateway manifest first (layer caching)
-COPY gateway/mix.exs ./
+COPY mix.exs ./
 
 # NS is a test-only dep — not needed for prod release, but mix.exs
-# references it. Create a minimal stub so mix doesn't fail.
+# references it at path "../ns". Create a minimal stub so mix doesn't fail.
+# The stub is created at /ns (outside WORKDIR) because mix resolves
+# path: "../ns" relative to the gateway project root (/build).
 RUN mkdir -p /ns/lib && \
     echo 'defmodule ZtlpNs.MixProject do\n  use Mix.Project\n  def project, do: [app: :ztlp_ns, version: "0.1.0"]\nend' > /ns/mix.exs && \
     echo "defmodule ZtlpNs do\nend" > /ns/lib/stub.ex
@@ -29,9 +31,9 @@ RUN mkdir -p lib && echo "defmodule ZtlpGateway do\nend" > lib/stub.ex && \
     rm lib/stub.ex
 
 # Copy config and source
-COPY gateway/config/ config/
-COPY gateway/lib/ lib/
-COPY gateway/rel/ rel/
+COPY config/ config/
+COPY lib/ lib/
+COPY rel/ rel/
 
 # Compile and build release
 RUN mix compile && \

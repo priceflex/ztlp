@@ -63,6 +63,30 @@ into `desktop/src/assets/`.
   35/35 checks PASS (structure, nav, connect→Connected, log transitions, enrollment gate
   + success, settings toggles/fields, no stray errors).
 
+### Turn 2 (2026-08-16) — Auto-connect fix + background service-attach in the live log
+- Built a second headless harness (autocount.js) for the FIRST-LAUNCH flows
+  (not-enrolled / enrolled+auto-on / enrolled+auto-off). Found + fixed TWO real bugs:
+    1. Live log never recorded the auto-connect transition at launch (baseline was set
+       by the initial poll, so the later flip read as "no change"). Fix: record the true
+       initial connection state into the log baseline in init().
+    2. Status ring/label did NOT repaint after launch auto-connect (maybeAutoConnect fed
+       only the log, not HomeComponent.update). Fix: maybeAutoConnect now refreshes Home
+       + log after connecting; and init() now runs auto-connect BEFORE startPolling() to
+       avoid a redundant double-connect.
+- Added background "attaches to zone services using the device identity" (a spec line the
+  first pass under-built): NEW read-only `get_attached` Tauri command (commands.rs) that
+  wraps the daemon's `tunnels` control command (same source get_services reads) → returns
+  { reachable, active, endpoints }. Registered in main.rs generate_handler!. Frontend
+  pollState() now samples it a few seconds after connecting (best-effort; a miss never
+  breaks the status poll) and LiveLog.serviceAttach() logs e.g. "Attached to 2 zone
+  services via identity: vault.trs.ztlp:443, db.trs.ztlp:5432." (deduped on change).
+  HONESTY: this surfaces REAL current tunnel/forward state; the daemon does not (yet)
+  push events, so attach is observed via this read-only poll, not a live event stream.
+- Re-verified: all JS parses; invoke↔command cross-check OK (incl. get_attached); Rust
+  brace balance OK + ipc_request signature match confirmed.
+- Headless suites now: main 36/36 (added service-attach check) + first-launch 12/12
+  (added service-attach via-identity check). Total 48/48 PASS.
+
 ---
 
 ## Status
@@ -77,15 +101,25 @@ DONE:
 - Settings = auto-connect (default on, honors live) + zone/identity; no relay field.
 - Services / Identity / Enrollment standalone pages removed.
 - UI standardized on one shared CSS/HTML path (Mac/PC/Linux; only backend elevation differs).
-- Verified: invoke↔command cross-check, JS parse, 35/35 headless DOM checks.
+- Verified: invoke↔command cross-check, JS parse, 48/48 headless DOM checks (36 + 12).
+- Auto-connect fixed (ring+label repaint after launch connect; log baseline correct).
+- Background service-attach surfaced in the live log via new read-only `get_attached`
+  command (real daemon tunnel state; deduped).
 - Committed on `desktop-simple-ui` branch, author steve@techrockstars.com.
 
 PENDING:
 - Live-run the built Tauri app (cargo tauri dev / bundle) on a real machine — needs the
-  Tauri toolchain + ztlp sidecar binary; not available on this build box. (Frontend
-  behavior is proven via the jsdom harness; the Rust backend is unchanged.)
-- When the daemon gains an event/log stream, wire LiveLog to it (seam is documented in
-  live-log.js).
+  Tauri toolchain + ztlp sidecar binary, NEITHER of which is on this build box (no rustup,
+  no webkit/gtk dev libs). Important: tauri.conf.json uses `frontendDist` (NO devUrl), so
+  the frontend is a STATIC BUNDLE compiled in at build time — a fresh `cargo tauri build`
+  is REQUIRED to pick up these frontend changes (there is no live-reload dev server). The
+  Rust backend change (get_attached) is also only proven by inspection here, not a real
+  compile. (Frontend behavior IS proven via the jsdom harnesses; existing Rust is unchanged
+  except the additive get_attached command.)
+- Build on the canonical host (hermes-ztlp 10.69.95.13 — has `~/.cargo/bin/cargo`) or a
+  machine with the toolchain, to get a real compiled app + confirm get_attached compiles.
+- When the daemon gains an event/log stream, wire LiveLog to it (seam documented in
+  live-log.js) instead of the read-only get_attached poll.
 - Optional: real traffic view (deferred per goal — "remove traffic for now").
 - Push branch to GitHub for review (Steven to confirm before push/merge to main).
 

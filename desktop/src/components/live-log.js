@@ -108,6 +108,32 @@ const LiveLog = (() => {
   function success(label) { log('ok', `✓ ${label}`); }
   function fail(label) { log('error', `✗ ${label}`); }
 
+  // Background service attach, reflected from the daemon's live tunnel/forward
+  // list (get_attached). This is the "attaches to zone services using the
+  // device identity" signal — shown so the user sees what's actually attached,
+  // not a static assumption. Deduped so we only log on a real change, not on
+  // every poll. `status` is { reachable, active, endpoints }.
+  let lastAttachActive = null;
+  function serviceAttach(status) {
+    if (!status) return;
+    if (!status.reachable) {
+      if (lastAttachActive !== null) {
+        lastAttachActive = null;
+        log('warn', 'Service attach: agent not reachable.');
+      }
+      return;
+    }
+    if (status.active === lastAttachActive) return; // no change → no noise
+    lastAttachActive = status.active;
+    if (status.active > 0) {
+      const shown = (status.endpoints || []).slice(0, 3).join(', ');
+      const more = status.active > 3 ? `, +${status.active - 3} more` : '';
+      log('ok', `Attached to ${status.active} zone service${status.active === 1 ? '' : 's'} via identity: ${shown}${more}.`);
+    } else {
+      log('info', 'Staying ready — no active service attachments yet.');
+    }
+  }
+
   function clear() {
     if (el) el.innerHTML = '';
     lastState = null;
@@ -116,5 +142,5 @@ const LiveLog = (() => {
   function markConnected() { lastState = 'connected'; }
   function markDisconnected() { lastState = 'disconnected'; }
 
-  return { render, log, stateChange, setup, success, fail, clear, markConnected, markDisconnected };
+  return { render, log, stateChange, setup, success, fail, serviceAttach, clear, markConnected, markDisconnected };
 })();

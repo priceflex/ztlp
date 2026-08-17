@@ -23,6 +23,7 @@ fn main() {
             commands::disconnect,
             commands::get_status,
             commands::get_identity,
+            commands::get_attached,
             commands::enroll,
             commands::record_attestation,
             commands::get_services,

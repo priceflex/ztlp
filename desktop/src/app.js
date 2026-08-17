@@ -55,6 +55,15 @@ async function pollState() {
     const status = await invoke('get_status');
     HomeComponent.update(status);
     LiveLog.stateChange(status);
+    // When secured, also reflect the live background service-attach state so
+    // the log shows what the device is actually attached to via its identity.
+    // Best-effort: a momentary `tunnels` IPC miss must never break the
+    // status poll.
+    if (status.state === 'connected' || status.state === 'reconnecting') {
+      invoke('get_attached')
+        .then((attached) => LiveLog.serviceAttach(attached))
+        .catch(() => {});
+    }
     if (consecutiveFailures >= FAILURE_THRESHOLD) restartPolling(POLL_FAST_MS);
     consecutiveFailures = 0;
   } catch (e) {
@@ -85,6 +94,15 @@ function stopPolling() {
 // enrolled and auto_connect is enabled (default true). We never nag the user;
 // if it's not enrolled we just log a hint pointing at Setup.
 async function maybeAutoConnect() {
+  // Refresh Home's view of the (possibly new) status so the ring/label repaint
+  // after any state change. Safe to call repeatedly.
+  const refresh = async () => {
+    try {
+      const s = await invoke('get_status');
+      HomeComponent.update(s);
+      LiveLog.stateChange(s);
+    } catch { /* agent down; poller will surface it */ }
+  };
   try {
     const cfg = await invoke('get_config');
     const identity = await invoke('get_identity');
@@ -95,14 +113,11 @@ async function maybeAutoConnect() {
       const relay = (cfg && cfg.relay_address) || 'relay.ztlp.net:4433';
       LiveLog.setup('Auto-connect: connecting and staying ready…');
       await invoke('connect', { relay, zone: (identity && identity.zone_name) || 'default' });
-      LiveLog.stateChange(await invoke('get_status'));
+      await refresh(); // repaint Home + log the transition
     } else if (!enrolled) {
       LiveLog.log('warn', 'This device is not enrolled yet — open Setup to enroll it.');
-    } else if (want) {
-      const relay = (cfg && cfg.relay_address) || 'relay.ztlp.net:4433';
-      LiveLog.setup('Auto-connect: connecting and staying ready…');
-      await invoke('connect', { relay, zone: (identity && identity.zone_name) || 'default' });
     }
+    // (enrolled, want=false → intentionally stay disconnected; nothing to do.)
   } catch (e) {
     console.error('Auto-connect error:', e);
   }
@@ -132,9 +147,20 @@ async function init() {
     SettingsComponent.load(),
   ]);
 
-  // Start the state poller, then run auto-connect.
-  startPolling();
+  // Establish the live log's baseline from the true current state, so the very
+  // first transition is reported accurately (a fresh log has no prior state,
+  // and Home's initial load doesn't feed the log).
+  try {
+    LiveLog.stateChange(await invoke('get_status'));
+  } catch {
+    LiveLog.stateChange({ state: 'disconnected' });
+  }
+
+  // Auto-connect first, THEN start the steady-state poller. (Connect is a one-
+  // shot; polling handles everything after. Doing it in this order avoids a
+  // redundant double-connect at launch.)
   await maybeAutoConnect();
+  startPolling();
 }
 
 // Boot

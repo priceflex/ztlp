@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ZoneAuthorityTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, Record, ZoneAuthority}
 

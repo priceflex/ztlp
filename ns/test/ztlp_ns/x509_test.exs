@@ -1,5 +1,5 @@
 defmodule ZtlpNs.X509Test do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.X509
 

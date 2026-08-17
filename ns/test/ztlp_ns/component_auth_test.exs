@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ComponentAuthTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.ComponentAuth
 

@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ReleaseTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduledoc """
   Tests that OTP release configuration is valid for the NS service.

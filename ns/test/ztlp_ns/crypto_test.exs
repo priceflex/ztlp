@@ -1,5 +1,5 @@
 defmodule ZtlpNs.CryptoTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.Crypto
 

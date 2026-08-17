@@ -1,5 +1,5 @@
 defmodule ZtlpNs.CidrTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   alias ZtlpNs.Cidr
 
   describe "parse/1 — happy paths" do

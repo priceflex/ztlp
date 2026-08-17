@@ -1040,8 +1040,12 @@ defmodule ZtlpNs.SecurityHardeningTest do
       assert ZtlpNs.Config.worker_pool_size() == 100
     end
 
-    test "identity_key_file defaults to nil" do
-      assert ZtlpNs.Config.identity_key_file() == nil
+    test "identity_key_file defaults to a path under the CA data dir" do
+      # The default is <ca_data_dir>/registration_signing.key (not nil) —
+      # a sensible, non-nil default so the NS signing key has a stable
+      # location. (Was nil before the Ed25519 endpoint-claim auth work.)
+      path = ZtlpNs.Config.identity_key_file()
+      assert path == Path.join(ZtlpNs.Config.ca_data_dir(), "registration_signing.key")
     end
 
     test "verify_trust_chain defaults to false" do

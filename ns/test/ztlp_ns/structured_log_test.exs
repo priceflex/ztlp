@@ -1,5 +1,5 @@
 defmodule ZtlpNs.StructuredLogTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 

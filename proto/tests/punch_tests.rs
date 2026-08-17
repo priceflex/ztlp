@@ -8,31 +8,45 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
-use ztlp_proto::identity::NodeId;
+use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::punch::{
     self, decode_peer_endpoints_response, decode_punch_notify, encode_peer_endpoints_request,
     encode_punch_report, is_punch_notify, is_punch_packet, KeepaliveTracker, PunchConfig,
     PunchResult, NS_PEER_ENDPOINTS, NS_PUNCH_NOTIFY, PUNCH_BYTE,
 };
 
+/// Test helper: build a NodeIdentity with a specific node_id (real generated
+/// keys + signing key) so the signed wire formats (irt-rwzo: timestamp +
+/// 64B Ed25519 sig + 32B pubkey) roundtrip correctly.
+fn identity_with_node_id(node_id: NodeId) -> NodeIdentity {
+    let mut ident = NodeIdentity::generate().expect("generate identity");
+    ident.node_id = node_id;
+    ident
+}
+
 // ─── Wire Protocol Roundtrip Tests ──────────────────────────────────
 
 #[test]
 fn test_peer_endpoints_request_roundtrip() {
     let our_id = NodeId::from_bytes([0x11; 16]);
+    let our_identity = identity_with_node_id(our_id);
     let peer_id = NodeId::from_bytes([0x22; 16]);
     let endpoints = vec![
         "192.168.1.100:12345".parse::<SocketAddr>().unwrap(),
         "10.0.0.1:54321".parse::<SocketAddr>().unwrap(),
     ];
 
-    let pkt = encode_peer_endpoints_request(&our_id, &peer_id, &endpoints);
+    let pkt = encode_peer_endpoints_request(&our_identity, &peer_id, &endpoints);
 
-    // Verify structure
+    // Verify structure (signed irt-rwzo format):
+    // type(1) + our_id(16) + peer_id(16) + timestamp(8) + sig(64) +
+    // pubkey(32) + count(1) = 138-byte header before endpoints.
     assert_eq!(pkt[0], NS_PEER_ENDPOINTS);
     assert_eq!(&pkt[1..17], our_id.as_bytes());
     assert_eq!(&pkt[17..33], peer_id.as_bytes());
-    assert_eq!(pkt[33], 2); // 2 reported endpoints
+    assert_eq!(pkt[137], 2); // 2 reported endpoints (count at byte 137)
+                             // 2 IPv4 endpoints: 2 * 7 = 14 bytes -> total = 138 + 14 = 152
+    assert_eq!(pkt.len(), 152);
 }
 
 #[test]
@@ -110,18 +124,20 @@ fn test_punch_notify_roundtrip() {
 #[test]
 fn test_punch_report_encoding() {
     let node_id = NodeId::from_bytes([0xBB; 16]);
+    let identity = identity_with_node_id(node_id);
     let addrs = vec![
         "1.2.3.4:5000".parse::<SocketAddr>().unwrap(),
         "5.6.7.8:9000".parse::<SocketAddr>().unwrap(),
     ];
 
-    let pkt = encode_punch_report(&node_id, &addrs);
+    let pkt = encode_punch_report(&identity, &addrs);
 
     assert_eq!(pkt[0], 0x0C); // PUNCH_REPORT
     assert_eq!(&pkt[1..17], &[0xBB; 16]);
-    assert_eq!(pkt[17], 2); // 2 endpoints
-                            // Total: 1 + 16 + 1 + 14 = 32
-    assert_eq!(pkt.len(), 32);
+    // Signed irt-rwzo format: header = 122 bytes, count at byte 121.
+    assert_eq!(pkt[121], 2); // 2 endpoints
+                             // 2 IPv4 endpoints: 2 * 7 = 14 bytes -> total = 122 + 14 = 136
+    assert_eq!(pkt.len(), 136);
 }
 
 // ─── Packet Classification Tests ────────────────────────────────────
@@ -260,7 +276,8 @@ async fn test_full_punch_flow_with_fake_ns() {
         keepalive_interval: Duration::from_secs(25),
     };
 
-    let result = punch::execute_punch(&client_a, ns_addr, &node_a, &node_b, &[], &config).await;
+    let identity_a = identity_with_node_id(node_a);
+    let result = punch::execute_punch(&client_a, ns_addr, &identity_a, &node_b, &[], &config).await;
 
     match result {
         Ok(PunchResult::Success { peer_addr }) => {
@@ -303,7 +320,8 @@ async fn test_punch_timeout_with_unreachable_peer() {
     };
 
     let start = Instant::now();
-    let result = punch::execute_punch(&client, ns_addr, &node_a, &node_b, &[], &config).await;
+    let identity_a = identity_with_node_id(node_a);
+    let result = punch::execute_punch(&client, ns_addr, &identity_a, &node_b, &[], &config).await;
     let elapsed = start.elapsed();
 
     match result {
@@ -370,10 +388,11 @@ async fn test_graceful_fallback_when_punch_fails() {
         keepalive_interval: Duration::from_secs(25),
     };
 
+    let identity_a = identity_with_node_id(NodeId::from_bytes([0x11; 16]));
     let result = punch::execute_punch(
         &client,
         ns_addr,
-        &NodeId::from_bytes([0x11; 16]),
+        &identity_a,
         &NodeId::from_bytes([0x22; 16]),
         &[],
         &config,

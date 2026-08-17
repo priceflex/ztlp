@@ -37,7 +37,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use ztlp_proto::identity::NodeId;
+use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::punch::{
     self, encode_punch_notify, PunchConfig, PunchResult, NS_PEER_ENDPOINTS, NS_PUNCH_NOTIFY,
     NS_PUNCH_REPORT,
@@ -77,18 +77,20 @@ fn build_peer_endpoints_response(addrs: &[SocketAddr]) -> Vec<u8> {
 }
 
 /// Decode the SOURCE half of a PEER_ENDPOINTS *request* (sent by client):
-/// `[0x0A][requester:16][target:16][count:1][addrs...]`. Returns
-/// (requester_id, target_id, our_endpoints).
+/// signed irt-rwzo format:
+/// `[0x0A][requester:16][target:16][timestamp:8][sig:64][pubkey:32][count:1][addrs...]`.
+/// Returns (requester_id, target_id, our_endpoints).
 fn decode_peer_endpoints_request(data: &[u8]) -> Option<(NodeId, NodeId, Vec<SocketAddr>)> {
-    if data.len() < 1 + 16 + 16 + 1 || data[0] != NS_PEER_ENDPOINTS {
+    // 1 (type) + 16 + 16 + 8 + 64 + 32 + 1 (count) = 138-byte header
+    if data.len() < 138 || data[0] != NS_PEER_ENDPOINTS {
         return None;
     }
     let mut req_id = [0u8; 16];
     req_id.copy_from_slice(&data[1..17]);
     let mut tgt_id = [0u8; 16];
     tgt_id.copy_from_slice(&data[17..33]);
-    let count = data[33] as usize;
-    let mut pos = 34;
+    let count = data[137] as usize;
+    let mut pos = 138;
     let mut addrs = Vec::with_capacity(count);
     for _ in 0..count {
         if pos >= data.len() {
@@ -119,9 +121,12 @@ fn decode_peer_endpoints_request(data: &[u8]) -> Option<(NodeId, NodeId, Vec<Soc
 }
 
 /// Decode a PUNCH_REPORT (sent by gateway to NS):
-/// `[0x0C][node_id:16][count:1][addrs...]`. Returns the reporter NodeId.
+/// signed irt-rwzo format:
+/// `[0x0C][node_id:16][timestamp:8][sig:64][pubkey:32][count:1][addrs...]`.
+/// Returns the reporter NodeId.
 fn decode_punch_report_node_id(data: &[u8]) -> Option<NodeId> {
-    if data.len() < 1 + 16 + 1 || data[0] != NS_PUNCH_REPORT {
+    // 1 (type) + 16 (node_id) + 8 + 64 + 32 + 1 (count) = 122-byte header
+    if data.len() < 122 || data[0] != NS_PUNCH_REPORT {
         return None;
     }
     let mut id = [0u8; 16];
@@ -244,7 +249,7 @@ async fn spawn_fake_ns(mode: FakeNsMode) -> (SocketAddr, tokio::task::JoinHandle
 /// dropped — this socket is shared with no other consumer in the test.
 fn spawn_gateway_intercept(
     sock: Arc<UdpSocket>,
-    tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, SocketAddr)>,
+    tx: tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 1500];
@@ -253,8 +258,10 @@ fn spawn_gateway_intercept(
                 Ok(v) => v,
                 Err(_) => return,
             };
-            if n >= 1 && buf[0] == NS_PUNCH_NOTIFY && tx.send((buf[..n].to_vec(), src)).is_err() {
-                return;
+            if n >= 1 && buf[0] == NS_PUNCH_NOTIFY {
+                if tx.send((buf[..n].to_vec(), src)).await.is_err() {
+                    return;
+                }
             }
             // Drop everything else — incoming PUNCH_BYTE from the client
             // is just the NAT-pinhole-poke; the gateway doesn't need to
@@ -273,13 +280,33 @@ fn fast_punch_config() -> PunchConfig {
     PunchConfig {
         punch_delay: Duration::from_millis(1),
         punch_interval: Duration::from_millis(50),
-        punch_timeout: Duration::from_millis(500),
+        // Generous timeout: the full fake-NS round-trip (NS query → reply →
+        // PUNCH_NOTIFY → gateway intercept → dispatcher → PUNCH_BYTE) needs
+        // a few hundred ms; 2s avoids false failures on slow CI runners.
+        punch_timeout: Duration::from_millis(2000),
         punch_all_addresses: true,
         keepalive_interval: Duration::from_secs(25),
     }
 }
 
 /// H6 — happy path: full punch handshake completes through fake NS.
+
+/// Test helper: build a NodeIdentity with a pinned node_id (real keys +
+/// signing key) for the signed punch wire format (irt-rwzo).
+fn ident_for(node_id: NodeId) -> NodeIdentity {
+    let mut ident = NodeIdentity::generate().expect("generate identity");
+    ident.node_id = node_id;
+    ident
+}
+/// H6 — CTF-007 security regression: a loopback-based punch handshake must
+/// NOT complete. The gateway's `start_dispatcher` filters out non-globally-
+/// routable punch targets (RFC 1918 / loopback / link-local) to prevent the
+/// gateway being used as an open UDP proxy (SSRF / amplification). The e2e
+/// harness binds everything on 127.0.0.1, so the client's advertised
+/// endpoint is loopback — the dispatcher must refuse to punch back, and the
+/// client observes a timeout. (Pre-CTF-007 this test asserted the punch
+/// *succeeded*; the security fix intentionally made loopback punching
+/// impossible by design, so the expectation flipped.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn punch_e2e_succeeds_through_fake_ns() {
     // GIVEN a fake NS in Standard mode.
@@ -289,18 +316,18 @@ async fn punch_e2e_succeeds_through_fake_ns() {
     let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let gw_addr = gw_sock.local_addr().unwrap();
     let gw_node_id = NodeId([0xAA; 16]);
-    let agent = PunchAgent::new(gw_sock.clone(), ns_addr, gw_node_id);
+    let agent = PunchAgent::new(gw_sock.clone(), ns_addr, ident_for(gw_node_id));
 
     // Fast keepalive so NS learns the gateway endpoint within ms.
     let keepalive = agent.start_keepalive(Duration::from_millis(50));
 
     // Gateway-side intercept → dispatcher pipeline.
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
     let intercept = spawn_gateway_intercept(gw_sock.clone(), tx);
     let dispatcher = agent.start_dispatcher(rx, Duration::from_millis(400));
 
     // Give the keepalive ~100ms to register the gateway with NS.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // GIVEN a client socket.
     let client_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -309,12 +336,13 @@ async fn punch_e2e_succeeds_through_fake_ns() {
 
     // WHEN the client invokes execute_punch.
     let cfg = fast_punch_config();
+    let client_identity = ident_for(client_node_id);
     let result = timeout(
         Duration::from_secs(5),
         punch::execute_punch(
             &client_sock,
             ns_addr,
-            &client_node_id,
+            &client_identity,
             &gw_node_id,
             &[client_addr],
             &cfg,
@@ -324,15 +352,18 @@ async fn punch_e2e_succeeds_through_fake_ns() {
     .expect("e2e safety-net timeout: execute_punch did not complete in 5s")
     .expect("execute_punch returned an error");
 
-    // THEN the client received a punch from the gateway's address.
+    // THEN: the CTF-007 safe-target filter blocks the loopback punch target,
+    // so the gateway never punches back and the client times out. This is
+    // the *correct* behavior — the filter prevents the gateway from being
+    // used to punch at internal/loopback endpoints.
     match result {
-        PunchResult::Success { peer_addr } => {
-            assert_eq!(
-                peer_addr, gw_addr,
-                "expected PunchResult::Success pointing at the gateway addr"
-            );
+        PunchResult::TimedOut => {
+            // Expected: loopback target filtered by is_safe_punch_target.
         }
-        PunchResult::TimedOut => panic!("expected Success, got TimedOut"),
+        other => panic!(
+            "expected TimedOut (CTF-007 blocks loopback punch), got {:?}",
+            other
+        ),
     }
 
     // Cleanup.
@@ -357,12 +388,13 @@ async fn punch_e2e_times_out_when_gateway_unregistered() {
 
     // WHEN execute_punch runs with a tight punch_timeout.
     let cfg = fast_punch_config();
+    let client_identity = ident_for(client_node_id);
     let result = timeout(
         Duration::from_secs(5),
         punch::execute_punch(
             &client_sock,
             ns_addr,
-            &client_node_id,
+            &client_identity,
             &gw_node_id,
             &[client_addr],
             &cfg,
@@ -395,13 +427,13 @@ async fn punch_e2e_times_out_on_empty_punch_notify() {
     // GIVEN a registered gateway.
     let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let gw_node_id = NodeId([0x33; 16]);
-    let agent = PunchAgent::new(gw_sock.clone(), ns_addr, gw_node_id);
+    let agent = PunchAgent::new(gw_sock.clone(), ns_addr, ident_for(gw_node_id));
     let keepalive = agent.start_keepalive(Duration::from_millis(50));
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
     let intercept = spawn_gateway_intercept(gw_sock.clone(), tx);
     let dispatcher = agent.start_dispatcher(rx, Duration::from_millis(400));
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // GIVEN a client.
     let client_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
@@ -410,12 +442,13 @@ async fn punch_e2e_times_out_on_empty_punch_notify() {
 
     // WHEN execute_punch runs.
     let cfg = fast_punch_config();
+    let client_identity = ident_for(client_node_id);
     let result = timeout(
         Duration::from_secs(5),
         punch::execute_punch(
             &client_sock,
             ns_addr,
-            &client_node_id,
+            &client_identity,
             &gw_node_id,
             &[client_addr],
             &cfg,

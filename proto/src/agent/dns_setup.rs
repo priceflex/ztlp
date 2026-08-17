@@ -91,9 +91,9 @@ pub fn setup_dns(
 /// macOS/Linux the same way the Windows NRPT check does. Never mutates.
 pub fn is_dns_configured() -> bool {
     match detect_backend() {
-        DnsBackend::SystemdResolved => {
-            Path::new(RESOLVED_CONF_DIR).join(RESOLVED_CONF_FILE).exists()
-        }
+        DnsBackend::SystemdResolved => Path::new(RESOLVED_CONF_DIR)
+            .join(RESOLVED_CONF_FILE)
+            .exists(),
         DnsBackend::ResolvConf => fs::read_to_string(RESOLV_CONF)
             .map(|s| s.contains("ZTLP agent DNS"))
             .unwrap_or(false),

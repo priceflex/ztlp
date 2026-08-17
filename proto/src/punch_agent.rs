@@ -638,7 +638,11 @@ mod tests {
     #[tokio::test]
     async fn h4_dispatcher_exits_when_channel_closes() {
         let gw_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let agent = PunchAgent::new(gw_sock, "127.0.0.1:0".parse().unwrap(), identity_with_node_id(NodeId([0x11; 16])));
+        let agent = PunchAgent::new(
+            gw_sock,
+            "127.0.0.1:0".parse().unwrap(),
+            identity_with_node_id(NodeId([0x11; 16])),
+        );
 
         let (tx, rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
         let handle = agent.start_dispatcher(rx, Duration::from_millis(200));
@@ -754,7 +758,7 @@ mod tests {
         // endpoints — these should all be filtered out.
         let loopback_endpoints = vec![
             "127.0.0.1:9999".parse().unwrap(),
-            "10.0.0.1:9999".parse().unwrap(), // RFC 1918
+            "10.0.0.1:9999".parse().unwrap(),    // RFC 1918
             "192.168.1.1:9999".parse().unwrap(), // RFC 1918
             "169.254.1.1:9999".parse().unwrap(), // link-local
         ];
@@ -767,9 +771,9 @@ mod tests {
 
         // Now mix global + non-global: only the global one should be used.
         let mixed_endpoints = vec![
-            "10.0.0.1:9999".parse().unwrap(),         // private — filtered
-            "203.0.113.5:54321".parse().unwrap(),     // global — accepted
-            "192.168.1.1:9999".parse().unwrap(),      // private — filtered
+            "10.0.0.1:9999".parse().unwrap(),     // private — filtered
+            "203.0.113.5:54321".parse().unwrap(), // global — accepted
+            "192.168.1.1:9999".parse().unwrap(),  // private — filtered
         ];
         let notify2 = encode_punch_notify_for_test(&NodeId([0xBB; 16]), &mixed_endpoints);
         tx.try_send((notify2, ns_addr)).unwrap();
@@ -826,7 +830,11 @@ mod tests {
     async fn punch_agent_caches_listener_port_on_construction() {
         let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let expected_port = sock.local_addr().unwrap().port();
-        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), identity_with_node_id(NodeId([0x01; 16])));
+        let agent = PunchAgent::new(
+            sock,
+            "127.0.0.1:23096".parse().unwrap(),
+            identity_with_node_id(NodeId([0x01; 16])),
+        );
         assert_eq!(
             agent.listener_port, expected_port,
             "listener_port must be cached from the bound socket"
@@ -841,7 +849,11 @@ mod tests {
     #[tokio::test]
     async fn punch_agent_default_advertise_overrides_are_empty() {
         let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-        let agent = PunchAgent::new(sock, "127.0.0.1:23096".parse().unwrap(), identity_with_node_id(NodeId([0x02; 16])));
+        let agent = PunchAgent::new(
+            sock,
+            "127.0.0.1:23096".parse().unwrap(),
+            identity_with_node_id(NodeId([0x02; 16])),
+        );
         assert!(agent.advertise_include.is_empty());
         assert!(agent.advertise_exclude.is_empty());
         assert!(!agent.advertise_all);

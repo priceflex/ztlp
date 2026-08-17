@@ -466,10 +466,17 @@ mod tests {
         let peer_id = fresh_node_id();
         let policy = DialPolicy::default();
 
-        let err =
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy)
-                .await
-                .expect_err("expected NoCandidates");
+        let err = try_multi_candidate_connect(
+            peer_id,
+            ns_addr,
+            our_socket,
+            &our_identity,
+            &[],
+            None,
+            policy,
+        )
+        .await
+        .expect_err("expected NoCandidates");
         match err {
             MultiCandidateError::NoCandidates => {}
             other => panic!("expected NoCandidates, got {:?}", other),
@@ -494,10 +501,17 @@ mod tests {
             band_delay: Duration::from_millis(50),
             total_budget: Duration::from_secs(2),
         };
-        let err =
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy)
-                .await
-                .expect_err("expected AllFailed");
+        let err = try_multi_candidate_connect(
+            peer_id,
+            ns_addr,
+            our_socket,
+            &our_identity,
+            &[],
+            None,
+            policy,
+        )
+        .await
+        .expect_err("expected AllFailed");
         match err {
             MultiCandidateError::AllFailed(_) => {}
             other => panic!("expected AllFailed, got {:?}", other),
@@ -596,7 +610,15 @@ mod tests {
         let policy = DialPolicy::default();
         let res = tokio::time::timeout(
             Duration::from_secs(5),
-            try_multi_candidate_connect(peer_id, ns_addr, our_socket, &our_identity, &[], None, policy),
+            try_multi_candidate_connect(
+                peer_id,
+                ns_addr,
+                our_socket,
+                &our_identity,
+                &[],
+                None,
+                policy,
+            ),
         )
         .await
         .expect("must not hang past NS_QUERY_TIMEOUT + grace");

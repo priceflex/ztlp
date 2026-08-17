@@ -73,7 +73,7 @@ async fn test_corrupted_auth_tag() {
     // Build a valid packet
     let mut header = DataHeader::new(SessionId(sid), 1);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&key, &aad, 1);
     let packet = header.serialize();
 
     // Valid packet should pass

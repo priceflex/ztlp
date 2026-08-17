@@ -1089,7 +1089,7 @@ mod tests {
 
         assert_eq!(pkt[0], NS_PEER_ENDPOINTS);
         assert_eq!(pkt[137], 2); // 2 reported endpoints (see offset note above)
-                                // Each IPv4 addr = 7 bytes (1 family + 4 addr + 2 port)
+                                 // Each IPv4 addr = 7 bytes (1 family + 4 addr + 2 port)
         assert_eq!(pkt.len(), 138 + 14);
     }
 
@@ -1265,7 +1265,7 @@ mod tests {
             node_id,
             ..NodeIdentity::generate().expect("generate identity")
         };
-let pkt = encode_punch_report(&identity, &[]);
+        let pkt = encode_punch_report(&identity, &[]);
 
         assert_eq!(pkt[0], NS_PUNCH_REPORT);
         assert_eq!(&pkt[1..17], &[0xFF; 16]);
@@ -1300,7 +1300,7 @@ let pkt = encode_punch_report(&identity, &[]);
             node_id,
             ..NodeIdentity::generate().expect("generate identity")
         };
-let pkt = encode_punch_report(&identity, &[]);
+        let pkt = encode_punch_report(&identity, &[]);
         let (decoded_id, addrs) = decode_punch_report(&pkt).unwrap();
         assert_eq!(decoded_id, node_id);
         assert!(addrs.is_empty());

@@ -290,7 +290,7 @@ fn test_pipeline_hdrlen_discrimination() {
     // Data packet with payload (total size > 95 bytes, but HdrLen = 11)
     let mut header = DataHeader::new(sid, 1);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad, 1);
     let mut bytes = header.serialize();
     bytes.extend_from_slice(&[0xCC; 200]); // large payload makes total > 95
 
@@ -320,7 +320,7 @@ fn test_pipeline_many_sessions() {
     for (sid, recv_key) in &session_ids {
         let mut header = DataHeader::new(*sid, 0);
         let aad = header.aad_bytes();
-        header.header_auth_tag = compute_header_auth_tag(recv_key, &aad);
+        header.header_auth_tag = compute_header_auth_tag(recv_key, &aad, 0);
         let bytes = header.serialize();
         assert_eq!(pipeline.process(&bytes), AdmissionResult::Pass);
     }
@@ -342,7 +342,7 @@ fn test_pipeline_correct_key_for_auth() {
     // Sign with recv_key (what the remote's send_key would be) → should pass
     let mut header = DataHeader::new(sid, 0);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad, 0);
     assert_eq!(
         pipeline.process(&header.serialize()),
         AdmissionResult::Pass,
@@ -352,7 +352,7 @@ fn test_pipeline_correct_key_for_auth() {
     // Sign with send_key → should fail Layer 3
     let mut header2 = DataHeader::new(sid, 1);
     let aad2 = header2.aad_bytes();
-    header2.header_auth_tag = compute_header_auth_tag(&send_key, &aad2);
+    header2.header_auth_tag = compute_header_auth_tag(&send_key, &aad2, 1);
     assert_eq!(
         pipeline.process(&header2.serialize()),
         AdmissionResult::Drop,
@@ -389,8 +389,8 @@ fn test_pipeline_3_byte_packet() {
 fn test_auth_tag_deterministic() {
     let key = [0x42; 32];
     let aad = b"some authenticated data";
-    let tag1 = compute_header_auth_tag(&key, aad);
-    let tag2 = compute_header_auth_tag(&key, aad);
+    let tag1 = compute_header_auth_tag(&key, aad, 0);
+    let tag2 = compute_header_auth_tag(&key, aad, 0);
     assert_eq!(tag1, tag2, "same key + AAD should produce same tag");
 }
 
@@ -399,23 +399,23 @@ fn test_auth_tag_different_keys() {
     let key1 = [0x42; 32];
     let key2 = [0x43; 32];
     let aad = b"same data";
-    let tag1 = compute_header_auth_tag(&key1, aad);
-    let tag2 = compute_header_auth_tag(&key2, aad);
+    let tag1 = compute_header_auth_tag(&key1, aad, 0);
+    let tag2 = compute_header_auth_tag(&key2, aad, 0);
     assert_ne!(tag1, tag2, "different keys should produce different tags");
 }
 
 #[test]
 fn test_auth_tag_different_aad() {
     let key = [0x42; 32];
-    let tag1 = compute_header_auth_tag(&key, b"data A");
-    let tag2 = compute_header_auth_tag(&key, b"data B");
+    let tag1 = compute_header_auth_tag(&key, b"data A", 0);
+    let tag2 = compute_header_auth_tag(&key, b"data B", 0);
     assert_ne!(tag1, tag2, "different AAD should produce different tags");
 }
 
 #[test]
 fn test_auth_tag_empty_aad() {
     let key = [0x42; 32];
-    let tag = compute_header_auth_tag(&key, b"");
+    let tag = compute_header_auth_tag(&key, b"", 0);
     assert_ne!(tag, [0u8; 16], "even empty AAD should produce non-zero tag");
 }
 

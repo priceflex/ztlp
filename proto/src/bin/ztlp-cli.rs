@@ -228,12 +228,22 @@ enum Commands {
         /// NS server address for name resolution (host:port)
         #[arg(long)]
         ns_server: Option<String>,
+        /// Transport to use: `quic` (default, recommended) or `udp`
+        /// (legacy raw-UDP tunnel, deprecated — removed in 0.36).
+        ///
+        /// QUIC is the default and "just works" out of the box: it handles
+        /// NAT'd peers via NS candidate resolution and relay routing via
+        /// CLIENT_ROUTE. `--transport udp` forces the legacy raw-UDP path
+        /// (equivalent to `--relay`/`--punch`/`--nat-assist`/`--relay-pool`)
+        /// and emits a deprecation warning at connect time.
+        #[arg(long, default_value = "quic")]
+        transport: String,
         /// Use QUIC transport instead of ZTLP reliable UDP
         ///
         /// **No-op since the QUIC migration:** QUIC is now the default
-        /// `ztlp connect` path. The flag is retained for backward
-        /// compatibility and is ignored.
-        #[arg(long)]
+        /// `ztlp connect` path (see `--transport`). Retained and hidden for
+        /// backward compatibility; ignored.
+        #[arg(long, hide = true)]
         quic: bool,
 
         /// Specific session ID to use (hex)
@@ -255,7 +265,7 @@ enum Commands {
         service: Option<String>,
 
         /// STUN server address for NAT traversal (host:port)
-        #[arg(long)]
+        #[arg(long, hide = true)]
         stun_server: Option<String>,
 
         /// Enable NAT traversal (STUN discovery + hole punching)
@@ -264,11 +274,11 @@ enum Commands {
         /// tunnel path. The default QUIC path handles NAT'd peers via
         /// NS candidate resolution; emitting the deprecation warning at
         /// connect time.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         nat_assist: bool,
 
         /// Fail instead of falling back to relay when hole punch fails
-        #[arg(long)]
+        #[arg(long, hide = true)]
         no_relay_fallback: bool,
 
         /// Enable NS-coordinated hole punching (auto-on when --ns-server is set in v0.30.12+)
@@ -277,19 +287,19 @@ enum Commands {
         /// tunnel path. The default QUIC path handles NAT'd peers via
         /// NS candidate resolution; setting this flag emits the
         /// deprecation warning at connect time.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         punch: bool,
 
         /// Disable NS-coordinated UDP hole punching even when --ns-server is set
-        #[arg(long, conflicts_with = "punch")]
+        #[arg(long, conflicts_with = "punch", hide = true)]
         no_punch: bool,
 
         /// Delay before sending punch packets (e.g. "100ms", "1s")
-        #[arg(long, value_parser = parse_duration_arg)]
+        #[arg(long, value_parser = parse_duration_arg, hide = true)]
         punch_delay: Option<Duration>,
 
         /// Timeout for the punch procedure (e.g. "10s", "30s")
-        #[arg(long, value_parser = parse_duration_arg)]
+        #[arg(long, value_parser = parse_duration_arg, hide = true)]
         punch_timeout: Option<Duration>,
 
         /// Enable multi-relay failover via probe pool (auto-on when --ns-server is set in v0.30.12+)
@@ -298,15 +308,15 @@ enum Commands {
         /// tunnel path. The default QUIC path handles relay-routed
         /// connects via CLIENT_ROUTE; setting this flag emits the
         /// deprecation warning at connect time.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         relay_pool: bool,
 
         /// Disable multi-relay failover even when --ns-server is set
-        #[arg(long, conflicts_with = "relay_pool")]
+        #[arg(long, conflicts_with = "relay_pool", hide = true)]
         no_relay_pool: bool,
 
         /// Health check probe interval for relay pool (e.g. "30s", "1m")
-        #[arg(long, value_parser = parse_duration_arg, default_value = "30s")]
+        #[arg(long, value_parser = parse_duration_arg, default_value = "30s", hide = true)]
         relay_probe_interval: Duration,
 
         /// Enable v0.32 multi-candidate parallel dial.
@@ -2376,15 +2386,54 @@ fn is_valid_record_type(type_byte: u8) -> bool {
 /// staying under the UDP MTU and at the server's sanctioned 8x ceiling.
 const NS_QUERY_PAD_BYTES: usize = 256;
 
+/// Resolve an `--ns-server` value to a concrete `SocketAddr`.
+///
+/// Accepts either `IP:PORT` (fast path — `SocketAddr::parse`) or
+/// `HOSTNAME:PORT` (DNS-resolved). The hostname form is required for
+/// Docker Compose / service-name deployments (e.g. `ns:23096` on a
+/// compose network) where the NS is reached by service name rather than IP.
+///
+/// TDD-pinned by `mod tests::resolve_ns_address` (3 tests).
+async fn resolve_ns_address(ns_server: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    // Fast path: already an IP:PORT.
+    if let Ok(addr) = ns_server.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    // Hostname:PORT — split on the last ':' (hostname may be IPv6-in-brackets).
+    let (host, port) = match ns_server.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p),
+        None => {
+            return Err(format!(
+                "invalid --ns-server '{}': expected HOST:PORT or IP:PORT",
+                ns_server
+            )
+            .into())
+        }
+    };
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("invalid --ns-server port '{}' in '{}'", port, ns_server))?;
+    // Resolve the hostname. `lookup_host` handles both A and AAAA; take the
+    // first result (deterministic enough for an NS bootstrap address).
+    let mut it = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| {
+            format!(
+                "DNS resolution failed for --ns-server '{}': {}",
+                ns_server, e
+            )
+        })?;
+    it.next()
+        .ok_or_else(|| format!("DNS returned no addresses for --ns-server '{}'", ns_server).into())
+}
+
 /// Perform an NS query for a given record type. Returns the raw CBOR data field if found.
 async fn ns_query_raw(
     name: &str,
     ns_server: &str,
     record_type: u8,
 ) -> Result<Option<NsQueryResult>, Box<dyn std::error::Error>> {
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
     let name_bytes = name.as_bytes();
     let name_len = name_bytes.len() as u16;
     let mut query = Vec::with_capacity(4 + name_bytes.len());
@@ -2522,7 +2571,7 @@ async fn ns_pubkey_lookup(
     pubkey_hex: &str,
     ns_server: &str,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let ns_addr: SocketAddr = ns_server.parse()?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
     let pk_bytes = pubkey_hex.as_bytes();
     let pk_len = pk_bytes.len() as u16;
     let mut query = Vec::with_capacity(3 + pk_bytes.len());
@@ -2872,6 +2921,7 @@ async fn cmd_connect(
     punch_timeout: &Option<Duration>,
     relay_pool_enabled: bool,
     relay_probe_interval: Duration,
+    transport: &str,
     multi_candidate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
@@ -2901,8 +2951,12 @@ async fn cmd_connect(
     // v0.30 production relay, so silently dropping a multi-candidate user
     // into legacy was the exact bug A1 fixes. The QUIC path now contains
     // the M6 dial logic; `--multi-candidate` is the canonical opt-in.
-    let want_legacy_path =
-        !multi_candidate && (relay.is_some() || punch_enabled || nat_assist || relay_pool_enabled);
+    let want_legacy_path = !multi_candidate
+        && (relay.is_some()
+            || punch_enabled
+            || nat_assist
+            || relay_pool_enabled
+            || transport.eq_ignore_ascii_case("udp"));
 
     if want_legacy_path {
         // Legacy UDP fallback for NAT traversal / relays
@@ -2913,9 +2967,11 @@ async fn cmd_connect(
         // NAT-traversal compatibility; warn once (not per-packet).
         eprintln!(
             "{}",
-            c_yellow("WARNING: legacy raw-UDP tunnel path is DEPRECATED (removed in 0.36). \
+            c_yellow(
+                "WARNING: legacy raw-UDP tunnel path is DEPRECATED (removed in 0.36). \
 Use the default QUIC path \u{2014} drop --relay/--punch/--nat-assist/--relay-pool. \
-Only enable for legacy NAT-traversal compatibility.")
+Only enable for legacy NAT-traversal compatibility."
+            )
         );
 
         let identity = load_or_generate_identity(key)?;
@@ -3162,9 +3218,7 @@ Only enable for legacy NAT-traversal compatibility.")
         // NS-coordinated hole punching (if --punch)
         if punch_enabled {
             let ns_addr_str = ns_server.as_deref().ok_or("--punch requires --ns-server")?;
-            let ns_addr: SocketAddr = ns_addr_str
-                .parse()
-                .map_err(|e| format!("invalid --ns-server '{}': {}", ns_addr_str, e))?;
+            let ns_addr = resolve_ns_address(ns_addr_str).await?;
 
             let peer_node_id = _resolved_node_id.unwrap_or_else(NodeId::zero);
 
@@ -5480,33 +5534,34 @@ async fn cmd_listen(
                         // Each direction owns its half of the stream:
                         //   backend -> client:  t_read (ReadHalf)  -> q_send
                         //   client -> backend:  q_recv             -> t_write
-                        let pump_backend_to_quic =
-                            tokio::spawn(async move {
-                                use tokio::io::AsyncReadExt;
-                                use ztlp_proto::quic_transport::noise_stream;
-                                loop {
-                                    match t_read.read(&mut read_buf).await {
-                                        Ok(0) => break, // backend EOF
-                                        Ok(n) => {
-                                            if noise_stream::write_ztlp_frame(
-                                                &mut q_send,
-                                                &read_buf[..n],
-                                            )
-                                            .await
-                                            .is_err()
-                                            {
-                                                eprintln!("gateway TCP->QUIC write error; closing pump");
-                                                break;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            eprintln!("gateway TCP read error; closing pump");
+                        let pump_backend_to_quic = tokio::spawn(async move {
+                            use tokio::io::AsyncReadExt;
+                            use ztlp_proto::quic_transport::noise_stream;
+                            loop {
+                                match t_read.read(&mut read_buf).await {
+                                    Ok(0) => break, // backend EOF
+                                    Ok(n) => {
+                                        if noise_stream::write_ztlp_frame(
+                                            &mut q_send,
+                                            &read_buf[..n],
+                                        )
+                                        .await
+                                        .is_err()
+                                        {
+                                            eprintln!(
+                                                "gateway TCP->QUIC write error; closing pump"
+                                            );
                                             break;
                                         }
                                     }
+                                    Err(_) => {
+                                        eprintln!("gateway TCP read error; closing pump");
+                                        break;
+                                    }
                                 }
-                                let _ = q_send.finish();
-                            });
+                            }
+                            let _ = q_send.finish();
+                        });
 
                         let pump_quic_to_backend = tokio::spawn(async move {
                             use tokio::io::AsyncWriteExt;
@@ -5515,7 +5570,9 @@ async fn cmd_listen(
                                 match noise_stream::read_ztlp_frame(&mut q_recv).await {
                                     Ok(frame) => {
                                         if t_write.write_all(&frame).await.is_err() {
-                                            eprintln!("gateway QUIC->TCP write error; closing pump");
+                                            eprintln!(
+                                                "gateway QUIC->TCP write error; closing pump"
+                                            );
                                             break;
                                         }
                                     }
@@ -6369,9 +6426,7 @@ async fn cmd_ns_lookup(
     ns_server: &str,
     record_type: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
 
     eprintln!(
         "{} {} (type {}) at {}",
@@ -6449,9 +6504,7 @@ async fn cmd_ns_lookup(
 
 /// `ztlp ns pubkey` — Query by public key
 async fn cmd_ns_pubkey(hex_key: &str, ns_server: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
 
     // Validate hex
     let _ = hex::decode(hex_key)?;
@@ -6701,9 +6754,7 @@ async fn ns_publish_self(
         .into());
     }
 
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
 
     let node_id_hex = hex::encode(identity.node_id.0);
     // [CWE-284 irt-rwzo] KEY record must carry the Ed25519 signing pubkey
@@ -6895,9 +6946,7 @@ async fn cmd_ns_register(
     ns_server: &str,
     address: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
 
     let identity = NodeIdentity::load(key_path)?;
     let node_id_hex = hex::encode(identity.node_id.0);
@@ -7354,9 +7403,7 @@ async fn cmd_gateway_candidates(
     // 3. Open an ephemeral UDP socket and ask NS for the gateway's
     //    endpoints. Wire format: PEER_ENDPOINTS (0x0A).
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
-    let ns_addr: SocketAddr = ns_server
-        .parse()
-        .map_err(|e| format!("invalid --ns-server '{}': {}", ns_server, e))?;
+    let ns_addr = resolve_ns_address(ns_server).await?;
 
     let req = encode_peer_endpoints_request(&requester, &gateway_nid, &[]);
     socket.send_to(&req, ns_addr).await?;
@@ -12918,6 +12965,7 @@ async fn main() {
             no_reconnect,
             no_resolve_on_reconnect,
             allow_identity_change,
+            transport,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -12986,6 +13034,7 @@ async fn main() {
                     punch_timeout,
                     relay_pool_active,
                     *relay_probe_interval,
+                    &transport,
                     multi_candidate_active,
                 )
                 .await
@@ -13034,6 +13083,7 @@ async fn main() {
                         punch_timeout,
                         relay_pool_active,
                         *relay_probe_interval,
+                        &transport,
                         multi_candidate_active,
                     )
                     .await;
@@ -13417,6 +13467,54 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── resolve_ns_address (TDD) ─────────────────────────────
+    // The NS address parser must accept BOTH IP:PORT (fast path) and
+    // HOSTNAME:PORT (DNS-resolved). The hostname form is required for
+    // Docker Compose / service-name deployments (e.g. `ns:23096`).
+
+    #[tokio::test]
+    async fn resolve_ns_address_accepts_ip_port_fast_path() {
+        // IP:PORT should parse without a DNS lookup.
+        let addr = resolve_ns_address("127.0.0.1:23096")
+            .await
+            .expect("IP:PORT should parse");
+        assert_eq!(addr, "127.0.0.1:23096".parse::<SocketAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_ns_address_accepts_hostname_port() {
+        // `localhost` resolves to 127.0.0.1 (or ::1) — both are valid.
+        let addr = resolve_ns_address("localhost:23096")
+            .await
+            .expect("hostname:PORT should resolve");
+        assert_eq!(addr.port(), 23096);
+        // The host should be a loopback address (localhost resolves to 127.0.0.1 or ::1).
+        let ip = addr.ip();
+        assert!(
+            ip.is_loopback(),
+            "localhost should resolve to a loopback IP, got {}",
+            ip
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ns_address_rejects_missing_port() {
+        // No port → error (expected HOST:PORT or IP:PORT).
+        let err = resolve_ns_address("just-a-hostname")
+            .await
+            .expect_err("missing port should error");
+        assert!(err.to_string().contains("HOST:PORT"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn resolve_ns_address_rejects_bad_port() {
+        // Non-numeric port → error.
+        let err = resolve_ns_address("127.0.0.1:notaport")
+            .await
+            .expect_err("bad port should error");
+        assert!(err.to_string().contains("port"), "got: {}", err);
+    }
 
     // v0.30.12 — JSON field extraction for the confirm-callback response.
     // This is a deliberately tiny parser; these tests cover the shapes we
@@ -14301,8 +14399,7 @@ mod tests {
         let data_off = 1 + 2 + name_len + 1 + 2;
         let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
         let cbor = &p[data_off..data_off + data_len];
-        let decoded: ciborium::value::Value =
-            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let decoded: ciborium::value::Value = ciborium::de::from_reader(cbor).expect("cbor decode");
         let map = match decoded {
             ciborium::value::Value::Map(m) => m,
             _ => panic!("expected CBOR map"),
@@ -14311,7 +14408,10 @@ mod tests {
             .iter()
             .find_map(|(k, v)| match (k, v) {
                 (ciborium::value::Value::Text(k), ciborium::value::Value::Text(v))
-                    if k == "public_key" => Some(v.clone()),
+                    if k == "public_key" =>
+                {
+                    Some(v.clone())
+                }
                 _ => None,
             })
             .expect("KEY record has no public_key field");

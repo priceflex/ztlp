@@ -135,7 +135,7 @@ fn test_layer3_passes_valid_auth_tag() {
     let mut header = DataHeader::new(sid, 0);
     let aad = header.aad_bytes();
     // The pipeline verifies with recv_key, so we sign with recv_key
-    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad, 0);
     let bytes = header.serialize();
 
     assert_eq!(
@@ -156,7 +156,7 @@ fn test_full_pipeline_pass() {
     // Build a valid data packet
     let mut header = DataHeader::new(sid, 1);
     let aad = header.aad_bytes();
-    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad);
+    header.header_auth_tag = compute_header_auth_tag(&recv_key, &aad, 1);
     let bytes = header.serialize();
 
     assert_eq!(

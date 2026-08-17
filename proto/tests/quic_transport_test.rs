@@ -39,7 +39,19 @@ async fn multi_stream_loopback_roundtrip() {
         std::future::pending::<()>().await;
     });
 
-    let client = QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, "localhost")
+    // Unique server_name per run: the QUIC TOFU pin is keyed by server_name.
+    // Using "localhost" would collide with a stale pin from a prior run (the
+    // server's ephemeral cert rotates between runs) and fail the handshake
+    // with a fingerprint mismatch. A timestamp-unique name avoids that.
+    let server_name = format!(
+        "ztlp-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let client = QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, &server_name)
         .await
         .expect("client connect");
 
@@ -92,7 +104,19 @@ async fn noise_handshake_over_quic_stream_zero() {
             .expect("responder handshake")
     });
 
-    let client = QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, "localhost")
+    // Unique server_name per run: the QUIC TOFU pin is keyed by server_name.
+    // Using "localhost" would collide with a stale pin from a prior run (the
+    // server's ephemeral cert rotates between runs) and fail the handshake
+    // with a fingerprint mismatch. A timestamp-unique name avoids that.
+    let server_name = format!(
+        "ztlp-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let client = QuicEndpoint::connect(QuicEndpointConfig::default(), server_addr, &server_name)
         .await
         .expect("client connect");
 

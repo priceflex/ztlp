@@ -446,36 +446,34 @@ pub async fn forward_to_upstream(
     sock.send_to(query, upstream_addr).await?;
 
     let mut buf = vec![0u8; 4096];
-    let result: Result<
-        Result<Vec<u8>, std::io::Error>,
-        tokio::time::error::Elapsed,
-    > = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let (len, src) = sock.recv_from(&mut buf).await?;
-            // Must come from the upstream we sent the query to
-            if src != upstream_addr {
-                debug!(
-                    "upstream DNS: dropped response from {} (expected {})",
-                    src, upstream_addr
-                );
-                continue;
-            }
-            // Response Transaction ID must match our query
-            if len >= 2 {
-                let resp_id = u16::from_be_bytes([buf[0], buf[1]]);
-                if resp_id == query_id {
-                    return Ok(buf[..len].to_vec());
+    let result: Result<Result<Vec<u8>, std::io::Error>, tokio::time::error::Elapsed> =
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (len, src) = sock.recv_from(&mut buf).await?;
+                // Must come from the upstream we sent the query to
+                if src != upstream_addr {
+                    debug!(
+                        "upstream DNS: dropped response from {} (expected {})",
+                        src, upstream_addr
+                    );
+                    continue;
                 }
-                debug!(
-                    "upstream DNS: dropped response with ID {resp_id} (expected {query_id})"
-                );
-                continue;
+                // Response Transaction ID must match our query
+                if len >= 2 {
+                    let resp_id = u16::from_be_bytes([buf[0], buf[1]]);
+                    if resp_id == query_id {
+                        return Ok(buf[..len].to_vec());
+                    }
+                    debug!(
+                        "upstream DNS: dropped response with ID {resp_id} (expected {query_id})"
+                    );
+                    continue;
+                }
+                // Response too short to be valid DNS — discard
+                debug!("upstream DNS: dropped response too short ({len} bytes)");
             }
-            // Response too short to be valid DNS — discard
-            debug!("upstream DNS: dropped response too short ({len} bytes)");
-        }
-    })
-    .await;
+        })
+        .await;
 
     match result {
         Ok(Ok(resp)) => Ok(resp),

@@ -26,7 +26,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use ztlp_proto::candidate_priority::{prioritize, CandidateClass};
-use ztlp_proto::identity::NodeId;
+use ztlp_proto::identity::{NodeId, NodeIdentity};
 use ztlp_proto::punch::{
     decode_peer_endpoints_response, decode_punch_report, encode_punch_report, NS_PEER_ENDPOINTS,
     NS_PUNCH_REPORT,
@@ -68,16 +68,29 @@ fn encode_peer_endpoints_response(addrs: &[SocketAddr]) -> Vec<u8> {
 /// Matrix rows 1 + 2: v0.31 gateway behavior — it always sent
 /// `reported_count=0`. v0.32 NS (and our decode_punch_report) must
 /// accept that empty payload cleanly.
+
+/// Test helper: build a NodeIdentity with a specific node_id (and real
+/// generated keys + signing key) so the *signed* PUNCH_REPORT wire format
+/// (irt-rwzo: type + node_id + timestamp + 64B sig + 32B pubkey + count +
+/// endpoints = 122-byte header) roundtrips through encode/decode.
+fn identity_with_node_id(node_id: NodeId) -> NodeIdentity {
+    let mut ident = NodeIdentity::generate().expect("generate identity");
+    ident.node_id = node_id;
+    ident
+}
+
 #[test]
 fn v031_gateway_sends_zero_reported_endpoints_decodes_cleanly() {
     let node_id = NodeId::from_bytes([0xAB; 16]);
     // Empty endpoints — what v0.31 gateways always sent.
-    let pkt = encode_punch_report(&node_id, &[]);
+    let identity = identity_with_node_id(node_id);
+    let pkt = encode_punch_report(&identity, &[]);
 
-    // Sanity-check wire shape: type + 16-byte node_id + 1-byte count = 18 bytes.
-    assert_eq!(pkt.len(), 18, "empty PUNCH_REPORT is exactly 18 bytes");
+    // Sanity-check wire shape (signed irt-rwzo format): type + node_id(16) +
+    // timestamp(8) + sig(64) + pubkey(32) + count(1) = 122-byte header.
+    assert_eq!(pkt.len(), 122, "empty PUNCH_REPORT is exactly 122 bytes");
     assert_eq!(pkt[0], NS_PUNCH_REPORT);
-    assert_eq!(pkt[17], 0, "reported_count must be 0");
+    assert_eq!(pkt[121], 0, "reported_count must be 0");
 
     let (decoded_id, endpoints) =
         decode_punch_report(&pkt).expect("v0.31-shape PUNCH_REPORT must decode");
@@ -100,7 +113,8 @@ fn v032_gateway_sends_n_reported_endpoints_decodes_cleanly() {
         sa4(100, 64, 1, 5, 23095),
     ];
 
-    let pkt = encode_punch_report(&node_id, &endpoints);
+    let identity = identity_with_node_id(node_id);
+    let pkt = encode_punch_report(&identity, &endpoints);
     let (decoded_id, decoded_endpoints) =
         decode_punch_report(&pkt).expect("v0.32 PUNCH_REPORT must decode");
 
@@ -149,17 +163,18 @@ fn v032_gateway_to_v031_ns_parser_tolerance() {
         sa4(172, 16, 0, 5, 23095),
     ];
 
-    let pkt = encode_punch_report(&node_id, &endpoints);
+    let identity = identity_with_node_id(node_id);
+    let pkt = encode_punch_report(&identity, &endpoints);
 
     // Wire-shape invariants the Elixir v0.31 parser depends on:
     //   byte 0   == NS_PUNCH_REPORT
     //   bytes 1..17 == 16-byte node_id
-    //   byte 17  == count
+    //   byte 121 == count
     //   bytes 18.. == N × <family(1) + addr(4|16) + port(2)>
     assert_eq!(pkt[0], NS_PUNCH_REPORT);
-    assert_eq!(pkt[17], 3);
-    // Each IPv4 entry: 1 + 4 + 2 = 7 bytes → 3 × 7 = 21 → total = 18 + 21 = 39.
-    assert_eq!(pkt.len(), 39, "bounded-length walk land at byte 39");
+    assert_eq!(pkt[121], 3);
+    // Each IPv4 entry: 1 + 4 + 2 = 7 bytes → 3 × 7 = 21 → total = 122 + 21 = 143.
+    assert_eq!(pkt.len(), 143, "bounded-length walk land at byte 143");
 
     // Symmetric decode confirms we built a packet a tolerant
     // length-walking parser will accept exactly.

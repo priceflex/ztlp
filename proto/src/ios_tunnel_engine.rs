@@ -1306,7 +1306,7 @@ mod tests {
     fn parse_ipv4_rejects_total_len_smaller_than_ihl() {
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45; // version 4, IHL = 5 (20 bytes)
-        // total_len (bytes 2-3) = 0, which is < ihl (20).
+                          // total_len (bytes 2-3) = 0, which is < ihl (20).
         packet[2] = 0x00;
         packet[3] = 0x00;
 

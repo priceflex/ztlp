@@ -397,15 +397,13 @@ impl HandshakeContext {
         // the handshake payload. Fall back to the passed parameter only if
         // the authenticated value is not available (e.g., legacy interop
         // with peers that don't embed NodeID in their payload).
-        let authenticated_peer_node_id = self
-            .peer_node_id
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    "peer_node_id not available from Noise payload — \
+        let authenticated_peer_node_id = self.peer_node_id.unwrap_or_else(|| {
+            tracing::warn!(
+                "peer_node_id not available from Noise payload — \
                      falling back to unauthenticated value (fne-nxah mitigation)"
-                );
-                peer_node_id
-            });
+            );
+            peer_node_id
+        });
 
         // Must be captured BEFORE into_transport_mode() consumes `self.noise`.
         // cs1 == initiator's send key == responder's recv key (i2r direction).
@@ -429,7 +427,13 @@ impl HandshakeContext {
             Role::Responder => (r2i_key, i2r_key),
         };
 
-        let session = SessionState::new(session_id, authenticated_peer_node_id, send_key, recv_key, false);
+        let session = SessionState::new(
+            session_id,
+            authenticated_peer_node_id,
+            send_key,
+            recv_key,
+            false,
+        );
 
         Ok((transport, session))
     }

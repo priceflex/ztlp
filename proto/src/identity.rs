@@ -114,7 +114,11 @@ pub struct NodeIdentity {
     /// keep pre-existing identity.json files (written before this
     /// field existed) loading cleanly, lazily generating and
     /// persisting a signing key on first load.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_hex_bytes")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "opt_hex_bytes"
+    )]
     pub signing_key_seed: Option<Vec<u8>>,
 }
 
@@ -267,9 +271,7 @@ mod opt_hex_bytes {
     {
         let opt: Option<String> = Option::deserialize(deserializer)?;
         match opt {
-            Some(s) => hex::decode(&s)
-                .map(Some)
-                .map_err(serde::de::Error::custom),
+            Some(s) => hex::decode(&s).map(Some).map_err(serde::de::Error::custom),
             None => Ok(None),
         }
     }
@@ -314,10 +316,8 @@ mod tests {
     fn test_save_sets_mode_0600_even_under_permissive_umask() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "ztlp_identity_save_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ztlp_identity_save_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("identity.json");
 
@@ -351,10 +351,8 @@ mod tests {
     fn test_save_overwrites_existing_permissive_file_to_0600() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!(
-            "ztlp_identity_save_test2_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ztlp_identity_save_test2_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let path = dir.join("identity.json");
 

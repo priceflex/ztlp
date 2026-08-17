@@ -688,8 +688,12 @@ pub mod tokio_endpoint {
             let verifier = TofuCertVerifier::with_pin_dir("gw1.example.com", tmp.clone());
             let cert = fake_cert(0xAA);
 
-            let result = verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
-            assert!(result.is_ok(), "first connection should be accepted and pinned");
+            let result =
+                verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
+            assert!(
+                result.is_ok(),
+                "first connection should be accepted and pinned"
+            );
 
             // A pin file should now exist.
             let pin_path = verifier.pin_path();
@@ -710,8 +714,12 @@ pub mod tokio_endpoint {
                 .is_ok());
 
             // Second connection with the SAME cert must also succeed.
-            let result = verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
-            assert!(result.is_ok(), "matching cert on 2nd connection should be accepted");
+            let result =
+                verifier.verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now());
+            assert!(
+                result.is_ok(),
+                "matching cert on 2nd connection should be accepted"
+            );
 
             let _ = std::fs::remove_dir_all(&tmp);
         }
@@ -732,7 +740,8 @@ pub mod tokio_endpoint {
             // (attempt to the same server_name) must be REJECTED — this
             // is the exact scenario lqq-wjuo's NoCertVerifier failed to
             // stop.
-            let result = verifier.verify_server_cert(&mitm_cert, &[], &fake_server_name(), &[], fixed_now());
+            let result =
+                verifier.verify_server_cert(&mitm_cert, &[], &fake_server_name(), &[], fixed_now());
             assert!(
                 result.is_err(),
                 "MITM presenting a different cert MUST be rejected, not silently accepted"

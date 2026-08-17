@@ -1352,7 +1352,8 @@ where
 
                         let mut header = DataHeader::new(sid_send, orig_packet_seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, orig_packet_seq);
+                        header.header_auth_tag =
+                            compute_header_auth_tag(&send_key, &aad, orig_packet_seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
@@ -1805,7 +1806,8 @@ where
 
                         let mut header = DataHeader::new(sid_send, packet_seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key, &aad, packet_seq);
+                        header.header_auth_tag =
+                            compute_header_auth_tag(&send_key, &aad, packet_seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);
@@ -2540,8 +2542,11 @@ where
                                     {
                                         let mut header = DataHeader::new(sid_recv, pong_seq);
                                         let aad = header.aad_bytes();
-                                        header.header_auth_tag =
-                                            compute_header_auth_tag(&send_key_for_acks, &aad, pong_seq);
+                                        header.header_auth_tag = compute_header_auth_tag(
+                                            &send_key_for_acks,
+                                            &aad,
+                                            pong_seq,
+                                        );
                                         let mut packet = header.serialize();
                                         packet.extend_from_slice(&encrypted);
                                         let _ = udp_recv.send_to(&packet, peer_addr).await;
@@ -2785,7 +2790,8 @@ where
 
                         let mut header = DataHeader::new(sid_recv, seq);
                         let aad = header.aad_bytes();
-                        header.header_auth_tag = compute_header_auth_tag(&send_key_for_acks, &aad, seq);
+                        header.header_auth_tag =
+                            compute_header_auth_tag(&send_key_for_acks, &aad, seq);
 
                         let mut packet = header.serialize();
                         packet.extend_from_slice(&encrypted);

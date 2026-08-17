@@ -149,7 +149,8 @@ fn main() {
     let wrong_sid = SessionId::generate();
     let mut wrong_sid_header = DataHeader::new(wrong_sid, 2);
     let wrong_aad = wrong_sid_header.aad_bytes();
-    wrong_sid_header.header_auth_tag = compute_header_auth_tag(&auth_key, &wrong_aad, wrong_sid_header.packet_seq);
+    wrong_sid_header.header_auth_tag =
+        compute_header_auth_tag(&auth_key, &wrong_aad, wrong_sid_header.packet_seq);
 
     let mut cmd = b"VALIDATE_DATA_PACKET".to_vec();
     cmd.extend_from_slice(&wrong_sid_header.serialize());

@@ -26,8 +26,8 @@
 #![cfg(feature = "quic-transport")]
 
 use std::time::{SystemTime, UNIX_EPOCH};
-use ztlp_proto::quic_transport::{QuicEndpointConfig, ZTLP_ALPN};
 use ztlp_proto::quic_transport::tokio_endpoint::QuicEndpoint;
+use ztlp_proto::quic_transport::{QuicEndpointConfig, ZTLP_ALPN};
 
 const MB: f64 = 1_048_576.0;
 /// Soft floor for loopback throughput. Lenient on purpose — see module docs.
@@ -147,8 +147,7 @@ async fn one_mib_single_stream_is_byte_exact() {
         eprintln!(
             "WARN: loopback throughput {:.2} MB/s is below the soft floor \
              ({:.0} MB/s). Not failing — verify on a fast box.",
-            mbps,
-            THROUGHPUT_FLOOR_MB_S
+            mbps, THROUGHPUT_FLOOR_MB_S
         );
     }
 }
@@ -292,8 +291,7 @@ async fn eight_parallel_streams_distinct_payloads_no_hol() {
         eprintln!(
             "WARN: loopback 8-stream throughput {:.2} MB/s is below the soft floor \
              ({:.0} MB/s). Not failing — verify on a fast box.",
-            mbps,
-            THROUGHPUT_FLOOR_MB_S
+            mbps, THROUGHPUT_FLOOR_MB_S
         );
     }
 }

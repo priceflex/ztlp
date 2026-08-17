@@ -6577,7 +6577,9 @@ async fn ns_publish_self(
         .map_err(|e| format!("invalid NS server address '{}': {}", ns_server, e))?;
 
     let node_id_hex = hex::encode(identity.node_id.0);
-    let pubkey_hex = hex::encode(&identity.static_public_key);
+    // [CWE-284 irt-rwzo] KEY record must carry the Ed25519 signing pubkey
+    // (matches the key that signs PEER_ENDPOINTS/PUNCH_REPORT), not X25519.
+    let pubkey_hex = identity.signing_public_key_hex();
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
 
@@ -6770,7 +6772,13 @@ async fn cmd_ns_register(
 
     let identity = NodeIdentity::load(key_path)?;
     let node_id_hex = hex::encode(identity.node_id.0);
-    let pubkey_hex = hex::encode(&identity.static_public_key);
+    // [CWE-284 irt-rwzo] The KEY record's `public_key` MUST be the Ed25519
+    // signing pubkey (the key that signs PEER_ENDPOINTS/PUNCH_REPORT claims),
+    // NOT the X25519 `static_public_key`. EndpointAuth's strict ownership
+    // check compares the registered pubkey against the claim's Ed25519
+    // verifying key; storing the X25519 key here made every legitimate
+    // PUNCH_REPORT fail as `not_key_owner` (live full-stack regression).
+    let pubkey_hex = identity.signing_public_key_hex();
 
     eprintln!("{}", c_bold("ZTLP-NS Registration"));
     eprintln!("  {} {}", c_cyan("Name:"), name);

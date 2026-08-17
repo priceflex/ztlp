@@ -23,6 +23,17 @@ defmodule ZtlpNs.AdminApiHttpTest do
     # earlier tests don't bleed into later ones.
     ZtlpNs.AdminApiRateLimiter.reset()
 
+    # The MetricsServer TCP accept handler applies a per-IP burst limit
+    # (default 20 requests / 10s window via :metrics_max_requests_per_ip)
+    # to ALL HTTP connections, including the admin API. This module makes
+    # ~20-30 sequential requests (10 tests × 2-3 requests), which exceeds
+    # the 20-per-10s burst limit, causing 429s at the accept level BEFORE
+    # the AdminApiRateLimiter is even consulted. Raise the burst limit so
+    # the admin tests don't trip it. The burst limiter uses a counters ref
+    # that's not resettable, so we raise the limit (not reset the counter).
+    prev_burst = Application.get_env(:ztlp_ns, :metrics_max_requests_per_ip)
+    Application.put_env(:ztlp_ns, :metrics_max_requests_per_ip, 10_000)
+
     Store.clear()
 
     # Seed one record so /admin/records has something to return.
@@ -55,6 +66,12 @@ defmodule ZtlpNs.AdminApiHttpTest do
       case prev_secret do
         nil -> Application.delete_env(:ztlp_ns, :admin_api_secret)
         v -> Application.put_env(:ztlp_ns, :admin_api_secret, v)
+      end
+
+      # Restore the per-IP burst limit (raised to 10_000 in setup).
+      case prev_burst do
+        nil -> Application.delete_env(:ztlp_ns, :metrics_max_requests_per_ip)
+        v -> Application.put_env(:ztlp_ns, :metrics_max_requests_per_ip, v)
       end
     end)
 

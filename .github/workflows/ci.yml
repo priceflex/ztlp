@@ -13,6 +13,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   MIX_ENV: test
+  # CertAuthority (NS) reads ZTLP_CA_PASSPHRASE at app-boot to decrypt the
+  # Root CA key. The app boots BEFORE test_helper.exs can System.put_env, so
+  # the passphrase must be set here (BEAM-boot env) or the NS GenServer
+  # raises "ZTLP_CA_PASSPHRASE environment variable is required". Test-only
+  # passphrase — the CA is regenerated per CI run (no persisted state).
+  ZTLP_CA_PASSPHRASE: ci-test-passphrase-not-a-real-secret
   ELIXIR_VERSION: '1.15'
   OTP_VERSION: '26'
   RUST_TOOLCHAIN: stable

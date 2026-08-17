@@ -1,5 +1,5 @@
 defmodule ZtlpNs.ListRelaysProtocolTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   @moduledoc """
   Tests for the LIST_RELAYS (0x0D) wire protocol handled by the NS server.

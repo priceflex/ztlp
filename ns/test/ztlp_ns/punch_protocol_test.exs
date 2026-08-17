@@ -1,5 +1,5 @@
 defmodule ZtlpNs.PunchProtocolTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, EndpointStore}
 

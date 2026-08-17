@@ -16,7 +16,7 @@ defmodule ZtlpNs.GroupTest do
   - Revocation interplay
   """
 
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, Record, Store, TrustAnchor, ZoneAuthority, RegistrationAuth}
 

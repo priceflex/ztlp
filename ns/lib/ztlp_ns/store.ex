@@ -506,6 +506,16 @@ defmodule ZtlpNs.Store do
     case :mnesia.create_table(name, opts) do
       {:atomic, :ok} -> :ok
       {:aborted, {:already_exists, ^name}} -> :ok
+
+      # In parallel async tests, some test processes run before Mnesia is
+      # started in their context (the app-boot ensure_mnesia_started/0 runs in
+      # the boot process, but a concurrent test's Store.clear/0 → ensure_tables/0
+      # can hit :node_not_running). Start Mnesia and retry — the node is the
+      # same local node, so a fresh :mnesia.start() is idempotent and safe.
+      {:aborted, {:node_not_running, _node}} ->
+        :mnesia.start()
+        create_table(name, opts)
+
       {:aborted, reason} -> raise "Failed to create Mnesia table #{name}: #{inspect(reason)}"
     end
   end

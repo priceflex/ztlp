@@ -14,7 +14,7 @@ defmodule ZtlpNs.IdentityTest do
   - Backward compatibility with existing KEY records
   """
 
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Crypto, Record, Store, TrustAnchor, ZoneAuthority, RegistrationAuth}
 

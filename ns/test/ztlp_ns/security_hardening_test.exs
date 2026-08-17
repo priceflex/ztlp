@@ -9,7 +9,7 @@ defmodule ZtlpNs.SecurityHardeningTest do
   keys, and revocation checks.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: false, async: false
 
   alias ZtlpNs.{
     Crypto,

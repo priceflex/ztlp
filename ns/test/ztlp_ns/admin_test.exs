@@ -12,7 +12,7 @@ defmodule ZtlpNs.AdminTest do
   - Admin query wire protocol (0x13)
   """
 
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   alias ZtlpNs.{Audit, Crypto, Record, Store, RegistrationAuth, TrustAnchor}
 

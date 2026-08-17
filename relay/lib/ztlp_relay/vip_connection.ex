@@ -470,11 +470,14 @@ defmodule ZtlpRelay.VipConnection do
 
   defp encrypt_for_client(frame, session_key, state) do
     # Frame the response as a ZTLP data packet
+    # NOTE: packet_seq is 0 for RST responses (see Packet.build_data below);
+    # the per-packet nonce uses this seq (MUST match the Rust side).
     aad = build_packet_aad(state, frame)
-    header_auth_tag = Crypto.compute_header_auth_tag(session_key, aad)
+    packet_seq = 0
+    header_auth_tag = Crypto.compute_header_auth_tag(session_key, aad, packet_seq)
 
     packet =
-      Packet.build_data(state.session_id, 0,
+      Packet.build_data(state.session_id, packet_seq,
         header_auth_tag: header_auth_tag,
         payload: frame
       )

@@ -38,10 +38,17 @@ def start_elixir_server(script_name, mix_project=None, port_key=None):
     """Start an Elixir test server. Returns (process, port) or (None, None)."""
     script_path = os.path.join(SCRIPT_DIR, script_name)
 
+    env = {**os.environ, "PATH": os.path.expanduser("~/.cargo/bin") + ":" + os.environ.get("PATH", "")}
+
     if mix_project:
         project_dir = os.path.join(ZTLP_ROOT, mix_project)
         cmd = ["mix", "run", "--no-halt", script_path]
         working_dir = project_dir
+        # For the gateway project, `mix run` auto-starts the gateway app's
+        # Listener on the default port (23097). Override it with a free port
+        # to avoid :eaddrinuse conflicts between sequential suites.
+        if mix_project == "gateway":
+            env["ZTLP_GATEWAY_PORT"] = str(_free_gateway_port())
     else:
         cmd = ["elixir", script_path]
         working_dir = SCRIPT_DIR
@@ -51,7 +58,7 @@ def start_elixir_server(script_name, mix_project=None, port_key=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=working_dir,
-        env={**os.environ, "PATH": os.path.expanduser("~/.cargo/bin") + ":" + os.environ.get("PATH", "")},
+        env=env,
     )
 
     if port_key is None:
@@ -144,6 +151,20 @@ def run_suite(suite_name, server_script, binary_name, mix_project=None, port_key
             print(f"    {line}")
 
     return passed, failed, [proc]
+
+
+def _free_gateway_port() -> int:
+    """Pick a free UDP port in a high range for the auto-started gateway
+    Listener. Without this, `mix run` auto-starts the gateway app's Listener
+    on the default port (23097), which conflicts between sequential suites
+    and with stale processes → :eaddrinuse. Binding to port 0 asks the OS
+    for a free port; we return it for the env override."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
 
 
 def main():

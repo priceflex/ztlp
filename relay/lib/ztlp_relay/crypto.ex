@@ -15,22 +15,35 @@ defmodule ZtlpRelay.Crypto do
   @doc """
   Compute a HeaderAuthTag (128-bit AEAD tag) over the given AAD.
 
-  Uses ChaCha20-Poly1305 with a zero nonce and empty plaintext.
+  Uses ChaCha20-Poly1305 with a per-packet nonce and empty plaintext.
   The AAD should be the header bytes excluding the HeaderAuthTag field.
+
+  ## Nonce derivation (MUST match the Rust side, proto/src/pipeline.rs
+  `compute_header_auth_tag`)
+
+  nonce = [0; 4] || packet_seq.to_le_bytes()  (12 bytes)
+
+  The per-packet nonce (derived from the packet sequence number,
+  little-endian) provides replay protection: a replayed packet carries a
+  different seq and therefore produces a different nonce, so its auth tag
+  won't verify. (The old implementation used a fixed all-zero nonce and
+  relied on AAD uniqueness for replay protection — the Rust security fix
+  in commit 53b607f moved to per-packet nonces, and this side had to
+  follow.)
 
   ## Parameters
 
     - `key` — 32-byte symmetric key
     - `aad` — Additional Authenticated Data (header bytes without auth tag)
+    - `packet_seq` — the packet's sequence number (u64)
 
   ## Returns
 
   A 16-byte binary (128-bit Poly1305 tag).
   """
-  @spec compute_header_auth_tag(binary(), binary()) :: binary()
-  def compute_header_auth_tag(key, aad) when byte_size(key) == 32 do
-    # 96-bit zero nonce — unique AAD per packet via seq/timestamp
-    nonce = <<0::96>>
+  @spec compute_header_auth_tag(binary(), binary(), non_neg_integer()) :: binary()
+  def compute_header_auth_tag(key, aad, packet_seq \\ 0) when byte_size(key) == 32 do
+    nonce = build_nonce(packet_seq)
 
     # Encrypt empty plaintext with header as AAD
     # Returns {ciphertext, tag} where ciphertext is empty
@@ -57,15 +70,18 @@ defmodule ZtlpRelay.Crypto do
     - `key` — 32-byte symmetric key
     - `aad` — Additional Authenticated Data (header bytes without auth tag)
     - `tag` — 16-byte auth tag to verify
+    - `packet_seq` — the packet's sequence number (u64), used for the nonce
 
   ## Returns
 
   `true` if the tag is valid, `false` otherwise.
   """
-  @spec verify_header_auth_tag(binary(), binary(), binary()) :: boolean()
-  def verify_header_auth_tag(key, aad, tag)
+  @spec verify_header_auth_tag(binary(), binary(), binary(), non_neg_integer()) :: boolean()
+  def verify_header_auth_tag(key, aad, tag, packet_seq \\ 0)
+
+  def verify_header_auth_tag(key, aad, tag, packet_seq)
       when byte_size(key) == 32 and byte_size(tag) == 16 do
-    nonce = <<0::96>>
+    nonce = build_nonce(packet_seq)
 
     # Decrypt empty ciphertext with the tag to verify
     # If tag is invalid, :crypto.crypto_one_time_aead/7 returns :error
@@ -84,7 +100,13 @@ defmodule ZtlpRelay.Crypto do
     end
   end
 
-  def verify_header_auth_tag(_key, _aad, _tag), do: false
+  def verify_header_auth_tag(_key, _aad, _tag, _packet_seq), do: false
+
+  # Build the 12-byte nonce: [0; 4] || packet_seq (little-endian, 8 bytes).
+  # MUST match proto/src/pipeline.rs compute_header_auth_tag exactly.
+  defp build_nonce(packet_seq) when is_integer(packet_seq) and packet_seq >= 0 do
+    <<0::32, packet_seq::little-64>>
+  end
 
   @doc """
   Generate a random 32-byte key for testing.

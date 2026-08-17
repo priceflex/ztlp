@@ -113,9 +113,20 @@ defmodule ZtlpRelay.Pipeline do
     if Packet.hello?(data) do
       :ok
     else
+      # Extract the packet_seq for the per-packet nonce (MUST match the
+      # Rust side's compute_header_auth_tag, which derives the nonce from
+      # the seq). The seq offset differs between data (46-byte) and
+      # handshake (96-byte) headers, so use Packet.parse/1 which handles
+      # both and returns the seq for each. parse/1 returns {:ok, map}.
+      packet_seq =
+        case Packet.parse(data) do
+          {:ok, %{packet_seq: seq}} when is_integer(seq) -> seq
+          _ -> 0
+        end
+
       with {:ok, aad} <- Packet.extract_aad(data),
            {:ok, tag} <- Packet.extract_auth_tag(data) do
-        if Crypto.verify_header_auth_tag(session_key, aad, tag) do
+        if Crypto.verify_header_auth_tag(session_key, aad, tag, packet_seq) do
           :ok
         else
           {:drop, :invalid_auth_tag}

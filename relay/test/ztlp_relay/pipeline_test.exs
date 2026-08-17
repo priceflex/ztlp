@@ -92,12 +92,14 @@ defmodule ZtlpRelay.PipelineTest do
       key = Crypto.generate_key()
       session_id = :crypto.strong_rand_bytes(12)
 
-      # Build packet, compute auth tag over the AAD
+      # Build packet, compute auth tag over the AAD.
+      # The per-packet nonce uses the packet's seq (MUST match the Rust
+      # side). build_data uses seq=1, so compute the tag with seq=1.
       pkt = Packet.build_data(session_id, 1)
       raw_no_tag = Packet.serialize(pkt)
       {:ok, aad} = Packet.extract_aad(raw_no_tag)
 
-      tag = Crypto.compute_header_auth_tag(key, aad)
+      tag = Crypto.compute_header_auth_tag(key, aad, 1)
       pkt_with_tag = %{pkt | header_auth_tag: tag}
       raw = Packet.serialize(pkt_with_tag)
 

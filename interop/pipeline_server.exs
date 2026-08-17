@@ -112,7 +112,7 @@ defmodule PipelineServer do
   defp validate_data_packet(state, packet) do
     # Data header: Magic(2) + Ver|HdrLen(2) + Flags(2) + SessionID(12) + Seq(8) + AuthTag(16) + ExtLen(2) + PayloadLen(2) = 46
     <<magic::binary-size(2), _ver_hdrlen::binary-size(2), _flags::binary-size(2),
-      session_id::binary-size(12), _seq::unsigned-big-64,
+      session_id::binary-size(12), seq::unsigned-big-64,
       auth_tag::binary-size(16), _ext_len::binary-size(2), _payload_len::binary-size(2),
       _payload::binary>> = packet
 
@@ -129,7 +129,7 @@ defmodule PipelineServer do
         pre_tag_aad = binary_part(packet, 0, 26)
         post_tag_aad = binary_part(packet, 42, 4)
         aad = pre_tag_aad <> post_tag_aad
-        expected_tag = compute_header_auth_tag(state.auth_key, aad)
+        expected_tag = compute_header_auth_tag(state.auth_key, aad, seq)
 
         if auth_tag == expected_tag do
           "VALID"
@@ -153,7 +153,7 @@ defmodule PipelineServer do
     #            + PolicyTag(4) + ExtLen(2) + PayloadLen(2) + Reserved(1) + AuthTag(16) = 96
     <<magic::binary-size(2), _ver_hdrlen::binary-size(2), _flags::binary-size(2),
       _msg_type::8, _crypto_suite::16, _key_id::16,
-      session_id::binary-size(12), _seq::unsigned-big-64, _ts::unsigned-big-64,
+      session_id::binary-size(12), seq::unsigned-big-64, _ts::unsigned-big-64,
       _src_node::binary-size(16), _dst_svc::binary-size(16),
       _policy_tag::32, _ext_len::16, _payload_len::16, _reserved::8,
       auth_tag::binary-size(16), _rest::binary>> = packet
@@ -169,7 +169,7 @@ defmodule PipelineServer do
         # Layer 3: HeaderAuthTag
         # AAD = first 80 bytes (everything before auth tag)
         aad = binary_part(packet, 0, 80)
-        expected_tag = compute_header_auth_tag(state.auth_key, aad)
+        expected_tag = compute_header_auth_tag(state.auth_key, aad, seq)
 
         if auth_tag == expected_tag do
           "VALID"
@@ -211,7 +211,7 @@ defmodule PipelineServer do
 
     # AAD = pre-tag + post-tag (non-contiguous in wire format, concatenated for AEAD)
     aad = header_prefix <> post_tag
-    auth_tag = compute_header_auth_tag(state.auth_key, aad)
+    auth_tag = compute_header_auth_tag(state.auth_key, aad, seq)
 
     # Full packet: prefix + auth_tag + post_tag + payload
     header_prefix <> auth_tag <> post_tag <> payload
@@ -254,19 +254,23 @@ defmodule PipelineServer do
       reserved::8                           # Reserved
     >>
 
-    auth_tag = compute_header_auth_tag(state.auth_key, header_prefix)
+    auth_tag = compute_header_auth_tag(state.auth_key, header_prefix, seq)
 
     header_prefix <> auth_tag <> :binary.copy(<<0xEF>>, payload_len)
   end
 
   # ── ChaCha20-Poly1305 AEAD HeaderAuthTag ───────────────────────
   #
-  # Matches the Rust compute_header_auth_tag exactly:
-  # ChaCha20-Poly1305 encrypt with zero nonce, empty plaintext, AAD = header bytes.
-  # The resulting ciphertext IS the 16-byte tag.
+  # Matches the Rust compute_header_auth_tag exactly
+  # (proto/src/pipeline.rs): ChaCha20-Poly1305 encrypt with a per-packet
+  # nonce, empty plaintext, AAD = header bytes. The resulting ciphertext
+  # IS the 16-byte tag.
+  #
+  # Nonce derivation (MUST match Rust): [0; 4] || packet_seq (little-endian,
+  # 8 bytes). The per-packet nonce provides replay protection.
 
-  defp compute_header_auth_tag(key, aad) when byte_size(key) == 32 do
-    nonce = <<0::96>>  # 12-byte zero nonce
+  defp compute_header_auth_tag(key, aad, packet_seq \\ 0) when byte_size(key) == 32 do
+    nonce = <<0::32, packet_seq::little-64>>  # [0;4] || seq.LE (12 bytes)
     # Encrypt empty plaintext with AAD — returns {<<>>, tag}
     {_ciphertext, tag} = :crypto.crypto_one_time_aead(
       :chacha20_poly1305,

@@ -134,31 +134,6 @@ defmodule ZtlpGateway.Config do
     end
   end
 
-  # Parse a single "identity:service" policy entry, correctly handling
-  # colon-containing identity patterns (role:X, group:X) and
-  # colon-containing service names (tcp:443) at the same time.
-  @spec parse_policy_entry(String.t()) :: {String.t(), String.t()} | nil
-  defp parse_policy_entry("role:" <> _ = entry) do
-    case String.split(entry, ":", parts: 3) do
-      ["role", role, service] -> {service, "role:" <> role}
-      _ -> nil
-    end
-  end
-
-  defp parse_policy_entry("group:" <> _ = entry) do
-    case String.split(entry, ":", parts: 3) do
-      ["group", group, service] -> {service, "group:" <> group}
-      _ -> nil
-    end
-  end
-
-  defp parse_policy_entry(entry) do
-    case String.split(entry, ":", parts: 2) do
-      [identity, service] -> {service, identity}
-      _ -> nil
-    end
-  end
-
   def get(:session_timeout_ms) do
     case System.get_env("ZTLP_GATEWAY_SESSION_TIMEOUT_MS") do
       nil -> Application.get_env(:ztlp_gateway, :session_timeout_ms, 300_000)
@@ -181,24 +156,22 @@ defmodule ZtlpGateway.Config do
   def get(:ns_query_timeout_ms),
     do: Application.get_env(:ztlp_gateway, :ns_query_timeout_ms, 2000)
 
-  @doc """
-  Trust anchors for verifying ZTLP-NS record signatures.
-
-  Returns a map of `label => 32-byte public key binary`. A gateway needs
-  at least one trust anchor configured (typically the zone's signing
-  public key) before it will accept *any* record from NS — this is a
-  deliberate fail-closed default to prevent spoofing.
-
-  ## Environment Variable
-
-  `ZTLP_GATEWAY_TRUST_ANCHORS` — comma-separated `label:hexpubkey` entries.
-  Each pubkey must be a 64-char hex string (32 raw bytes). Malformed or
-  wrong-length entries are silently skipped (with a startup log warning),
-  not fatal — this favors "gateway starts but attestation degrades to
-  hex-only identities" over "gateway refuses to start".
-
-  Example: `ZTLP_GATEWAY_TRUST_ANCHORS=defcon.ztlp:ee53416947900e36020d83f9282f0a9a6540d5ae661ec48476b2906e27dc7d75`
-  """
+  # Trust anchors for verifying ZTLP-NS record signatures.
+  #
+  # Returns a map of `label => 32-byte public key binary`. A gateway needs
+  # at least one trust anchor configured (typically the zone's signing
+  # public key) before it will accept *any* record from NS — this is a
+  # deliberate fail-closed default to prevent spoofing.
+  #
+  # ## Environment Variable
+  #
+  # `ZTLP_GATEWAY_TRUST_ANCHORS` — comma-separated `label:hexpubkey` entries.
+  # Each pubkey must be a 64-char hex string (32 raw bytes). Malformed or
+  # wrong-length entries are silently skipped (with a startup log warning),
+  # not fatal — this favors "gateway starts but attestation degrades to
+  # hex-only identities" over "gateway refuses to start".
+  #
+  # Example: `ZTLP_GATEWAY_TRUST_ANCHORS=defcon.ztlp:ee53416947900e36020d83f9282f0a9a6540d5ae661ec48476b2906e27dc7d75`
   def get(:trust_anchors) do
     case System.get_env("ZTLP_GATEWAY_TRUST_ANCHORS") do
       nil ->
@@ -366,23 +339,46 @@ defmodule ZtlpGateway.Config do
     end
   end
 
-  @doc """
-  Bearer token for admin dashboard authentication.
-
-  All requests to the admin dashboard must include:
-    Authorization: Bearer <token>
-
-  If no token is configured, the dashboard rejects every request
-  (fail-closed). Set this to the same value as
-  `ZTLP_GATEWAY_DASHBOARD_TOKEN` environment variable.
-
-  Generate a strong token:
-    openssl rand -hex 32
-  """
+  # Bearer token for admin dashboard authentication.
+  #
+  # All requests to the admin dashboard must include:
+  #   Authorization: Bearer ***
+  #
+  # If no token is configured, the dashboard rejects every request
+  # (fail-closed). Set this to the same value as
+  # `ZTLP_GATEWAY_DASHBOARD_TOKEN` environment variable.
+  #
+  # Generate a strong token:
+  #   openssl rand -hex 32
   def get(:dashboard_token) do
     case System.get_env("ZTLP_GATEWAY_DASHBOARD_TOKEN") do
       nil -> Application.get_env(:ztlp_gateway, :dashboard_token)
       token when is_binary(token) and byte_size(token) > 0 -> token
+      _ -> nil
+    end
+  end
+
+  # Parse a single "identity:service" policy entry, correctly handling
+  # colon-containing identity patterns (role:X, group:X) and
+  # colon-containing service names (tcp:443) at the same time.
+  @spec parse_policy_entry(String.t()) :: {String.t(), String.t()} | nil
+  defp parse_policy_entry("role:" <> _ = entry) do
+    case String.split(entry, ":", parts: 3) do
+      ["role", role, service] -> {service, "role:" <> role}
+      _ -> nil
+    end
+  end
+
+  defp parse_policy_entry("group:" <> _ = entry) do
+    case String.split(entry, ":", parts: 3) do
+      ["group", group, service] -> {service, "group:" <> group}
+      _ -> nil
+    end
+  end
+
+  defp parse_policy_entry(entry) do
+    case String.split(entry, ":", parts: 2) do
+      [identity, service] -> {service, identity}
       _ -> nil
     end
   end

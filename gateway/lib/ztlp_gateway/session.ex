@@ -183,7 +183,7 @@ defmodule ZtlpGateway.Sack do
 
   def seq_in_sacked_range([], _seq), do: false
 
-  def seq_in_sacked_range([{start, stop} | _rest], seq) when seq < start do
+  def seq_in_sacked_range([{start, _stop} | _rest], seq) when seq < start do
     # Sorted — seq is before first range, no need to check further
     false
   end

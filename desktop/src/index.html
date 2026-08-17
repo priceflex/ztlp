@@ -8,65 +8,39 @@
 </head>
 <body>
   <div id="app">
-    <!-- Sidebar -->
+    <!-- Sidebar: minimal, brand + 3 nav items -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <img src="assets/shield.svg" alt="ZTLP">
-        <h1>ZTLP</h1>
+        <img src="assets/ztlp-logo.png" alt="ZTLP">
+        <span class="brand-name">ZTLP</span>
       </div>
       <nav class="sidebar-nav" id="sidebar-nav">
         <button class="nav-item active" data-page="home">
-          <span class="nav-icon">🏠</span> Home
+          <span class="nav-icon">●</span> Home
         </button>
         <button class="nav-item" data-page="setup">
-          <span class="nav-icon">🚀</span> Setup
-        </button>
-        <button class="nav-item" data-page="services">
-          <span class="nav-icon">🔌</span> Services
-        </button>
-        <button class="nav-item" data-page="identity">
-          <span class="nav-icon">🪪</span> Identity
-        </button>
-        <button class="nav-item" data-page="enrollment">
-          <span class="nav-icon">🔑</span> Enrollment
+          <span class="nav-icon">◎</span> Setup
         </button>
         <button class="nav-item" data-page="settings">
-          <span class="nav-icon">⚙️</span> Settings
+          <span class="nav-icon">≡</span> Settings
         </button>
       </nav>
-      <div class="sidebar-footer">
-        ZTLP v1.0.4
-      </div>
+      <div class="sidebar-footer" id="sidebar-footer">ZTLP v1.0.4</div>
     </aside>
 
-    <!-- Main content -->
+    <!-- Main content: exactly three pages -->
     <main class="main-content">
-      <!-- Home -->
       <div id="page-home" class="page active"></div>
-
-      <!-- Setup -->
       <div id="page-setup" class="page"></div>
-
-      <!-- Services -->
-      <div id="page-services" class="page"></div>
-
-      <!-- Identity -->
-      <div id="page-identity" class="page"></div>
-
-      <!-- Enrollment -->
-      <div id="page-enrollment" class="page"></div>
-
-      <!-- Settings -->
       <div id="page-settings" class="page"></div>
     </main>
   </div>
 
-  <!-- Component scripts -->
+  <!-- Component scripts (Services / Identity / Enrollment are gone —
+       enrollment lives inside Setup, identity info lives in Settings). -->
+  <script src="components/live-log.js"></script>
   <script src="components/home.js"></script>
   <script src="components/setup.js"></script>
-  <script src="components/services.js"></script>
-  <script src="components/identity.js"></script>
-  <script src="components/enrollment.js"></script>
   <script src="components/settings.js"></script>
   <script src="app.js"></script>
 </body>

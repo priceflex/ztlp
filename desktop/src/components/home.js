@@ -1,4 +1,14 @@
-// ── Home Component — Connection status + toggle ─────────────────────
+// ── Home — the entire point of the app, in one screen ─────────────────
+//
+// Per the goal, Home is nearly empty:
+//   • the ZTLP logo (big)
+//   • a status ring + label
+//   • ONE big Connect button (uses the existing connection manager)
+//   • a live activity log showing what's actually happening
+//
+// Removed from the old Home: relay address, connection-detail table, and the
+// whole traffic panel. This is not a user-facing VPN — the app just stays
+// ready to accept connections.
 
 const HomeComponent = (() => {
   const container = document.getElementById('page-home');
@@ -6,125 +16,74 @@ const HomeComponent = (() => {
 
   function render() {
     container.innerHTML = `
-      <h2 class="page-title">Connection</h2>
-      <div class="card">
-        <div class="status-hero">
+      <div class="home">
+        <div class="home-hero">
+          <img class="home-logo" src="assets/ztlp-logo.png" alt="ZTLP">
           <div class="status-ring" id="home-status-ring">
             <div class="status-dot"></div>
           </div>
-          <div class="status-label" id="home-status-label">Disconnected</div>
-          <div class="status-sublabel" id="home-status-sublabel">Not connected to any relay</div>
-          <button class="btn btn-primary" id="home-toggle-btn" onclick="HomeComponent.toggle()">
+          <div class="status-label" id="home-status-label">Ready</div>
+          <div class="status-sublabel" id="home-status-sublabel">ZTLP is standing by — connect when you're ready.</div>
+          <button class="btn btn-primary btn-connect" id="home-toggle-btn">
             Connect
           </button>
         </div>
-      </div>
 
-      <div class="card">
-        <div class="card-title">Connection Details</div>
-        <div class="info-row">
-          <span class="info-label">Relay</span>
-          <span class="info-value" id="home-relay">—</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Zone</span>
-          <span class="info-value" id="home-zone">—</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">Duration</span>
-          <span class="info-value" id="home-duration">--:--:--</span>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Traffic</div>
-        <div class="stats-grid">
-          <div class="stat-item">
-            <div class="stat-value" id="home-bytes-up">0 B</div>
-            <div class="stat-label">↑ Sent</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value" id="home-bytes-down">0 B</div>
-            <div class="stat-label">↓ Received</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value" id="home-pkts-up">0</div>
-            <div class="stat-label">Packets Sent</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value" id="home-pkts-down">0</div>
-            <div class="stat-label">Packets Received</div>
-          </div>
+        <div class="card log-card">
+          <div class="card-title">Live activity</div>
+          <div class="log" id="home-log"></div>
         </div>
       </div>
     `;
+
+    LiveLog.render();
+
+    // Bind the single Connect button. We use addEventListener (NOT an inline
+    // onclick attribute) — inline handlers are unreliable in the WebView2
+    // Runtime this app targets (see the note in enrollment.js's header).
+    const btn = document.getElementById('home-toggle-btn');
+    if (btn) btn.addEventListener('click', toggle);
   }
 
   async function load() {
     try {
-      const [status, traffic] = await Promise.all([
-        invoke('get_status'),
-        invoke('get_traffic_stats'),
-      ]);
-      update(status, traffic);
+      const status = await invoke('get_status');
+      update(status);
+      LiveLog.stateChange(status);
     } catch (e) {
-      console.error('Home load error:', e);
       renderErrorState(e);
     }
   }
 
-  function update(status, traffic) {
+  function update(status) {
     currentStatus = status;
 
     const ring = document.getElementById('home-status-ring');
     const label = document.getElementById('home-status-label');
     const sublabel = document.getElementById('home-status-sublabel');
     const btn = document.getElementById('home-toggle-btn');
-    const relay = document.getElementById('home-relay');
-    const zone = document.getElementById('home-zone');
-    const duration = document.getElementById('home-duration');
+    if (!ring) return; // not rendered yet
 
-    if (!ring) return; // Page not rendered yet
-
-    // Reset ring classes
+    // Reset ring state classes, then apply the one for the current state.
     ring.className = 'status-ring';
 
     const stateMap = {
-      disconnected: { label: 'Disconnected', sub: 'Not connected to any relay', btnText: 'Connect', btnClass: 'btn btn-primary', ring: '' },
-      connecting: { label: 'Connecting…', sub: `Reaching ${status.relay || '…'}`, btnText: 'Connecting…', btnClass: 'btn btn-secondary', ring: 'connecting' },
-      connected: { label: 'Connected', sub: `Secured via ${status.relay}`, btnText: 'Disconnect', btnClass: 'btn btn-danger', ring: 'connected' },
-      reconnecting: { label: 'Reconnecting…', sub: 'Attempting to restore connection', btnText: 'Disconnect', btnClass: 'btn btn-danger', ring: 'reconnecting' },
-      disconnecting: { label: 'Disconnecting…', sub: 'Tearing down tunnel', btnText: 'Disconnecting…', btnClass: 'btn btn-secondary', ring: 'disconnecting' },
-      failed: { label: 'Failed', sub: status.error || 'Connection failed', btnText: 'Retry', btnClass: 'btn btn-primary', ring: 'error' },
-      error: { label: 'Error', sub: status.error || 'System error', btnText: 'Retry', btnClass: 'btn btn-primary', ring: 'error' },
+      disconnected:   { label: 'Ready',         sub: 'ZTLP is standing by — connect when you\u2019re ready.', btn: 'Connect',     cls: 'btn btn-primary btn-connect', ring: '',            disabled: false },
+      connecting:     { label: 'Connecting…',   sub: 'Handshaking over the tunnel.',                         btn: 'Connecting…', cls: 'btn btn-secondary',           ring: 'connecting',  disabled: true  },
+      connected:      { label: 'Connected',     sub: 'Secured and ready to accept connections.',             btn: 'Disconnect',  cls: 'btn btn-danger',              ring: 'connected',   disabled: false },
+      reconnecting:   { label: 'Reconnecting…', sub: 'Restoring the connection.',                            btn: 'Disconnect',  cls: 'btn btn-danger',              ring: 'reconnecting',disabled: true  },
+      disconnecting:  { label: 'Disconnecting…',sub: 'Tearing down.',                                         btn: 'Disconnect',  cls: 'btn btn-secondary',           ring: 'disconnecting',disabled: true },
+      failed:         { label: 'Connection failed', sub: status.error || 'See the log for details.',         btn: 'Retry',       cls: 'btn btn-primary',           ring: 'error',       disabled: false },
+      error:          { label: 'Error',         sub: status.error || 'System error.',                        btn: 'Retry',       cls: 'btn btn-primary',           ring: 'error',       disabled: false },
     };
 
     const s = stateMap[status.state] || stateMap.disconnected;
     if (s.ring) ring.classList.add(s.ring);
     label.textContent = s.label;
     sublabel.textContent = s.sub;
-    btn.textContent = s.btnText;
-    btn.className = s.btnClass;
-    btn.disabled = status.state === 'connecting' || status.state === 'disconnecting';
-
-    relay.textContent = status.relay || '—';
-    zone.textContent = status.zone || '—';
-
-    // Duration
-    if (status.connected_since && status.state === 'connected') {
-      const elapsed = Math.floor(Date.now() / 1000) - status.connected_since;
-      duration.textContent = formatDuration(elapsed);
-    } else {
-      duration.textContent = '--:--:--';
-    }
-
-    // Traffic
-    if (traffic) {
-      document.getElementById('home-bytes-up').textContent = formatBytes(traffic.bytes_sent);
-      document.getElementById('home-bytes-down').textContent = formatBytes(traffic.bytes_received);
-      document.getElementById('home-pkts-up').textContent = traffic.packets_sent.toLocaleString();
-      document.getElementById('home-pkts-down').textContent = traffic.packets_received.toLocaleString();
-    }
+    btn.textContent = s.btn;
+    btn.className = s.cls;
+    btn.disabled = s.disabled;
   }
 
   function renderErrorState(err) {
@@ -132,45 +91,58 @@ const HomeComponent = (() => {
     const label = document.getElementById('home-status-label');
     const sublabel = document.getElementById('home-status-sublabel');
     const btn = document.getElementById('home-toggle-btn');
-    
-    if (!ring) return; // Page not rendered yet
+    if (!ring) return;
 
-    // Classify error: connection refused / unreachable daemon vs. genuine error.
-    // The backend wraps connect failures with "Failed to connect to daemon" —
-    // distinguish that from real daemon-side errors so the UI gives the user
-    // actionable guidance instead of a stack-trace-like message.
     const errStr = err && err.toString ? err.toString() : String(err);
     const isAgentDown = /Failed to connect to daemon|connection refused|ConnectionRefused/i.test(errStr);
 
     ring.className = 'status-ring error';
     if (isAgentDown) {
       label.textContent = 'Agent not running';
-      sublabel.textContent = 'Start the ZTLP agent to connect (ztlp-node service).';
-      btn.textContent = 'Retry';
+      sublabel.textContent = 'Start the ZTLP agent (ztlp-node service) to connect.';
+      LiveLog.fail('Agent not reachable — is the ztlp-node service running?');
     } else {
       label.textContent = 'Error';
       sublabel.textContent = errStr;
-      btn.textContent = 'Retry';
+      LiveLog.fail(errStr);
     }
-    btn.className = 'btn btn-primary';
+    btn.textContent = 'Retry';
+    btn.className = 'btn btn-primary btn-connect';
     btn.disabled = false;
   }
 
   async function toggle() {
     try {
-      if (currentStatus && currentStatus.state === 'connected') {
+      const st = currentStatus ? currentStatus.state : 'disconnected';
+      if (st === 'connected') {
+        LiveLog.setup('Disconnect requested.');
+        LiveLog.markConnected();
         await invoke('disconnect');
+        LiveLog.markDisconnected();
+        await invoke('get_status').then(update).catch(() => {});
+        LiveLog.stateChange(await safeStatus());
       } else {
-        // Get relay from config
+        LiveLog.setup('Connect requested.');
         const config = await invoke('get_config');
+        // Relay is handled by the name server + tunnel — never surfaced to the
+        // user. Read it from config silently, fall back to the default.
         const relay = config.relay_address || 'relay.ztlp.net:4433';
         await invoke('connect', { relay, zone: 'default' });
+        LiveLog.stateChange(await safeStatus());
       }
-      // Immediately poll to update UI
-      await pollState();
     } catch (e) {
       console.error('Toggle error:', e);
       renderErrorState(e);
+    }
+  }
+
+  async function safeStatus() {
+    try {
+      const status = await invoke('get_status');
+      update(status);
+      return status;
+    } catch {
+      return null;
     }
   }
 

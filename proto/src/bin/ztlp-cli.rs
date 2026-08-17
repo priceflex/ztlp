@@ -14128,6 +14128,79 @@ mod tests {
         );
     }
 
+    /// [CWE-284 irt-rwzo] The KEY record's `public_key` MUST be the Ed25519
+    /// signing pubkey — the same key the punch-agent uses to sign
+    /// PUNCH_REPORT / PEER_ENDPOINTS claims (`identity.signing_public_key_hex()`).
+    /// The NS's `EndpointAuth.check_ownership` compares the registered
+    /// `public_key` against the claim's Ed25519 verifying key and rejects on
+    /// any mismatch. Registration previously sent the X25519
+    /// `static_public_key` here, so every legitimate endpoint claim was
+    /// rejected as `not_key_owner`.
+    ///
+    /// This test captures the real KEY-record packet emitted by
+    /// `ns_publish_self` and asserts the `public_key` field equals the
+    /// Ed25519 signing key (and explicitly is NOT the X25519 key). If a
+    /// future refactor reverts to `static_public_key`, this fails.
+    #[tokio::test]
+    async fn ns_publish_self_key_record_uses_ed25519_signing_pubkey_not_x25519() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+
+        // The key the punch-agent signs endpoint claims with (the value the
+        // NS will compare against in check_ownership).
+        let expected_ed25519 = identity.signing_public_key_hex();
+        let x25519_hex = hex::encode(&identity.static_public_key);
+
+        let result = ns_publish_self(
+            "node.example.ztlp",
+            "example.ztlp",
+            &identity,
+            &ns_addr.to_string(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "publish failed: {:?}", result);
+
+        let pkts = captured.lock().await;
+        assert!(!pkts.is_empty(), "no register packet captured");
+        let p = &pkts[0];
+        assert_eq!(p[0], 0x09, "expected register opcode (0x09)");
+
+        // Extract the CBOR `public_key` from the KEY-record data section.
+        let name_len = u16::from_be_bytes([p[1], p[2]]) as usize;
+        let data_off = 1 + 2 + name_len + 1 + 2;
+        let data_len = u16::from_be_bytes([p[3 + name_len + 1], p[3 + name_len + 2]]) as usize;
+        let cbor = &p[data_off..data_off + data_len];
+        let decoded: ciborium::value::Value =
+            ciborium::de::from_reader(cbor).expect("cbor decode");
+        let map = match decoded {
+            ciborium::value::Value::Map(m) => m,
+            _ => panic!("expected CBOR map"),
+        };
+        let public_key_hex: String = map
+            .iter()
+            .find_map(|(k, v)| match (k, v) {
+                (ciborium::value::Value::Text(k), ciborium::value::Value::Text(v))
+                    if k == "public_key" => Some(v.clone()),
+                _ => None,
+            })
+            .expect("KEY record has no public_key field");
+
+        // The registered key MUST be the Ed25519 signing key (matches the
+        // PUNCH_REPORT signer) so check_ownership passes for the owner.
+        assert_eq!(
+            public_key_hex, expected_ed25519,
+            "KEY record public_key must equal the Ed25519 signing key \
+             (the PUNCH_REPORT/PEER_ENDPOINTS signer)"
+        );
+        // And it must NOT be the X25519 Noise key — that was the bug.
+        assert_ne!(
+            public_key_hex, x25519_hex,
+            "KEY record public_key must NOT be the X25519 static_public_key"
+        );
+    }
+
     #[tokio::test]
     async fn ns_publish_self_constructs_svc_packet_when_address_given() {
         let (ns_addr, captured) = spawn_capture_ns().await;

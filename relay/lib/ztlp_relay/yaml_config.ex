@@ -94,15 +94,18 @@ defmodule ZtlpRelay.YamlConfig do
     # Mesh section
     {config, errors} = case Map.get(raw, "mesh", %{}) do
       mesh when is_map(mesh) ->
-        {config, errors} = validate_field(config, errors, mesh, "enabled", :mesh_enabled, :boolean, false, nil)
-        {config, errors} = validate_field(config, errors, mesh, "port", :mesh_listen_port, :integer, 23096, 1..65535)
-        {config, errors} = validate_field(config, errors, mesh, "bootstrap", :mesh_bootstrap_relays, :string_list, [], nil)
-        {config, errors} = validate_field(config, errors, mesh, "node_id", :relay_node_id, :hex_bytes, nil, 16)
-        {config, errors} = validate_field(config, errors, mesh, "role", :relay_role, :enum, :all, [:ingress, :transit, :service, :all])
-        {config, errors} = validate_field(config, errors, mesh, "vnodes", :hash_ring_vnodes, :integer, 128, 1..1024)
-        {config, errors} = validate_field(config, errors, mesh, "ping_interval", :ping_interval_ms, :duration, 15_000, nil)
-        {config, errors} = validate_field(config, errors, mesh, "relay_timeout", :relay_timeout_ms, :duration, 300_000, nil)
-        {config, errors} = validate_field(config, errors, mesh, "signing_key", :mesh_signing_key, :hex_bytes, nil, 32)
+        c0 = config
+        e0 = errors
+        {c1, e1} = validate_field(c0, e0, mesh, "enabled", :mesh_enabled, :boolean, false, nil)
+        {c2, e2} = validate_field(c1, e1, mesh, "port", :mesh_listen_port, :integer, 23096, 1..65535)
+        {c3, e3} = validate_field(c2, e2, mesh, "bootstrap", :mesh_bootstrap_relays, :string_list, [], nil)
+        {c4, e4} = validate_field(c3, e3, mesh, "node_id", :relay_node_id, :hex_bytes, nil, 16)
+        {c5, e5} = validate_field(c4, e4, mesh, "role", :relay_role, :enum, :all, [:ingress, :transit, :service, :all])
+        {c6, e6} = validate_field(c5, e5, mesh, "vnodes", :hash_ring_vnodes, :integer, 128, 1..1024)
+        {c7, e7} = validate_field(c6, e6, mesh, "ping_interval", :ping_interval_ms, :duration, 15_000, nil)
+        {c8, e8} = validate_field(c7, e7, mesh, "relay_timeout", :relay_timeout_ms, :duration, 300_000, nil)
+        {c9, e9} = validate_field(c8, e8, mesh, "signing_key", :mesh_signing_key, :hex_bytes, nil, 32)
+        {c9, e9}
       nil -> {config, errors}
       other -> {config, ["mesh: expected a map, got: #{inspect(other)}" | errors]}
     end

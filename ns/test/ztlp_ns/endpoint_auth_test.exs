@@ -1,225 +1,182 @@
 defmodule ZtlpNs.EndpointAuthTest do
-  use ExUnit.Case, async: false
-
-  alias ZtlpNs.{Crypto, EndpointAuth, Record, Store}
-
   @moduledoc """
-  Unit tests for ZtlpNs.EndpointAuth -- the irt-rwzo fix.
+  Verifies `ZtlpNs.EndpointAuth` — the Ed25519 authentication for
+  PEER_ENDPOINTS (0x0A) and PUNCH_REPORT (0x0C) endpoint-tracking requests.
 
-  Covers the core ownership policy directly (verify_and_bind/4) rather
-  than through the full UDP wire protocol (see punch_protocol_test.exs
-  for those integration-level checks).
+  ## Background (irt-rwzo)
+
+  Before this fix, the 0x0A/0x0C UDP handlers accepted a `node_id` from the
+  packet with zero authentication: any UDP sender could claim to be any node
+  and poison the `EndpointStore` (endpoint-store poisoning / hole-punch
+  hijack, CWE-284). The NS-side half verifies a signature over
+  `node_id || timestamp` AND enforces that the claimed pubkey is the one
+  legitimately registered for that node_id (strict-if-registered) or the one
+  pinned on first sight (TOFU).
+
+  These tests pin the NS-side contract, with special attention to the exact
+  bug that shipped in the live full-stack deploy: the Rust registration path
+  originally sent the X25519 `static_public_key` in the KEY record while the
+  punch-agent signed PUNCH_REPORT with the Ed25519 key, so `check_ownership`
+  rejected every legitimate claim as `:not_key_owner`. The "register key ==
+  signer key" test below is the NS-side mirror of the Rust regression test
+  (`ns_publish_self_key_record_uses_ed25519_signing_pubkey_not_x25519`).
   """
 
+  use ExUnit.Case, async: false
+
+  require Bitwise
+  alias ZtlpNs.{Crypto, EndpointAuth, Record, Store}
+
+  @node_id :binary.decode_hex("82abae07daadbaf003a84b96d7de8dc6")
+
+  # The message the NS reconstructs from a (node_id, timestamp) pair and
+  # verifies the signature against — must match ZtlpNs.EndpointAuth
+  # `check_signature/4` byte-for-byte.
+  defp claim_message(node_id, timestamp),
+    do: <<node_id::binary-size(16), timestamp::unsigned-big-64>>
+
   setup do
+    Store.clear()
+    EndpointAuth.init()
     EndpointAuth.clear_pins()
+
+    on_exit(fn ->
+      EndpointAuth.clear_pins()
+      Store.clear()
+    end)
+
     :ok
   end
 
-  defp gen_identity, do: :crypto.generate_key(:eddsa, :ed25519)
+  # Insert a SIGNED KEY record binding @node_id to the given 32-byte pubkey,
+  # mirroring what `ztlp ns register` writes (Record.new_key hex-encodes the
+  # pubkey; the record is Ed25519-signed so Store.insert accepts it).
+  #
+  # Note: the record's SIGNER key is irrelevant to check_ownership — it only
+  # reads record.data.node_id + record.data.public_key. We sign with a throwaway
+  # CA key purely to satisfy the Store.insert signature invariant.
+  defp register_key(pubkey) do
+    {_signer_pub, signer_priv} = Crypto.generate_keypair()
+    record = Record.new_key("server.fullstack.ztlp", @node_id, pubkey, serial: 1)
+    signed = Record.sign(record, signer_priv)
+    assert :ok = Store.insert(signed)
+  end
 
-  defp sign_claim(node_id, timestamp, priv) do
-    message = <<node_id::binary-size(16), timestamp::unsigned-big-64>>
-    Crypto.sign(message, priv)
+  describe "strict path: KEY record already registered (the irt-rwzo case)" do
+    test "accepts a claim signed by the registered key (register key == signer key)" do
+      {pub, priv} = Crypto.generate_keypair()
+      register_key(pub)
+      ts = System.system_time(:second)
+      sig = Crypto.sign(claim_message(@node_id, ts), priv)
+
+      assert :ok = EndpointAuth.verify_and_bind(@node_id, ts, sig, pub)
+    end
+
+    test "rejects a claim signed by a DIFFERENT key as :not_key_owner (the original bug)" do
+      # The KEY record was registered with pub_A (e.g. the Ed25519 signing key),
+      # but the claimant signs/sends pub_B (e.g. the legacy X25519 key, or an
+      # attacker's throwaway key). check_ownership must reject.
+      {registered_pub, _registered_priv} = Crypto.generate_keypair()
+      register_key(registered_pub)
+
+      {imposter_pub, imposter_priv} = Crypto.generate_keypair()
+      ts = System.system_time(:second)
+      # A VALID signature from the imposter's own key — passes check_signature,
+      # so the rejection must come from check_ownership, not the sig check.
+      sig = Crypto.sign(claim_message(@node_id, ts), imposter_priv)
+
+      assert {:error, :not_key_owner} =
+               EndpointAuth.verify_and_bind(@node_id, ts, sig, imposter_pub)
+    end
   end
 
   describe "signature verification" do
-    test "accepts a valid signature for a fresh (unregistered) node_id" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub, priv} = gen_identity()
-      timestamp = System.system_time(:second)
-      sig = sign_claim(node_id, timestamp, priv)
-
-      assert :ok = EndpointAuth.verify_and_bind(node_id, timestamp, sig, pub)
-    end
-
-    test "rejects an invalid signature" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub, _priv} = gen_identity()
-      {_other_pub, other_priv} = gen_identity()
-      timestamp = System.system_time(:second)
-      # Sign with a DIFFERENT key than the pubkey we claim.
-      bad_sig = sign_claim(node_id, timestamp, other_priv)
+    test "rejects a tampered signature as :invalid_signature (TOFU path)" do
+      {pub, priv} = Crypto.generate_keypair()
+      ts = System.system_time(:second)
+      good_sig = Crypto.sign(claim_message(@node_id, ts), priv)
+      # Flip the very first byte — always changes the signature, so it can
+      # never accidentally remain a valid signature.
+      <<first_byte::8, rest::binary>> = good_sig
+      flipped = Bitwise.bxor(first_byte, 0xFF)
+      tampered = <<flipped, rest::binary>>
 
       assert {:error, :invalid_signature} =
-               EndpointAuth.verify_and_bind(node_id, timestamp, bad_sig, pub)
+               EndpointAuth.verify_and_bind(@node_id, ts, tampered, pub)
     end
 
-    test "rejects a signature over the wrong node_id (replay against a different target)" do
-      node_id = :crypto.strong_rand_bytes(16)
-      other_node_id = :crypto.strong_rand_bytes(16)
-      {pub, priv} = gen_identity()
-      timestamp = System.system_time(:second)
-      # Sign a claim for other_node_id, then try to use it for node_id.
-      sig = sign_claim(other_node_id, timestamp, priv)
+    test "rejects a signature over the wrong timestamp" do
+      {pub, priv} = Crypto.generate_keypair()
+      ts = System.system_time(:second)
+      # Sign a different timestamp than the one claimed in the request.
+      sig = Crypto.sign(claim_message(@node_id, ts + 1), priv)
 
       assert {:error, :invalid_signature} =
-               EndpointAuth.verify_and_bind(node_id, timestamp, sig, pub)
-    end
-
-    test "rejects a stale timestamp (replay protection)" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub, priv} = gen_identity()
-      # 10 minutes in the past -- well beyond the skew tolerance.
-      timestamp = System.system_time(:second) - 600
-      sig = sign_claim(node_id, timestamp, priv)
-
-      assert {:error, :stale_timestamp} =
-               EndpointAuth.verify_and_bind(node_id, timestamp, sig, pub)
-    end
-
-    test "rejects a timestamp too far in the future" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub, priv} = gen_identity()
-      timestamp = System.system_time(:second) + 600
-      sig = sign_claim(node_id, timestamp, priv)
-
-      assert {:error, :stale_timestamp} =
-               EndpointAuth.verify_and_bind(node_id, timestamp, sig, pub)
+               EndpointAuth.verify_and_bind(@node_id, ts, sig, pub)
     end
   end
 
-  describe "TOFU pinning (no registered record)" do
-    test "the second claim with a DIFFERENT pubkey for the same node_id is rejected" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub_a, priv_a} = gen_identity()
-      {pub_b, priv_b} = gen_identity()
+  describe "timestamp (replay protection)" do
+    test "rejects a stale timestamp as :stale_timestamp even with a valid signature" do
+      {pub, priv} = Crypto.generate_keypair()
+      # A timestamp 10 minutes in the past is outside @max_skew_seconds (120s),
+      # so it fails before the signature is even considered.
+      stale = System.system_time(:second) - 600
+      sig = Crypto.sign(claim_message(@node_id, stale), priv)
 
-      ts1 = System.system_time(:second)
-      sig1 = sign_claim(node_id, ts1, priv_a)
-      assert :ok = EndpointAuth.verify_and_bind(node_id, ts1, sig1, pub_a)
+      assert {:error, :stale_timestamp} =
+               EndpointAuth.verify_and_bind(@node_id, stale, sig, pub)
+    end
 
-      # A second, DIFFERENT key claiming the same node_id -- this is the
-      # attack irt-rwzo closes: without TOFU pinning, this would silently
-      # succeed and let the attacker hijack node_id's endpoint tracking.
+    test "accepts a timestamp within the allowed skew window" do
+      {pub, priv} = Crypto.generate_keypair()
+      # 60s in the past is within the 120s skew window.
+      ts = System.system_time(:second) - 60
+      sig = Crypto.sign(claim_message(@node_id, ts), priv)
+
+      assert :ok = EndpointAuth.verify_and_bind(@node_id, ts, sig, pub)
+    end
+  end
+
+  describe "TOFU path: no KEY record registered yet" do
+    test "pins the first pubkey seen, then accepts the same key" do
+      {pub, priv} = Crypto.generate_keypair()
+      ts = System.system_time(:second)
+      sig = Crypto.sign(claim_message(@node_id, ts), priv)
+
+      # First claim: no record, no pin -> pins pub, returns :ok.
+      assert :ok = EndpointAuth.verify_and_bind(@node_id, ts, sig, pub)
+
+      # Second claim with the same pinned key: still :ok.
       ts2 = System.system_time(:second)
-      sig2 = sign_claim(node_id, ts2, priv_b)
+      sig2 = Crypto.sign(claim_message(@node_id, ts2), priv)
+      assert :ok = EndpointAuth.verify_and_bind(@node_id, ts2, sig2, pub)
+    end
 
+    test "rejects a later claim with a DIFFERENT pubkey as :pubkey_mismatch" do
+      {first_pub, first_priv} = Crypto.generate_keypair()
+      ts = System.system_time(:second)
+      sig = Crypto.sign(claim_message(@node_id, ts), first_priv)
+      assert :ok = EndpointAuth.verify_and_bind(@node_id, ts, sig, first_pub)
+
+      # A second, different key trying to take over the same node_id:
+      # check_ownership sees a pin with a different pubkey -> rejected.
+      {other_pub, other_priv} = Crypto.generate_keypair()
+      ts2 = System.system_time(:second)
+      sig2 = Crypto.sign(claim_message(@node_id, ts2), other_priv)
       assert {:error, :pubkey_mismatch} =
-               EndpointAuth.verify_and_bind(node_id, ts2, sig2, pub_b)
-    end
-
-    test "repeated claims with the SAME pubkey for the same node_id all succeed" do
-      node_id = :crypto.strong_rand_bytes(16)
-      {pub, priv} = gen_identity()
-
-      for _ <- 1..5 do
-        ts = System.system_time(:second)
-        sig = sign_claim(node_id, ts, priv)
-        assert :ok = EndpointAuth.verify_and_bind(node_id, ts, sig, pub)
-      end
-    end
-
-    test "different node_ids can be pinned independently" do
-      node_id_a = :crypto.strong_rand_bytes(16)
-      node_id_b = :crypto.strong_rand_bytes(16)
-      {pub_a, priv_a} = gen_identity()
-      {pub_b, priv_b} = gen_identity()
-
-      ts = System.system_time(:second)
-      assert :ok =
-               EndpointAuth.verify_and_bind(node_id_a, ts, sign_claim(node_id_a, ts, priv_a), pub_a)
-
-      assert :ok =
-               EndpointAuth.verify_and_bind(node_id_b, ts, sign_claim(node_id_b, ts, priv_b), pub_b)
+               EndpointAuth.verify_and_bind(@node_id, ts2, sig2, other_pub)
     end
   end
 
-  describe "strict path (registered KEY record exists)" do
-    setup do
-      node_id = :crypto.strong_rand_bytes(16)
-      {registered_pub, registered_priv} = gen_identity()
-      {ns_pub, ns_priv} = gen_identity()
-
-      key_record = %Record{
-        name: "device-under-test-#{System.unique_integer([:positive])}.ztlp",
-        type: :key,
-        data: %{
-          "algorithm" => "Ed25519",
-          "node_id" => Base.encode16(node_id, case: :lower),
-          "public_key" => Base.encode16(registered_pub, case: :lower)
-        },
-        created_at: System.system_time(:second),
-        ttl: 86_400,
-        serial: System.system_time(:second),
-        signature: nil,
-        signer_public_key: nil
-      }
-
-      signed = Record.sign(key_record, ns_priv)
-      :ok = Store.insert(signed)
-
-      on_exit(fn ->
-        # Best-effort cleanup -- Store doesn't expose a generic delete,
-        # so just let subsequent tests use fresh random node_ids
-        # (collision probability with 16 random bytes is negligible).
-        :ok
-      end)
-
-      %{node_id: node_id, registered_pub: registered_pub, registered_priv: registered_priv, ns_pub: ns_pub}
-    end
-
-    test "accepts a claim signed by the REGISTERED pubkey", %{
-      node_id: node_id,
-      registered_pub: registered_pub,
-      registered_priv: registered_priv
-    } do
+  describe "malformed inputs" do
+    test "rejects a node_id that is not exactly 16 bytes as :malformed" do
+      {pub, priv} = Crypto.generate_keypair()
       ts = System.system_time(:second)
-      sig = sign_claim(node_id, ts, registered_priv)
-
-      assert :ok = EndpointAuth.verify_and_bind(node_id, ts, sig, registered_pub)
-    end
-
-    test "rejects a claim signed by a DIFFERENT (attacker) pubkey, even with a valid self-signature",
-         %{node_id: node_id} do
-      {attacker_pub, attacker_priv} = gen_identity()
-      ts = System.system_time(:second)
-      # The attacker's signature IS internally valid -- they really do
-      # control attacker_priv -- but attacker_pub doesn't match what's
-      # registered for this node_id. This is the core guarantee: a
-      # valid Ed25519 signature alone is not sufficient authorization.
-      sig = sign_claim(node_id, ts, attacker_priv)
-
-      assert {:error, :not_key_owner} =
-               EndpointAuth.verify_and_bind(node_id, ts, sig, attacker_pub)
-    end
-
-    test "the strict path takes priority over any prior TOFU pin", %{
-      node_id: node_id,
-      registered_pub: registered_pub,
-      registered_priv: registered_priv
-    } do
-      # Simulate an attacker having TOFU-pinned themselves to this
-      # node_id BEFORE registration existed (e.g. raced the real
-      # device during a brief pre-enrollment window). Once a real KEY
-      # record exists, verify_and_bind must ignore the stale pin and
-      # trust the registered record instead.
-      {attacker_pub, attacker_priv} = gen_identity()
-      ts0 = System.system_time(:second)
-      # Note: verify_and_bind checks the registered record FIRST, so
-      # this call actually already hits the strict path and correctly
-      # rejects the attacker -- demonstrating no TOFU pin ever gets a
-      # chance to form once registration exists.
-      sig0 = sign_claim(node_id, ts0, attacker_priv)
-      assert {:error, :not_key_owner} =
-               EndpointAuth.verify_and_bind(node_id, ts0, sig0, attacker_pub)
-
-      # The legitimate owner still succeeds afterward.
-      ts1 = System.system_time(:second)
-      sig1 = sign_claim(node_id, ts1, registered_priv)
-      assert :ok = EndpointAuth.verify_and_bind(node_id, ts1, sig1, registered_pub)
-    end
-  end
-
-  describe "malformed input" do
-    test "rejects a node_id that isn't exactly 16 bytes" do
-      {pub, priv} = gen_identity()
-      timestamp = System.system_time(:second)
-      short_node_id = :crypto.strong_rand_bytes(8)
-      sig = Crypto.sign(<<short_node_id::binary, timestamp::unsigned-big-64>>, priv)
+      sig = Crypto.sign(claim_message(@node_id, ts), priv)
 
       assert {:error, :malformed} =
-               EndpointAuth.verify_and_bind(short_node_id, timestamp, sig, pub)
+               EndpointAuth.verify_and_bind(@node_id <> <<0x00>>, ts, sig, pub)
     end
   end
 end

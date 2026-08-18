@@ -2741,52 +2741,78 @@ defmodule ZtlpGateway.Session do
         )
 
       true ->
+        # Resolve the backend, then authorize this stream's target service
+        # against the session identity. The handshake already authorized the
+        # session-level `state.service` (see handle_handshake_msg3), but a mux
+        # FRAME_OPEN carries a client-controlled `service_name` — without a
+        # per-stream check, a client authorized for service A could open a
+        # tunnel to ANY configured backend (lateral-movement authz bypass,
+        # CWE-639). [SAST: mux-per-stream-authz]
         case find_backend(backends, service_name) do
-          {:ok, %{host: host, port: port}} ->
-            # Check if we should do TLS termination for this stream.
-            # When a cert is provisioned for this service, gateway terminates
-            # TLS and forwards plain HTTP to the backend.
-            tls_creds =
-              case CertProvisioner.lookup(service_name) do
-                {:ok, creds} -> creds
-                :error -> nil
-              end
+          {:ok, %{name: resolved_service, host: host, port: port}} ->
+            if PolicyEngine.authorize?(state.identity, resolved_service) do
+              # Check if we should do TLS termination for this stream.
+              # When a cert is provisioned for this service, gateway terminates
+              # TLS and forwards plain HTTP to the backend.
+              tls_creds =
+                case CertProvisioner.lookup(service_name) do
+                  {:ok, creds} -> creds
+                  :error -> nil
+                end
 
-            # Async backend connection: spawn a process to connect without
-            # blocking the session GenServer. Data arriving for this stream
-            # during connection is buffered and flushed on success.
-            # Uses the BackendPool for connection reuse across mux streams.
-            session_pid = self()
+              # Async backend connection: spawn a process to connect without
+              # blocking the session GenServer. Data arriving for this stream
+              # during connection is buffered and flushed on success.
+              # Uses the BackendPool for connection reuse across mux streams.
+              session_pid = self()
 
-            spawn(fn ->
-              result = BackendPool.checkout(host, port, session_pid, stream_id)
-              send(session_pid, {:backend_connect_result, stream_id, result})
-            end)
+              spawn(fn ->
+                result = BackendPool.checkout(host, port, session_pid, stream_id)
+                send(session_pid, {:backend_connect_result, stream_id, result})
+              end)
 
-            # 10-second connect timeout prevents hanging streams
-            timeout_ref = Process.send_after(self(), {:connect_timeout, stream_id}, 10_000)
+              # 10-second connect timeout prevents hanging streams
+              timeout_ref = Process.send_after(self(), {:connect_timeout, stream_id}, 10_000)
 
-            stream_state = %{
-              state: :connecting,
-              backend_pid: nil,
-              buffer: [],
-              connect_buffer_bytes: 0,
-              connect_timeout_ref: timeout_ref,
-              tls_state: if(tls_creds, do: :pending_handshake, else: nil),
-              tls_creds: tls_creds,
-              tls_socket: nil,
-              tls_bridge_pid: nil,
-              service: service_name,
-              first_chunk: true
-            }
+              stream_state = %{
+                state: :connecting,
+                backend_pid: nil,
+                buffer: [],
+                connect_buffer_bytes: 0,
+                connect_timeout_ref: timeout_ref,
+                tls_state: if(tls_creds, do: :pending_handshake, else: nil),
+                tls_creds: tls_creds,
+                tls_socket: nil,
+                tls_bridge_pid: nil,
+                service: service_name,
+                first_chunk: true
+              }
 
-            streams = Map.put(state.streams, stream_id, stream_state)
+              streams = Map.put(state.streams, stream_id, stream_state)
 
-            Logger.info(
-              "[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}, queue=#{queue_len}"
-            )
+              Logger.info(
+                "[Session] Stream #{stream_id} connecting async (service=#{service_name}), total_streams=#{map_size(streams)}, queue=#{queue_len}"
+              )
 
-            {:noreply, %{state | streams: streams}}
+              {:noreply, %{state | streams: streams}}
+            else
+              # Per-stream policy denied: reject the stream and surface an
+              # audit event so the attempt is observable.
+              Logger.info(
+                "[Session] Per-stream policy denied: identity not authorized for service=#{resolved_service} (stream #{stream_id})"
+              )
+
+              Stats.policy_denied()
+
+              AuditLog.policy_denied(
+                state.identity,
+                state.client_addr,
+                resolved_service,
+                :not_authorized
+              )
+
+              reject_mux_stream(stream_id, "policy denied for service #{service_name}", state)
+            end
 
           :error ->
             Logger.warning("[Session] No backend for service #{service_name}")

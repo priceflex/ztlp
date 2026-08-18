@@ -34,6 +34,7 @@ defmodule ZtlpGateway.TlsSession do
 
   alias ZtlpGateway.{
     AuditLog,
+    Config,
     CrlServer,
     HttpHeaderInjector,
     PolicyEngine,
@@ -179,13 +180,60 @@ defmodule ZtlpGateway.TlsSession do
     end
   end
 
+  # Public decision helper (testable): given a certificate fingerprint, decide
+  # whether the session must be rejected on revocation grounds. Returns:
+  #   :reject — the cert is revoked, OR the CRL state is unprovable and the
+  #             deployment is fail-closed (the default).
+  #   :accept — the cert is not revoked (or unprovable but fail-open was opted
+  #             out by the operator).
+  #
+  # Extracted from the private crl_revoked?/1 so the fail-open/fail-closed
+  # decision can be unit-tested without a live TLS socket. [SAST: crl-fail-closed]
+  @spec crl_check_decision(fingerprint :: String.t()) :: :reject | :accept
+  def crl_check_decision(fingerprint) do
+    if crl_revoked?(fingerprint), do: :reject, else: :accept
+  end
+
   defp crl_revoked?(fingerprint) do
     case GenServer.whereis(CrlServer) do
-      nil -> false
-      _pid -> CrlServer.revoked?(fingerprint)
+      nil ->
+        # CRL server not running. This is a NORMAL operating state (CRL is not
+        # always deployed — many mTLS setups have no revocation list), so an
+        # absent CRL server does NOT by itself mean "revoked". Return false
+        # (not revoked) to keep mTLS working where CRL isn't configured.
+        # [SAST: crl-fail-closed] — note the distinction below.
+
+        false
+
+      _pid ->
+        # CRL server IS running. A lookup that errors/crashes is an
+        # unprovable revocation state — fail CLOSED by default (must not be
+        # treated as "definitely not revoked"), with an explicit operator
+        # opt-out for availability-first deployments.
+        try do
+          CrlServer.revoked?(fingerprint)
+        rescue
+          _ ->
+            fail_closed = Config.get(:crl_fail_closed)
+
+            if_audit(
+              if(fail_closed, do: :crl_error_fail_closed, else: :crl_error_fail_open),
+              fingerprint
+            )
+
+            fail_closed
+        end
     end
-  catch
-    :exit, _ -> false
+  end
+
+  # Best-effort audit logging for the CRL fail path. Kept separate so an audit
+  # failure can never break the revocation decision itself.
+  defp if_audit(event, fingerprint) do
+    try do
+      AuditLog.crl_failure(event, fingerprint)
+    catch
+      _, _ -> :ok
+    end
   end
 
   defp extract_connection_info(state) do

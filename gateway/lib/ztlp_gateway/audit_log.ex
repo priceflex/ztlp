@@ -176,6 +176,22 @@ defmodule ZtlpGateway.AuditLog do
   end
 
   @doc """
+  Log a CRL-check failure (CRL server unavailable or lookup error).
+
+  `mode` is one of `:crl_unavailable_fail_closed` or `:crl_unavailable_fail_open`
+  so an operator can observe the availability-vs-security decision that was made
+  when the revocation state could not be determined.
+  """
+  @spec crl_failure(atom(), String.t()) :: :ok
+  def crl_failure(mode, fingerprint) do
+    log(%{
+      event: :crl_check_failure,
+      mode: mode,
+      fingerprint: fingerprint
+    })
+  end
+
+  @doc """
   Log a certificate revoked event.
   """
   @spec cert_revoked(String.t(), String.t()) :: :ok

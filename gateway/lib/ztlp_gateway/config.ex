@@ -252,6 +252,23 @@ defmodule ZtlpGateway.Config do
     Application.get_env(:ztlp_gateway, :tls_mtls_optional, true)
   end
 
+  def get(:crl_fail_closed) do
+    # When the CRL server is unavailable or a revocation lookup errors, treat
+    # the certificate as REVOKED (fail closed) by default. Operators who need
+    # availability-first behavior on a network-facing TLS proxy can opt out by
+    # setting this to false (or ZTLP_GATEWAY_CRL_FAIL_CLOSED=false), in which
+    # case an unprovable revocation state is treated as "not revoked".
+    # [SAST: crl-fail-closed]
+    case System.get_env("ZTLP_GATEWAY_CRL_FAIL_CLOSED") do
+      nil -> Application.get_env(:ztlp_gateway, :crl_fail_closed, true)
+      "false" -> false
+      "0" -> false
+      "true" -> true
+      "1" -> true
+      _ -> Application.get_env(:ztlp_gateway, :crl_fail_closed, true)
+    end
+  end
+
   def get(:header_signing_enabled) do
     # ZTLP_HEADER_SIGNING_ENABLED env var takes precedence over app env.
     # Accepts true/1/yes/on (case-insensitive) as truthy; everything else

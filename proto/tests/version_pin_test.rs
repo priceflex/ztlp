@@ -63,7 +63,9 @@ use ztlp_proto::updater::SemVer;
 /// amplification-prevention cap (request_size * 8) can't truncate fat
 /// multi-candidate SVC records (Stage-2 v0.35.0+), which had made boxes with
 /// large `addresses` ICE lists unresolvable by name ("no SVC record").
-const MINIMUM_VERSION: &str = "0.35.3";
+/// Ratcheted 0.35.3 → 0.35.4 for the SAST-audit security patch release
+/// (gateway per-stream mux authorization bypass + CRL fail-closed).
+const MINIMUM_VERSION: &str = "0.35.4";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

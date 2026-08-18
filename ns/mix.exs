@@ -34,7 +34,7 @@ defmodule ZtlpNs.MixProject do
       # to 0.35.3 in the same PR for the NS-query amplification-padding fix);
       # the release tag-match gate requires changed components to equal the tag.
       # Floor ratcheted to 0.35.3 in release_test.exs.
-      version: "0.35.3",
+      version: "0.35.4",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

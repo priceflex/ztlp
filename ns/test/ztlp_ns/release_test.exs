@@ -67,21 +67,17 @@ defmodule ZtlpNs.ReleaseTest do
              """
     end
 
-    test "mix.exs version is at least 0.32.2 (v0.32.2 multi-candidate-QUIC-path tag)" do
+    test "mix.exs version is at least 0.35.4 (v0.35.4 security-audit-patch tag)" do
       # Floor guard: prevents an accidental down-bump that would make the NS
-      # misreport itself as a pre-v0.32.2 version. Ratcheted from 0.30.5 →
-      # 0.32.2 in PR release/v0.32.2 to align the floor with the v0.32 family:
-      # v0.32 (multi-candidate discovery, PR #69), v0.32.1 (keepalive-port +
-      # IPv6 dual-stack + loopback classifier, PR #70), v0.32.2
-      # (multi-candidate dial moves into QUIC path + punch IPv6 fix, PR #71).
-      # All three releases shipped while mix.exs still read 0.31.0; this PR
-      # closes that drift. Using Version.compare (rather than asserting a
-      # literal string) means this test does NOT need maintenance on every
-      # routine version bump — it only fails on a down-bump below the 0.32.2
-      # floor.
+      # misreport itself as a pre-v0.35.4 version. Ratcheted from 0.35.3 →
+      # 0.35.4 for the SAST-audit security patch release (gateway per-stream
+      # mux authorization bypass + CRL fail-closed). Using Version.compare
+      # (rather than asserting a literal string) means this test does NOT need
+      # maintenance on every routine version bump — it only fails on a
+      # down-bump below the 0.35.4 floor.
       declared = ZtlpNs.MixProject.project()[:version]
-      assert Version.compare(declared, "0.35.3") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.35.3 phantom-:learned-suppression + NS-query-padding tag"
+      assert Version.compare(declared, "0.35.4") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.35.4 security-audit-patch tag"
     end
   end
 

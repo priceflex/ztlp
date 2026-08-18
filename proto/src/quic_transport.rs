@@ -662,6 +662,165 @@ pub mod tokio_endpoint {
         }
     }
 
+    /// Persistent QUIC **client** endpoint.
+    ///
+    /// Root-cause fix for the reconnect-churn instability (feature/
+    /// quic-churn-stability, 2026-08-18 AWS `ztlp-test` validation):
+    ///
+    /// [`QuicEndpoint::connect`] / [`QuicEndpoint::connect_with_socket`]
+    /// each create a *brand-new* `quinn::Endpoint` (a fresh UDP socket +
+    /// a fresh driver task + a fresh connection-ID space) for every single
+    /// connection. Quinn's `Endpoint` is designed to be **long-lived and
+    /// host many connections** on one socket/driver — creating one per
+    /// connection is both wasteful and the source of churn instability:
+    /// under rapid reconnects (the `ztlp-client` benchmark opens a fresh
+    /// tunnel per transfer size, and the auto-reconnect supervisor
+    /// re-establishes the tunnel on every disconnect) the rapid
+    /// socket-bind / driver-spawn / CID-space churn produces
+    /// non-deterministic failures observed live on the AWS box —
+    /// `discarding possible duplicate packet`, `failed to authenticate
+    /// packet`, and `connect` timeouts on the 2nd+ rapid reconnect.
+    ///
+    /// This type owns ONE persistent `quinn::Endpoint` and opens many
+    /// [`QuicConnection`]s on it via [`connect_peer`](Self::connect_peer).
+    /// The socket, driver task, and CID space are stable across reconnects,
+    /// so reconnect churn no longer tears down and rebuilds the transport.
+    ///
+    /// `Clone` is shallow: `quinn::Endpoint` is internally `Arc`-backed, so
+    /// cloning shares the SAME underlying socket/driver/CID space — the
+    /// clone is another handle to the one persistent endpoint (useful for
+    /// concurrent reconnect tasks sharing the endpoint).
+    #[derive(Debug, Clone)]
+    pub struct QuicClientEndpoint {
+        cfg: QuicEndpointConfig,
+        inner: quinn::Endpoint,
+        bind_addr: SocketAddr,
+    }
+
+    impl QuicClientEndpoint {
+        /// Create a persistent client endpoint on an ephemeral loopback /
+        /// wildcard bind (matching [`QuicEndpoint::connect`]'s bind
+        /// behavior). Reuse this endpoint for the lifetime of the session;
+        /// every reconnect calls [`connect_peer`](Self::connect_peer) on
+        /// the SAME endpoint instead of rebuilding it.
+        pub async fn new(cfg: QuicEndpointConfig) -> Result<Self, QuicTransportError> {
+            ensure_crypto();
+            let bind_addr = cfg
+                .bind
+                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+            let actual = endpoint.local_addr()?;
+            Self::from_endpoint(cfg, endpoint, actual)
+                .await
+                .map(|mut e| {
+                    e.bind_addr = actual;
+                    e
+                })
+        }
+
+        /// Create a persistent client endpoint over a caller-supplied UDP
+        /// socket (matching [`QuicEndpoint::connect_with_socket`]). Use this
+        /// when the caller needs to send non-QUIC bytes (relay
+        /// `GATEWAY_REGISTER`) on the same socket before connecting.
+        pub async fn new_with_socket(
+            cfg: QuicEndpointConfig,
+            std_socket: std::net::UdpSocket,
+        ) -> Result<Self, QuicTransportError> {
+            ensure_crypto();
+            let bind_addr = std_socket.local_addr()?;
+            std_socket.set_nonblocking(true)?;
+            let endpoint = quinn::Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                std_socket,
+                Arc::new(quinn::TokioRuntime),
+            )?;
+            Self::from_endpoint(cfg, endpoint, bind_addr).await
+        }
+
+        /// Shared setup: install the default client config (TOFU verifier +
+        /// ZTLP transport tuning) on the given endpoint.
+        async fn from_endpoint(
+            cfg: QuicEndpointConfig,
+            mut endpoint: quinn::Endpoint,
+            bind_addr: SocketAddr,
+        ) -> Result<Self, QuicTransportError> {
+            // A fresh TOFU verifier per *endpoint* (not per connection) is
+            // correct: the verifier pins the first server cert it sees for a
+            // given server_name and enforces it thereafter. A persistent
+            // endpoint keeps the pin across its connections, which is the
+            // desired behavior (a MITM swapping the server cert mid-session
+            // is rejected on the *next* connection on the same endpoint).
+            //
+            // The pin is keyed by a per-endpoint unique name (pid + clock) so
+            // it never collides across runs / multiple persistent endpoints
+            // (e.g. in tests, where a fresh server generates a fresh ephemeral
+            // cert each run). The pin *value* is still enforced consistently
+            // for the endpoint's lifetime.
+            let pin_key = format!(
+                "ztlp-persistent-client-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let mut client_crypto = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(
+                    TofuCertVerifier::new(&pin_key),
+                ))
+                .with_no_client_auth();
+            client_crypto.alpn_protocols = cfg.alpn.clone();
+            let mut client_config = quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap(),
+            ));
+            let transport_config = apply_ztlp_transport_tuning(
+                quinn::TransportConfig::default(),
+                cfg.max_idle_timeout_ms,
+                cfg.keep_alive_interval_ms,
+            );
+            client_config.transport_config(Arc::new(transport_config));
+            endpoint.set_default_client_config(client_config);
+            Ok(Self {
+                cfg,
+                inner: endpoint,
+                bind_addr,
+            })
+        }
+
+        /// Open a NEW connection to `remote` on this persistent endpoint.
+        ///
+        /// This is the reconnect path: reuse the same socket / driver /
+        /// CID space, only the connection is new. `server_name` is the
+        /// ALPN / SNI name (ZTLP uses "localhost" for the inner Noise
+        /// handshake; the real peer identity is established by the
+        /// Noise_XX prologue over stream 0, not by this TLS layer).
+        pub async fn connect_peer(
+            &self,
+            remote: SocketAddr,
+            server_name: &str,
+        ) -> Result<QuicConnection, QuicTransportError> {
+            let conn = self.inner.connect(remote, server_name)?.await?;
+            Ok(QuicConnection { inner: conn })
+        }
+
+        /// The local (ip, port) this endpoint is bound to. The relay's
+        /// `GATEWAY_REGISTER` 5-tuple mapping and the NS `CLIENT_ROUTE`
+        /// both key off the client's source address — callers must use
+        /// THIS address (not a freshly-bound one) so the mapping stays
+        /// consistent across reconnects on the same endpoint.
+        pub fn local_addr(&self) -> Result<SocketAddr, QuicTransportError> {
+            Ok(self.bind_addr)
+        }
+
+        /// The local (ip, port) from the live socket (authoritative —
+        /// reflects the kernel-bound port after an ephemeral `:0` bind).
+        pub fn actual_local_addr(&self) -> Result<SocketAddr, QuicTransportError> {
+            Ok(self.inner.local_addr()?)
+        }
+    }
+
     #[cfg(test)]
     mod tofu_tests {
         use super::*;

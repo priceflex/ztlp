@@ -1,43 +1,36 @@
 // ── ZTLP Desktop — Main App Controller ───────────────────────────────
 //
-// Manages page navigation, state polling, and coordinates all component
-// modules. Uses the Tauri IPC bridge (`window.__TAURI__.core.invoke`).
+// Three pages (Home / Setup / Settings). Responsibilities:
+//   • page navigation
+//   • poll connection state and drive the status ring + the live log
+//   • auto-connect on launch (honor the `auto_connect` config, default ON —
+//     the app is not a VPN, it just stays ready)
+//
+// Uses the Tauri IPC bridge (`window.__TAURI__.core.invoke`).
 
 const { invoke } = window.__TAURI__.core;
 
 // ── Navigation ──────────────────────────────────────────────────────────
-
 const navItems = document.querySelectorAll('.nav-item');
 const pages = document.querySelectorAll('.page');
 
 function navigateTo(pageName) {
-  navItems.forEach(item => {
-    item.classList.toggle('active', item.dataset.page === pageName);
-  });
-  pages.forEach(page => {
-    page.classList.toggle('active', page.id === `page-${pageName}`);
-  });
+  navItems.forEach((item) => item.classList.toggle('active', item.dataset.page === pageName));
+  pages.forEach((page) => page.classList.toggle('active', page.id === `page-${pageName}`));
 }
 
-navItems.forEach(item => {
-  item.addEventListener('click', () => navigateTo(item.dataset.page));
-});
+navItems.forEach((item) => item.addEventListener('click', () => navigateTo(item.dataset.page)));
 
-// ── Utility: copy to clipboard ──────────────────────────────────────────
-
+// ── Utilities ───────────────────────────────────────────────────────────
 async function copyToClipboard(text, btnEl) {
   try {
     await navigator.clipboard.writeText(text);
     if (btnEl) {
       btnEl.classList.add('copied');
       btnEl.textContent = '✓';
-      setTimeout(() => {
-        btnEl.classList.remove('copied');
-        btnEl.textContent = '📋';
-      }, 1500);
+      setTimeout(() => { btnEl.classList.remove('copied'); btnEl.textContent = '📋'; }, 1500);
     }
   } catch {
-    // Fallback
     const ta = document.createElement('textarea');
     ta.value = text;
     document.body.appendChild(ta);
@@ -46,35 +39,11 @@ async function copyToClipboard(text, btnEl) {
     document.body.removeChild(ta);
   }
 }
+window.copyToClipboard = copyToClipboard; // exposed for the settings copy button
 
-// ── Utility: format bytes ───────────────────────────────────────────────
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-}
-
-// ── Utility: format duration ────────────────────────────────────────────
-
-function formatDuration(seconds) {
-  if (!seconds || seconds < 0) return '--:--:--';
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
-}
-
-// ── State polling ───────────────────────────────────────────────────────
-//
-// Adaptive polling: 2s normal cadence when the agent is reachable, backing
-// off to 10s after consecutive failures so we don't hammer a missing socket
-// (each failed connect costs IPC_CONNECT_TIMEOUT = 100ms, ×2 for status+
-// traffic = 200ms every cycle; at 2s cadence that's 10% CPU/jank just on
-// dead loopback connects). 10s back-off keeps the UI responsive but still
-// detects when the agent comes online without forcing a manual refresh.
-
+// ── Polling ─────────────────────────────────────────────────────────────
+// Adaptive: 2s when the agent is reachable, back off to 10s after repeated
+// failures so a dead socket doesn't jank the UI.
 let pollTimer = null;
 let consecutiveFailures = 0;
 const POLL_FAST_MS = 2000;
@@ -83,22 +52,26 @@ const FAILURE_THRESHOLD = 3;
 
 async function pollState() {
   try {
-    const [status, traffic] = await Promise.all([
-      invoke('get_status'),
-      invoke('get_traffic_stats'),
-    ]);
-    HomeComponent.update(status, traffic);
-    if (consecutiveFailures >= FAILURE_THRESHOLD) {
-      // Just recovered — return to fast cadence.
-      restartPolling(POLL_FAST_MS);
+    const status = await invoke('get_status');
+    HomeComponent.update(status);
+    LiveLog.stateChange(status);
+    // When secured, also reflect the live background service-attach state so
+    // the log shows what the device is actually attached to via its identity.
+    // Best-effort: a momentary `tunnels` IPC miss must never break the
+    // status poll.
+    if (status.state === 'connected' || status.state === 'reconnecting') {
+      invoke('get_attached')
+        .then((attached) => LiveLog.serviceAttach(attached))
+        .catch(() => {});
     }
+    if (consecutiveFailures >= FAILURE_THRESHOLD) restartPolling(POLL_FAST_MS);
     consecutiveFailures = 0;
   } catch (e) {
     consecutiveFailures += 1;
-    console.error('Poll error:', e);
     if (consecutiveFailures === FAILURE_THRESHOLD) {
-      // Slow down to avoid burning CPU on connect-timeouts.
       restartPolling(POLL_SLOW_MS);
+      // Log once that the agent went quiet (LiveLog dedups by state).
+      LiveLog.stateChange({ state: 'error', error: 'agent not reachable' });
     }
   }
 }
@@ -109,38 +82,84 @@ function restartPolling(intervalMs) {
 }
 
 function startPolling() {
-  if (pollTimer) return;
-  pollTimer = setInterval(pollState, POLL_FAST_MS);
+  if (!pollTimer) pollTimer = setInterval(pollState, POLL_FAST_MS);
 }
 
 function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+// ── Auto-connect on launch ──────────────────────────────────────────────
+// "It's not a VPN — stay ready." So on launch we connect if the device is
+// enrolled and auto_connect is enabled (default true). We never nag the user;
+// if it's not enrolled we just log a hint pointing at Setup.
+async function maybeAutoConnect() {
+  // Refresh Home's view of the (possibly new) status so the ring/label repaint
+  // after any state change. Safe to call repeatedly.
+  const refresh = async () => {
+    try {
+      const s = await invoke('get_status');
+      HomeComponent.update(s);
+      LiveLog.stateChange(s);
+    } catch { /* agent down; poller will surface it */ }
+  };
+  try {
+    const cfg = await invoke('get_config');
+    const identity = await invoke('get_identity');
+    const enrolled = !!(identity && identity.enrolled);
+    const want = cfg ? !!cfg.auto_connect : true; // default ON
+
+    if (enrolled && want) {
+      const relay = (cfg && cfg.relay_address) || 'relay.ztlp.net:4433';
+      LiveLog.setup('Auto-connect: connecting and staying ready…');
+      await invoke('connect', { relay, zone: (identity && identity.zone_name) || 'default' });
+      await refresh(); // repaint Home + log the transition
+    } else if (!enrolled) {
+      LiveLog.log('warn', 'This device is not enrolled yet — open Setup to enroll it.');
+    }
+    // (enrolled, want=false → intentionally stay disconnected; nothing to do.)
+  } catch (e) {
+    console.error('Auto-connect error:', e);
   }
 }
 
 // ── Init ────────────────────────────────────────────────────────────────
-
 async function init() {
-  // Render all components
+  // Expose the components on the global object. This is harmless in the browser
+  // (classic <script> scope already makes them visible to each other) and it
+  // makes the app testable/inspectable from outside — the headless UI harness
+  // and any future debug tooling can drive them via window.HomeComponent, etc.
+  window.HomeComponent = HomeComponent;
+  window.SetupComponent = SetupComponent;
+  window.SettingsComponent = SettingsComponent;
+  window.LiveLog = LiveLog;
+
+  // Render the (now three) components.
   HomeComponent.render();
   SetupComponent.render();
-  ServicesComponent.render();
-  IdentityComponent.render();
-  EnrollmentComponent.render();
   SettingsComponent.render();
 
-  // Load initial data
+  // Load initial data. Setup + Settings load their own daemon/identity state;
+  // Home loads connection status.
   await Promise.all([
     HomeComponent.load(),
     SetupComponent.load(),
-    ServicesComponent.load(),
-    IdentityComponent.load(),
     SettingsComponent.load(),
   ]);
 
-  // Start polling connection status
+  // Establish the live log's baseline from the true current state, so the very
+  // first transition is reported accurately (a fresh log has no prior state,
+  // and Home's initial load doesn't feed the log).
+  try {
+    LiveLog.stateChange(await invoke('get_status'));
+  } catch {
+    LiveLog.stateChange({ state: 'disconnected' });
+  }
+
+  // Auto-connect first, THEN start the steady-state poller. (Connect is a one-
+  // shot; polling handles everything after. Doing it in this order avoids a
+  // redundant double-connect at launch.)
+  await maybeAutoConnect();
   startPolling();
 }
 

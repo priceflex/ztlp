@@ -32,6 +32,57 @@ pub fn get_status(state: State<'_, AppState>) -> ConnectionStatus {
     state.status.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
+/// Live, read-only view of which zone services the device currently has
+/// active tunnels/forwards to — i.e. what the agent is actually attached to
+/// right now using its device identity (over the secured channel).
+///
+/// The frontend's live activity log polls this a few seconds after
+/// connecting, so the user sees "attached to N services" reflect real state
+/// instead of a static assumption. It is a thin, read-only wrapper over the
+/// daemon's `tunnels` control command (the same source `get_services` reads);
+/// on any IPC error it reports empty/unknown rather than failing the UI.
+#[derive(serde::Serialize)]
+pub struct AttachedStatus {
+    /// The agent's daemon is reachable on its control socket.
+    pub reachable: bool,
+    /// Number of active tunnels/forwards the agent reports.
+    pub active: usize,
+    /// Human-readable endpoint descriptions ("host:port"), capped for display.
+    pub endpoints: Vec<String>,
+}
+
+#[tauri::command]
+pub fn get_attached() -> AttachedStatus {
+    match crate::ipc::ipc_request("tunnels", None) {
+        Ok(v) => {
+            let endpoints: Vec<String> = v
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            t.as_object()
+                                .and_then(|o| o.get("target"))
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let active = endpoints.len();
+            AttachedStatus {
+                reachable: true,
+                active,
+                endpoints: endpoints.into_iter().take(12).collect(),
+            }
+        }
+        Err(_) => AttachedStatus {
+            reachable: false,
+            active: 0,
+            endpoints: vec![],
+        },
+    }
+}
+
 // ── Identity ────────────────────────────────────────────────────────────
 
 #[tauri::command]

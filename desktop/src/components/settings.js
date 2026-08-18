@@ -1,65 +1,33 @@
-// ── Settings Component — Configuration ──────────────────────────────
+// ── Settings — behavior + identity/zone info ──────────────────────────
+//
+// Per the goal, Settings keeps just the essentials:
+//   • Auto-connect toggle (default ON — the app "stays ready")
+//   • Zone + identity info (what used to be the standalone Identity page)
+//
+// Removed: the relay address field, STUN, tunnel address, DNS servers, and
+// the MTU slider. Relay/DNS are handled through the name server + tunnel and
+// are not user-facing. If power users ever need the tunnel knobs again, they
+// can reappear here behind an "Advanced" section without disturbing the
+// simple default.
 
 const SettingsComponent = (() => {
   const container = document.getElementById('page-settings');
   let config = null;
+  let identity = null;
 
   function render() {
     container.innerHTML = `
       <h2 class="page-title">Settings</h2>
 
       <div class="card">
-        <div class="card-title">Network</div>
-
-        <div class="form-group">
-          <label class="form-label" for="settings-relay">Relay Address</label>
-          <input type="text" id="settings-relay" class="form-input"
-                 placeholder="relay.ztlp.net:4433" spellcheck="false">
-          <div class="form-hint">The ZTLP relay server to connect through.</div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label" for="settings-stun">STUN Server</label>
-          <input type="text" id="settings-stun" class="form-input"
-                 placeholder="stun.l.google.com:19302" spellcheck="false">
-          <div class="form-hint">STUN server used for NAT traversal.</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Tunnel</div>
-
-        <div class="form-group">
-          <label class="form-label" for="settings-tunnel-addr">Tunnel Address</label>
-          <input type="text" id="settings-tunnel-addr" class="form-input"
-                 placeholder="10.0.0.2" spellcheck="false">
-          <div class="form-hint">Local TUN interface address.</div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label" for="settings-dns">DNS Servers</label>
-          <input type="text" id="settings-dns" class="form-input"
-                 placeholder="1.1.1.1, 8.8.8.8" spellcheck="false">
-          <div class="form-hint">Comma-separated DNS servers used while tunnel is active.</div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">MTU</label>
-          <div class="range-row">
-            <input type="range" id="settings-mtu" min="1200" max="1500" step="10" value="1400">
-            <span class="range-value" id="settings-mtu-value">1400</span>
-          </div>
-          <div class="form-hint">Maximum Transmission Unit for the tunnel interface.</div>
-        </div>
-      </div>
-
-      <div class="card">
         <div class="card-title">Behavior</div>
-
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Auto-connect</div>
-            <div class="toggle-desc">Automatically connect when the app launches</div>
+            <div class="toggle-desc">
+              Connect automatically and stay ready for connections. ZTLP is not a
+              VPN you flip on and off — it just keeps a secured channel ready.
+            </div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="settings-autoconnect">
@@ -68,70 +36,105 @@ const SettingsComponent = (() => {
         </div>
       </div>
 
-      <div style="display: flex; gap: 8px; margin-top: 8px;">
-        <button id="settings-save-btn" class="btn btn-primary" onclick="SettingsComponent.save()">
-          💾 Save Settings
-        </button>
-        <button class="btn btn-secondary" onclick="SettingsComponent.load()">
-          ↩ Reset
-        </button>
+      <div class="card">
+        <div class="card-title">Identity &amp; zone</div>
+        <div id="settings-identity-body">
+          <p class="setup-pending">Loading…</p>
+        </div>
       </div>
 
-      <div class="enrollment-status" id="settings-status" style="margin-top: 12px;"></div>
+      <div style="display:flex; gap:8px; margin-top:4px;">
+        <button id="settings-save-btn" class="btn btn-primary">💾 Save settings</button>
+        <button id="settings-reload-btn" class="btn btn-secondary">↩ Reload</button>
+      </div>
+
+      <div class="enrollment-status" id="settings-status"></div>
     `;
 
-    // MTU slider live update
-    const mtuSlider = document.getElementById('settings-mtu');
-    const mtuValue = document.getElementById('settings-mtu-value');
-    if (mtuSlider && mtuValue) {
-      mtuSlider.addEventListener('input', () => {
-        mtuValue.textContent = mtuSlider.value;
-      });
-    }
+    const save = document.getElementById('settings-save-btn');
+    const reload = document.getElementById('settings-reload-btn');
+    if (save) save.addEventListener('click', save);
+    if (reload) reload.addEventListener('click', load);
   }
 
   async function load() {
+    // Config is optional (settings may not exist yet); identity is optional too.
     try {
       config = await invoke('get_config');
-      populateForm(config);
+      const ac = document.getElementById('settings-autoconnect');
+      if (ac) ac.checked = !!config.auto_connect;
     } catch (e) {
-      console.error('Settings load error:', e);
+      console.error('Settings load (config) error:', e);
     }
+    try {
+      identity = await invoke('get_identity');
+    } catch (e) {
+      identity = null;
+    }
+    renderIdentity();
   }
 
-  function populateForm(c) {
-    const el = (id) => document.getElementById(id);
+  function renderIdentity() {
+    const body = document.getElementById('settings-identity-body');
+    if (!body) return;
 
-    if (el('settings-relay')) el('settings-relay').value = c.relay_address || '';
-    if (el('settings-stun')) el('settings-stun').value = c.stun_server || '';
-    if (el('settings-tunnel-addr')) el('settings-tunnel-addr').value = c.tunnel_address || '';
-    if (el('settings-dns')) el('settings-dns').value = (c.dns_servers || []).join(', ');
-    if (el('settings-mtu')) {
-      el('settings-mtu').value = c.mtu || 1400;
-      if (el('settings-mtu-value')) el('settings-mtu-value').textContent = c.mtu || 1400;
+    if (!identity || !identity.node_id) {
+      body.innerHTML = `
+        <p class="setup-err">✗ No identity found.</p>
+        <p class="setup-help">Run Setup to enroll this device, then it will appear here.</p>
+      `;
+      return;
     }
-    if (el('settings-autoconnect')) el('settings-autoconnect').checked = !!c.auto_connect;
+
+    const zone = identity.zone_name || 'not enrolled';
+    body.innerHTML = `
+      <div class="info-row">
+        <span class="info-label">Zone</span>
+        <span class="info-value">${escapeHtml(zone)}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Enrollment</span>
+        <span class="info-value">
+          ${identity.enrolled
+            ? '<span class="badge badge-green">✓ Enrolled</span>'
+            : '<span class="badge badge-red">Not enrolled</span>'}
+        </span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Node ID</span>
+        <span class="info-value">
+          <span title="${escapeAttr(identity.node_id)}">${escapeHtml(truncateMiddle(identity.node_id, 10, 6))}</span>
+          <button class="copy-btn" id="copy-nodeid">📋</button>
+        </span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Key provider</span>
+        <span class="info-value">${escapeHtml(identity.provider_type || 'software')}</span>
+      </div>
+    `;
+    const copyBtn = document.getElementById('copy-nodeid');
+    if (copyBtn) copyBtn.addEventListener('click', () => copyToClipboard(identity.node_id, copyBtn));
   }
 
   async function save() {
-    const el = (id) => document.getElementById(id);
-
-    const dnsStr = (el('settings-dns')?.value || '').trim();
-    const dnsServers = dnsStr ? dnsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-
-    const newConfig = {
-      relay_address: el('settings-relay')?.value.trim() || '',
-      stun_server: el('settings-stun')?.value.trim() || 'stun.l.google.com:19302',
-      tunnel_address: el('settings-tunnel-addr')?.value.trim() || '10.0.0.2',
-      dns_servers: dnsServers,
-      mtu: parseInt(el('settings-mtu')?.value || '1400', 10),
-      auto_connect: el('settings-autoconnect')?.checked || false,
-    };
-
+    const ac = document.getElementById('settings-autoconnect');
     try {
+      const newConfig = {
+        ...config,
+        auto_connect: !!(ac && ac.checked),
+      };
       await invoke('save_config', { config: newConfig });
       config = newConfig;
-      showStatus('success', '✓ Settings saved.');
+      const on = newConfig.auto_connect;
+      LiveLog.setup(`Auto-connect ${on ? 'enabled' : 'disabled'}.`);
+      showStatus('success', `✓ Auto-connect ${on ? 'on' : 'off'}.`);
+      // Honor the new setting immediately.
+      if (on) {
+        try { await invoke('connect', { relay: config.relay_address || 'relay.ztlp.net:4433', zone: 'default' }); }
+        catch (e) { LiveLog.fail(`Auto-connect attempt: ${e}`); }
+      } else {
+        try { await invoke('disconnect'); } catch (e) { /* already down */ }
+      }
     } catch (e) {
       showStatus('error', `Error saving settings: ${e}`);
     }
@@ -142,14 +145,25 @@ const SettingsComponent = (() => {
     if (!el) return;
     el.className = `enrollment-status ${type}`;
     el.textContent = message;
-    // Auto-clear after 3s
     setTimeout(() => {
-      if (el.textContent === message) {
-        el.className = 'enrollment-status';
-        el.textContent = '';
-      }
+      if (el.textContent === message) { el.className = 'enrollment-status'; el.textContent = ''; }
     }, 3000);
   }
 
-  return { render, load, save };
+  function truncateMiddle(str, prefix, suffix) {
+    if (!str || str.length <= prefix + suffix + 3) return str || '';
+    return str.slice(0, prefix) + '…' + str.slice(-suffix);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[<>&"']/g, c => ({
+      '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+
+  function escapeAttr(s) {
+    return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  }
+
+  return { render, load };
 })();

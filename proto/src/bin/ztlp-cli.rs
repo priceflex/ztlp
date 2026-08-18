@@ -371,6 +371,18 @@ enum Commands {
         /// (default: fail closed, matches SSH StrictHostKeyChecking)
         #[arg(long)]
         allow_identity_change: bool,
+
+        /// Reuse a persistent QUIC client endpoint (one quinn Endpoint /
+        /// socket / driver / CID space) across auto-reconnects instead of
+        /// re-binding a fresh UDP socket + endpoint per reconnect.
+        ///
+        /// Default OFF. Quinn endpoints are designed to be long-lived and
+        /// host many connections; the per-reconnect re-bind is the churn
+        /// source. Opt-in so the production default is unchanged until the
+        /// relay 5-tuple behavior is validated on ztlp-test. See
+        /// feature/quic-churn-stability.
+        #[arg(long)]
+        persistent_ep: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -2923,6 +2935,7 @@ async fn cmd_connect(
     relay_probe_interval: Duration,
     transport: &str,
     multi_candidate: bool,
+    persistent_ep: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
     //
@@ -3771,7 +3784,10 @@ Only enable for legacy NAT-traversal compatibility."
 
     // QUIC mode
 
-    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
+    use ztlp_proto::quic_transport::{
+        tokio_endpoint::{QuicClientEndpoint, QuicEndpoint},
+        QuicEndpointConfig,
+    };
     let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
 
     // ── Stage 2 (v0.35.x): multi-candidate pre-selection ─────────────
@@ -4070,13 +4086,36 @@ Only enable for legacy NAT-traversal compatibility."
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let client = QuicEndpoint::connect_with_socket(
-        QuicEndpointConfig::default(),
-        peer_addr,
-        "localhost",
-        std_socket,
-    )
-    .await?;
+    let client = if persistent_ep {
+        // Opt-in persistent-endpoint path (feature/quic-churn-stability).
+        // Uses QuicClientEndpoint (a long-lived quinn Endpoint reused across
+        // connections) instead of the per-connection connect_with_socket.
+        // new_with_socket reuses the SAME std_socket the relay 5-tuple was
+        // registered on (above), so relay routing is preserved. For a single
+        // cmd_connect invocation this establishes one QuicConnection the
+        // same way; the cross-reconnect endpoint lift (reusing the endpoint
+        // ACROSS supervisor reconnects, the deeper "autoreconnect is cheap"
+        // change) is a follow-up that also requires the relay 5-tuple to be
+        // validated on a stable port. Default OFF — production behavior is
+        // unchanged without --persistent-ep.
+        let ep = QuicClientEndpoint::new_with_socket(
+            QuicEndpointConfig::default(),
+            std_socket,
+        )
+        .await
+        .map_err(|e| format!("persistent endpoint init: {}", e))?;
+        ep.connect_peer(peer_addr, "localhost")
+            .await
+            .map_err(|e| format!("persistent endpoint connect: {}", e))?
+    } else {
+        QuicEndpoint::connect_with_socket(
+            QuicEndpointConfig::default(),
+            peer_addr,
+            "localhost",
+            std_socket,
+        )
+        .await?
+    };
 
     let local_port = if let Some(lf) = local_forward {
         lf.split(':').next().unwrap_or("0")
@@ -12965,6 +13004,7 @@ async fn main() {
             no_reconnect,
             no_resolve_on_reconnect,
             allow_identity_change,
+            persistent_ep,
             transport,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
@@ -13036,6 +13076,7 @@ async fn main() {
                     *relay_probe_interval,
                     &transport,
                     multi_candidate_active,
+                    *persistent_ep,
                 )
                 .await
             } else {
@@ -13085,6 +13126,7 @@ async fn main() {
                         *relay_probe_interval,
                         &transport,
                         multi_candidate_active,
+                        *persistent_ep,
                     )
                     .await;
 

@@ -9,12 +9,44 @@ mod tray;
 mod tunnel;
 
 use state::AppState;
+use tauri::{Manager, WebviewWindowBuilder};
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::default())
         .setup(|app| {
+            // Ensure the main window is VISIBLE on launch.
+            //
+            // The window is declared in tauri.conf.json (label "main") but the
+            // shipped entrypoint never showed it, so the build was a tray-only
+            // shell with no GUI. Two cases:
+            //   (a) Tauri auto-created the config window but left it hidden
+            //       -> just show + focus it.
+            //   (b) It was never created -> build it, then show + focus.
+            match app.get_webview_window("main") {
+                Some(existing) => {
+                    let _ = existing.show();
+                    let _ = existing.set_focus();
+                    let _ = existing.set_always_on_top(false);
+                }
+                None => {
+                    let window = WebviewWindowBuilder::new(
+                        app,
+                        "main",
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .title("ZTLP")
+                    .inner_size(900.0, 700.0)
+                    .min_inner_size(720.0, 500.0)
+                    .center()
+                    .resizable(true)
+                    .visible(true)
+                    .build()?;
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
             tray::setup_tray(app.handle())?;
             Ok(())
         })

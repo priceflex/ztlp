@@ -159,7 +159,12 @@ async fn sequential_reconnect_churn_is_reliable() {
     let elapsed = start.elapsed();
 
     // HARD assert: every connection delivered its OWN full payload.
-    assert_eq!(received.len(), CONNS, "server saw {} connections, expected {CONNS}", received.len());
+    assert_eq!(
+        received.len(),
+        CONNS,
+        "server saw {} connections, expected {CONNS}",
+        received.len()
+    );
     for (i, got) in received.iter().enumerate() {
         let expected = make_payload(PAYLOAD, i as u8);
         assert_eq!(
@@ -169,7 +174,8 @@ async fn sequential_reconnect_churn_is_reliable() {
             got.len()
         );
         assert_eq!(
-            got, &expected,
+            got,
+            &expected,
             "churn reconnect #{i}: NOT byte-exact — stale/corrupted delivery (fp={})",
             fingerprint(&expected)
         );
@@ -275,7 +281,7 @@ async fn concurrent_reconnect_churn_is_reliable() {
             // CONNECTION_CLOSE-before-drain race.
             loop {
                 match recv.read(&mut [0u8; 64]).await {
-                    Ok(Some(_)) => {} // ACK bytes / drain progress
+                    Ok(Some(_)) => {}           // ACK bytes / drain progress
                     Ok(None) | Err(_) => break, // server closed (drained)
                 }
             }
@@ -290,8 +296,9 @@ async fn concurrent_reconnect_churn_is_reliable() {
     // HARD assert: every concurrent connection delivered byte-exact.
     // QUIC may complete connections out of order; match by payload set.
     assert_eq!(received.len(), CONNS, "expected {CONNS} connections");
-    let sent_fps: std::collections::BTreeSet<String> =
-        (0..CONNS).map(|i| fingerprint(&make_payload(PAYLOAD, i as u8))).collect();
+    let sent_fps: std::collections::BTreeSet<String> = (0..CONNS)
+        .map(|i| fingerprint(&make_payload(PAYLOAD, i as u8)))
+        .collect();
     let got_fps: std::collections::BTreeSet<String> =
         received.iter().map(|g| fingerprint(g)).collect();
     assert_eq!(

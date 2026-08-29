@@ -705,9 +705,7 @@ pub mod tokio_endpoint {
         /// the SAME endpoint instead of rebuilding it.
         pub async fn new(cfg: QuicEndpointConfig) -> Result<Self, QuicTransportError> {
             ensure_crypto();
-            let bind_addr = cfg
-                .bind
-                .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+            let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
             let mut endpoint = quinn::Endpoint::client(bind_addr)?;
             let actual = endpoint.local_addr()?;
             Self::from_endpoint(cfg, endpoint, actual)
@@ -767,9 +765,7 @@ pub mod tokio_endpoint {
             );
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(
-                    TofuCertVerifier::new(&pin_key),
-                ))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key)))
                 .with_no_client_auth();
             client_crypto.alpn_protocols = cfg.alpn.clone();
             let mut client_config = quinn::ClientConfig::new(Arc::new(

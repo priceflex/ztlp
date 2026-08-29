@@ -3456,12 +3456,11 @@ Only enable for legacy NAT-traversal compatibility."
                 // Pin the NS-resolved gateway NodeID when we have one (strict
                 // tenant isolation); fall back to the client's own NodeID (legacy
                 // / direct ip:port) — mirrors the initial single-session path.
-                let cr_node_id: [u8; 16] =
-                    if peer_node_id_for_routing != [0u8; 16] {
-                        peer_node_id_for_routing
-                    } else {
-                        identity.node_id.0
-                    };
+                let cr_node_id: [u8; 16] = if peer_node_id_for_routing != [0u8; 16] {
+                    peer_node_id_for_routing
+                } else {
+                    identity.node_id.0
+                };
                 if via_relay {
                     match build_client_route_packet(&cr_node_id, svc_name, ts, None) {
                         Ok(pkt) => {
@@ -4157,12 +4156,9 @@ Only enable for legacy NAT-traversal compatibility."
         // change) is a follow-up that also requires the relay 5-tuple to be
         // validated on a stable port. Default OFF — production behavior is
         // unchanged without --persistent-ep.
-        let ep = QuicClientEndpoint::new_with_socket(
-            QuicEndpointConfig::default(),
-            std_socket,
-        )
-        .await
-        .map_err(|e| format!("persistent endpoint init: {}", e))?;
+        let ep = QuicClientEndpoint::new_with_socket(QuicEndpointConfig::default(), std_socket)
+            .await
+            .map_err(|e| format!("persistent endpoint init: {}", e))?;
         ep.connect_peer(peer_addr, "localhost")
             .await
             .map_err(|e| format!("persistent endpoint connect: {}", e))?

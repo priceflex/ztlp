@@ -371,6 +371,18 @@ enum Commands {
         /// (default: fail closed, matches SSH StrictHostKeyChecking)
         #[arg(long)]
         allow_identity_change: bool,
+
+        /// Reuse a persistent QUIC client endpoint (one quinn Endpoint /
+        /// socket / driver / CID space) across auto-reconnects instead of
+        /// re-binding a fresh UDP socket + endpoint per reconnect.
+        ///
+        /// Default OFF. Quinn endpoints are designed to be long-lived and
+        /// host many connections; the per-reconnect re-bind is the churn
+        /// source. Opt-in so the production default is unchanged until the
+        /// relay 5-tuple behavior is validated on ztlp-test. See
+        /// feature/quic-churn-stability.
+        #[arg(long)]
+        persistent_ep: bool,
     },
 
     /// Listen for incoming ZTLP connections
@@ -2923,6 +2935,7 @@ async fn cmd_connect(
     relay_probe_interval: Duration,
     transport: &str,
     multi_candidate: bool,
+    persistent_ep: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
     //
@@ -3416,6 +3429,64 @@ Only enable for legacy NAT-traversal compatibility."
             // Detach: dispatcher lives as long as the connect command runs.
             let _ = dispatcher;
 
+            // ─── Relay-forwarding route (CLIENT_ROUTE) for the parallel-session path ───
+            // The relay keys a client's forwarding route by its source 5-tuple
+            // (`{:client_map, {ip, port}}` — see the relay's `do_install_client_route`,
+            // which notes "every `ztlp connect` ... opens a fresh ephemeral UDP socket").
+            // Every parallel session below sends its HELLO from `node.socket` (one
+            // shared port), so a SINGLE CLIENT_ROUTE from `node.socket` installs the
+            // route the relay needs to forward each per-connection session to the
+            // target server. Without it the relay leaves each session half-open and
+            // it times out before a HELLO_ACK can return (data-plane gap, ticket #10).
+            //
+            // Only meaningful when routing via a relay (relay-forwarding); a
+            // β-direct (no relay) connect has no relay to install a route with, and
+            // the relay safely drops an unrecognized frame in that case anyway
+            // (see the initial single-session CLIENT_ROUTE note).
+            // `send_addr` is the relay (or, β-direct, the peer). We only install a
+            // relay route when we're actually going through a relay (`send_addr`
+            // differs from the direct `peer_addr`).
+            if let Some(svc_name) = service.as_deref() {
+                let relay_target = send_addr;
+                let via_relay = send_addr != peer_addr;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                // Pin the NS-resolved gateway NodeID when we have one (strict
+                // tenant isolation); fall back to the client's own NodeID (legacy
+                // / direct ip:port) — mirrors the initial single-session path.
+                let cr_node_id: [u8; 16] = if peer_node_id_for_routing != [0u8; 16] {
+                    peer_node_id_for_routing
+                } else {
+                    identity.node_id.0
+                };
+                if via_relay {
+                    match build_client_route_packet(&cr_node_id, svc_name, ts, None) {
+                        Ok(pkt) => {
+                            // Send from `node.socket` — the SAME socket the parallel
+                            // sessions use — so the relay keys the route to the right
+                            // source port. (A std::net socket here would have the wrong
+                            // ephemeral port and the route would never match.)
+                            let _ = node.socket.send_to(&pkt, relay_target).await;
+                            eprintln!(
+                                "{} CLIENT_ROUTE sent to {} ({} bytes, service={}, parallel-session socket)",
+                                c_dim("→"),
+                                relay_target,
+                                pkt.len(),
+                                svc_name
+                            );
+                        }
+                        Err(e) => eprintln!(
+                            "{} could not build CLIENT_ROUTE for service '{}': {} (parallel path — relay may not route per-connection sessions)",
+                            c_red("✗"),
+                            svc_name,
+                            e
+                        ),
+                    }
+                }
+            }
+
             // Accept loop: every TCP connection spawns a brand-new Noise session.
             loop {
                 let (tcp_stream, tcp_addr) = tcp_listener.accept().await?;
@@ -3771,7 +3842,10 @@ Only enable for legacy NAT-traversal compatibility."
 
     // QUIC mode
 
-    use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
+    use ztlp_proto::quic_transport::{
+        tokio_endpoint::{QuicClientEndpoint, QuicEndpoint},
+        QuicEndpointConfig,
+    };
     let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
 
     // ── Stage 2 (v0.35.x): multi-candidate pre-selection ─────────────
@@ -4070,13 +4144,33 @@ Only enable for legacy NAT-traversal compatibility."
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let client = QuicEndpoint::connect_with_socket(
-        QuicEndpointConfig::default(),
-        peer_addr,
-        "localhost",
-        std_socket,
-    )
-    .await?;
+    let client = if persistent_ep {
+        // Opt-in persistent-endpoint path (feature/quic-churn-stability).
+        // Uses QuicClientEndpoint (a long-lived quinn Endpoint reused across
+        // connections) instead of the per-connection connect_with_socket.
+        // new_with_socket reuses the SAME std_socket the relay 5-tuple was
+        // registered on (above), so relay routing is preserved. For a single
+        // cmd_connect invocation this establishes one QuicConnection the
+        // same way; the cross-reconnect endpoint lift (reusing the endpoint
+        // ACROSS supervisor reconnects, the deeper "autoreconnect is cheap"
+        // change) is a follow-up that also requires the relay 5-tuple to be
+        // validated on a stable port. Default OFF — production behavior is
+        // unchanged without --persistent-ep.
+        let ep = QuicClientEndpoint::new_with_socket(QuicEndpointConfig::default(), std_socket)
+            .await
+            .map_err(|e| format!("persistent endpoint init: {}", e))?;
+        ep.connect_peer(peer_addr, "localhost")
+            .await
+            .map_err(|e| format!("persistent endpoint connect: {}", e))?
+    } else {
+        QuicEndpoint::connect_with_socket(
+            QuicEndpointConfig::default(),
+            peer_addr,
+            "localhost",
+            std_socket,
+        )
+        .await?
+    };
 
     let local_port = if let Some(lf) = local_forward {
         lf.split(':').next().unwrap_or("0")
@@ -12965,6 +13059,7 @@ async fn main() {
             no_reconnect,
             no_resolve_on_reconnect,
             allow_identity_change,
+            persistent_ep,
             transport,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
@@ -13036,6 +13131,7 @@ async fn main() {
                     *relay_probe_interval,
                     &transport,
                     multi_candidate_active,
+                    *persistent_ep,
                 )
                 .await
             } else {
@@ -13085,6 +13181,7 @@ async fn main() {
                         *relay_probe_interval,
                         &transport,
                         multi_candidate_active,
+                        *persistent_ep,
                     )
                     .await;
 

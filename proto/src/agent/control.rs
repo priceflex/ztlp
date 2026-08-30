@@ -422,6 +422,44 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     ControlResponse::ok_empty()
 }
 
+/// Read the enrolled zone name from whichever ZTLP config file exists on
+/// disk, checking both known shapes.
+///
+/// - `~/.ztlp/config.toml` (written by `ztlp setup --token ...`, the exact
+///   path the desktop app's own enroll flow uses): flat `zone = "..."` key.
+/// - `~/.ztlp/agent.toml` (the older/manual agent-config shape): `zones =
+///   [...]` under a `[dns]` section — the first entry is used.
+///
+/// Returns `None` if neither file exists or neither yields a zone.
+fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
+    let ztlp_dir = home.join(".ztlp");
+
+    if let Ok(text) = std::fs::read_to_string(ztlp_dir.join("config.toml")) {
+        let flat_zone = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("zone "))
+            .or_else(|| text.lines().find(|l| l.trim_start().starts_with("zone=")))
+            .and_then(|l| l.split('"').nth(1))
+            .map(|s| s.to_string());
+        if let Some(z) = flat_zone {
+            return Some(z);
+        }
+    }
+
+    if let Ok(text) = std::fs::read_to_string(ztlp_dir.join("agent.toml")) {
+        let dns_zone = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("zones"))
+            .and_then(|l| l.split('"').nth(1))
+            .map(|s| s.to_string());
+        if let Some(z) = dns_zone {
+            return Some(z);
+        }
+    }
+
+    None
+}
+
 /// Compute the wizard's setup status.
 ///
 /// This is a thin observability call: it reads the filesystem and (on
@@ -439,23 +477,32 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
     let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
     let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
 
-    // Identity / enrollment: read identity.json and look for zone.
-    let (identity_present, identity_enrolled, zone) = match std::fs::read_to_string(&identity_path)
-    {
-        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(v) => {
-                let z = v
-                    .get("zone")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let enrolled = !z.is_empty();
-                (true, enrolled, z)
-            }
-            Err(_) => (false, false, String::new()),
-        },
-        Err(_) => (false, false, String::new()),
-    };
+    // Identity presence: does identity.json exist and parse?
+    //
+    // Real bug found live on the Windows AI test machine (2026-08-30): this
+    // used to ALSO try to read a `"zone"` field directly out of
+    // identity.json to decide `identity_enrolled` — but identity.json's
+    // real schema (confirmed live, repeatedly) is
+    // `{node_id, static_private_key, static_public_key, signing_key_seed}`.
+    // There has never been a `zone` field in identity.json; the zone lives
+    // in `config.toml` (written by `ztlp setup`, flat `zone = "..."` key)
+    // or the older `agent.toml` ([dns] `zones = [...]`). So
+    // `identity_enrolled` was ALWAYS false for every real device, which
+    // silently blocked the ENTIRE zero-click auto-provisioning chain in
+    // app.js's `autoProvision()` (its very first gate is
+    // `status.identity_enrolled`) even on a genuinely, successfully
+    // enrolled device — confirmed live: Home showed "Active" (a different,
+    // correct code path) while CA-init/CA-install/DNS-setup silently never
+    // ran, and a real Chrome navigation to the zone hostname failed with
+    // ERR_NAME_NOT_RESOLVED because the NRPT rule was never (correctly)
+    // installed.
+    let identity_present = std::fs::read_to_string(&identity_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some();
+
+    let zone = read_zone_from_config(&home).unwrap_or_default();
+    let identity_enrolled = identity_present && !zone.is_empty();
 
     // CA initialized: both root + intermediate PEMs present AND parseable as X.509.
     let ca_initialized = ca_root_path.exists()
@@ -678,6 +725,61 @@ impl AgentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── read_zone_from_config (2026-08-30) ─────────────────────────────
+    //
+    // Real bug found live on the Windows AI test machine: `cmd_setup_status`
+    // used to read a `"zone"` field directly out of identity.json to decide
+    // `identity_enrolled` -- but identity.json never has a `zone` field
+    // (confirmed live, repeatedly: its real schema is
+    // {node_id, static_private_key, static_public_key, signing_key_seed}).
+    // This silently blocked app.js's ENTIRE auto-provisioning chain
+    // (CA-init, CA-install, DNS-setup) on every real device, even ones that
+    // had just completed a genuinely successful UI enrollment -- Home
+    // showed "Active" (a different, correct code path) while a real Chrome
+    // navigation to the zone hostname failed with ERR_NAME_NOT_RESOLVED.
+
+    #[test]
+    fn reads_zone_from_config_toml_flat_key() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-a", std::process::id()));
+        let ztlp_dir = dir.join(".ztlp");
+        std::fs::create_dir_all(&ztlp_dir).unwrap();
+        std::fs::write(
+            ztlp_dir.join("config.toml"),
+            "# ZTLP Configuration\nzone = \"demo.spongebob.ztlp\"\nns_server = \"34.221.165.244:24096\"\n",
+        )
+        .unwrap();
+
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_zone_from_agent_toml_dns_section() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-b", std::process::id()));
+        let ztlp_dir = dir.join(".ztlp");
+        std::fs::create_dir_all(&ztlp_dir).unwrap();
+        std::fs::write(
+            ztlp_dir.join("agent.toml"),
+            "[dns]\nzones = [\"demo.spongebob.ztlp\"]\n",
+        )
+        .unwrap();
+
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn returns_none_when_no_config_files_exist() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-c", std::process::id()));
+        // Deliberately do NOT create the directory or any files.
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone, None);
+    }
 
     #[test]
     fn test_control_response_ok() {

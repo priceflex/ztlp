@@ -12775,9 +12775,55 @@ async fn cmd_agent_dns_setup_windows(
     zones: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
-    use ztlp_proto::agent::dns_setup_windows;
+    use ztlp_proto::agent::{control, dns_setup_windows};
 
-    let config = AgentConfig::load();
+    // Real bug found live on the Windows AI test machine (2026-08-30): this
+    // used `AgentConfig::load()` (agent.toml ONLY) instead of
+    // `load_merged` (agent.toml backfilled from config.toml — see
+    // `cmd_agent_start`'s identical fix from earlier this project). A
+    // device enrolled via the desktop app's own Setup screen never gets an
+    // `agent.toml` at all, so `config.dns.listen` silently fell back to the
+    // struct default `127.0.0.53:5353` — but the actually-RUNNING agent's
+    // DNS resolver may have fallen back to a DIFFERENT port (15353/25353)
+    // if 5353 was already taken, which is common on Windows (svchost's own
+    // mDNS responder + Chrome both commonly hold it — see the dns.rs
+    // fallback fix). The result: `Add-DnsClientNrptRule -NameServers
+    // @('127.0.0.53:5353')` pointed the NRPT rule at a port nothing was
+    // listening on, and Chrome got ERR_NAME_NOT_RESOLVED even though the
+    // agent's resolver was alive and correctly answering queries on its
+    // real (fallback) port.
+    //
+    // Fix: prefer the LIVE running agent's actual `dns_listen` (queried via
+    // the control-socket `status` command, which always reports the real
+    // bound address post-fallback) over the static config file. Only fall
+    // back to the merged config file's `config.dns.listen` if the agent
+    // isn't reachable (e.g. `dns-setup` run before `agent start`).
+    let agent_path = dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("agent.toml"))
+        .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
+    let cli_path = dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let config = AgentConfig::load_merged(&agent_path, &cli_path);
+
+    let live_dns_listen = {
+        let ipc_addr = config.ipc.listen.clone();
+        let cmd = control::ControlCommand {
+            cmd: "status".to_string(),
+            name: None,
+            token: ztlp_proto::agent::config::load_agent_token(),
+        };
+        match control::send_command(&ipc_addr, &cmd).await {
+            Ok(resp) if resp.ok => resp
+                .data
+                .as_ref()
+                .and_then(|d| d.get("dns_listen"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        }
+    };
+    let effective_dns_listen = live_dns_listen.unwrap_or_else(|| config.dns.listen.clone());
 
     // Same merge order as the Unix path: zones from config, then domain_map
     // keys, then any CLI-passed comma-separated additions. Dedup happens
@@ -12798,7 +12844,7 @@ async fn cmd_agent_dns_setup_windows(
     }
 
     let api = dns_setup_windows::default_nrpt_api();
-    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &config.dns.listen) {
+    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &effective_dns_listen) {
         Ok(installed) => {
             eprintln!(
                 "{} NRPT rules installed ({} namespace{})",

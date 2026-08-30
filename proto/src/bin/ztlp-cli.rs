@@ -12887,6 +12887,41 @@ async fn cmd_agent_dns_setup_windows(
                     "Verify with: Get-DnsClientNrptRule | Where-Object Comment -Match 'ZTLP-managed'"
                 )
             );
+
+            // Read back and apply the static-DNS fallback when NRPT didn't
+            // actually stick (the degraded-Dnscache boxes where a correct,
+            // bare-IP NRPT rule still doesn't apply — e.g. DESKTOP-CBSQDNE).
+            // `set_adapter_dns` is a no-op on non-Windows and on a healthy
+            // box (NRPT already honored → returns early).
+            let enrolled_zone = zone_list.first().cloned().unwrap_or_default();
+            if let Ok(rules) = api.list_rules() {
+                if !enrolled_zone.is_empty()
+                    && dns_setup_windows::should_use_static_dns_fallback(&rules, &enrolled_zone)
+                {
+                    eprintln!(
+                        "{} NRPT rule not applied by the OS (degraded Dnscache) — falling back to static adapter DNS → {}",
+                        c_yellow("→"), nrpt_server
+                    );
+                    match dns_setup_windows::set_adapter_dns(&nrpt_server) {
+                        Ok(true) => {
+                            eprintln!(
+                                "{} adapter DNS pointed at {} (all active interfaces)",
+                                c_green("✓"),
+                                nrpt_server
+                            );
+                        }
+                        Ok(false) => {
+                            eprintln!(
+                                "{} no active adapters to update (static DNS fallback skipped)",
+                                c_yellow("→")
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("{} static DNS fallback failed: {}", c_red("✗"), e);
+                        }
+                    }
+                }
+            }
         }
         Err(e) => {
             eprintln!("{} NRPT setup failed: {}", c_red("✗"), e);

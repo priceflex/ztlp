@@ -1,6 +1,58 @@
 # ZTLP zero-click E2E: NRPT port-53 fix — live verification handoff (2026-08-30)
 
-## Status: code fix VERIFIED; final Chrome step blocked on box-specific Dnscache degradation
+## Status: NRPT fix VERIFIED + static-DNS fallback implemented (NextDNS-style)
+
+PR #105 (`fix/desktop-main-window`) is green on `4a95421` (Desktop Build + ZTLP CI).
+The NRPT/port-53 root-cause fix is implemented, tested (9 regression tests), and
+validated on the live Windows test box `10.170.3.207` (DESKTOP-CBSQDNE). The
+**static-DNS fallback** (NextDNS-style) is now implemented + tested (11 more tests)
+to unblock degraded-Dnscache boxes.
+
+**Commit `4a95421`** adds the fallback:
+- `parse_netsh_interfaces` — parse `netsh interface ipv4 show interfaces`.
+- `build_set_dnsserver_cmd(idx, ip, v4)` — emit `netsh interface ipv4 set dnsserver <idx> static <ip> primary` (the exact NextDNS form; bare IP, implicit port 53).
+- `set_adapter_dns(ip)` — point every active adapter's DNS at the resolver (Windows shells to netsh; non-Windows no-ops).
+- `should_use_static_dns_fallback(rules, zone)` — fire only when NO usable NRPT rule exists for the enrolled zone (degraded-Dnscache signature).
+- `nrpt_rule_is_usable(rule)` — single source of truth for the read-back guard.
+- Wired into `cmd_agent_dns_setup_windows`: after `setup_zones`, read back the rules and apply the fallback when NRPT didn't stick.
+
+### Why NextDNS's approach (from source research, `nextdns/nextdns`)
+NextDNS does **NOT** use NRPT at all (no `nrpt.go`, no WFP, no TUN). It runs a local
+port-53 DNS proxy and sets each interface's **static DNS server** via
+`netsh interface ipv4 set dnsserver <idx> static 127.0.0.1 primary` — the OS's
+*primary* resolver path, not a side rule dnscache can refuse. On degraded boxes
+(like 10.170.3.207) NRPT silently no-ops (WMI 9572, DnsAdmin COM missing, netsh dns
+unsupported), so Chrome/curl route the zone to the ISP. Our fallback is NextDNS's
+exact mechanism: NRPT stays primary (surgical, zone-only); if the read-back shows the
+rule didn't stick, we set the adapter DNS to the resolver (safe — the agent forwards
+non-zone queries upstream). Reliability ranking: (1) TUN adapter, (2) static-DNS
+(NextDNS), (3) WFP, (4) NRPT — we kept NRPT primary + added (2) as the fallback.
+
+### Local verification (all green on Linux, cross-checked for Windows)
+- proto lib: **1176 passed** (was 1165, +11).
+- proto bin: green. `cargo fmt --check`: clean. `cargo clippy --all-targets`: clean
+  (only pre-existing warnings).
+- **`cargo check --target x86_64-pc-windows-gnu --all-targets`: Finished, no errors** —
+  the CI gate that caught the 3 prior push-iterate cycles. The `set_adapter_dns`
+  Windows netsh path compiles clean.
+- CI: Desktop Build (run 33334748427) + ZTLP CI (33334748430) both **success** on `4a95421`.
+
+### Blocked: downloading the fresh installer artifact
+- Local MSVC cross-build hits the `aws-lc-sys` (rustls C dep) blocker —
+  `pthread_rwlock_t` unknown type for the Windows target; can't cross-build
+  `ztlp.exe` on this Linux box. That's why the Desktop Build runs on a
+  `windows-latest` runner.
+- `gh run download` of the `ztlp-desktop-windows` artifact (id 9738821396) → 401
+  (the current token lacks `actions:read` on the repo).
+- **To complete the final Chrome step on 10.170.3.207:** download
+  `ztlp-desktop-windows` from run 33334748427 (needs `actions:read`), extract the
+  NSIS `ZTLP_*.exe`, install it via the UI wizard (the same cua-driver path as
+  before), launch the desktop app, and it will now run `dns-setup` → NRPT → (on
+  this degraded box) the static-DNS fallback → `netsh set dnsserver <idx> static
+  127.0.0.53 primary` on every active adapter → Chrome resolves
+  `web.demo.spongebob.ztlp` → `127.100.0.1` (gateway) → GATEWAY-AUTHENTICATED.
+
+## (Prior section, kept for the NRPT-fix verification)
 
 PR #105 (`fix/desktop-main-window`) is green on `82e83a6` (Desktop Build + ZTLP CI).
 The NRPT/port-53 root-cause fix is implemented, tested (9 new regression tests), and

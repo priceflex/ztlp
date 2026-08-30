@@ -630,6 +630,26 @@ impl WindowsNrptApi {
 ///
 /// Returns parse errors as [`NrptError::ParseError`] with the offending JSON
 /// snippet included so an operator can diagnose it from the agent logs.
+/// Extract a bare IP-address string from one JSON value in the `NameServers`
+/// position, tolerating the shapes actually observed across PowerShell/.NET
+/// versions:
+///
+/// - A plain string: `"127.0.0.53"` -> returned as-is.
+/// - A serialized `.NET IPAddress` object: `{"Address":..., "IPAddressToString":"127.0.0.53", ...}`
+///   -> read the `IPAddressToString` field (the human-readable form; `Address`
+///   is the packed integer form and NOT what NRPT/netsh expect as a string).
+/// - Anything else -> `None` (caller decides whether that's an error).
+fn ip_string_from_value(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => map
+            .get("IPAddressToString")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_list_output(stdout: &str) -> Result<Vec<NrptRule>, NrptError> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
@@ -677,10 +697,28 @@ pub(crate) fn parse_list_output(stdout: &str) -> Result<Vec<NrptRule>, NrptError
         };
         let name_servers = match entry.get("NameServers") {
             Some(serde_json::Value::String(s)) => vec![s.clone()],
-            Some(serde_json::Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
+            Some(serde_json::Value::Array(arr)) => {
+                arr.iter().filter_map(|v| ip_string_from_value(v)).collect()
+            }
+            // Real shape found live (2026-08-30, DESKTOP-CBSQDNE, second pass):
+            // on some PowerShell/.NET versions `NameServers` serializes as a
+            // single .NET `IPAddress` OBJECT (not a string, not an array):
+            // {"Address":889192575,...,"IPAddressToString":"127.0.0.53"}.
+            // The pre-fix parser hit the `Some(other) => Err(...)` branch for
+            // this shape, which failed list_rules() ENTIRELY — every rule
+            // (including a correctly `ZTLP-managed`-tagged, fully-working
+            // one) was reported as unusable, so the desktop app's Setup
+            // screen showed a false-negative red "DNS routes missing" even
+            // though DNS was verifiably working (curl 200, agent resolving).
+            Some(obj @ serde_json::Value::Object(_)) => match ip_string_from_value(obj) {
+                Some(ip) => vec![ip],
+                None => {
+                    return Err(NrptError::ParseError(format!(
+                        "NameServers object has no recognizable IP string field: {}",
+                        obj
+                    )))
+                }
+            },
             Some(serde_json::Value::Null) | None => Vec::new(),
             Some(other) => {
                 return Err(NrptError::ParseError(format!(
@@ -1328,6 +1366,118 @@ mod tests {
             }
             other => panic!("expected ParseError, got {:?}", other),
         }
+    }
+
+    /// Real bug found live (2026-08-30, DESKTOP-CBSQDNE, second pass): on this
+    /// box `NameServers` serializes as a raw .NET `IPAddress` OBJECT (not a
+    /// string, not a string array) — `{"Address":889192575,...,
+    /// "IPAddressToString":"127.0.0.53"}`. Before this fix, `Some(other) =>
+    /// Err(...)` fired on this shape and **list_rules() failed entirely**:
+    /// every rule (including a correctly ZTLP-managed, fully-working one)
+    /// was reported unusable, so the desktop app's Setup screen showed a
+    /// false-negative red "DNS routes missing" / "CA not installed" even
+    /// though DNS was verifiably working (curl 200, live gateway auth).
+    /// The parser must extract `IPAddressToString`, not error out.
+    #[test]
+    fn parse_list_accepts_ipaddress_object_nameservers_shape() {
+        let json = concat!(
+            r#"[{"Namespace":[".demo.spongebob.ztlp"],"#,
+            r#""NameServers":{"Address":889192575,"AddressFamily":2,"ScopeId":null,"#,
+            r#""IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"IsIPv6SiteLocal":false,"#,
+            r#""IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"IPAddressToString":"127.0.0.53"},"#,
+            r#""Comment":"ZTLP-managed"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].namespace, ".demo.spongebob.ztlp");
+        assert_eq!(parsed[0].name_servers, vec!["127.0.0.53"]);
+        assert_eq!(parsed[0].comment, "ZTLP-managed");
+        // And it must be classified USABLE by the read-back guard — this is
+        // exactly what makes `dns_configured` report true instead of a false
+        // negative.
+        assert!(nrpt_rule_is_usable(&parsed[0]));
+    }
+
+    /// Same IPAddress-object shape but inside an ARRAY of name servers (the
+    /// multi-resolver case) — every element must resolve to its
+    /// `IPAddressToString`.
+    #[test]
+    fn parse_list_accepts_ipaddress_object_array_nameservers_shape() {
+        let json = concat!(
+            r#"[{"Namespace":[".demo.spongebob.ztlp"],"#,
+            r#""NameServers":[{"Address":889192575,"IPAddressToString":"127.0.0.53"},"#,
+            r#"{"Address":889192576,"IPAddressToString":"127.0.0.54"}],"#,
+            r#""Comment":"ZTLP-managed"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].name_servers,
+            vec!["127.0.0.53".to_string(), "127.0.0.54".to_string()]
+        );
+    }
+
+    /// An IPAddress-shaped object with no `IPAddressToString` field at all is
+    /// a genuine parse error (we can't recover an address from it) — but the
+    /// error message must be specific, not the generic "unexpected shape".
+    #[test]
+    fn parse_list_rejects_ipaddress_object_missing_string_field() {
+        let json = r#"[{"Namespace":[".x.ztlp"],"NameServers":{"Address":123},"Comment":"c"}]"#;
+        let err = parse_list_output(json).unwrap_err();
+        match err {
+            NrptError::ParseError(msg) => {
+                assert!(
+                    msg.contains("no recognizable IP string field"),
+                    "msg = {}",
+                    msg
+                );
+            }
+            other => panic!("expected ParseError, got {:?}", other),
+        }
+    }
+
+    /// Exact JSON captured live from DESKTOP-CBSQDNE (2026-08-30, second
+    /// pass) via `Get-DnsClientNrptRule | ... | ConvertTo-Json` — 4 rules,
+    /// mixed comments (3 from a manual registry write with comment "ZTLP",
+    /// 1 correctly agent-managed with "ZTLP-managed"), all NameServers in
+    /// the IPAddress-object shape. Before this fix this ENTIRE payload
+    /// failed to parse (first offending element aborted the whole call),
+    /// which is exactly why `dns_configured` in control.rs showed false
+    /// (red "DNS routes missing") despite DNS actually working end-to-end.
+    #[test]
+    fn parse_list_real_desktop_cbsqdne_second_pass_payload() {
+        let json = concat!(
+            r#"[{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"},"#,
+            r#"{"Namespace":[".demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP-managed"},"#,
+            r#"{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"},"#,
+            r#"{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 4);
+        // The one correctly-managed rule must be found, usable, and match
+        // the enrolled zone — proving `should_use_static_dns_fallback` (and
+        // by extension control.rs's dns_configured guard) now sees it.
+        let managed = parsed
+            .iter()
+            .find(|r| r.comment == ZTLP_NRPT_MARKER)
+            .expect("the ZTLP-managed rule must parse, not vanish into a whole-payload error");
+        assert!(nrpt_rule_is_usable(managed));
+        assert!(!should_use_static_dns_fallback(
+            &parsed,
+            "demo.spongebob.ztlp"
+        ));
     }
 
     #[test]

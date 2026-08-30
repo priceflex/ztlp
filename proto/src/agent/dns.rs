@@ -196,9 +196,19 @@ async fn process_dns_query(
             let mut st = state.lock().await;
             let ttl = Duration::from_secs(DEFAULT_TTL as u64);
             if let Some(ip) = st.vip_pool.allocate(&ztlp_name, Some(ttl)) {
-                // Store the resolved peer address
+                // Store the resolved peer address AND NodeID.
+                //
+                // The NodeID matters for the automatic tunnel dialer's
+                // CLIENT_ROUTE frame — a shared relay's fallback-by-
+                // NodeID lookup requires the PEER's NodeID (not the
+                // client's own), and without caching it here alongside
+                // peer_addr, `run_tcp_proxy` (which reads cached
+                // `VipEntry.peer_node_id`, not a fresh NS lookup) always
+                // saw `None` even after `ns_resolve` itself was fixed to
+                // return a real NodeID — found live 2026-08-30.
                 if let Some(entry) = st.vip_pool.lookup_name_mut(&ztlp_name) {
                     entry.peer_addr = Some(resolution.addr);
+                    entry.peer_node_id = resolution.node_id;
                 }
                 drop(st);
 

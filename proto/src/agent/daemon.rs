@@ -43,118 +43,70 @@ use super::proxy;
 use super::tunnel_pool::{TunnelPool, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL};
 use super::vip_pool::VipPool;
 
-/// Verify that the peer on the other end of a just-accepted local TCP
-/// connection is running as the SAME OS user as this daemon process.
+/// Verify that a just-accepted local TCP connection actually originates
+/// from loopback (127.0.0.0/8 or ::1) — the property this daemon can
+/// realistically rely on to keep the VIP proxy from being reachable off-box.
 ///
 /// [CWE-284 egi-dcvj] The VIP proxy listeners bind on loopback addresses
 /// and previously accepted every connection unconditionally, letting ANY
 /// local user/process reach protected ZTLP services proxied through the
 /// daemon owner's identity — the bearer token only protects the separate
-/// control socket, not these data-plane listeners. This check closes that
-/// gap using the standard Unix "ambient" peer-credential mechanisms:
-/// SO_PEERCRED on Linux, LOCAL_PEERCRED on macOS/BSD. Both are read via a
-/// raw getsockopt call (libc is already a dependency) since neither has a
-/// portable safe wrapper in std, and adding a new crate for this alone
-/// wasn't warranted.
+/// control socket, not these data-plane listeners.
 ///
-/// Returns `true` if the peer's UID matches ours (or if peer-credential
-/// checking isn't supported on this platform — see the non-unix fallback
-/// below, which intentionally does NOT check and is a known coverage gap,
-/// documented rather than silently faked).
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)]
+/// A PRIOR fix attempted same-OS-user verification via SO_PEERCRED
+/// (Linux) / LOCAL_PEERCRED (macOS/BSD). That was a genuine regression
+/// discovered live on 2026-08-30: **SO_PEERCRED and LOCAL_PEERCRED are
+/// Unix-domain-socket-only mechanisms** — calling them on a TCP
+/// (AF_INET/AF_INET6) socket, which is exactly what these VIP listeners
+/// are, still returns `ret == 0` (success) but with garbage credentials
+/// (`uid=-1, pid=0` — confirmed via a raw `getsockopt` probe against a
+/// live VIP listener). The old code treated any non-matching uid as a
+/// hostile peer and rejected it, which meant it silently rejected
+/// EVERY connection, including the daemon's own legitimate local
+/// traffic — the VIP proxy was completely unusable, not just insecure in
+/// the other direction. This is why a real curl/HTTP client to the VIP
+/// address got "Connection reset by peer" on every attempt.
+///
+/// Same-OS-user verification over TCP would require switching the VIP
+/// proxy's transport to Unix domain sockets entirely, which is out of
+/// scope for this fix. Loopback-address verification is a strictly
+/// weaker guarantee (any local process can connect, not just the same
+/// user) but it is what TCP can actually provide, and it restores the
+/// VIP proxy to a WORKING state while still blocking the actually
+/// dangerous case this code was meant to prevent: a REMOTE peer reaching
+/// these listeners (which should be impossible anyway since they bind to
+/// 127.100.0.0/16, but defense in depth against a misconfigured bind).
 fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = stream.as_raw_fd();
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-
-    let ret = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut cred as *mut libc::ucred as *mut libc::c_void,
-            &mut len,
-        )
-    };
-
-    if ret != 0 {
-        let errno = unsafe { *libc::__errno_location() };
-        warn!(
-            "SO_PEERCRED getsockopt failed (errno={}); rejecting connection as a precaution",
-            errno
-        );
-        return false;
+    match stream.peer_addr() {
+        Ok(addr) => {
+            let ip = addr.ip();
+            if ip.is_loopback() {
+                true
+            } else {
+                warn!(
+                    "Rejected VIP connection from non-loopback peer {} (VIP listeners must only accept loopback traffic)",
+                    addr
+                );
+                false
+            }
+        }
+        Err(e) => {
+            warn!(
+                "Failed to read peer address ({}); rejecting connection as a precaution",
+                e
+            );
+            false
+        }
     }
-
-    let our_uid = unsafe { libc::getuid() };
-    if cred.uid != our_uid {
-        warn!(
-            "Rejected local VIP connection from uid={} (daemon runs as uid={})",
-            cred.uid, our_uid
-        );
-        return false;
-    }
-
-    true
 }
 
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
-    use std::os::unix::io::AsRawFd;
-
-    let fd = stream.as_raw_fd();
-    // macOS/BSD: LOCAL_PEERCRED at the SOL_LOCAL level, xucred struct.
-    // libc's xucred layout matches the kernel ABI (cr_version, cr_uid,
-    // cr_ngroups, cr_groups[NGROUPS]).
-    let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
-
-    let ret = unsafe {
-        libc::getsockopt(
-            fd,
-            0, /* SOL_LOCAL */
-            1, /* LOCAL_PEERCRED */
-            &mut cred as *mut libc::xucred as *mut libc::c_void,
-            &mut len,
-        )
-    };
-
-    if ret != 0 {
-        let errno = unsafe { *libc::__error() };
-        warn!(
-            "LOCAL_PEERCRED getsockopt failed (errno={}); rejecting connection as a precaution",
-            errno
-        );
-        return false;
-    }
-
-    let our_uid = unsafe { libc::getuid() };
-    if cred.cr_uid != our_uid {
-        warn!(
-            "Rejected local VIP connection from uid={} (daemon runs as uid={})",
-            cred.cr_uid, our_uid
-        );
-        return false;
-    }
-
-    true
-}
-
-// KNOWN COVERAGE GAP [egi-dcvj]: no peer-credential mechanism is wired up
-// here for other targets (e.g. Windows). VIP proxy listeners on those
-// platforms remain accept-everyone until a platform-appropriate check
-// (e.g. Windows named-pipe ACLs, or a different transport entirely for
-// the data plane) is implemented. Returning `true` preserves the
-// PRE-EXISTING behavior on those platforms rather than silently breaking
-// functionality; it does not claim to fix the finding there.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn verify_local_peer(_stream: &tokio::net::TcpStream) -> bool {
-    true
-}
+// KNOWN COVERAGE GAP [egi-dcvj]: loopback-address verification (above)
+// confirms the peer is on this machine but NOT that it's the same OS
+// user — any local process/user can still reach these listeners. True
+// same-user isolation would require a Unix-domain-socket (or Windows
+// named-pipe) transport for the data plane instead of TCP, which is a
+// larger architectural change than this fix. Documented rather than
+// silently claimed as fully closed.
 
 /// GC interval for expired VIP allocations (60 seconds).
 const GC_INTERVAL: Duration = Duration::from_secs(60);
@@ -668,15 +620,20 @@ async fn run_tcp_proxy(
         poll_interval.tick().await;
 
         // Check for new VIP allocations
-        let entries: Vec<(Ipv4Addr, String, Option<SocketAddr>)> = {
+        let entries: Vec<(
+            Ipv4Addr,
+            String,
+            Option<SocketAddr>,
+            Option<crate::identity::NodeId>,
+        )> = {
             let st = dns_state.lock().await;
             st.vip_pool
                 .entries()
-                .map(|e| (e.ip, e.ztlp_name.clone(), e.peer_addr))
+                .map(|e| (e.ip, e.ztlp_name.clone(), e.peer_addr, e.peer_node_id))
                 .collect()
         };
 
-        for (vip, ztlp_name, peer_addr) in entries {
+        for (vip, ztlp_name, peer_addr, peer_node_id) in entries {
             let already = {
                 let listeners = active_listeners.lock().await;
                 listeners.contains(&vip)
@@ -728,6 +685,7 @@ async fn run_tcp_proxy(
                 let ns = ns_server.clone();
                 let name = ztlp_name.clone();
                 let peer = peer_addr;
+                let peer_node_id = peer_node_id;
                 let dns_st = dns_state.clone();
                 let bind = bind_addr.clone();
                 let tls = tls_acceptor.clone();
@@ -783,6 +741,7 @@ async fn run_tcp_proxy(
                                                     &name,
                                                     port,
                                                     peer,
+                                                    peer_node_id,
                                                     &identity,
                                                     &bind,
                                                     &ns,
@@ -796,6 +755,7 @@ async fn run_tcp_proxy(
                                                     &name,
                                                     port,
                                                     peer,
+                                                    peer_node_id,
                                                     &identity,
                                                     &bind,
                                                     &ns,
@@ -846,6 +806,7 @@ async fn handle_tcp_connection_with_tls(
     ztlp_name: &str,
     port: u16,
     peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
     identity: &NodeIdentity,
     bind_addr: &str,
     ns_server: &str,
@@ -856,13 +817,29 @@ async fn handle_tcp_connection_with_tls(
         Ok(local_tls::MaybeWrapped::Tls(tls_stream)) => {
             info!("TLS handshake OK for {} (port {})", ztlp_name, port);
             handle_tcp_connection_bridged(
-                tls_stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server, relay_addr,
+                tls_stream,
+                ztlp_name,
+                port,
+                peer_addr,
+                peer_node_id,
+                identity,
+                bind_addr,
+                ns_server,
+                relay_addr,
             )
             .await
         }
         Ok(local_tls::MaybeWrapped::Plain(stream)) => {
             handle_tcp_connection_bridged(
-                stream, ztlp_name, port, peer_addr, identity, bind_addr, ns_server, relay_addr,
+                stream,
+                ztlp_name,
+                port,
+                peer_addr,
+                peer_node_id,
+                identity,
+                bind_addr,
+                ns_server,
+                relay_addr,
             )
             .await
         }
@@ -872,6 +849,7 @@ async fn handle_tcp_connection_with_tls(
                 ztlp_name,
                 port,
                 peer_addr,
+                peer_node_id,
                 identity,
                 bind_addr,
                 ns_server,
@@ -893,6 +871,7 @@ async fn handle_tcp_connection_bridged<S>(
     ztlp_name: &str,
     port: u16,
     peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
     identity: &NodeIdentity,
     bind_addr: &str,
     ns_server: &str,
@@ -901,12 +880,22 @@ async fn handle_tcp_connection_bridged<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Resolve peer address (use cached or query NS)
-    let peer = match peer_addr {
-        Some(addr) => addr,
+    // Resolve peer address (use cached or query NS). Also capture the
+    // resolved NodeID when available — the gateway relay's CLIENT_ROUTE
+    // handler falls back to routing by NodeID when the plain service-
+    // name lookup misses (see `udp_listener.ex`'s
+    // `pick_fallback_gateway/2`), which matters for exactly the shared-
+    // relay case this demo exercises (gateway registered under a zone
+    // key, not the bare service name). When `peer_addr` is already
+    // cached (the common VIP-proxy path), use the CALLER-supplied
+    // `peer_node_id` (cached alongside `peer_addr` in `VipEntry` — see
+    // `vip_pool.rs`) instead of discarding it; only a fresh NS lookup
+    // (uncached path) needs to re-resolve it here.
+    let (peer, resolved_node_id) = match peer_addr {
+        Some(addr) => (addr, peer_node_id),
         None => {
             let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
-            resolution.addr
+            (resolution.addr, resolution.node_id)
         }
     };
 
@@ -926,14 +915,91 @@ where
         ztlp_name, peer, port
     );
 
-    // Establish ZTLP tunnel
-    let node = TransportNode::bind(bind_addr).await?;
-    let session_id = SessionId::generate();
-    let mut ctx = HandshakeContext::new_initiator(identity)?;
+    // Encode port as service name — derive from the hostname's leading
+    // label when present (real gateways register arbitrary operator-
+    // chosen names like "web", not port-derivable ones — see
+    // `service_name_for_ztlp_name` for the real mismatch this fixes,
+    // found live 2026-08-30), falling back to a port-based guess.
+    let service_name = service_name_for_ztlp_name(ztlp_name, port);
 
-    // Encode port as service name
-    let service_name = format!("tcp:{}", port);
-    let dst_svc_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
+    // ── QUIC transport (2026-08-30 architecture fix) ───────────────────
+    //
+    // The automatic VIP tunnel dialer used to speak a raw-UDP Noise
+    // handshake directly (`TransportNode` + `HandshakeHeader`). Root-
+    // caused live: every modern ZTLP gateway (confirmed via this demo's
+    // `ztlp listen --gateway` process, whose own log literally says
+    // "ZTLP QUIC server listening on UDP ...") is a pure QUIC endpoint —
+    // it has no raw-UDP listener at all. A raw HELLO packet reaching it
+    // gets "dropping packet with invalid CID" (Quinn trying to parse it
+    // as a malformed QUIC packet) and is silently discarded, which is
+    // why the handshake always timed out even after CLIENT_ROUTE,
+    // NodeID-fallback routing, and VIP-cache threading were all fixed
+    // and independently verified working (confirmed live: the relay's
+    // own stats showed `forwarded` incrementing correctly, so the
+    // packet WAS reaching the gateway — it just spoke the wrong
+    // protocol once there). `ztlp connect`'s `cmd_connect` already uses
+    // this exact QUIC path successfully against the same relay/gateway
+    // (see `bin/ztlp-cli.rs`'s `QuicEndpoint::connect_with_socket` +
+    // `noise_stream::run_initiator_handshake`); this brings the
+    // automatic agent dialer onto the same, actually-working transport
+    // instead of a protocol no real-world gateway speaks anymore.
+    let std_socket = std::net::UdpSocket::bind(bind_addr)?;
+
+    if relay_addr.is_some() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        // Prefer the NS-resolved GATEWAY NodeID over our own identity —
+        // this is the relay's fallback lookup key when the plain
+        // service-name doesn't match a registered gateway (e.g. a
+        // gateway registered under a zone key like
+        // "gw:demo.spongebob.ztlp" rather than the bare service name
+        // "web"). Using our OWN node_id here was the bug: the relay's
+        // fallback-by-NodeID lookup needs the PEER's (gateway's) NodeID,
+        // not the client's — confirmed live 2026-08-30 by comparing
+        // against `ztlp connect`'s cmd_connect, which does exactly this
+        // (stamps the NS-resolved gateway NodeID when available).
+        let client_route_node_id: [u8; 16] = resolved_node_id
+            .map(|nid| *nid.as_bytes())
+            .unwrap_or(*identity.node_id.as_bytes());
+        match tunnel::build_client_route_packet(&client_route_node_id, &service_name, ts, None) {
+            Ok(route_pkt) => {
+                if let Err(e) = std_socket.send_to(&route_pkt, send_addr) {
+                    warn!("failed to send CLIENT_ROUTE to {}: {}", send_addr, e);
+                } else {
+                    debug!(
+                        "CLIENT_ROUTE sent to {} (service={})",
+                        send_addr, service_name
+                    );
+                }
+                // Brief delay to let the relay install the 5-tuple
+                // mapping before the first QUIC INITIAL races down the
+                // same socket — mirrors `cmd_connect`'s identical
+                // 50ms wait for the exact same reason (see
+                // "Brief delay to let the relay install the 5-tuple"
+                // in ztlp-cli.rs).
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                warn!(
+                    "could not build CLIENT_ROUTE for service '{}': {}",
+                    service_name, e
+                );
+            }
+        }
+    }
+
+    let quic_conn = crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket(
+        crate::quic_transport::QuicEndpointConfig::default(),
+        send_addr,
+        "localhost",
+        std_socket,
+    )
+    .await?;
+
+    let responder_id = resolved_node_id.unwrap_or_else(NodeId::zero);
+    let service_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
         let mut svc = [0u8; 16];
         let port_str = port.to_string();
         let bytes = port_str.as_bytes();
@@ -942,211 +1008,111 @@ where
         svc
     });
 
-    // Noise_XX handshake
-    let msg1 = ctx.write_message(&[])?;
-    let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
-    hello_hdr.session_id = session_id;
-    hello_hdr.src_node_id = *identity.node_id.as_bytes();
-    hello_hdr.payload_len = msg1.len() as u16;
-    hello_hdr.dst_svc_hash = dst_svc_hash;
-    let mut pkt1 = hello_hdr.serialize();
-    pkt1.extend_from_slice(&msg1);
-    node.send_raw(&pkt1, send_addr).await?;
-
-    let (recv2, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "handshake timeout")??;
-
-    if recv2.len() < HANDSHAKE_HEADER_SIZE {
-        return Err("response too short".into());
-    }
-    let recv2_hdr = HandshakeHeader::deserialize(&recv2)?;
-    if recv2_hdr.msg_type != MsgType::HelloAck {
-        return Err(format!("expected HELLO_ACK, got {:?}", recv2_hdr.msg_type).into());
-    }
-
-    ctx.read_message(&recv2[HANDSHAKE_HEADER_SIZE..])?;
-
-    let msg3 = ctx.write_message(&[])?;
-    let mut final_hdr = HandshakeHeader::new(MsgType::Data);
-    final_hdr.session_id = session_id;
-    final_hdr.src_node_id = *identity.node_id.as_bytes();
-    final_hdr.payload_len = msg3.len() as u16;
-    let mut pkt3 = final_hdr.serialize();
-    pkt3.extend_from_slice(&msg3);
-    node.send_raw(&pkt3, send_addr).await?;
-
-    if !ctx.is_finished() {
-        return Err("handshake incomplete".into());
-    }
-
-    // [SAST: fne-nxah] The peer_node_id is now extracted from the
-    // Noise-authenticated payload inside HandshakeContext::finalize().
-    // We pass NodeId::zero() here as a fallback — it will only be used
-    // if the authenticated value is missing (which shouldn't happen with
-    // updated peers).
-    let (_, session) = ctx.finalize(NodeId::zero(), session_id)?;
-
-    {
-        let mut pl = node.pipeline.lock().await;
-        pl.register_session(session);
-    }
+    let handshake_result = crate::quic_transport::noise_stream::run_initiator_handshake(
+        &quic_conn,
+        identity,
+        responder_id,
+        service_hash,
+    )
+    .await
+    .map_err(|e| format!("QUIC Noise handshake failed: {}", e))?;
 
     info!(
         "tunnel active: {} → {} (session {})",
-        ztlp_name, peer, session_id
+        ztlp_name, peer, handshake_result.session_id
     );
 
-    // Bridge the (potentially TLS-unwrapped) stream ↔ ZTLP tunnel
-    match tunnel::run_bridge_io(
-        stream,
-        node.socket.clone(),
-        node.pipeline.clone(),
-        session_id,
-        send_addr,
-    )
-    .await
-    {
-        Ok(_) => {
-            debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
+    let (mut q_send, mut q_recv) = quic_conn
+        .open_bi()
+        .await
+        .map_err(|e| format!("failed to open QUIC data stream: {}", e))?;
+
+    // Bridge the (potentially TLS-unwrapped) local stream <-> the QUIC
+    // data stream, one task per direction (mirrors `cmd_connect`'s
+    // v0.36.0 quic-pump-throughput fix: coupling both directions in a
+    // single select! let a stalled direction starve the other).
+    let (mut local_read, mut local_write) = tokio::io::split(stream);
+
+    let pump_up = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 65000];
+        loop {
+            match local_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &buf[..n])
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
         }
-        Err(e) => {
-            warn!("tunnel error: {} — {}", ztlp_name, e);
+        let _ = q_send.finish();
+    });
+
+    let pump_down = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        loop {
+            match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
+                Ok(payload) => {
+                    if local_write.write_all(&payload).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
         }
-    }
+        let _ = local_write.shutdown().await;
+    });
+
+    let _ = tokio::join!(pump_up, pump_down);
+
+    debug!(
+        "tunnel closed: {} (session {})",
+        ztlp_name, handshake_result.session_id
+    );
 
     Ok(())
 }
 
 /// Handle a single TCP connection by establishing a ZTLP tunnel (no TLS).
+///
+/// Delegates to `handle_tcp_connection_bridged`, which is generic over
+/// any `AsyncRead + AsyncWrite` stream (a plain `TcpStream` satisfies
+/// this directly) — this eliminates what used to be a second,
+/// independently-drifting copy of the entire tunnel-establishment
+/// block. Keeping two copies in sync was exactly how the 2026-08-30
+/// CLIENT_ROUTE / NodeID-fallback / QUIC-transport fixes had to be
+/// applied twice each; a single implementation removes that class of
+/// bug going forward.
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection(
     tcp_stream: tokio::net::TcpStream,
     ztlp_name: &str,
     port: u16,
     peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
     identity: &NodeIdentity,
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Resolve peer address (use cached or query NS)
-    let peer = match peer_addr {
-        Some(addr) => addr,
-        None => {
-            let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
-            resolution.addr
-        }
-    };
-
-    // If relay is configured, route all ZTLP packets through the relay
-    let send_addr: SocketAddr = match relay_addr {
-        Some(relay) => {
-            info!("routing tunnel through relay {}", relay);
-            relay
-                .parse()
-                .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
-        }
-        None => peer,
-    };
-
-    debug!(
-        "establishing tunnel to {} ({}) port {}",
-        ztlp_name, peer, port
-    );
-
-    // Establish ZTLP tunnel
-    let node = TransportNode::bind(bind_addr).await?;
-    let session_id = SessionId::generate();
-    let mut ctx = HandshakeContext::new_initiator(identity)?;
-
-    // Encode port as service name
-    let service_name = format!("tcp:{}", port);
-    let dst_svc_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
-        let mut svc = [0u8; 16];
-        let port_str = port.to_string();
-        let bytes = port_str.as_bytes();
-        let len = bytes.len().min(16);
-        svc[..len].copy_from_slice(&bytes[..len]);
-        svc
-    });
-
-    // Noise_XX handshake
-    let msg1 = ctx.write_message(&[])?;
-    let mut hello_hdr = HandshakeHeader::new(MsgType::Hello);
-    hello_hdr.session_id = session_id;
-    hello_hdr.src_node_id = *identity.node_id.as_bytes();
-    hello_hdr.payload_len = msg1.len() as u16;
-    hello_hdr.dst_svc_hash = dst_svc_hash;
-    let mut pkt1 = hello_hdr.serialize();
-    pkt1.extend_from_slice(&msg1);
-    node.send_raw(&pkt1, send_addr).await?;
-
-    let (recv2, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, node.recv_raw())
-        .await
-        .map_err(|_| "handshake timeout")??;
-
-    if recv2.len() < HANDSHAKE_HEADER_SIZE {
-        return Err("response too short".into());
-    }
-    let recv2_hdr = HandshakeHeader::deserialize(&recv2)?;
-    if recv2_hdr.msg_type != MsgType::HelloAck {
-        return Err(format!("expected HELLO_ACK, got {:?}", recv2_hdr.msg_type).into());
-    }
-
-    ctx.read_message(&recv2[HANDSHAKE_HEADER_SIZE..])?;
-
-    let msg3 = ctx.write_message(&[])?;
-    let mut final_hdr = HandshakeHeader::new(MsgType::Data);
-    final_hdr.session_id = session_id;
-    final_hdr.src_node_id = *identity.node_id.as_bytes();
-    final_hdr.payload_len = msg3.len() as u16;
-    let mut pkt3 = final_hdr.serialize();
-    pkt3.extend_from_slice(&msg3);
-    node.send_raw(&pkt3, send_addr).await?;
-
-    if !ctx.is_finished() {
-        return Err("handshake incomplete".into());
-    }
-
-    // [SAST: fne-nxah] The peer_node_id is now extracted from the
-    // Noise-authenticated payload inside HandshakeContext::finalize().
-    // We pass NodeId::zero() here as a fallback — it will only be used
-    // if the authenticated value is missing (which shouldn't happen with
-    // updated peers).
-    let (_, session) = ctx.finalize(NodeId::zero(), session_id)?;
-
-    {
-        let mut pl = node.pipeline.lock().await;
-        pl.register_session(session);
-    }
-
-    info!(
-        "tunnel active: {} → {} (session {})",
-        ztlp_name, peer, session_id
-    );
-
-    // Bridge TCP ↔ ZTLP tunnel
-    match tunnel::run_bridge(
+    handle_tcp_connection_bridged(
         tcp_stream,
-        node.socket.clone(),
-        node.pipeline.clone(),
-        session_id,
-        send_addr,
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
     )
     .await
-    {
-        Ok(_) => {
-            debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
-        }
-        Err(e) => {
-            warn!("tunnel error: {} — {}", ztlp_name, e);
-        }
-    }
-
-    Ok(())
 }
-
 /// Check if the agent daemon is currently running.
 pub fn is_agent_running() -> bool {
     let pid_path = control::default_pid_path();
@@ -1178,6 +1144,42 @@ mod tests {
         let _running = super::is_agent_running();
     }
 
+    // ── verify_local_peer SO_PEERCRED-on-TCP regression (2026-08-30) ──────
+    //
+    // Real bug found live: a PRIOR CWE-284 fix used SO_PEERCRED (Linux) /
+    // LOCAL_PEERCRED (macOS) to verify the connecting peer is the same OS
+    // user — but those mechanisms are Unix-DOMAIN-socket-only. Called on
+    // a TCP socket (exactly what the VIP proxy listeners are), the
+    // getsockopt call still "succeeds" but returns garbage credentials
+    // (uid=-1, pid=0 — confirmed via a raw getsockopt probe against a
+    // live listener), which the old code treated as "not us" and
+    // rejected. Net effect: the VIP proxy rejected EVERY connection,
+    // including entirely legitimate local traffic — real curl/HTTP
+    // clients got "Connection reset by peer" on every single request,
+    // making the automatic browser-just-works flow completely non-
+    // functional. Fixed by checking the peer's IP is loopback instead
+    // (the property TCP can actually provide), verified here with a real
+    // loopback TCP connection.
+    #[tokio::test]
+    async fn verify_local_peer_accepts_real_loopback_tcp_connection() {
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client_task = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let _client_stream = client_task.await.unwrap();
+
+        assert!(
+            super::verify_local_peer(&server_stream),
+            "a real loopback TCP connection must be accepted — this is \
+             exactly the case the old SO_PEERCRED-on-TCP code silently \
+             broke, rejecting 100% of real traffic"
+        );
+    }
+
     #[test]
     fn test_get_agent_pid_none() {
         // Without a PID file, returns None
@@ -1185,6 +1187,136 @@ mod tests {
         let pid = super::get_agent_pid();
         // Just verify it doesn't panic
         let _ = pid;
+    }
+
+    // ── conventional_service_name_for_port (2026-08-30) ───────────────────
+    //
+    // Real bug found live: the agent's built-in TCP proxy guessed
+    // `format!("tcp:{}", port)` as the ZTLP service name for every VIP
+    // connection, but real `ztlp listen --forward NAME:HOST:PORT` servers
+    // register CONVENTIONAL names (`http`, `ssh`, `https`, etc.) — verified
+    // live against the demo gateway, whose actual invocation was
+    // `--forward ssh:172.28.0.30:22 --forward http:172.28.0.30:8080`. A
+    // client dialing service `tcp:8080` never matches the server's
+    // registered `http` service hash, so every VIP proxy connection to a
+    // "well-known" port failed the service lookup even though the tunnel
+    // and DNS resolution were both otherwise working correctly. This
+    // mirrors the manual `ztlp connect --service web` verification done
+    // earlier in this investigation, which worked only because the flag
+    // was supplied explicitly — the agent's automatic path had no such
+    // override and always guessed wrong.
+    #[test]
+    fn conventional_service_name_for_port_matches_common_forward_names() {
+        use super::conventional_service_name_for_port;
+        assert_eq!(conventional_service_name_for_port(80), "http");
+        assert_eq!(conventional_service_name_for_port(8080), "http");
+        assert_eq!(conventional_service_name_for_port(443), "https");
+        assert_eq!(conventional_service_name_for_port(8443), "https");
+        assert_eq!(conventional_service_name_for_port(22), "ssh");
+        assert_eq!(conventional_service_name_for_port(3389), "rdp");
+        assert_eq!(conventional_service_name_for_port(3306), "mysql");
+        assert_eq!(conventional_service_name_for_port(5432), "postgres");
+        // Unknown ports fall back to the old tcp:PORT convention so custom
+        // server-side `--forward tcp:9999:...` registrations still work.
+        assert_eq!(conventional_service_name_for_port(9999), "tcp:9999");
+    }
+
+    // ── service_name_for_ztlp_name (2026-08-30) — the REAL fix ────────────
+    //
+    // Even after `conventional_service_name_for_port` above, a live curl
+    // through the demo's actual VIP proxy still 404'd from the WRONG
+    // backend: the real gateway was started with
+    // `--forward web:172.28.0.2:8080` — an OPERATOR-CHOSEN arbitrary
+    // service name "web" that has nothing to do with port 8080's
+    // "conventional" name ("http"). Port-based guessing can never work for
+    // arbitrary operator-chosen service names.
+    //
+    // The fix: a ZTLP hostname like `web.demo.spongebob.ztlp` encodes the
+    // service name AS ITS LEADING LABEL — "web" — with the remaining
+    // labels ("demo.spongebob.ztlp") being the zone/gateway routing key.
+    // This is exactly the real demo's naming convention (verified live:
+    // the gateway process registered under zone `demo.spongebob.ztlp`
+    // with `--forward web:...`, and the hostname clients resolve is
+    // `web.demo.spongebob.ztlp`). Deriving the service name from the
+    // hostname works for ANY operator-chosen name, not just the handful
+    // of "conventional" ports covered above — port-based guessing becomes
+    // a fallback for names that don't look like `service.zone` (e.g. bare
+    // single-label names or IP-literal-style names).
+    #[test]
+    fn service_name_for_ztlp_name_extracts_leading_label_for_multi_label_names() {
+        use super::service_name_for_ztlp_name;
+        assert_eq!(
+            service_name_for_ztlp_name("web.demo.spongebob.ztlp", 8080),
+            "web"
+        );
+        assert_eq!(
+            service_name_for_ztlp_name("ssh.demo.spongebob.ztlp", 22),
+            "ssh"
+        );
+        assert_eq!(
+            service_name_for_ztlp_name("api.internal.example.ztlp", 443),
+            "api"
+        );
+    }
+
+    #[test]
+    fn service_name_for_ztlp_name_falls_back_to_port_for_single_label_names() {
+        use super::service_name_for_ztlp_name;
+        // A name with no zone subdomain structure (fewer than 3 labels —
+        // i.e. just "name" or "name.tld") has no leading "service" label
+        // to meaningfully extract — fall back to the port-based
+        // conventional guess so direct `ztlp listen --forward http:...`
+        // style servers (flat names, no service.zone structure) still
+        // resolve correctly instead of misreading their only label as a
+        // bogus "service name".
+        assert_eq!(service_name_for_ztlp_name("myserver", 8080), "http");
+        assert_eq!(service_name_for_ztlp_name("myserver.ztlp", 22), "ssh");
+    }
+}
+
+/// Map a well-known port to the conventional ZTLP service name a real
+/// `ztlp listen --forward NAME:HOST:PORT` server is likely to have
+/// registered, so the agent's automatic VIP proxy dials the SAME service
+/// name a server operator would naturally choose (`http`, `ssh`, etc.)
+/// instead of a synthetic `tcp:PORT` name no real server ever registers.
+/// See `conventional_service_name_for_port_matches_common_forward_names`
+/// for the real-world mismatch this fixes (2026-08-30).
+fn conventional_service_name_for_port(port: u16) -> String {
+    match port {
+        80 | 8080 => "http".to_string(),
+        443 | 8443 => "https".to_string(),
+        22 => "ssh".to_string(),
+        3389 => "rdp".to_string(),
+        3306 => "mysql".to_string(),
+        5432 => "postgres".to_string(),
+        _ => format!("tcp:{}", port),
+    }
+}
+
+/// Derive the ZTLP service name to dial for a given resolved hostname.
+///
+/// A ZTLP hostname of the form `SERVICE.ZONE...` (2+ labels) encodes the
+/// gateway operator's chosen service name as its leading label — e.g.
+/// `web.demo.spongebob.ztlp` was registered by a real gateway as
+/// `--forward web:...`, which port-based guessing can never discover
+/// since "web" bears no relationship to port 8080. For single-label names
+/// (no zone subdomain to split off), falls back to the port-based
+/// conventional guess. See
+/// `service_name_for_ztlp_name_extracts_leading_label_for_multi_label_names`
+/// and its single-label sibling test for the exact contract (2026-08-30).
+fn service_name_for_ztlp_name(ztlp_name: &str, port: u16) -> String {
+    let name = ztlp_name.trim_end_matches('.');
+    let labels: Vec<&str> = name.split('.').collect();
+    // Require at least 3 labels (service + a zone of at least 2 labels,
+    // e.g. "web.demo.spongebob.ztlp") before treating the leading label
+    // as an operator-chosen service name. A 1- or 2-label name (bare
+    // hostname, or hostname.tld) has no meaningful "service.zone"
+    // structure to extract from — misreading its only label as a service
+    // name would silently break flat, non-zoned deployments.
+    if labels.len() >= 3 && !labels[0].is_empty() {
+        labels[0].to_string()
+    } else {
+        conventional_service_name_for_port(port)
     }
 }
 

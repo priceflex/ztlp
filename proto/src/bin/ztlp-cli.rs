@@ -6504,12 +6504,46 @@ async fn cmd_relay_status(target: &str) -> Result<(), Box<dyn std::error::Error>
 fn ns_record_payload(response: &[u8]) -> Result<Option<&[u8]>, Box<dyn std::error::Error>> {
     match response {
         [] => Ok(None),
-        [0x02, 0x01, record @ ..] => {
-            // Some NS replies insert a truncation/continuation flag byte after
-            // the found marker. Keep the actual record type byte intact.
-            Ok(Some(record))
+        [0x02, rest @ ..] => {
+            // NS amplification prevention may insert a 0x01 truncation flag
+            // byte after the 0x02 FOUND marker — but a KEY record's own
+            // type byte is ALSO 0x01, so `[0x02, 0x01, ...]` is genuinely
+            // ambiguous between "truncation flag, real type follows" and
+            // "no flag, 0x01 IS the real (KEY) type byte" (see
+            // `ns_record_payload_does_not_misparse_untruncated_key_record`
+            // — this exact ambiguity silently corrupted every complete
+            // KEY-record response before this fix). Disambiguate
+            // structurally like `ns_query_raw` above does: try the
+            // no-flag interpretation first (the common case) and only
+            // treat it as a flag if the no-flag interpretation doesn't
+            // parse as a structurally valid record.
+            fn looks_structurally_valid(record: &[u8]) -> bool {
+                if record.len() < 4 {
+                    return false;
+                }
+                let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+                if record.len() < 3 + name_len + 4 {
+                    return false;
+                }
+                let offset = 3 + name_len;
+                let data_len = u32::from_be_bytes([
+                    record[offset],
+                    record[offset + 1],
+                    record[offset + 2],
+                    record[offset + 3],
+                ]) as usize;
+                record.len() >= offset + 4 + data_len
+            }
+
+            if rest.first() == Some(&0x01) && !looks_structurally_valid(rest) {
+                // Only skip the extra byte when treating it as the real
+                // type byte fails to validate — i.e. it really was a
+                // truncation flag.
+                Ok(Some(&rest[1..]))
+            } else {
+                Ok(Some(rest))
+            }
         }
-        [0x02, record @ ..] => Ok(Some(record)),
         _ => Ok(None),
     }
 }
@@ -12265,7 +12299,22 @@ async fn cmd_agent_start(
     let config = if let Some(path) = config_path {
         AgentConfig::load_from_path(path)
     } else {
-        AgentConfig::load()
+        // v0.36 fix: `agent start` used to read only `~/.ztlp/agent.toml`,
+        // a file `ztlp setup` never writes. A freshly-enrolled device's
+        // agent silently started against AgentConfig::default()
+        // (127.0.0.1:23096, no relay) instead of the zone the operator
+        // just joined via `ztlp setup --token ... --yes`. load_merged
+        // backfills ns_server/relay/identity from `~/.ztlp/config.toml`
+        // (the file `setup` DOES write) whenever agent.toml leaves those
+        // fields at their bare default — see agent::config for the full
+        // rationale and unit tests.
+        let agent_path = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("agent.toml"))
+            .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
+        let cli_path = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("config.toml"))
+            .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+        AgentConfig::load_merged(&agent_path, &cli_path)
     };
 
     if !foreground {
@@ -13571,6 +13620,48 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── ns_record_payload KEY-type/truncation-flag ambiguity (2026-08-30) ──
+    //
+    // Real bug found live: `ns_record_payload` (used by `ztlp ns lookup`)
+    // treats `[0x02, 0x01, ...]` as ALWAYS meaning "0x02 FOUND + 0x01
+    // truncation flag, strip 2 bytes" — but a KEY record's own type byte is
+    // ALSO 0x01, so every complete, correctly-sized KEY record response
+    // was silently misparsed (one byte too many stripped), corrupting the
+    // name/data that `print_ns_record` then reported as "Type: UNKNOWN /
+    // Raw: (truncated record)" even though the record was genuinely
+    // complete. `ns_query_raw` a few hundred lines above (used by `ztlp
+    // connect`) already disambiguates this correctly via structural
+    // validation (see its 'parse: block) — `ns_record_payload` needs the
+    // same treatment.
+    #[test]
+    fn ns_record_payload_does_not_misparse_untruncated_key_record() {
+        // Real capture: a live, padded (256-byte query) response from the
+        // demo NS server (34.221.165.244:24096) for
+        // web.demo.spongebob.ztlp's KEY record — confirmed complete/
+        // untruncated (339 bytes total).
+        let hex = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+        let data: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        let record = ns_record_payload(&data)
+            .expect("ns_record_payload must not error on a valid response")
+            .expect("must find a record payload");
+
+        // record[0] is the type byte; must be 0x01 (KEY), and record[1..3]
+        // must be the correct name_len (23, for "web.demo.spongebob.ztlp"),
+        // proving the byte offset wasn't shifted by the bogus truncation-
+        // flag detection.
+        assert_eq!(record[0], 0x01, "type byte must be KEY (1)");
+        let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+        assert_eq!(
+            name_len, 23,
+            "name_len must be 23, not shifted by a phantom truncation flag"
+        );
+        assert_eq!(&record[3..3 + name_len], b"web.demo.spongebob.ztlp");
+    }
 
     // ── resolve_ns_address (TDD) ─────────────────────────────
     // The NS address parser must accept BOTH IP:PORT (fast path) and

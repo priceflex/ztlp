@@ -452,5 +452,83 @@ const SetupComponent = (() => {
     })[c]);
   }
 
-  return { render, load };
+  // ── Zero-click provisioning ─────────────────────────────────────────
+  //
+  // Called once from app.js right after auto-connect succeeds. Runs
+  // whichever of CA-init / CA-trust-install / DNS-routing steps the device
+  // hasn't completed yet, in order, so a freshly-enrolled device reaches
+  // "browser just works" state with no manual visits to the Setup page.
+  // Each underlying command is already idempotent (a no-op if that step is
+  // already done), so this is safe to call on every launch.
+  //
+  // CA-trust and DNS installs pop a native OS elevation prompt the first
+  // time (UAC on Windows, pkexec/sudo elsewhere) — that's an OS security
+  // boundary the signed-in user must confirm once, not an in-app button we
+  // could or should bypass. Everything else here requires zero user input.
+  async function autoProvision() {
+    try {
+      const status = await invoke('setup_status');
+      lastStatus = status;
+      if (!status || !status.daemon_running || !status.identity_enrolled) {
+        return; // nothing to provision yet
+      }
+
+      if (!status.ca_initialized) {
+        LiveLog.setup('Auto-provisioning: generating CA chain…');
+        try {
+          await invoke('setup_run_ca_init', { zone: status.zone });
+          LiveLog.success('CA chain generated.');
+        } catch (e) {
+          LiveLog.fail(`Auto CA-init failed: ${e}`);
+          return; // later steps depend on this — stop here
+        }
+      }
+
+      const refreshed = await invoke('setup_status').catch(() => status);
+      lastStatus = refreshed;
+
+      if (!refreshed.ca_installed_system_trust) {
+        LiveLog.setup('Auto-provisioning: installing CA into system trust (one-time permission prompt)…');
+        try {
+          await invoke('setup_install_ca');
+          // Elevated install runs detached — poll briefly for the flag to flip.
+          for (let i = 0; i < 6; i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const s = await invoke('setup_status').catch(() => null);
+            if (s) lastStatus = s;
+            if (s && s.ca_installed_system_trust) {
+              LiveLog.success('CA installed into system trust.');
+              break;
+            }
+          }
+        } catch (e) {
+          LiveLog.fail(`Auto CA-install failed: ${e}`);
+        }
+      }
+
+      if (lastStatus && lastStatus.zone && !lastStatus.dns_configured) {
+        LiveLog.setup(`Auto-provisioning: configuring DNS routing for ${lastStatus.zone} (one-time permission prompt)…`);
+        try {
+          await invoke('setup_install_dns', { zone: lastStatus.zone });
+          for (let i = 0; i < 6; i++) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const s = await invoke('setup_status').catch(() => null);
+            if (s) lastStatus = s;
+            if (s && s.dns_configured) {
+              LiveLog.success(`DNS routing active for ${lastStatus.zone}.`);
+              break;
+            }
+          }
+        } catch (e) {
+          LiveLog.fail(`Auto DNS-setup failed: ${e}`);
+        }
+      }
+
+      repaint();
+    } catch (e) {
+      console.error('autoProvision error:', e);
+    }
+  }
+
+  return { render, load, autoProvision };
 })();

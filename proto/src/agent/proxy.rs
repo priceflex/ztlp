@@ -191,6 +191,14 @@ async fn ns_query_addr(
     }
 
     if let Some(data) = ns_query_raw(ztlp_name, ns_server, 1).await? {
+        // `ns_query_raw` already returns the unwrapped CBOR payload (past
+        // the status/type/name/length-prefix envelope) — see its return
+        // value contract. An earlier attempted fix here wrongly called
+        // `ns_cbor::parse_ns_record()` on this AGAIN, double-unwrapping
+        // and corrupting the bytes a second time; that mistake was caught
+        // via a live probe against the demo NS (2026-08-30) showing
+        // `ns_query_raw` alone correctly returned the CBOR data while this
+        // function still failed to extract "address" from it.
         if let Some(addr_str) = cbor_extract_string(&data, "address") {
             let addr = addr_str
                 .parse()
@@ -232,6 +240,24 @@ async fn ns_query_raw(
     query.extend_from_slice(name_bytes);
     query.push(record_type);
 
+    // Amplification-prevention padding.
+    //
+    // The NS server caps a 0x01 query's response to `request_size * 8`
+    // bytes (see `ztlp-cli.rs`'s NS_QUERY_PAD_BYTES doc comment for the
+    // full history — this exact bug already bit the CLI's `ztlp connect`
+    // path in June 2026: a bare ~27-byte query for a real hostname gets
+    // capped at ~216 bytes, truncating any KEY/SVC record that carries a
+    // real "address" field, multi-candidate SVC data, etc.). The agent's
+    // own DNS resolver → ns_resolve → ns_query_addr → THIS function hit
+    // the identical truncation on 2026-08-30 while resolving a live demo
+    // zone's KEY record, which is why this padding must match the CLI's
+    // fix exactly: pad to the same NS_QUERY_PAD_BYTES so the cap
+    // (256*8=2048) comfortably covers any realistic record.
+    const NS_QUERY_PAD_BYTES: usize = 256;
+    if query.len() < NS_QUERY_PAD_BYTES {
+        query.resize(NS_QUERY_PAD_BYTES, 0u8);
+    }
+
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.send_to(&query, ns_addr).await?;
     let mut buf = vec![0u8; 65535];
@@ -243,10 +269,43 @@ async fn ns_query_raw(
                 return Ok(None);
             }
 
-            let record = if data.len() > 5 && data[1] == 0x01 {
+            // Determine whether byte[1] is a genuine amplification-
+            // prevention truncation flag or the record's own type byte
+            // (ambiguous for KEY records, whose type is ALSO 0x01 — see
+            // `ns_query_raw_key_record_type_not_confused_with_truncation_flag`,
+            // a real bug found live against the demo NS server on
+            // 2026-08-30 that silently corrupted this exact response
+            // shape). Disambiguate structurally, matching the fix already
+            // applied to `ns_cbor::parse_ns_record` and `ztlp-cli.rs`'s
+            // `ns_record_payload`: try "no flag" first, only fall back to
+            // "flag present" if the no-flag interpretation doesn't
+            // validate structurally.
+            fn looks_structurally_valid(record: &[u8]) -> bool {
+                if record.len() < 4 {
+                    return false;
+                }
+                let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+                if record.len() < 3 + name_len + 4 {
+                    return false;
+                }
+                let offset = 3 + name_len;
+                let data_len = u32::from_be_bytes([
+                    record[offset],
+                    record[offset + 1],
+                    record[offset + 2],
+                    record[offset + 3],
+                ]) as usize;
+                record.len() >= offset + 4 + data_len
+            }
+
+            let no_flag_candidate = &data[1..];
+            let record = if data.len() > 1
+                && data[1] == 0x01
+                && !looks_structurally_valid(no_flag_candidate)
+            {
                 &data[2..]
             } else {
-                &data[1..]
+                no_flag_candidate
             };
 
             if record.len() < 4 {
@@ -325,13 +384,20 @@ async fn poll_for_post_handshake_reject(
 
 /// Parse a KEY record response to extract the NodeID.
 fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + Send + Sync>> {
-    let record = parse_ns_record(data).ok_or("invalid NS response (parse failed)")?;
-    if record.status != NsResponseStatus::Found {
-        return Err("NS response: record not found or revoked".into());
-    }
-
-    let nid_hex =
-        cbor_extract_string(&record.data, "node_id").ok_or("KEY record missing 'node_id'")?;
+    // `data` here is ALREADY the unwrapped CBOR payload returned by
+    // `ns_query_raw` (past the status/type/name/length-prefix envelope)
+    // — NOT the raw wire response. Calling `parse_ns_record` on it AGAIN
+    // was a double-unwrap bug (the same mistake made and fixed once
+    // already in `ns_query_addr`'s KEY fallback, then reintroduced here
+    // in the sibling `ns_query_node_id` path): it silently made every
+    // NodeID lookup fail, meaning `ns_resolve()` always returned
+    // `node_id: None`. This directly caused the gateway CLIENT_ROUTE
+    // fallback-by-NodeID path (see `udp_listener.ex`'s
+    // `pick_fallback_gateway/2`) to have nothing to fall back to,
+    // compounding the "no gateway registered for service" rejection —
+    // found live 2026-08-30 while debugging why the agent's automatic
+    // tunnel handshake timed out even after the CLIENT_ROUTE fix.
+    let nid_hex = cbor_extract_string(data, "node_id").ok_or("KEY record missing 'node_id'")?;
 
     if nid_hex.len() != 32 {
         return Err(format!("invalid NodeID hex length: {}", nid_hex.len()).into());
@@ -348,7 +414,7 @@ fn parse_key_node_id(data: &[u8]) -> Result<NodeId, Box<dyn std::error::Error + 
 }
 
 // Delegate CBOR parsing to the shared ns_cbor module (also available in ios-sync builds).
-use crate::ns_cbor::{cbor_extract_string, parse_ns_record, NsResponseStatus};
+use crate::ns_cbor::cbor_extract_string;
 
 // ─── Proxy Command ──────────────────────────────────────────────────────────
 
@@ -961,6 +1027,120 @@ mod tests {
         );
     }
 
+    // ── ns_query_addr truncation investigation (2026-08-30) ────────────────
+    //
+    // Investigating a live NXDOMAIN-on-real-record bug against the demo NS
+    // server (34.221.165.244:24096), an initial hypothesis was that
+    // `ns_query_addr`'s KEY-record (type 1) fallback was skipping the
+    // `ns_cbor::parse_ns_record()` envelope-unwrap step that every other
+    // caller in this file uses. That turned out to be a RED HERRING: the
+    // capture used to "prove" it was itself genuinely truncated by the NS
+    // server's amplification-prevention (see the real fix and test below),
+    // so `parse_ns_record` correctly failing on it wasn't a code bug, it
+    // was correct behavior on truncated input. The actual root cause is
+    // documented on `test_ns_query_raw_pads_short_queries_to_avoid_amplification_truncation`
+    // below.
+    #[test]
+    fn test_cbor_extract_string_fails_on_wrapped_ns_record_without_unwrap() {
+        let raw_key_record_response = hex_decode(REAL_KEY_RECORD_RESPONSE_HEX);
+        // This IS a genuinely truncated NS response (see note above) —
+        // extraction correctly fails on it either with or without the
+        // parse_ns_record unwrap, because the bytes themselves are
+        // incomplete. Kept as a regression pin on the truncated-capture
+        // shape itself, distinct from the real fix tested below.
+        assert_eq!(
+            cbor_extract_string(&raw_key_record_response, "address"),
+            None
+        );
+    }
+
+    /// Real capture: the demo NS server's (34.221.165.244:24096) actual
+    /// response to an UNPADDED `ns_query_raw("web.demo.spongebob.ztlp", _,
+    /// 1)` — genuinely truncated by the server's own amplification
+    /// prevention (see the real fix + test below). Kept as a fixture for
+    /// the regression pin above.
+    const REAL_KEY_RECORD_RESPONSE_HEX: &str = "02010100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e736967";
+
+    /// Minimal hex decoder so the fixture bytes above stay readable as a
+    /// literal hex dump (matching exactly what a UDP capture shows) without
+    /// pulling in a hex crate dependency just for a test fixture.
+    fn hex_decode(s: &str) -> Vec<u8> {
+        let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..clean.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // ── ns_query_raw truncation bug (2026-08-30, real root cause) ─────────
+    //
+    // The earlier "unwrap" theory above was a red herring from testing
+    // against an already-truncated capture. The REAL bug, confirmed against
+    // the live demo NS (34.221.165.244:24096) with two raw UDP probes:
+    //
+    //   - Unpadded (~27-byte) query for "web.demo.spongebob.ztlp" (type 1):
+    //     216-byte response, WITH a truncation flag byte, CBOR data cut off
+    //     mid-map (missing bytes needed to complete the "registered_unsig..."
+    //     tail field) — exactly matching `ztlp-cli.rs`'s documented
+    //     amplification-prevention behavior (cap = request_size * 8 =
+    //     27*8 = 216).
+    //   - The SAME query padded to 256 bytes (matching `ztlp-cli.rs`'s
+    //     `NS_QUERY_PAD_BYTES` fix, applied there back in June 2026 for
+    //     the identical failure mode): 339-byte response, NO truncation
+    //     flag, complete CBOR record.
+    //
+    // `agent/proxy.rs::ns_query_raw` (used by the agent's own DNS resolver
+    // via `ns_resolve` → `ns_query_addr`) never got the same padding fix
+    // the CLI got, so the agent's DNS resolver silently returned NXDOMAIN
+    // for names whose records didn't fit in an unpadded query's tiny cap —
+    // this is why the desktop app's automatic browser flow was still
+    // broken even after the config-loading fix (t1).
+    //
+    // This test locks in the fix directly: `ns_query_raw` must always send
+    // a >= NS_QUERY_PAD_BYTES-sized UDP datagram, regardless of how short
+    // the hostname is, matching `ztlp-cli.rs`'s already-proven fix exactly.
+    #[tokio::test]
+    async fn test_ns_query_raw_pads_short_queries_to_avoid_amplification_truncation() {
+        use tokio::net::UdpSocket as TokioUdpSocket;
+        use tokio::sync::oneshot;
+
+        // Fake NS: just record the size of the first datagram it receives,
+        // then reply with a minimal well-formed NOT_FOUND so ns_query_raw
+        // returns cleanly instead of timing out.
+        let server_sock = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            if let Ok((len, src)) = server_sock.recv_from(&mut buf).await {
+                let _ = tx.send(len);
+                let _ = server_sock.send_to(&[0x03], src).await; // NOT_FOUND
+            }
+        });
+
+        // Even a 1-character hostname must still produce a padded query —
+        // this is the exact shape of the real bug (short name => tiny
+        // unpadded query => truncation on any real-sized record).
+        let _ = ns_query_raw("x", &server_addr.to_string(), 1).await;
+
+        let received_query_len = rx.await.expect("fake NS never received a query");
+        assert!(
+            received_query_len >= 256,
+            "ns_query_raw sent an unpadded {}-byte query — must pad to >= \
+             256 bytes (matching ztlp-cli.rs's NS_QUERY_PAD_BYTES fix) so \
+             the NS server's amplification-prevention cap \
+             (request_size * 8) doesn't truncate real-sized KEY/SVC \
+             records, exactly as observed live against the demo NS \
+             (34.221.165.244:24096): an unpadded ~27-byte query for \
+             web.demo.spongebob.ztlp got truncated to 216 bytes \
+             (cap=27*8), losing the record's \"address\" field, while the \
+             same query padded to 256 bytes returned the full untruncated \
+             339-byte record.",
+            received_query_len
+        );
+    }
+
     #[test]
     fn test_cbor_extract_empty() {
         assert_eq!(cbor_extract_string(&[], "key"), None);
@@ -995,6 +1175,129 @@ mod tests {
         let addr = parse_svc_response(&response).unwrap();
 
         assert_eq!(addr, "10.0.0.1:23095".parse().unwrap());
+    }
+
+    // TEMP DIAGNOSTIC — live network probe, not for CI. Run manually via:
+    //   cargo test --lib agent::proxy::tests::live_ns_resolve_probe -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_ns_resolve_probe() {
+        let raw = ns_query_raw("web.demo.spongebob.ztlp", "34.221.165.244:24096", 1).await;
+        eprintln!(
+            "ns_query_raw(type=1) isolated result: {:?}",
+            raw.as_ref().map(|o| o.as_ref().map(|v| v.len()))
+        );
+        let result = ns_resolve("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
+        eprintln!("ns_resolve result: {:?}", result);
+        let addr_result = ns_query_addr("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
+        eprintln!("ns_query_addr result: {:?}", addr_result);
+    }
+
+    // ── parse_key_node_id double-unwrap bug (2026-08-30) ───────────────────
+    //
+    // Real bug found live: `parse_key_node_id` called `parse_ns_record`
+    // on `data`, but `data` (as returned by `ns_query_raw`) is ALREADY
+    // the unwrapped CBOR payload — the same double-unwrap mistake fixed
+    // once already in `ns_query_addr`'s KEY fallback, reintroduced here
+    // in the sibling function. Effect: `ns_query_node_id` (and therefore
+    // `ns_resolve()`) ALWAYS returned `node_id: None`, even for a fully
+    // valid, resolvable KEY record — confirmed live via
+    // `live_ns_resolve_probe` showing `NsResolution { node_id: None, .. }`
+    // for a real, successfully-resolving demo hostname. This mattered
+    // downstream: the gateway relay's CLIENT_ROUTE handler falls back to
+    // routing by NodeID when the plain service-name lookup misses (see
+    // `udp_listener.ex`'s `pick_fallback_gateway/2`), and with node_id
+    // always None, the agent's automatic tunnel dial had no fallback
+    // available at all.
+    #[tokio::test]
+    async fn ns_query_node_id_extracts_id_from_real_captured_key_response() {
+        use tokio::net::UdpSocket as TokioUdpSocket;
+
+        // Same real, complete KEY record capture used by the sibling
+        // ns_query_raw regression test above — includes a real
+        // "node_id" CBOR field.
+        let hex = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+        let response: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        let server_sock = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            if let Ok((_len, src)) = server_sock.recv_from(&mut buf).await {
+                let _ = server_sock.send_to(&response, src).await;
+            }
+        });
+
+        let node_id = ns_query_node_id("web.demo.spongebob.ztlp", &server_addr.to_string())
+            .await
+            .unwrap();
+        assert!(
+            node_id.is_some(),
+            "must extract a real node_id from a complete KEY record, not silently return None"
+        );
+        assert_eq!(
+            hex::encode(node_id.unwrap().as_bytes()),
+            "1b6f55cfa85ccf08029263d348e6ca77",
+            "extracted NodeID must match the real value encoded in the capture"
+        );
+    }
+
+    // ── ns_query_raw KEY-type/truncation-flag ambiguity (2026-08-30) ──────
+    //
+    // Real bug found live against the demo NS server (34.221.165.244:24096),
+    // the ORIGINAL and deepest root cause behind the whole NXDOMAIN chase:
+    // `ns_query_raw`'s truncation-flag heuristic (`data[1] == 0x01` => skip
+    // an extra byte) is ambiguous with a KEY record's own type byte, which
+    // is ALSO 0x01. This silently shifted every field for every complete
+    // KEY record response by one byte BEFORE the data even reached
+    // `ns_query_addr`'s caller — the amplification-padding fix and the
+    // `ns_query_addr`/`ns_cbor::parse_ns_record` unwrap fix (both applied
+    // earlier in this same investigation) were necessary but not
+    // sufficient, because this function's OWN independent copy of the
+    // ambiguous heuristic was still corrupting the bytes it returned.
+    #[tokio::test]
+    async fn test_ns_query_raw_key_record_type_not_confused_with_truncation_flag() {
+        use tokio::net::UdpSocket as TokioUdpSocket;
+
+        // Real capture: complete, untruncated KEY record response from the
+        // live demo NS for web.demo.spongebob.ztlp (339 bytes, padded query).
+        let hex = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+        let response: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        let server_sock = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            if let Ok((_len, src)) = server_sock.recv_from(&mut buf).await {
+                let _ = server_sock.send_to(&response, src).await;
+            }
+        });
+
+        let result = ns_query_raw("web.demo.spongebob.ztlp", &server_addr.to_string(), 1)
+            .await
+            .unwrap()
+            .expect("must return Some(cbor_data) for a valid, complete KEY record");
+
+        // The returned bytes must be the CBOR data ONLY (post-header),
+        // starting with a CBOR map marker (0xA5 = map with 5 entries in
+        // this fixture) — NOT shifted by a phantom truncation-flag skip,
+        // which would instead start mid-field on garbage.
+        assert_eq!(
+            result[0], 0xA5,
+            "returned CBOR data must start with the map marker (0xA5), \
+             not be shifted by a bogus truncation-flag byte skip"
+        );
+        assert_eq!(
+            cbor_extract_string(&result, "address"),
+            Some("34.221.165.244:24095".to_string()),
+            "address field must be extractable once the byte offset is correct"
+        );
     }
 
     #[test]

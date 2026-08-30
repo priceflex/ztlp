@@ -329,6 +329,24 @@ html, body {
   font-size: 12px;
 }
 
+.btn-tertiary {
+  background: transparent;
+  color: var(--text-secondary, #8b949e);
+  border: 1px solid var(--border);
+}
+
+.btn-tertiary:hover {
+  background: var(--gray-100);
+}
+
+.identity-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-secondary, #8b949e);
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;

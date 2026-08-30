@@ -583,11 +583,48 @@ pub fn is_process_running(pid: u32) -> bool {
         // by POSIX (IEEE Std 1003.1-2017, kill(2)).
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // v0.36 fix: this used to be hardcoded `false` on every non-Unix
+        // target, which silently disabled `ztlp agent start`'s
+        // "already running" duplicate-start guard on Windows — the
+        // platform the desktop app actually ships on. Shell out to
+        // `tasklist /FI "PID eq N"` (no extra crate/dependency needed) and
+        // check whether that PID is actually listed in the output.
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                tasklist_output_contains_pid(&stdout, pid)
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
     }
+}
+
+/// Pure parsing core of the Windows liveness check: does `tasklist`'s
+/// stdout actually list `pid`? Separated from the `Command::new("tasklist")`
+/// call so this logic is unit-testable without a live Windows process.
+///
+/// Uses `/FO CSV` output (`"ztlp.exe","12345","Console","1","18,432 K"`) and
+/// checks the quoted PID field exactly — a naive substring search on the raw
+/// table output would let PID 123 false-positive-match a row for PID 12345.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tasklist_output_contains_pid(output: &str, pid: u32) -> bool {
+    let pid_str = pid.to_string();
+    output.lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .map(|field| field.trim().trim_matches('"') == pid_str)
+            .unwrap_or(false)
+    })
 }
 
 /// Test-only helpers exposed for integration tests in `tests/`.
@@ -691,5 +728,50 @@ mod tests {
     fn test_default_pid_path() {
         let path = default_pid_path();
         assert!(path.to_string_lossy().contains("agent.pid"));
+    }
+
+    // ── Windows liveness check (2026-08-30) ──────────────────────────────
+    //
+    // `is_process_running` was hardcoded `false` on every non-Unix target
+    // (`#[cfg(not(unix))] { let _ = pid; false }`), so `ztlp agent start`'s
+    // "already running" duplicate-start guard silently never fired on
+    // Windows — the platform every desktop-app user actually runs on. The
+    // symptom this produced: the desktop app's "Connect" button spawning a
+    // SECOND `ztlp agent start` on top of an already-running agent, which
+    // then failed to bind its IPC/DNS ports and surfaced as a spurious
+    // error banner even though an agent was already up and working fine.
+    //
+    // `tasklist_output_contains_pid` is the pure, OS-call-free parsing core
+    // of the Windows liveness check — it takes `tasklist /FI "PID eq N"`'s
+    // stdout and decides whether that PID is actually listed. Kept
+    // separate from the `Command::new("tasklist")` call itself so the
+    // matching logic is unit-testable without a live Windows process.
+
+    #[test]
+    fn test_tasklist_output_contains_pid_when_present() {
+        // Real `tasklist /FI "PID eq N" /NH /FO CSV` output shape.
+        let output = "\"ztlp.exe\",\"12345\",\"Console\",\"1\",\"18,432 K\"";
+        assert!(tasklist_output_contains_pid(output, 12345));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_absent_when_not_found() {
+        // tasklist with a /FI filter that matches nothing prints exactly
+        // this message instead of a CSV row — must not be misread as a hit.
+        let output = "INFO: No tasks are running which match the specified criteria.";
+        assert!(!tasklist_output_contains_pid(output, 12345));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_does_not_false_positive_on_substring() {
+        // PID 123 must not match a row for PID 12345 (naive substring
+        // search on the raw output would get this wrong).
+        let output = "\"ztlp.exe\",\"12345\",\"Console\",\"1\",\"18,432 K\"";
+        assert!(!tasklist_output_contains_pid(output, 123));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_empty_output() {
+        assert!(!tasklist_output_contains_pid("", 12345));
     }
 }

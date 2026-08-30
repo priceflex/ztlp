@@ -244,7 +244,10 @@ mod tests {
         });
 
         let ready = wait_for_agent_ready(&addr, Duration::from_secs(5), Duration::from_millis(50));
-        assert!(ready, "should become ready once the daemon starts listening");
+        assert!(
+            ready,
+            "should become ready once the daemon starts listening"
+        );
     }
 
     #[test]

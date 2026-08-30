@@ -116,7 +116,15 @@ impl Default for AppConfig {
             dns_servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             port_mappings: vec![],
             mtu: 1400,
-            auto_connect: false,
+            // Zero-click product requirement: the desktop app must
+            // auto-connect on every fresh install with no manual "turn this
+            // on" step (see app.js's `maybeAutoConnect()`, which was ALREADY
+            // written assuming this default — its "default ON" comment
+            // documented the intent this field failed to implement).
+            // Confirmed live on a real Windows box (2026-08-30): a
+            // freshly-enrolled device with valid identity+config never
+            // auto-connected because this was `false`.
+            auto_connect: true,
         }
     }
 }
@@ -226,5 +234,40 @@ impl Default for AppState {
             traffic: Mutex::new(TrafficStats::default()),
             config: Mutex::new(AppConfig::default()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real bug found live on the Windows AI test machine (2026-08-30): a
+    /// freshly-enrolled device (valid `~/.ztlp/identity.json` +
+    /// `~/.ztlp/agent.toml` on disk, confirmed via a real live UIA/HTTP
+    /// desktop-automation session showing the Setup screen already
+    /// recognizing the device as enrolled) NEVER auto-connected — the Home
+    /// screen stayed stuck on "Ready — standing by" instead of "Active"
+    /// indefinitely, and `ztlp.exe` (the agent) was never spawned at all.
+    ///
+    /// Root cause: `app.js`'s `maybeAutoConnect()` computes
+    /// `want = cfg.auto_connect` (defaulting only when `cfg` itself is
+    /// absent) with an inline comment claiming "default ON", but
+    /// `AppConfig::default()` here set `auto_connect: false` — the exact
+    /// opposite of what the JS assumed and what the product's stated
+    /// requirement is ("the user shouldn't even have to hit connect").
+    /// Every fresh install (no config.json on disk yet, so
+    /// `AppConfig::default()` is what `get_config()` actually returns)
+    /// silently never auto-connected.
+    #[test]
+    fn app_config_default_has_auto_connect_enabled() {
+        let cfg = AppConfig::default();
+        assert!(
+            cfg.auto_connect,
+            "AppConfig::default() must default auto_connect to true — \
+             app.js's maybeAutoConnect() assumes this (see its 'default ON' \
+             comment) and the product requirement is zero-click auto-connect \
+             on every fresh install, not just after a user manually flips a \
+             setting"
+        );
     }
 }

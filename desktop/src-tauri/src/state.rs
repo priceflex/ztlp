@@ -140,6 +140,47 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
 }
 
+/// Parse zone name + enrollment status out of a ZTLP config file's text.
+///
+/// Handles BOTH shapes seen in the wild:
+/// - `~/.ztlp/config.toml` (written by `ztlp setup --token ...`, the exact
+///   path the desktop app's own enroll flow uses): flat top-level keys,
+///   `zone = "..."`, `ns_server = "..."`, no `[ns]` section at all.
+/// - `~/.ztlp/agent.toml` (the older/manual agent-config shape): an `[ns]`
+///   section with `servers = [...]`, and `zones = [...]` under `[dns]`.
+///
+/// A device is considered enrolled if either an explicit `zone = "..."` key
+/// is present (config.toml shape) OR an `[ns]` section exists (agent.toml
+/// shape) OR a bare `ns_server = "..."` key is present (config.toml shape,
+/// belt-and-suspenders in case `zone` itself is ever omitted).
+fn derive_zone_and_enrollment(text: &str) -> (Option<String>, bool) {
+    // config.toml shape: `zone = "demo.spongebob.ztlp"`
+    let flat_zone = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("zone "))
+        .or_else(|| text.lines().find(|l| l.trim_start().starts_with("zone=")))
+        .and_then(|l| l.split('"').nth(1))
+        .map(|s| s.to_string());
+
+    // agent.toml shape: first entry of `zones = [...]` under [dns].
+    let dns_zones_zone = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("zones"))
+        .and_then(|l| l.split('"').nth(1))
+        .map(|s| s.to_string());
+
+    let zone = flat_zone.or(dns_zones_zone);
+
+    let has_ns_section = text.contains("[ns]");
+    let has_flat_ns_server = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("ns_server"));
+
+    let enrolled = has_ns_section || has_flat_ns_server || zone.is_some();
+
+    (zone, enrolled)
+}
+
 impl Default for AppState {
     fn default() -> Self {
         // Generate or load identity.
@@ -149,32 +190,38 @@ impl Default for AppState {
             .join("identity.json");
         let identity_info = match ztlp_proto::identity::NodeIdentity::load(&default_path) {
             Ok(id) => {
-                // Derive the zone + enrollment state from the agent config on
-                // disk (~/.ztlp/agent.toml) rather than hardcoding. An identity
-                // that has a configured NS/zone IS enrolled from the UI's
-                // perspective, so the Identity page shows the real zone the
-                // device is registered in instead of a blank field.
-                let (zone_name, enrolled) = {
-                    let cfg_path = dirs::home_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                        .join(".ztlp")
-                        .join("agent.toml");
-                    match std::fs::read_to_string(&cfg_path) {
-                        Ok(text) => {
-                            // Pull the first entry of `zones = [...]` under [dns].
-                            // Kept as a light scan so we don't add a TOML dep
-                            // just to surface one display string.
-                            let zone = text
-                                .lines()
-                                .find(|l| l.trim_start().starts_with("zones"))
-                                .and_then(|l| l.split('"').nth(1))
-                                .map(|s| s.to_string());
-                            let has_ns = text.contains("[ns]");
-                            (zone, has_ns)
-                        }
-                        Err(_) => (None, false),
-                    }
-                };
+                // Derive the zone + enrollment state from whichever config
+                // file is actually on disk. Real bug found live on the
+                // Windows AI test machine (2026-08-30): `ztlp setup --token
+                // ... --yes` (the exact command the desktop app's own
+                // `process_enrollment` shells out to) writes
+                // `~/.ztlp/config.toml` with FLAT keys (`zone = "..."`,
+                // `ns_server = "..."`) — it does NOT write `agent.toml` and
+                // never emits an `[ns]` section at all. This code used to
+                // hardcode reading `agent.toml` and check for the literal
+                // substring `"[ns]"`, so a device that had JUST completed a
+                // real, successful enrollment through the app's own Setup
+                // screen was STILL reported as `enrolled: false` forever —
+                // the Home screen stayed stuck on "Ready" and auto-connect
+                // never fired, no matter how many times the user re-enrolled.
+                // Confirmed live: `~/.ztlp/config.toml` existed with valid
+                // `zone`/`ns_server` keys immediately after a real UI
+                // enrollment, while `~/.ztlp/agent.toml` never existed at all.
+                let ztlp_dir = dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(".ztlp");
+                let (zone_name, enrolled) = std::fs::read_to_string(ztlp_dir.join("config.toml"))
+                    .ok()
+                    .map(|text| derive_zone_and_enrollment(&text))
+                    .filter(|(zone, enrolled)| zone.is_some() || *enrolled)
+                    .or_else(|| {
+                        // Fall back to the older agent.toml-based check for
+                        // any install that still uses that file format.
+                        std::fs::read_to_string(ztlp_dir.join("agent.toml"))
+                            .ok()
+                            .map(|text| derive_zone_and_enrollment(&text))
+                    })
+                    .unwrap_or((None, false));
 
                 Some(IdentityInfo {
                     node_id: id.node_id.to_string(), // NodeId implements Display via hex encoding
@@ -240,6 +287,60 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── derive_zone_and_enrollment (2026-08-30) ────────────────────────
+    //
+    // Real bug found live on the Windows AI test machine: a device that
+    // had JUST completed a real, successful enrollment through the app's
+    // own Setup screen (paste token -> Enroll -> "Identity saved" ->
+    // config.toml written with a real zone) was STILL reported as
+    // `enrolled: false` by AppState::default() forever, because the old
+    // code hardcoded reading `agent.toml` and checking for the literal
+    // substring `"[ns]"` -- but `ztlp setup --token ... --yes` (the exact
+    // command the app's own `process_enrollment` shells out to) writes
+    // `config.toml` with flat `zone = "..."` / `ns_server = "..."` keys
+    // and never creates `agent.toml` at all in the desktop-app enrollment
+    // path. Confirmed live via SSH: `~/.ztlp/config.toml` existed with a
+    // real zone/ns_server immediately after enrollment; `~/.ztlp/agent.toml`
+    // never existed.
+
+    #[test]
+    fn recognizes_config_toml_shape_as_enrolled() {
+        let text = "# ZTLP Configuration\n\
+                     # Zone: demo.spongebob.ztlp\n\n\
+                     identity = \"C:\\\\Users\\\\trs\\\\.ztlp\\\\identity.json\"\n\
+                     ns_server = \"34.221.165.244:24096\"\n\
+                     relay = \"34.221.165.244:24095\"\n\
+                     zone = \"demo.spongebob.ztlp\"\n";
+        let (zone, enrolled) = derive_zone_and_enrollment(text);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+        assert!(
+            enrolled,
+            "a device with a real config.toml (flat zone/ns_server keys, \
+             the shape `ztlp setup` actually writes) must be recognized as \
+             enrolled"
+        );
+    }
+
+    #[test]
+    fn recognizes_agent_toml_shape_as_enrolled() {
+        let text = "[ns]\nservers = [\"34.221.165.244:24096\"]\n\n\
+                     [dns]\nzones = [\"demo.spongebob.ztlp\"]\n\n\
+                     [tunnel]\nrelay = \"34.221.165.244:24095\"\n";
+        let (zone, enrolled) = derive_zone_and_enrollment(text);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+        assert!(
+            enrolled,
+            "the older agent.toml [ns]-section shape must still work"
+        );
+    }
+
+    #[test]
+    fn empty_config_is_not_enrolled() {
+        let (zone, enrolled) = derive_zone_and_enrollment("");
+        assert_eq!(zone, None);
+        assert!(!enrolled);
+    }
 
     /// Real bug found live on the Windows AI test machine (2026-08-30): a
     /// freshly-enrolled device (valid `~/.ztlp/identity.json` +

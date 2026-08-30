@@ -260,12 +260,43 @@ pub async fn run_daemon(
         token.len()
     );
 
+    // ── Bind the DNS resolver socket UP FRONT (before AgentState) ────────
+    //
+    // Real bug found live on Windows (2026-08-30): the configured DNS
+    // listen port (5353, standard mDNS) is frequently already occupied
+    // system-wide by Windows' own mDNS responder service and even by
+    // Chrome — `dns::bind_dns_socket_with_fallback` now falls back to an
+    // alternate port when that happens, but the daemon must publish the
+    // REAL bound address (not the configured one) into `AgentState` so the
+    // control API's status and Windows NRPT/DNS-routing setup both point
+    // at where the resolver ACTUALLY is. Binding here, before constructing
+    // `agent_state`, means `dns_listen` is always accurate — no separate
+    // "what port did the fallback actually pick" plumbing needed later.
+    let dns_socket_and_addr = if config.dns.enabled {
+        match dns::bind_dns_socket_with_fallback(&config.dns.listen).await {
+            Ok((socket, addr)) => Some((socket, addr)),
+            Err(e) => {
+                return Err(format!(
+                    "failed to bind DNS resolver on {} or any fallback port: {}",
+                    config.dns.listen, e
+                )
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let effective_dns_listen = dns_socket_and_addr
+        .as_ref()
+        .map(|(_, addr)| addr.to_string())
+        .unwrap_or_else(|| config.dns.listen.clone());
+
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
         dns_state: dns_state.clone(),
         tunnel_pool: tunnel_pool.clone(),
         start_time,
-        dns_listen: config.dns.listen.clone(),
+        dns_listen: effective_dns_listen,
         shutdown_tx: shutdown_tx.clone(),
         // D1.T3: real Bearer token wired in. The T2 gate is now live.
         expected_token: Some(Arc::new(token)),
@@ -276,12 +307,12 @@ pub async fn run_daemon(
     control::write_pid_file(&pid_path)?;
     info!("PID file: {}", pid_path.display());
 
-    // ── Spawn DNS resolver ──────────────────────────────────────────────
-    let dns_handle = if config.dns.enabled {
-        let listen = config.dns.listen.clone();
+    // ── Spawn DNS resolver (on the socket bound above) ───────────────────
+    let dns_handle = if let Some((socket, addr)) = dns_socket_and_addr {
+        info!("DNS resolver listening on {}", addr);
         let state = dns_state.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) = dns::run_dns_resolver(&listen, state).await {
+            if let Err(e) = dns::run_dns_resolver_on_socket(socket, state).await {
                 error!("DNS resolver error: {}", e);
             }
         }))

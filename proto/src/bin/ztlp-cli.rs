@@ -8677,12 +8677,19 @@ async fn setup_join(
         n.clone()
     } else {
         let default_name = get_hostname();
-        let name: String = Input::new()
-            .with_prompt("Device name")
-            .default(default_name)
-            .interact_text()
-            .map_err(|e| format!("input error: {}", e))?;
-        name
+        if auto_yes {
+            // --yes means fully non-interactive: never block on a TTY prompt
+            // (this path is also hit by callers with no controlling terminal,
+            // e.g. the desktop app invoking `ztlp setup --token ... --yes`).
+            default_name
+        } else {
+            let name: String = Input::new()
+                .with_prompt("Device name")
+                .default(default_name)
+                .interact_text()
+                .map_err(|e| format!("input error: {}", e))?;
+            name
+        }
     };
 
     // Full ZTLP name

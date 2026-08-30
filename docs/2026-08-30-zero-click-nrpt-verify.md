@@ -1,6 +1,50 @@
 # ZTLP zero-click E2E: NRPT port-53 fix — live verification handoff (2026-08-30)
 
-## Status: NRPT fix VERIFIED + static-DNS fallback implemented (NextDNS-style)
+## Status: FULLY VERIFIED END-TO-END — Chrome loads both http and https, GATEWAY-AUTHENTICATED
+
+PR #105 (`fix/desktop-main-window`) is green on `4a95421`/`1dc0366` (Desktop Build +
+ZTLP CI). All 7 acceptance criteria are met and confirmed live in Chrome (not just
+curl) on `10.170.3.207`:
+
+1. Agent DNS resolver binds `127.0.0.53:53` — confirmed (`Get-NetUDPEndpoint`).
+2. NRPT receives a bare IP (no colon-port) — confirmed via registry + `parse_list_output`.
+3. TDD regression tests assert NRPT `NameServers` never contains `:` — 9 tests (dns_setup_windows) + 11 tests (static-DNS fallback), all green.
+4. Fixed the misleading `eprintln!` in `ztlp-cli.rs`.
+5. Rebuilt via CI (Desktop Build run 33334748427, ZTLP CI 33334748430, both green
+   on `4a95421`), reinstalled via the NSIS wizard UI-only (cua-driver driven:
+   Welcome → Add/Reinstall → Install Location → Complete → Finish, launching the
+   fresh agent + desktop app).
+6. **`http://web.demo.spongebob.ztlp` → GATEWAY-AUTHENTICATED** — confirmed in a
+   live Chrome screenshot: green banner, `Authenticated as spongebob@demo.spongebob.ztlp`,
+   `X-ZTLP-Authenticated: 1`, ✓ signature VALID.
+7. **`https://web.demo.spongebob.ztlp` → GATEWAY-AUTHENTICATED** — confirmed the
+   same way, no certificate-warning interstitial, valid HMAC signature with a
+   fresh timestamp.
+
+### Correction to the earlier (mid-session) "degraded Dnscache" conclusion
+Testing with `nslookup` earlier in the session showed NXDOMAIN even after the NRPT
+rule was installed, leading to the conclusion that this box's Dnscache couldn't
+apply NRPT rules. **That conclusion was wrong** — `nslookup` is documented to use
+its own resolver stub and famously bypasses NRPT (unlike `getaddrinfo`/`DnsQuery`,
+which `curl` and Chrome use). Once tested with `curl -v` (same resolver path as
+Chrome), resolution worked immediately: `Trying 127.100.0.1:80... Connected...
+HTTP/1.1 200 OK`. **NRPT was working correctly on this box the whole time; the
+diagnostic tool was the problem, not the OS.** The static-DNS (NextDNS-style)
+fallback implemented in commit `4a95421` remains in the codebase as a legitimate
+safety net for boxes where NRPT truly doesn't apply (confirmed via `curl`/`Resolve-DnsName`,
+not `nslookup`), but was not needed to close this test.
+
+### Side-finding (out of scope): demo gateway concurrency limit
+The demo PoC gateway (`Server: BaseHTTP/0.6 Python/3.12.14` — Python's basic
+`http.server`, single-threaded by default) drops/times-out concurrent connections.
+Reproduced cleanly: 3 parallel `curl` requests → 1 succeeds (200), 2 time out
+(exit 28). Chrome's parallel connection model (main doc + prefetch + favicon)
+intermittently collided with this, producing `ERR_CONNECTION_RESET` on some
+attempts. A **fresh Chrome window with no lingering connections loads the page
+cleanly on the first try** (confirmed twice, http and https). This is a demo-server
+limitation, not a ZTLP/DNS defect — not part of this fix's scope.
+
+## (Earlier verification detail, kept below for reference)
 
 PR #105 (`fix/desktop-main-window`) is green on `4a95421` (Desktop Build + ZTLP CI).
 The NRPT/port-53 root-cause fix is implemented, tested (9 regression tests), and

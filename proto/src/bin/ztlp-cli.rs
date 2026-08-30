@@ -12843,8 +12843,30 @@ async fn cmd_agent_dns_setup_windows(
         }
     }
 
+    // NRPT can ONLY take a bare IP (implicit port 53). The live
+    // `effective_dns_listen` may still carry a `:port` (e.g. when the
+    // agent is running with a high-port fallback from an older build, or
+    // when dns-setup is run before `agent start` and the config file says
+    // `127.0.0.53:5353`). Hand NRPT the bare IP rather than the host:port
+    // string — Windows silently stores an EMPTY NameServers list for a
+    // host:port value (the bug this whole fix exists for; see
+    // `dns_setup_windows::plan_windows_nrpt_listen`).
+    let nrpt_server: String = match effective_dns_listen.rsplit_once(':') {
+        Some((ip, _port)) => {
+            if ip.parse::<std::net::IpAddr>().is_err() {
+                return Err(format!(
+                    "cannot derive a bare IP for the NRPT rule from dns.listen {:?} (expected host:port with an IP host)",
+                    effective_dns_listen
+                )
+                .into());
+            }
+            ip.to_string()
+        }
+        None => effective_dns_listen.clone(),
+    };
+
     let api = dns_setup_windows::default_nrpt_api();
-    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &effective_dns_listen) {
+    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &nrpt_server) {
         Ok(installed) => {
             eprintln!(
                 "{} NRPT rules installed ({} namespace{})",
@@ -12853,7 +12875,10 @@ async fn cmd_agent_dns_setup_windows(
                 if installed.len() == 1 { "" } else { "s" }
             );
             for ns in &installed {
-                eprintln!("  {} → {}", ns, config.dns.listen);
+                eprintln!(
+                    "  {} → {} (resolver listening on {})",
+                    ns, nrpt_server, effective_dns_listen
+                );
             }
             eprintln!();
             eprintln!(

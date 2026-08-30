@@ -519,9 +519,20 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
             let api = crate::agent::dns_setup_windows::default_nrpt_api();
             match api.list_rules() {
                 Ok(rules) => Some(rules.iter().any(|r| {
+                    // The rule must target this zone AND carry a usable
+                    // NameServers list: Windows NRPT silently stores an
+                    // EMPTY list when handed a host:port string (real bug,
+                    // 2026-08-30, DESKTOP-CBSQDNE — Chrome got
+                    // DNS_PROBE_FINISHED_NXDOMAIN because the rule
+                    // "existed" but pointed nowhere). A rule with no usable
+                    // server must count as NOT configured so the wizard
+                    // re-runs dns-setup instead of showing a false green
+                    // checkmark.
                     r.namespace
                         .trim_start_matches('.')
                         .eq_ignore_ascii_case(&zone)
+                        && !r.name_servers.is_empty()
+                        && r.name_servers.iter().all(|s| !s.contains(':'))
                 })),
                 Err(_) => Some(false),
             }

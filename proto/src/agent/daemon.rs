@@ -286,6 +286,70 @@ pub async fn run_daemon(
     } else {
         None
     };
+    // ── Windows NRPT listen plan ──────────────────────────────────────
+    //
+    // Real bug found live (2026-08-30, DESKTOP-CBSQDNE): Windows NRPT
+    // rules only take a bare IP (implicit port 53). When the agent's DNS
+    // resolver ends up on a high fallback port (5353 is routinely taken
+    // by svchost mDNS + Chrome), the NRPT rule silently stores an EMPTY
+    // NameServers list and browsers get DNS_PROBE_FINISHED_NXDOMAIN.
+    //
+    // Fix: on Windows, if the bound port is not 53, re-bind the resolver
+    // socket to the dedicated loopback alias on port 53 (127.0.0.53:53)
+    // and hand NRPT the bare alias IP. `bind_dns_socket_with_fallback`
+    // already tries the alias port-53 FIRST on Windows (see dns.rs), so
+    // this rebind only fires when that first attempt failed and a higher
+    // port won instead.
+    let (dns_socket_and_addr, nrpt_bind_overridden) = {
+        #[cfg(target_os = "windows")]
+        {
+            let ztlp_proto::agent::dns_setup_windows::WindowsNrptListenPlan {
+                bind_addr,
+                nrpt_server: _nrpt,
+                needs_alias,
+            } = ztlp_proto::agent::dns_setup_windows::plan_windows_nrpt_listen(&config.dns.listen)
+                .unwrap_or_else(|e| {
+                    return Err(format!(
+                        "Windows NRPT requires a loopback dns.listen on port 53 (got {}): {e} \
+                         — set dns.listen to 127.0.0.53:53 in config.toml",
+                        config.dns.listen
+                    )
+                    .into());
+                });
+            let _ = needs_alias; // alias is ensured by the bind step
+            match &dns_socket_and_addr {
+                Some((_, bound)) if bound.port() != 53 => {
+                    match tokio::net::UdpSocket::bind(bind_addr).await {
+                        Ok(sock) => {
+                            let addr = sock.local_addr().unwrap_or(bind_addr);
+                            warn!(
+                                "DNS resolver: NRPT requires port 53, re-binding {} -> {}",
+                                bound, addr
+                            );
+                            (Some((sock, addr)), true)
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "DNS resolver: configured port {} was taken and the NRPT-required \
+                             port-53 rebind to {bind_addr} also failed: {} \
+                             (NRPT can only route to a bare IP on port 53 — check \
+                             `netstat -ano -p UDP | findstr :53` for what holds it)",
+                                bound.port(),
+                                e
+                            )
+                            .into());
+                        }
+                    }
+                }
+                _ => (dns_socket_and_addr, false),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            (dns_socket_and_addr, false)
+        }
+    };
+    let _ = nrpt_bind_overridden;
     let effective_dns_listen = dns_socket_and_addr
         .as_ref()
         .map(|(_, addr)| addr.to_string())

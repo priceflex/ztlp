@@ -172,6 +172,76 @@ impl NrptApi for FakeNrptApi {
     }
 }
 
+/// Windows NRPT can only route a namespace to an IP address (implicit port
+/// 53). If the agent's DNS resolver is not listening on port 53, return a
+/// `loopback_alias:port` form and the caller must bind the resolver to
+/// `loopback_alias:53` and install a loopback alias so the NRPT rule works.
+///
+/// Real bug found live (2026-08-30, DESKTOP-CBSQDNE): `Add-DnsClientNrptRule`
+/// given `127.0.0.53:5353` silently stored an EMPTY `NameServers` list and
+/// Chrome got `DNS_PROBE_FINISHED_NXDOMAIN` — no error, no warning. NRPT
+/// rules only take bare IPs. On Windows, the dedicated loopback alias
+/// `127.0.0.53` was clearly intended for port 53 all along.
+pub struct WindowsNrptListenPlan {
+    /// The resolver socket the daemon must bind: `ip:53` on the alias (or
+    /// the configured address when it's already on port 53).
+    pub bind_addr: std::net::SocketAddr,
+    /// The bare IP (no port) to hand to NRPT.
+    pub nrpt_server: std::net::IpAddr,
+    /// `true` when the resolver needs the dedicated loopback alias and the
+    /// caller must ensure `nrpt_server` is present on the loopback adapter
+    /// before binding (a no-op on the common Windows case where it already
+    /// exists).
+    pub needs_alias: bool,
+}
+
+/// Plan the Windows listen-address + NRPT-server pair for a configured DNS
+/// listen address.
+///
+/// - Configured `127.0.0.53:53`  -> bind there, NRPT `127.0.0.53`, no alias work.
+/// - Configured `127.0.0.53:5353` (or any non-53 port on the alias) -> bind
+///   `127.0.0.53:53`, NRPT `127.0.0.53`, `needs_alias = true`.
+/// - Configured `0.0.0.0:53` / `127.0.0.1:53` -> bind as configured, NRPT
+///   `127.0.0.1` (loopback primary), no alias work.
+pub fn plan_windows_nrpt_listen(listen: &str) -> Result<WindowsNrptListenPlan, String> {
+    let (host, port): (String, u16) = match listen.rsplit_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p.parse().map_err(|_| format!("bad port in {listen}"))?;
+            (h.to_string(), port)
+        }
+        None => {
+            return Err(format!(
+                "dns.listen {listen:?} has no host:port; Windows NRPT requires a \
+                 loopback address on port 53 (use e.g. 127.0.0.53:53)"
+            ))
+        }
+    };
+
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| format!("dns.listen host {host:?} is not an IP literal"))?;
+
+    if port == 53 {
+        return Ok(WindowsNrptListenPlan {
+            bind_addr: (ip, 53).into(),
+            nrpt_server: ip,
+            needs_alias: false,
+        });
+    }
+
+    // Port != 53: NRPT can't express it, so move the resolver to port 53 on
+    // the dedicated loopback alias (127.0.0.53). This is safe because
+    // 127.0.0.53 is a loopback-only address the agent already uses.
+    let alias: std::net::IpAddr = "127.0.0.53"
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    Ok(WindowsNrptListenPlan {
+        bind_addr: (alias, 53).into(),
+        nrpt_server: alias,
+        needs_alias: ip != alias,
+    })
+}
+
 // ─── High-level setup / teardown ───────────────────────────────────────────
 
 /// Normalize a zone name into an NRPT namespace.
@@ -503,6 +573,117 @@ pub fn default_nrpt_api() -> Box<dyn NrptApi> {
 
 #[cfg(test)]
 mod tests {
+
+    // ─── Regression: NRPT NameServers must never carry a colon-port ───────
+    //
+    // Real bug (2026-08-30, DESKTOP-CBSQDNE): `Add-DnsClientNrptRule` given
+    // `127.0.0.53:5353` silently stored an EMPTY NameServers list and
+    // Chrome got DNS_PROBE_FINISHED_NXDOMAIN — the command reported
+    // success, the rule existed, it pointed nowhere. These tests lock in
+    // the invariant that every rule this module installs carries a BARE IP
+    // with no `:port`, because NRPT can only route a namespace to an IP
+    // on implicit port 53.
+
+    /// Helper mirroring the guard the `setup_status` / `dns_configured`
+    /// check applies: a rule is USABLE iff it has at least one server and
+    /// every server is a bare IP (no colon-port).
+    fn rule_is_usable(rule: &NrptRule) -> bool {
+        !rule.name_servers.is_empty() && rule.name_servers.iter().all(|s| !s.contains(':'))
+    }
+
+    /// The exact live failure shape: a rule whose single server is a
+    /// host:port string. `parse_list_output` must parse it faithfully (we
+    /// cannot know Windows mangled it) and the usability guard must
+    /// classify it as NOT usable — so `dns_configured` reports false and
+    /// the wizard re-runs dns-setup instead of showing a green check.
+    #[test]
+    fn host_port_server_is_parsed_but_not_usable() {
+        let json = r#"[{"Namespace":[".demo.spongebob.ztlp"],"NameServers":["127.0.0.53:5353"],"Comment":"ZTLP-managed"}]"#;
+        let rules = parse_list_output(json).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name_servers, vec!["127.0.0.53:5353"]);
+        assert!(
+            !rule_is_usable(&rules[0]),
+            "a host:port server must NOT count as a usable NRPT rule"
+        );
+    }
+
+    /// The live EMPTY-list shape (what Windows actually stored).
+    #[test]
+    fn empty_name_servers_is_not_usable() {
+        let rule = NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: Vec::new(),
+            comment: ZTLP_NRPT_MARKER.into(),
+        };
+        assert!(!rule_is_usable(&rule));
+    }
+
+    /// A bare-IP server IS usable.
+    #[test]
+    fn bare_ip_server_is_usable() {
+        let rule = NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        };
+        assert!(rule_is_usable(&rule));
+    }
+
+    /// End-to-end through `setup_zones`: the installed rule's NameServers is
+    /// exactly the string the caller handed in — pinning the contract that
+    /// the caller (CLI) must hand a bare IP.
+    #[test]
+    fn setup_zones_stores_the_given_server_verbatim() {
+        let api = FakeNrptApi::new();
+        let installed =
+            setup_zones(&api, &["demo.spongebob.ztlp".to_string()], "127.0.0.53").unwrap();
+        assert_eq!(installed, vec![".demo.spongebob.ztlp"]);
+        let rules = api.list_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(
+            rule_is_usable(&rules[0]),
+            "server handed to setup_zones must produce a usable rule: {:?}",
+            rules[0]
+        );
+    }
+
+    // ─── plan_windows_nrpt_listen ─────────────────────────────────────────
+
+    #[test]
+    fn plan_port_53_uses_configured_address() {
+        let p = plan_windows_nrpt_listen("127.0.0.53:53").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(!p.needs_alias);
+    }
+
+    #[test]
+    fn plan_non_53_port_moves_resolver_to_alias_port_53() {
+        // The live-bug case: configured 5353 (mDNS), NRPT needs port 53.
+        let p = plan_windows_nrpt_listen("127.0.0.53:5353").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(!p.needs_alias, "alias is the configured host itself");
+    }
+
+    #[test]
+    fn plan_127_0_0_1_non_53_moves_to_alias() {
+        let p = plan_windows_nrpt_listen("127.0.0.1:5353").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(p.needs_alias);
+    }
+
+    #[test]
+    fn plan_rejects_host_without_port() {
+        assert!(plan_windows_nrpt_listen("127.0.0.53").is_err());
+    }
+
+    #[test]
+    fn plan_rejects_non_ip_host() {
+        assert!(plan_windows_nrpt_listen("localhost:53").is_err());
+    }
     use super::*;
 
     #[test]

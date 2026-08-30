@@ -89,6 +89,44 @@ fn split_host_port(listen_addr: &str) -> (String, u16) {
     }
 }
 
+/// Ensure the dedicated ZTLP loopback alias `127.0.0.53` exists on the
+/// Windows loopback adapter (a no-op when it's already present — which is
+/// the default on stock Windows 10/11). The NRPT fix needs the resolver on
+/// `127.0.0.53:53`; a bare `127.0.0.1/8` loopback only has `127.0.0.1`
+/// unless an alias is added. Requires elevation (matches the NRPT rule
+/// write, which also requires Administrator).
+///
+/// Failure is non-fatal: the bind step that follows is the real gate, and
+/// the NRPT step then fails loudly with a clear error if the alias is
+/// still missing.
+#[cfg(target_os = "windows")]
+pub fn ensure_loopback_alias_127_0_0_53() {
+    use std::process::Command;
+    let out = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"Get-NetIPConfiguration -Loopback | Where-Object { $_.IPv4Address -notcontains 127.0.0.53 } | ForEach-Object { New-NetIPAddress -InterfaceIndex $_.InterfaceIndex -IPAddress 127.0.0.53 -PrefixLength 32 -PrefixOrigin Dhcp -SuffixOrigin Dhcp -AddressFamily IPv4 }"#,
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            debug!("ensured loopback alias 127.0.0.53 present");
+        }
+        Ok(o) => {
+            warn!(
+                "could not ensure loopback alias 127.0.0.53 (exit {}): {}",
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Err(e) => {
+            warn!("could not invoke PowerShell for loopback alias check: {e}");
+        }
+    }
+}
+
 /// Real bug found live on Windows (2026-08-30): the configured DNS listen
 /// port (`5353`, standard mDNS) is frequently ALREADY occupied system-wide —
 /// Windows' own mDNS responder service (svchost) and even Chrome itself both
@@ -114,12 +152,49 @@ pub async fn bind_dns_socket_with_fallback(
     // Fallback ports tried in order after the configured one. 15353/25353
     // are unassigned by IANA and unlikely to collide with anything else a
     // desktop OS or browser claims by default (unlike 5353/mDNS).
-    let mut candidates = vec![primary_port];
-    for fallback in [15353u16, 25353u16] {
-        if fallback != primary_port {
-            candidates.push(fallback);
+    //
+    // Windows gets EXTRA candidates up front: NRPT (the Windows NRPT rule
+    // installer) can only route a namespace to an IP with an implicit
+    // port 53, so on Windows the resolver's end goal is port 53 on the
+    // dedicated loopback alias 127.0.0.53 (see
+    // `dns_setup_windows::plan_windows_nrpt_listen`). If the configured
+    // high port is taken (common: svchost mDNS + Chrome both hold 5353),
+    // falling back to port 53 on the alias FIRST means NRPT can point at
+    // `127.0.0.53` and the rule actually works. A real bug found live
+    // (2026-08-30, DESKTOP-CBSQDNE): NRPT given `127.0.0.53:15353`
+    // silently stored an EMPTY NameServers list and Chrome got
+    // DNS_PROBE_FINISHED_NXDOMAIN — the high-port fallback "worked" but
+    // the rule pointed at nothing NRPT can express.
+    #[cfg(target_os = "windows")]
+    let mut candidates: Vec<u16> = {
+        // Ensure the alias exists before attempting the port-53 bind.
+        ensure_loopback_alias_127_0_0_53();
+        let mut c = Vec::new();
+        if primary_port == 53 {
+            c.push(53);
+        } else if primary_port != 53 {
+            // Port 53 on the alias first (the NRPT-compatible address),
+            // then the configured high port as a last resort.
+            c.push(53);
+            c.push(primary_port);
         }
-    }
+        for fallback in [15353u16, 25353u16] {
+            if !c.contains(&fallback) {
+                c.push(fallback);
+            }
+        }
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut candidates: Vec<u16> = {
+        let mut c = vec![primary_port];
+        for fallback in [15353u16, 25353u16] {
+            if fallback != primary_port {
+                c.push(fallback);
+            }
+        }
+        c
+    };
 
     let mut last_err: Option<std::io::Error> = None;
     for port in candidates {

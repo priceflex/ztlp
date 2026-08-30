@@ -210,3 +210,132 @@ push-iterate cycles on the daemon.rs path/type errors.
 - CI artifact: `ZTLP_1.0.4_x64-setup.exe` (from green Desktop Build run on `82e83a6`)
 - Test box: 10.170.3.207 (left in working state: agent + desktop running, 127.0.0.53 alias
   present, CA in trust store, NRPT rule in registry)
+
+---
+
+# FOLLOW-UP: Chrome refresh hang — root cause (Wireshark-confirmed) + fix plan
+
+**Status: DIAGNOSED, NOT YET FIXED. This section is the implementation brief.**
+
+## Symptom
+Refreshing `http://web.demo.spongebob.ztlp/` in Chrome intermittently hangs the tab
+spinner for ~45 seconds. First load in a fresh window is usually instant (200 OK in
+~38ms end-to-end). `curl` (single connection) almost always succeeds instantly.
+
+## Root cause (packet-capture proof, 2026-08-30, 10.170.3.207)
+tshark on `\Device\NPF_Loopback` (filter `host 127.100.0.1`) during a reproduced hang:
+
+- On refresh, Chrome opens **two parallel TCP connections** to `127.100.0.1:80`
+  (normal Chrome behavior: main request + speculative socket).
+- Connection A (client port 65113): SYN/SYN-ACK/ACK completes, `GET / HTTP/1.1`
+  sent at t+0.06s, agent ACKs the bytes at the TCP layer — **then silence. No HTTP
+  response is ever written back.**
+- Connection B (client port 53189): handshake completes — then silence.
+- Both sockets sit idle for **45 seconds** until Chrome's OS-level TCP keep-alive
+  probe fires (`[TCP Keep-Alive] Seq=481 Ack=1` at t+45.01s). That probe is the
+  first packet after the GET. The spinner clears only when Chrome gives up.
+- A healthy single request captured minutes earlier on the same box: TCP + TLS
+  handshake + GET + `200 OK` in 38ms total. The path is fast when it answers at all.
+
+Two compounding causes:
+
+1. **Agent gap (the real bug to fix):** the VIP TCP proxy (`run_tcp_proxy` /
+   `handle_tcp_connection` in `proto/src/agent/daemon.rs`) accepts the client
+   socket and forwards into the ZTLP tunnel with **no deadline covering
+   accept → first response byte**. `HANDSHAKE_TIMEOUT = 10s` (daemon.rs:115)
+   covers tunnel *establishment* only. If the backend never answers, the client
+   socket hangs until the peer's OS keep-alive (~45s on Windows Chrome) notices.
+   The agent fails **silently** — nothing is written back, nothing is logged
+   above debug level.
+2. **Backend reality (demo artifact, but the class matters):** the demo PoC web
+   server is `BaseHTTP/0.6 Python/3.12.14` — Python's single-threaded
+   `http.server`. It serves one connection at a time; the second concurrent
+   connection starves. Reproduced independently: 3 parallel curls → one 200, two
+   timeouts. Real backends stall too (pool exhaustion, GC pauses), so the agent
+   must behave well against this class regardless of the demo being fixed.
+
+## Fix plan (agreed approach — implement in this order)
+
+### Layer 1 — accept-to-first-byte deadline (core fix)
+In `handle_tcp_connection` (+ the TLS variant), wrap ONLY the phase
+"client accepted → first byte received back from the tunnel/backend" in
+`tokio::time::timeout`. Default 15s, configurable via `agent.toml`.
+**Do NOT deadline the steady-state bridge loop** — long-lived flows
+(websockets, SSE, RDP on the 3389 listener) are legitimate and must survive
+arbitrary idle.
+
+### Layer 2 — fail loudly, not silently
+On deadline expiry:
+- HTTP-ish ports (80, 8080): write a real `HTTP/1.1 504 Gateway Timeout` with a
+  ZTLP-branded body naming the zone and the timeout ("ZTLP agent: backend for
+  <name> did not respond within 15s"), then close.
+- HTTPS ports (443, 8443): agent already terminates TLS locally with its minted
+  cert — send the same 504 inside the TLS stream.
+- Non-HTTP ports: RST promptly.
+This converts a 45s silent spinner into a clear, named error page in 15s.
+Highest-UX-value part of the whole fix.
+
+### Layer 3 — backpressure instead of unbounded pileup (separate PR)
+Track in-flight connections per (vip, port) — plumbing exists
+(`inc_connections`/`dec_connections` in the VIP pool). When a new connection
+arrives while existing ones to the same backend are stalled past a threshold,
+fast-fail with 503 (or queue with its own deadline). Prevents the exact
+Chrome-refresh pileup pattern.
+
+## TDD plan
+1. Extract pure policy functions first, unit-test trivially:
+   - `first_byte_deadline(port, config) -> Duration`
+   - `stall_response_for_port(port) -> Option<Vec<u8>>` (canned 504 bytes)
+2. Tokio integration tests with real sockets:
+   - **Black-hole backend** (accepts, never responds — the demo server's exact
+     behavior under concurrency): client must receive the 504 bytes within
+     deadline+slack; socket closed; connection count decremented.
+   - **Slow-but-alive backend** (first byte at deadline−1s): must NOT be killed.
+   - **Websocket-shaped flow** (fast first byte, then 60s idle on an open
+     connection): must survive — proves the deadline doesn't leak into the
+     steady-state bridge.
+3. **Regression test pinning tonight's packet trace:** two simultaneous client
+   connections against a serve-one-at-a-time mock backend; the second must get
+   a timely 504 instead of hanging.
+
+## Fix-adjacent items (same neighborhood, do while in there)
+- `daemon.rs` VIP bind failure is swallowed at debug level
+  (`debug!("cannot bind {}:{}: ... (likely in use)")`, daemon.rs:890). On ports
+  80/443 this masked a real "listener never existed" failure for an hour of
+  diagnosis tonight. Promote to `warn!` and surface bind state in `agent status`.
+- `ensure_loopback_alias_127_0_0_53()` (dns.rs:103) uses
+  `Get-NetIPConfiguration -Loopback` — **invalid parameter on this Windows build**;
+  fails every startup, silently tolerated only because the alias already exists
+  from a prior session. Fix the cmdlet (e.g.
+  `Get-NetIPAddress -InterfaceAlias 'Loopback Pseudo-Interface 1'` /
+  `New-NetIPAddress`), and generalize to `ensure_loopback_alias(ip)` so **VIPs
+  get the same treatment**: on Windows, bare 127.x.y.z addresses are NOT bindable
+  without an explicit interface alias (confirmed live: `TcpListener::bind`
+  silently failed for `127.100.0.1` until `New-NetIPAddress ... 127.100.0.1` was
+  run manually).
+- Demo server: switch `HTTPServer` → `ThreadingHTTPServer` (one-line Python
+  change) so the demo exercises real concurrency instead of masking it.
+
+## What NOT to do
+- No global session timeout (kills websockets/RDP/long polls).
+- No automatic tunnel retry — retries against a stalled single-threaded backend
+  double the pileup. Fail fast; let the client retry.
+- No HTTP parsing in the proxy beyond "is this an HTTP port with zero response
+  bytes" — the agent stays a dumb fast byte pipe.
+
+## Sizing
+Layers 1+2: contained change in daemon.rs, ~100–150 lines + tests, one PR.
+Layer 3: second PR. Layers 1+2 alone make the silent Chrome hang impossible —
+worst case becomes a clear 504 in 15s.
+
+## Evidence artifacts
+- `/tmp/capture.pcapng` (Hermes VM, loopback-only filter) — the 45s idle
+  connection: frames 472–482 (handshake+TLS+184B response), frame 829 (keep-alive
+  at +45.01s).
+- `/tmp/capture2.pcapng` (Hermes VM, dual-interface, 831MB) — the refresh hang:
+  ports 65113/53189, GET at epoch 1788129603.06, keep-alive at 1788129648.07.
+- Also visible on refresh: the demo PoC page renders "NOT VERIFIED /
+  signature INVALID — missing X-ZTLP-Signature header" when Chrome reuses a
+  keep-alive connection, because the gateway only injects X-ZTLP-* headers on the
+  **first request per connection** (stated on the page itself). Separate,
+  demo-design issue — worth noting so nobody chases it as an agent bug.

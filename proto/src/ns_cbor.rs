@@ -230,12 +230,53 @@ pub fn parse_ns_record(data: &[u8]) -> Option<NsRecordPayload> {
         _ => return None,
     }
 
-    // Skip optional truncation flag (0x01) inserted by NS amplification prevention.
-    let record = if data.len() > 1 && data[1] == 0x01 {
-        &data[2..]
+    // Determine whether byte[1] is a genuine amplification-prevention
+    // truncation flag or the record's own type byte (which happens to
+    // collide with the flag's value for KEY records, type=1 — see
+    // `test_parse_ns_record_key_type_not_confused_with_truncation_flag`
+    // for the real bug this caused: every complete, correctly-sized KEY
+    // record response was silently shifted by one byte and corrupted).
+    //
+    // Disambiguate structurally instead of by byte value: try the
+    // "no flag, byte[1] is the real type" interpretation FIRST (this is
+    // the common case — most responses aren't truncated), and only fall
+    // back to the "flag present, skip a byte" interpretation if the
+    // first one fails to parse as a structurally valid record (lengths
+    // that don't fit the buffer). A genuinely truncated response's name
+    // and data lengths won't validate under the no-flag interpretation
+    // (they'll overrun the buffer or land on garbage), so this ordering
+    // is safe both ways.
+    fn try_parse_record_body(record: &[u8]) -> Option<(u8, usize, usize)> {
+        if record.len() < 4 {
+            return None;
+        }
+        let record_type = record[0];
+        let rname_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+        if record.len() < 3 + rname_len + 4 {
+            return None;
+        }
+        let offset = 3 + rname_len;
+        let data_len = u32::from_be_bytes([
+            record[offset],
+            record[offset + 1],
+            record[offset + 2],
+            record[offset + 3],
+        ]) as usize;
+        if record.len() < offset + 4 + data_len {
+            return None;
+        }
+        Some((record_type, rname_len, data_len))
+    }
+
+    let no_flag_candidate = &data[1..];
+    let (record, has_flag) = if try_parse_record_body(no_flag_candidate).is_some() {
+        (no_flag_candidate, false)
+    } else if data.len() > 1 && data[1] == 0x01 {
+        (&data[2..], true)
     } else {
-        &data[1..]
+        (no_flag_candidate, false)
     };
+    let _ = has_flag; // only used to pick the byte slice above
     if record.len() < 4 {
         eprintln!("DEBUG: parse_ns_record RET None at line {}", line!());
         return None;
@@ -393,6 +434,74 @@ mod tests {
             cbor_extract_string(&record.data, "address"),
             Some("10.0.0.1:443".to_string())
         );
+    }
+
+    // ── KEY-record (type=1) / truncation-flag ambiguity bug (2026-08-30) ──
+    //
+    // Real bug found live against the demo NS server (34.221.165.244:24096):
+    // `parse_ns_record`'s truncation-flag detection (`data[1] == 0x01` =>
+    // "skip one extra byte, amplification prevention inserted a flag")
+    // is genuinely ambiguous with a KEY record, whose record_type byte is
+    // ALSO literally 0x01. Every non-truncated KEY record response
+    // (`[0x02 FOUND, 0x01 KEY-type, name_len_hi, name_len_lo, name...]`)
+    // was being misparsed as `[0x02 FOUND, 0x01 TRUNCATION-FLAG, <real
+    // type byte mistaken for name_len_hi>, ...]`, permanently shifting
+    // every subsequent field by one byte and corrupting the parsed name,
+    // data length, and CBOR payload — even for perfectly complete,
+    // correctly-sized responses.
+    //
+    // This is exactly why `ztlp ns lookup` printed "Type: UNKNOWN / Raw:
+    // (truncated record)" for a live, fully-registered KEY record, and
+    // why `ns_query_addr`'s KEY fallback couldn't find the "address"
+    // field even after the amplification-padding fix: the padding fix
+    // (see agent/proxy.rs) got a complete, untruncated response, but this
+    // separate parsing bug then corrupted it anyway.
+    //
+    // The existing `test_parse_ns_record_found` test above never caught
+    // this because it exercises a SVC record (type=2), which never
+    // collides with the 0x01 truncation-flag value.
+    //
+    // Fixture: the exact bytes captured from a live, padded (256-byte)
+    // query to the demo NS for `web.demo.spongebob.ztlp`'s KEY record —
+    // confirmed complete/untruncated (matches ztlp-cli.rs's own
+    // NS_QUERY_PAD_BYTES-padded capture, 339 bytes, no continuation
+    // needed).
+    #[test]
+    fn test_parse_ns_record_key_type_not_confused_with_truncation_flag() {
+        let real_untruncated_key_response = hex_decode(REAL_UNTRUNCATED_KEY_RESPONSE_HEX);
+        let record = parse_ns_record(&real_untruncated_key_response)
+            .expect("must parse a real, complete KEY record response");
+        assert_eq!(record.status, NsResponseStatus::Found);
+        assert_eq!(
+            record.record_type, 0x01,
+            "record_type must be KEY (1), not misread as a truncation flag"
+        );
+        assert_eq!(
+            record.name, "web.demo.spongebob.ztlp",
+            "name must parse correctly once the type byte isn't misidentified \
+             as a truncation flag (this is what silently shifted every \
+             subsequent field by one byte in the original bug)"
+        );
+        assert_eq!(
+            cbor_extract_string(&record.data, "address"),
+            Some("34.221.165.244:24095".to_string()),
+            "the address field must be extractable once record.data lines \
+             up on the correct byte boundary"
+        );
+    }
+
+    /// Real capture: a live, PADDED (256-byte query, matching
+    /// `NS_QUERY_PAD_BYTES`) response from the demo NS server
+    /// (34.221.165.244:24096) for `web.demo.spongebob.ztlp`'s KEY record —
+    /// confirmed complete (339 bytes, no amplification truncation).
+    const REAL_UNTRUNCATED_KEY_RESPONSE_HEX: &str = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        let clean: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..clean.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]

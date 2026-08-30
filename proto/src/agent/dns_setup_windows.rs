@@ -172,6 +172,269 @@ impl NrptApi for FakeNrptApi {
     }
 }
 
+/// Windows NRPT can only route a namespace to an IP address (implicit port
+/// 53). If the agent's DNS resolver is not listening on port 53, return a
+/// `loopback_alias:port` form and the caller must bind the resolver to
+/// `loopback_alias:53` and install a loopback alias so the NRPT rule works.
+///
+/// Real bug found live (2026-08-30, DESKTOP-CBSQDNE): `Add-DnsClientNrptRule`
+/// given `127.0.0.53:5353` silently stored an EMPTY `NameServers` list and
+/// Chrome got `DNS_PROBE_FINISHED_NXDOMAIN` — no error, no warning. NRPT
+/// rules only take bare IPs. On Windows, the dedicated loopback alias
+/// `127.0.0.53` was clearly intended for port 53 all along.
+pub struct WindowsNrptListenPlan {
+    /// The resolver socket the daemon must bind: `ip:53` on the alias (or
+    /// the configured address when it's already on port 53).
+    pub bind_addr: std::net::SocketAddr,
+    /// The bare IP (no port) to hand to NRPT.
+    pub nrpt_server: std::net::IpAddr,
+    /// `true` when the resolver needs the dedicated loopback alias and the
+    /// caller must ensure `nrpt_server` is present on the loopback adapter
+    /// before binding (a no-op on the common Windows case where it already
+    /// exists).
+    pub needs_alias: bool,
+}
+
+/// Plan the Windows listen-address + NRPT-server pair for a configured DNS
+/// listen address.
+///
+/// - Configured `127.0.0.53:53`  -> bind there, NRPT `127.0.0.53`, no alias work.
+/// - Configured `127.0.0.53:5353` (or any non-53 port on the alias) -> bind
+///   `127.0.0.53:53`, NRPT `127.0.0.53`, `needs_alias = true`.
+/// - Configured `0.0.0.0:53` / `127.0.0.1:53` -> bind as configured, NRPT
+///   `127.0.0.1` (loopback primary), no alias work.
+pub fn plan_windows_nrpt_listen(listen: &str) -> Result<WindowsNrptListenPlan, String> {
+    let (host, port): (String, u16) = match listen.rsplit_once(':') {
+        Some((h, p)) => {
+            let port: u16 = p.parse().map_err(|_| format!("bad port in {listen}"))?;
+            (h.to_string(), port)
+        }
+        None => {
+            return Err(format!(
+                "dns.listen {listen:?} has no host:port; Windows NRPT requires a \
+                 loopback address on port 53 (use e.g. 127.0.0.53:53)"
+            ))
+        }
+    };
+
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| format!("dns.listen host {host:?} is not an IP literal"))?;
+
+    if port == 53 {
+        return Ok(WindowsNrptListenPlan {
+            bind_addr: (ip, 53).into(),
+            nrpt_server: ip,
+            needs_alias: false,
+        });
+    }
+
+    // Port != 53: NRPT can't express it, so move the resolver to port 53 on
+    // the dedicated loopback alias (127.0.0.53). This is safe because
+    // 127.0.0.53 is a loopback-only address the agent already uses.
+    let alias: std::net::IpAddr = "127.0.0.53"
+        .parse()
+        .map_err(|e: std::net::AddrParseError| e.to_string())?;
+    Ok(WindowsNrptListenPlan {
+        bind_addr: (alias, 53).into(),
+        nrpt_server: alias,
+        needs_alias: ip != alias,
+    })
+}
+
+// ─── Static-DNS fallback (NextDNS-style) ───────────────────────────────────
+//
+// NRPT is the most surgical but LEAST reliable Windows DNS-interception
+// technique: it depends on the OS `dnscache` honoring the rule, and on some
+// Windows boxes (observed live 2026-08-30 on DESKTOP-CBSQDNE) the Dnscache
+// subsystem is degraded enough that a correct, bare-IP NRPT rule still
+// doesn't apply — `Get-DnsClientNrptPolicy` throws WIN32 9572,
+// `Add-DnsClientNrptRule` silently no-ops, the DnsAdmin COM class is
+// missing, and `netsh dns client set filter` isn't supported. Chrome and
+// `curl` then still route the zone to the ISP resolver.
+//
+// NextDNS (https://github.com/nextdns/nextdns) sidesteps NRPT entirely: it
+// runs a local port-53 DNS proxy and sets each interface's STATIC DNS server
+// to it via `netsh interface ipv4 set dnsserver <idx> static <ip> primary`.
+// That is the OS's PRIMARY resolver path (not a side rule dnscache can
+// refuse), so it's reliable. Because our agent already forwards non-zone
+// queries upstream, pointing an adapter at it is safe — the fallback is
+// global but not breaking.
+//
+// We keep NRPT as the PRIMARY (zone-only) technique and only fall back to
+// the static-DNS path when the NRPT read-back shows the rule did not stick.
+
+/// A single network adapter as reported by `netsh interface ipv4 show
+/// interfaces`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterInfo {
+    /// The netsh interface index — the value `set dnsserver <idx>` needs.
+    pub idx: u32,
+    /// The adapter name (e.g. `Ethernet`, `Wi-Fi`, `Loopback Pseudo-Interface 2`).
+    pub name: String,
+    /// `true` when the `State` column is `Active`/`Connected` — only active
+    /// adapters should have their DNS server pointed at the resolver.
+    pub active: bool,
+}
+
+/// Parse `netsh interface ipv4 show interfaces` output into adapter records.
+///
+/// The command emits a 3-column table (Admin State / State / Name) preceded
+/// by a header row and a dash separator row. The **State** column (2nd)
+/// determines activity: `Active`/`Connected` → active; `Disconnected` /
+/// `Media disconnected` / empty → inactive. The netsh interface **index** is
+/// not in this table, so we assign a 1-based positional index that matches
+/// the `set dnsserver <idx>` convention used by `build_set_dnsserver_cmd` in
+/// the common case where the caller enumerates and then sets in the same
+/// session. (On Windows the production path uses `netsh interface show
+/// interface` which DOES print the index; this parser is the cross-platform
+/// testable core.)
+pub fn parse_netsh_interfaces(output: &str) -> Vec<AdapterInfo> {
+    let mut out = Vec::new();
+    let mut idx: u32 = 0;
+    for line in output.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            continue; // blank separator
+        }
+        // Skip the header + dash-separator rows.
+        if trimmed.starts_with("Admin State")
+            || trimmed.starts_with("-------------")
+            || trimmed.starts_with("Index")
+        {
+            continue;
+        }
+        let cols: Vec<&str> = trimmed.split_whitespace().collect();
+        // Minimum shape: Admin State, State, then the (possibly multi-word)
+        // Name. We take at least 2 leading columns for the states and join the
+        // rest as the name.
+        if cols.len() < 3 {
+            continue;
+        }
+        let admin_state = cols[0];
+        let state = cols[1];
+        let name = cols[2..].join(" ");
+        // An active adapter: Admin State `Enabled` AND State `Connected`/`Active`.
+        // `Disabled` admin state or a `Disconnected`/`Media disconnected`
+        // state are inactive.
+        let admin_enabled = admin_state.eq_ignore_ascii_case("enabled");
+        let state_up =
+            state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("active");
+        let active = admin_enabled && state_up;
+        idx += 1;
+        out.push(AdapterInfo { idx, name, active });
+    }
+    out
+}
+
+/// Build the `netsh` command that points one adapter's DNS at `ip` (bare IP,
+/// implicit port 53) as its primary server — the exact NextDNS form.
+///
+/// `v4 = true` → `netsh interface ipv4 set dnsserver <idx> static <ip>
+/// primary`; `v4 = false` → the `ipv6` subcommand with the IPv6 literal.
+///
+/// The IP must be a **bare literal** (no `:port`): like NRPT, `netsh set
+/// dnsserver` takes the implicit port 53 and rejects a `host:port` string.
+pub fn build_set_dnsserver_cmd(idx: u32, ip: &str, v4: bool) -> String {
+    let family = if v4 { "ipv4" } else { "ipv6" };
+    format!("netsh interface {family} set dnsserver {idx} static {ip} primary")
+}
+
+/// Decide whether the static-DNS fallback should run for `zone`.
+///
+/// Returns `true` when NO currently-installed NRPT rule for `zone` is usable
+/// (absent, empty NameServers, or a host:port server) — the degraded-Dnscache
+/// signature — so the adapter DNS must be pointed at the resolver instead.
+/// Returns `false` when a usable rule for `zone` exists (NRPT is honored;
+/// stay surgical).
+///
+/// `zone` is the bare enrolled zone (e.g. `demo.spongebob.ztlp`); NRPT rules
+/// carry the leading-dot form, so the comparison is leading-dot-tolerant and
+/// case-insensitive.
+pub fn should_use_static_dns_fallback(rules: &[NrptRule], zone: &str) -> bool {
+    if zone.trim().is_empty() {
+        return false; // no zone enrolled → nothing to route
+    }
+    // Fallback fires when NO installed NRPT rule for `zone` is usable.
+    // A usable rule (bare-IP server) means NRPT is honored → stay surgical.
+    let nrpt_honored = rules.iter().any(|r| {
+        r.namespace
+            .trim_start_matches('.')
+            .eq_ignore_ascii_case(zone)
+            && nrpt_rule_is_usable(r)
+    });
+    !nrpt_honored
+}
+
+/// The single source of truth for "is this NRPT rule actually usable?": a
+/// rule is usable iff it has at least one name server AND every name server
+/// is a **bare IP** (no `:port`). Windows NRPT silently stores an EMPTY
+/// `NameServers` list when handed a host:port string, so an empty or
+/// colon-port list must count as NOT usable (the wizard re-runs setup).
+pub fn nrpt_rule_is_usable(rule: &NrptRule) -> bool {
+    !rule.name_servers.is_empty() && rule.name_servers.iter().all(|s| !s.contains(':'))
+}
+
+/// Point the static DNS server of every ACTIVE adapter at `ip` (bare IP,
+/// implicit port 53) — the NextDNS-style fallback for degraded-Dnscache
+/// boxes where NRPT doesn't apply.
+///
+/// On Windows this shells out to `netsh` for each active adapter (both IPv4
+/// and IPv6). Returns `true` when at least one adapter was updated, `false`
+/// when there were no active adapters (nothing to do). Errors from individual
+/// adapters are non-fatal (we best-effort each one) so a single flaky
+/// interface doesn't block the rest.
+///
+/// On non-Windows targets this is a no-op returning `Ok(false)` — there's no
+/// `netsh` and the Unix path uses its own resolver mechanism.
+pub fn set_adapter_dns(ip: &str) -> Result<bool, NrptError> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        let netsh = "netsh.exe";
+        // Enumerate adapters.
+        let show = Command::new(netsh)
+            .args(["interface", "ipv4", "show", "interfaces"])
+            .output()
+            .map_err(NrptError::Io)?;
+        let stdout = String::from_utf8_lossy(&show.stdout).to_string();
+        let adapters = parse_netsh_interfaces(&stdout);
+        let mut updated = false;
+        for a in adapters.iter().filter(|a| a.active) {
+            // IPv4 primary server.
+            let v4cmd = build_set_dnsserver_cmd(a.idx, ip, true);
+            let r = Command::new(netsh)
+                .args(v4cmd.split_whitespace())
+                .output()
+                .map_err(NrptError::Io)?;
+            if r.status.success() {
+                updated = true;
+            }
+            // IPv6: only set a v6 server if the resolver IP is IPv6 (e.g. ::1).
+            if ip
+                .parse::<std::net::IpAddr>()
+                .map(|v| v.is_ipv6())
+                .unwrap_or(false)
+            {
+                let v6cmd = build_set_dnsserver_cmd(a.idx, ip, false);
+                let r6 = Command::new(netsh)
+                    .args(v6cmd.split_whitespace())
+                    .output()
+                    .map_err(NrptError::Io)?;
+                if r6.status.success() {
+                    updated = true;
+                }
+            }
+        }
+        Ok(updated)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ip;
+        Ok(false)
+    }
+}
+
 // ─── High-level setup / teardown ───────────────────────────────────────────
 
 /// Normalize a zone name into an NRPT namespace.
@@ -367,6 +630,26 @@ impl WindowsNrptApi {
 ///
 /// Returns parse errors as [`NrptError::ParseError`] with the offending JSON
 /// snippet included so an operator can diagnose it from the agent logs.
+/// Extract a bare IP-address string from one JSON value in the `NameServers`
+/// position, tolerating the shapes actually observed across PowerShell/.NET
+/// versions:
+///
+/// - A plain string: `"127.0.0.53"` -> returned as-is.
+/// - A serialized `.NET IPAddress` object: `{"Address":..., "IPAddressToString":"127.0.0.53", ...}`
+///   -> read the `IPAddressToString` field (the human-readable form; `Address`
+///   is the packed integer form and NOT what NRPT/netsh expect as a string).
+/// - Anything else -> `None` (caller decides whether that's an error).
+fn ip_string_from_value(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => map
+            .get("IPAddressToString")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_list_output(stdout: &str) -> Result<Vec<NrptRule>, NrptError> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
@@ -414,10 +697,28 @@ pub(crate) fn parse_list_output(stdout: &str) -> Result<Vec<NrptRule>, NrptError
         };
         let name_servers = match entry.get("NameServers") {
             Some(serde_json::Value::String(s)) => vec![s.clone()],
-            Some(serde_json::Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
+            Some(serde_json::Value::Array(arr)) => {
+                arr.iter().filter_map(|v| ip_string_from_value(v)).collect()
+            }
+            // Real shape found live (2026-08-30, DESKTOP-CBSQDNE, second pass):
+            // on some PowerShell/.NET versions `NameServers` serializes as a
+            // single .NET `IPAddress` OBJECT (not a string, not an array):
+            // {"Address":889192575,...,"IPAddressToString":"127.0.0.53"}.
+            // The pre-fix parser hit the `Some(other) => Err(...)` branch for
+            // this shape, which failed list_rules() ENTIRELY — every rule
+            // (including a correctly `ZTLP-managed`-tagged, fully-working
+            // one) was reported as unusable, so the desktop app's Setup
+            // screen showed a false-negative red "DNS routes missing" even
+            // though DNS was verifiably working (curl 200, agent resolving).
+            Some(obj @ serde_json::Value::Object(_)) => match ip_string_from_value(obj) {
+                Some(ip) => vec![ip],
+                None => {
+                    return Err(NrptError::ParseError(format!(
+                        "NameServers object has no recognizable IP string field: {}",
+                        obj
+                    )))
+                }
+            },
             Some(serde_json::Value::Null) | None => Vec::new(),
             Some(other) => {
                 return Err(NrptError::ParseError(format!(
@@ -503,6 +804,117 @@ pub fn default_nrpt_api() -> Box<dyn NrptApi> {
 
 #[cfg(test)]
 mod tests {
+
+    // ─── Regression: NRPT NameServers must never carry a colon-port ───────
+    //
+    // Real bug (2026-08-30, DESKTOP-CBSQDNE): `Add-DnsClientNrptRule` given
+    // `127.0.0.53:5353` silently stored an EMPTY NameServers list and
+    // Chrome got DNS_PROBE_FINISHED_NXDOMAIN — the command reported
+    // success, the rule existed, it pointed nowhere. These tests lock in
+    // the invariant that every rule this module installs carries a BARE IP
+    // with no `:port`, because NRPT can only route a namespace to an IP
+    // on implicit port 53.
+
+    /// Helper mirroring the guard the `setup_status` / `dns_configured`
+    /// check applies: a rule is USABLE iff it has at least one server and
+    /// every server is a bare IP (no colon-port).
+    fn rule_is_usable(rule: &NrptRule) -> bool {
+        !rule.name_servers.is_empty() && rule.name_servers.iter().all(|s| !s.contains(':'))
+    }
+
+    /// The exact live failure shape: a rule whose single server is a
+    /// host:port string. `parse_list_output` must parse it faithfully (we
+    /// cannot know Windows mangled it) and the usability guard must
+    /// classify it as NOT usable — so `dns_configured` reports false and
+    /// the wizard re-runs dns-setup instead of showing a green check.
+    #[test]
+    fn host_port_server_is_parsed_but_not_usable() {
+        let json = r#"[{"Namespace":[".demo.spongebob.ztlp"],"NameServers":["127.0.0.53:5353"],"Comment":"ZTLP-managed"}]"#;
+        let rules = parse_list_output(json).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].name_servers, vec!["127.0.0.53:5353"]);
+        assert!(
+            !rule_is_usable(&rules[0]),
+            "a host:port server must NOT count as a usable NRPT rule"
+        );
+    }
+
+    /// The live EMPTY-list shape (what Windows actually stored).
+    #[test]
+    fn empty_name_servers_is_not_usable() {
+        let rule = NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: Vec::new(),
+            comment: ZTLP_NRPT_MARKER.into(),
+        };
+        assert!(!rule_is_usable(&rule));
+    }
+
+    /// A bare-IP server IS usable.
+    #[test]
+    fn bare_ip_server_is_usable() {
+        let rule = NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        };
+        assert!(rule_is_usable(&rule));
+    }
+
+    /// End-to-end through `setup_zones`: the installed rule's NameServers is
+    /// exactly the string the caller handed in — pinning the contract that
+    /// the caller (CLI) must hand a bare IP.
+    #[test]
+    fn setup_zones_stores_the_given_server_verbatim() {
+        let api = FakeNrptApi::new();
+        let installed =
+            setup_zones(&api, &["demo.spongebob.ztlp".to_string()], "127.0.0.53").unwrap();
+        assert_eq!(installed, vec![".demo.spongebob.ztlp"]);
+        let rules = api.list_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(
+            rule_is_usable(&rules[0]),
+            "server handed to setup_zones must produce a usable rule: {:?}",
+            rules[0]
+        );
+    }
+
+    // ─── plan_windows_nrpt_listen ─────────────────────────────────────────
+
+    #[test]
+    fn plan_port_53_uses_configured_address() {
+        let p = plan_windows_nrpt_listen("127.0.0.53:53").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(!p.needs_alias);
+    }
+
+    #[test]
+    fn plan_non_53_port_moves_resolver_to_alias_port_53() {
+        // The live-bug case: configured 5353 (mDNS), NRPT needs port 53.
+        let p = plan_windows_nrpt_listen("127.0.0.53:5353").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(!p.needs_alias, "alias is the configured host itself");
+    }
+
+    #[test]
+    fn plan_127_0_0_1_non_53_moves_to_alias() {
+        let p = plan_windows_nrpt_listen("127.0.0.1:5353").unwrap();
+        assert_eq!(p.bind_addr, "127.0.0.53:53".parse().unwrap());
+        assert_eq!(p.nrpt_server.to_string(), "127.0.0.53");
+        assert!(p.needs_alias);
+    }
+
+    #[test]
+    fn plan_rejects_host_without_port() {
+        assert!(plan_windows_nrpt_listen("127.0.0.53").is_err());
+    }
+
+    #[test]
+    fn plan_rejects_non_ip_host() {
+        assert!(plan_windows_nrpt_listen("localhost:53").is_err());
+    }
     use super::*;
 
     #[test]
@@ -956,6 +1368,118 @@ mod tests {
         }
     }
 
+    /// Real bug found live (2026-08-30, DESKTOP-CBSQDNE, second pass): on this
+    /// box `NameServers` serializes as a raw .NET `IPAddress` OBJECT (not a
+    /// string, not a string array) — `{"Address":889192575,...,
+    /// "IPAddressToString":"127.0.0.53"}`. Before this fix, `Some(other) =>
+    /// Err(...)` fired on this shape and **list_rules() failed entirely**:
+    /// every rule (including a correctly ZTLP-managed, fully-working one)
+    /// was reported unusable, so the desktop app's Setup screen showed a
+    /// false-negative red "DNS routes missing" / "CA not installed" even
+    /// though DNS was verifiably working (curl 200, live gateway auth).
+    /// The parser must extract `IPAddressToString`, not error out.
+    #[test]
+    fn parse_list_accepts_ipaddress_object_nameservers_shape() {
+        let json = concat!(
+            r#"[{"Namespace":[".demo.spongebob.ztlp"],"#,
+            r#""NameServers":{"Address":889192575,"AddressFamily":2,"ScopeId":null,"#,
+            r#""IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"IsIPv6SiteLocal":false,"#,
+            r#""IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"IPAddressToString":"127.0.0.53"},"#,
+            r#""Comment":"ZTLP-managed"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].namespace, ".demo.spongebob.ztlp");
+        assert_eq!(parsed[0].name_servers, vec!["127.0.0.53"]);
+        assert_eq!(parsed[0].comment, "ZTLP-managed");
+        // And it must be classified USABLE by the read-back guard — this is
+        // exactly what makes `dns_configured` report true instead of a false
+        // negative.
+        assert!(nrpt_rule_is_usable(&parsed[0]));
+    }
+
+    /// Same IPAddress-object shape but inside an ARRAY of name servers (the
+    /// multi-resolver case) — every element must resolve to its
+    /// `IPAddressToString`.
+    #[test]
+    fn parse_list_accepts_ipaddress_object_array_nameservers_shape() {
+        let json = concat!(
+            r#"[{"Namespace":[".demo.spongebob.ztlp"],"#,
+            r#""NameServers":[{"Address":889192575,"IPAddressToString":"127.0.0.53"},"#,
+            r#"{"Address":889192576,"IPAddressToString":"127.0.0.54"}],"#,
+            r#""Comment":"ZTLP-managed"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].name_servers,
+            vec!["127.0.0.53".to_string(), "127.0.0.54".to_string()]
+        );
+    }
+
+    /// An IPAddress-shaped object with no `IPAddressToString` field at all is
+    /// a genuine parse error (we can't recover an address from it) — but the
+    /// error message must be specific, not the generic "unexpected shape".
+    #[test]
+    fn parse_list_rejects_ipaddress_object_missing_string_field() {
+        let json = r#"[{"Namespace":[".x.ztlp"],"NameServers":{"Address":123},"Comment":"c"}]"#;
+        let err = parse_list_output(json).unwrap_err();
+        match err {
+            NrptError::ParseError(msg) => {
+                assert!(
+                    msg.contains("no recognizable IP string field"),
+                    "msg = {}",
+                    msg
+                );
+            }
+            other => panic!("expected ParseError, got {:?}", other),
+        }
+    }
+
+    /// Exact JSON captured live from DESKTOP-CBSQDNE (2026-08-30, second
+    /// pass) via `Get-DnsClientNrptRule | ... | ConvertTo-Json` — 4 rules,
+    /// mixed comments (3 from a manual registry write with comment "ZTLP",
+    /// 1 correctly agent-managed with "ZTLP-managed"), all NameServers in
+    /// the IPAddress-object shape. Before this fix this ENTIRE payload
+    /// failed to parse (first offending element aborted the whole call),
+    /// which is exactly why `dns_configured` in control.rs showed false
+    /// (red "DNS routes missing") despite DNS actually working end-to-end.
+    #[test]
+    fn parse_list_real_desktop_cbsqdne_second_pass_payload() {
+        let json = concat!(
+            r#"[{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"},"#,
+            r#"{"Namespace":[".demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP-managed"},"#,
+            r#"{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"},"#,
+            r#"{"Namespace":["demo.spongebob.ztlp"],"NameServers":{"Address":889192575,"#,
+            r#""AddressFamily":2,"ScopeId":null,"IsIPv6Multicast":false,"IsIPv6LinkLocal":false,"#,
+            r#""IsIPv6SiteLocal":false,"IsIPv6Teredo":false,"IsIPv4MappedToIPv6":false,"#,
+            r#""IPAddressToString":"127.0.0.53"},"Comment":"ZTLP"}]"#,
+        );
+        let parsed = parse_list_output(json).unwrap();
+        assert_eq!(parsed.len(), 4);
+        // The one correctly-managed rule must be found, usable, and match
+        // the enrolled zone — proving `should_use_static_dns_fallback` (and
+        // by extension control.rs's dns_configured guard) now sees it.
+        let managed = parsed
+            .iter()
+            .find(|r| r.comment == ZTLP_NRPT_MARKER)
+            .expect("the ZTLP-managed rule must parse, not vanish into a whole-payload error");
+        assert!(nrpt_rule_is_usable(managed));
+        assert!(!should_use_static_dns_fallback(
+            &parsed,
+            "demo.spongebob.ztlp"
+        ));
+    }
+
     #[test]
     fn windows_nrpt_api_default_path_is_powershell_exe() {
         let api = WindowsNrptApi::new();
@@ -971,5 +1495,205 @@ mod tests {
             api.powershell_path,
             "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
         );
+    }
+
+    // ─── Static-DNS fallback (NextDNS-style) ───────────────────────────────
+    //
+    // Real bug (2026-08-30, DESKTOP-CBSQDNE): even a correct, bare-IP NRPT
+    // rule did NOT apply on that box — its Dnscache subsystem was degraded
+    // (Get-DnsClientNrptPolicy threw WIN32 9572, Add-DnsClientNrptRule
+    // silently no-oped, DnsAdmin COM missing), so Chrome/curl still routed
+    // the zone to the ISP resolver. NRPT is the MOST surgical but LEAST
+    // reliable Windows DNS-interception technique.
+    //
+    // NextDNS solves this by NOT using NRPT at all: it sets each interface's
+    // static DNS server to its local port-53 resolver
+    // (`netsh interface ipv4 set dnsserver <idx> static 127.0.0.1 primary`),
+    // which is the OS's PRIMARY resolver path (not a side rule Dnscache can
+    // refuse) and is therefore reliable. The agent already forwards
+    // non-zone queries upstream, so pointing the adapter at it is safe.
+    //
+    // We keep NRPT as the PRIMARY (surgical, zone-only) technique and add
+    // the static-DNS fallback for when NRPT read-back shows it didn't
+    // actually stick. These tests lock the decision + command shape.
+
+    /// A healthy NRPT rule (zone matches, usable bare-IP server) means NO
+    /// fallback — NRPT is honored, so we stay surgical.
+    #[test]
+    fn fallback_not_needed_when_nrpt_rule_is_usable() {
+        let rules = vec![NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }];
+        assert!(
+            !should_use_static_dns_fallback(&rules, "demo.spongebob.ztlp"),
+            "a usable NRPT rule for the zone must suppress the fallback"
+        );
+    }
+
+    /// The degraded-box failure: the rule is ABSENT (Dnscache stored nothing).
+    /// Fallback must fire so the adapter DNS gets pointed at the resolver.
+    #[test]
+    fn fallback_fires_when_nrpt_rule_is_absent() {
+        let rules: Vec<NrptRule> = Vec::new();
+        assert!(
+            should_use_static_dns_fallback(&rules, "demo.spongebob.ztlp"),
+            "no NRPT rule present must trigger the static-DNS fallback"
+        );
+    }
+
+    /// The degraded-box failure: the rule exists but Dnscache stored an EMPTY
+    /// NameServers list (the original host:port silent-mangle shape). Fallback
+    /// must fire.
+    #[test]
+    fn fallback_fires_when_nrpt_rule_has_empty_name_servers() {
+        let rules = vec![NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: Vec::new(),
+            comment: ZTLP_NRPT_MARKER.into(),
+        }];
+        assert!(
+            should_use_static_dns_fallback(&rules, "demo.spongebob.ztlp"),
+            "an empty-NameServers rule must trigger the static-DNS fallback"
+        );
+    }
+
+    /// A rule whose server is a host:port string (the original bug shape) is
+    /// not usable — fallback must fire.
+    #[test]
+    fn fallback_fires_when_nrpt_rule_has_host_port_server() {
+        let rules = vec![NrptRule {
+            namespace: ".demo.spongebob.ztlp".into(),
+            name_servers: vec!["127.0.0.53:5353".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }];
+        assert!(
+            should_use_static_dns_fallback(&rules, "demo.spongebob.ztlp"),
+            "a host:port server must NOT count as usable; fallback fires"
+        );
+    }
+
+    /// A rule for a DIFFERENT zone must not satisfy the check for our zone —
+    /// fallback fires (we only care about the enrolled zone's rule).
+    #[test]
+    fn fallback_ignores_rules_for_other_zones() {
+        let rules = vec![NrptRule {
+            namespace: ".other.acme.ztlp".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }];
+        assert!(
+            should_use_static_dns_fallback(&rules, "demo.spongebob.ztlp"),
+            "a rule for a different zone must not suppress our fallback"
+        );
+    }
+
+    /// Zone match is case-insensitive and leading-dot tolerant (NRPT stores
+    /// the leading-dot form; callers pass the bare zone).
+    #[test]
+    fn fallback_zone_match_is_case_insensitive_and_dot_tolerant() {
+        let rules = vec![NrptRule {
+            namespace: ".Demo.SpongeBob.ZTLP".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }];
+        assert!(!should_use_static_dns_fallback(
+            &rules,
+            "demo.spongebob.ztlp"
+        ));
+    }
+
+    /// `nrpt_rule_is_usable` is the single source of truth for the read-back
+    /// guard: non-empty AND every server a bare IP (no colon-port).
+    #[test]
+    fn nrpt_rule_is_usable_requires_bare_ip_server() {
+        assert!(nrpt_rule_is_usable(&NrptRule {
+            namespace: ".z".into(),
+            name_servers: vec!["127.0.0.53".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }));
+        assert!(!nrpt_rule_is_usable(&NrptRule {
+            namespace: ".z".into(),
+            name_servers: Vec::new(),
+            comment: ZTLP_NRPT_MARKER.into(),
+        }));
+        assert!(!nrpt_rule_is_usable(&NrptRule {
+            namespace: ".z".into(),
+            name_servers: vec!["127.0.0.53:5353".into()],
+            comment: ZTLP_NRPT_MARKER.into(),
+        }));
+    }
+
+    /// The adapter-DNS command must be the NextDNS form:
+    /// `netsh interface ipv4 set dnsserver <idx> static <ip> primary` — a BARE
+    /// IP, never a host:port (netsh, like NRPT, takes implicit port 53).
+    #[test]
+    fn set_dnsserver_cmd_is_bare_ip_static_primary() {
+        let cmd = build_set_dnsserver_cmd(14, "127.0.0.53", true);
+        assert!(
+            cmd.contains("netsh interface ipv4 set dnsserver 14 static 127.0.0.53 primary"),
+            "cmd = {cmd}"
+        );
+        // Must NOT carry a port suffix.
+        assert!(!cmd.contains("127.0.0.53:"));
+    }
+
+    /// The same helper for the IPv6 path (`::1`) — IPv6 uses the `ipv6`
+    /// subcommand and a bare IPv6 literal.
+    #[test]
+    fn set_dnsserver_cmd_ipv6_uses_ipv6_subcommand() {
+        let cmd = build_set_dnsserver_cmd(14, "::1", false);
+        assert!(
+            cmd.contains("netsh interface ipv6 set dnsserver 14 static ::1 primary"),
+            "cmd = {cmd}"
+        );
+    }
+
+    /// Adapter enumeration must parse `netsh interface ipv4 show interfaces`
+    /// output: skip header rows + the blank separator, and classify the
+    /// State column (Active/Disconnected/Media disconnected) so only Active
+    /// adapters get the DNS server pointed at the resolver.
+    #[test]
+    fn parse_netsh_interfaces_extracts_active_adapters() {
+        // Exact shape captured from `netsh interface ipv4 show interfaces`
+        // on a typical Windows 11 box (locale-en). The State column is the
+        // 3rd column; the header + a blank separator precede the data rows.
+        let sample = "\
+Admin State      State          Name
+-------------    --------------- --------------------------
+Disabled         Disconnected   Loopback Pseudo-Interface 1
+Enabled          Connected      Loopback Pseudo-Interface 2
+Enabled          Connected      Ethernet
+Enabled          Disconnected   Wi-Fi
+";
+        let adps = parse_netsh_interfaces(sample);
+        // Only the rows with Enabled+Connected state are active. The sample
+        // has 2 active adapters (Loopback Pseudo-Interface 2 + Ethernet) and
+        // 2 inactive (Loopback Pseudo-Interface 1 = Disabled, Wi-Fi = Disconnected).
+        let active: Vec<_> = adps.iter().filter(|a| a.active).collect();
+        assert_eq!(active.len(), 2, "expected 2 active adapters, got {adps:?}");
+        assert!(adps.iter().any(|a| a.name == "Loopback Pseudo-Interface 2"));
+        assert!(adps.iter().any(|a| a.name == "Ethernet"));
+        // The Disabled/Disconnected loopback pseudo-interface must be flagged
+        // inactive so we never point its DNS at the resolver.
+        assert!(
+            !adps
+                .iter()
+                .find(|a| a.name == "Loopback Pseudo-Interface 1")
+                .unwrap()
+                .active
+        );
+        // Every parsed row carries a numeric idx (the netsh interface index).
+        for a in &adps {
+            assert!(a.idx > 0, "adapter {:?} has a non-positive idx", a.name);
+        }
+    }
+
+    /// A blank/empty netsh output yields no adapters (graceful no-op).
+    #[test]
+    fn parse_netsh_interfaces_empty_input() {
+        assert!(parse_netsh_interfaces("").is_empty());
+        assert!(parse_netsh_interfaces("   \n  ").is_empty());
     }
 }

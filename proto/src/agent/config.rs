@@ -455,6 +455,77 @@ impl AgentConfig {
             .map(|s| s.as_str())
             .unwrap_or("127.0.0.1:23096")
     }
+
+    /// Load agent config, backfilling any field the agent config leaves at
+    /// its default from the CLI's `~/.ztlp/config.toml`.
+    ///
+    /// ## Why this exists
+    ///
+    /// `ztlp setup --token ... --yes` writes the enrolled zone's
+    /// `ns_server`/`relay`/`identity` to `~/.ztlp/config.toml`. `ztlp agent
+    /// start` — including the invocation the desktop app's "Connect" button
+    /// makes, with no `-c` flag — only ever read `~/.ztlp/agent.toml`, a
+    /// file `setup` never writes. A freshly-enrolled device's agent daemon
+    /// therefore silently started against `AgentConfig::default()`
+    /// (`127.0.0.1:23096`, no relay) instead of the zone the user just
+    /// joined, and every tunnel attempt failed or hit the wrong network
+    /// entirely. `load_merged` closes that gap without requiring the
+    /// operator to hand-author `agent.toml`: real `agent.toml` values are
+    /// never overridden, only fields still at their bare struct default are
+    /// backfilled from `config.toml`.
+    pub fn load_merged(agent_config_path: &Path, cli_config_path: &Path) -> Self {
+        let mut cfg = Self::load_from_path(agent_config_path);
+        let cli = CliConfigForMerge::load(cli_config_path);
+
+        if cfg.ns.servers == NsConfig::default().servers {
+            if let Some(ns_server) = cli.ns_server {
+                cfg.ns.servers = vec![ns_server];
+            }
+        }
+        if cfg.tunnel.relays.0.is_empty() {
+            if let Some(relay) = cli.relay {
+                cfg.tunnel.relays = RelayAddrs(vec![relay]);
+            }
+        }
+        if cfg.identity.path == IdentityConfig::default().path {
+            if let Some(identity) = cli.identity {
+                cfg.identity.path = identity;
+            }
+        }
+
+        cfg
+    }
+}
+
+/// Minimal shape of the CLI's `~/.ztlp/config.toml`, used only to backfill
+/// [`AgentConfig::load_merged`]. Deliberately narrow — the CLI's `Config`
+/// struct (in `bin/ztlp-cli.rs`) is the source of truth for that file's full
+/// schema; this is just the handful of fields the agent daemon also cares
+/// about.
+#[derive(Debug, Default, Deserialize)]
+struct CliConfigForMerge {
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
+    #[serde(default)]
+    ns_server: Option<String>,
+}
+
+impl CliConfigForMerge {
+    /// Load from `path`, falling back to all-`None` on any error (missing
+    /// file, malformed TOML) — mirrors [`AgentConfig::load_from_path`]'s
+    /// fail-open behavior so a broken/missing CLI config never blocks the
+    /// agent from starting with defaults.
+    fn load(path: &Path) -> Self {
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
 }
 
 /// Expand `~` prefix to the user's home directory.
@@ -805,5 +876,107 @@ node_id = "abcd"
             "expected overflow error, got: {}",
             err
         );
+    }
+
+    // ── `ztlp setup` / agent config bridge (2026-08-30) ─────────────────────
+    //
+    // `ztlp setup --token ... --yes` writes ~/.ztlp/config.toml with the
+    // enrolled zone's ns_server/relay/identity. `ztlp agent start` (spawned
+    // by the desktop app's "Connect" button, with no `-c` flag) only ever
+    // read ~/.ztlp/agent.toml — a DIFFERENT file that setup never writes —
+    // so a freshly-enrolled device's agent silently fell back to
+    // AgentConfig::default() (ns_server 127.0.0.1:23096, no relay), pointing
+    // at nothing related to the zone the user just joined. `load_merged`
+    // closes that gap: when agent.toml is absent/incomplete, missing fields
+    // are backfilled from the CLI's config.toml, without ever overriding an
+    // explicit agent.toml value.
+
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn test_load_merged_backfills_from_cli_config_when_agent_toml_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join("agent.toml"); // does not exist
+        let cli_path = dir.path().join("config.toml");
+        write_file(
+            &cli_path,
+            r#"
+identity = "/home/user/.ztlp/identity.json"
+ns_server = "34.221.165.244:24096"
+relay = "34.221.165.244:24095"
+zone = "demo.spongebob.ztlp"
+"#,
+        );
+
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+
+        assert_eq!(cfg.ns_server(), "34.221.165.244:24096");
+        assert_eq!(
+            cfg.tunnel.relays.0.first().map(String::as_str),
+            Some("34.221.165.244:24095")
+        );
+        assert_eq!(
+            cfg.identity_path(),
+            PathBuf::from("/home/user/.ztlp/identity.json")
+        );
+    }
+
+    #[test]
+    fn test_load_merged_prefers_explicit_agent_toml_over_cli_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join("agent.toml");
+        let cli_path = dir.path().join("config.toml");
+        write_file(
+            &agent_path,
+            r#"
+[ns]
+servers = ["10.0.0.1:23096"]
+"#,
+        );
+        write_file(
+            &cli_path,
+            r#"
+ns_server = "34.221.165.244:24096"
+relay = "34.221.165.244:24095"
+"#,
+        );
+
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+
+        // Explicit agent.toml value wins — never silently overridden.
+        assert_eq!(cfg.ns_server(), "10.0.0.1:23096");
+        // But tunnel.relay, which agent.toml never set, is still backfilled.
+        assert_eq!(
+            cfg.tunnel.relays.0.first().map(String::as_str),
+            Some("34.221.165.244:24095")
+        );
+    }
+
+    #[test]
+    fn test_load_merged_falls_back_to_defaults_when_neither_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join("agent.toml");
+        let cli_path = dir.path().join("config.toml");
+
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+
+        assert_eq!(cfg.ns_server(), "127.0.0.1:23096");
+        assert!(cfg.tunnel.relays.0.is_empty());
+    }
+
+    #[test]
+    fn test_load_merged_ignores_malformed_cli_config_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_path = dir.path().join("agent.toml");
+        let cli_path = dir.path().join("config.toml");
+        write_file(&cli_path, "not valid toml {{{");
+
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+
+        // Malformed CLI config must not panic and must not poison agent
+        // defaults — falls back exactly as if the file were absent.
+        assert_eq!(cfg.ns_server(), "127.0.0.1:23096");
     }
 }

@@ -25,6 +25,19 @@ pub struct VipEntry {
     pub ztlp_name: String,
     /// The resolved peer endpoint (from NS SVC record).
     pub peer_addr: Option<std::net::SocketAddr>,
+    /// The resolved peer's NodeID (from NS KEY record), when available.
+    ///
+    /// Needed for the automatic VIP tunnel dialer's CLIENT_ROUTE frame:
+    /// a shared relay's fallback-by-NodeID lookup (used when the plain
+    /// service-name lookup misses — e.g. a gateway registered under a
+    /// zone key like "gw:demo.spongebob.ztlp" rather than the bare
+    /// service name) requires the PEER's NodeID, not the client's own.
+    /// Without caching this alongside `peer_addr`, every VIP-proxied
+    /// connection after the first DNS resolution had no NodeID to fall
+    /// back to and its CLIENT_ROUTE was rejected by the relay — found
+    /// live 2026-08-30 while debugging why the automatic tunnel dial
+    /// still failed even after fixing NS NodeID resolution itself.
+    pub peer_node_id: Option<crate::identity::NodeId>,
     /// When this allocation was created.
     pub created_at: Instant,
     /// When this allocation expires (based on NS record TTL).
@@ -111,6 +124,7 @@ impl VipPool {
                     ip,
                     ztlp_name: name.clone(),
                     peer_addr: None,
+                    peer_node_id: None,
                     created_at: now,
                     expires_at: ttl.map(|d| now + d),
                     active_connections: 0,

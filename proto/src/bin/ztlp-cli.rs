@@ -6504,12 +6504,46 @@ async fn cmd_relay_status(target: &str) -> Result<(), Box<dyn std::error::Error>
 fn ns_record_payload(response: &[u8]) -> Result<Option<&[u8]>, Box<dyn std::error::Error>> {
     match response {
         [] => Ok(None),
-        [0x02, 0x01, record @ ..] => {
-            // Some NS replies insert a truncation/continuation flag byte after
-            // the found marker. Keep the actual record type byte intact.
-            Ok(Some(record))
+        [0x02, rest @ ..] => {
+            // NS amplification prevention may insert a 0x01 truncation flag
+            // byte after the 0x02 FOUND marker — but a KEY record's own
+            // type byte is ALSO 0x01, so `[0x02, 0x01, ...]` is genuinely
+            // ambiguous between "truncation flag, real type follows" and
+            // "no flag, 0x01 IS the real (KEY) type byte" (see
+            // `ns_record_payload_does_not_misparse_untruncated_key_record`
+            // — this exact ambiguity silently corrupted every complete
+            // KEY-record response before this fix). Disambiguate
+            // structurally like `ns_query_raw` above does: try the
+            // no-flag interpretation first (the common case) and only
+            // treat it as a flag if the no-flag interpretation doesn't
+            // parse as a structurally valid record.
+            fn looks_structurally_valid(record: &[u8]) -> bool {
+                if record.len() < 4 {
+                    return false;
+                }
+                let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+                if record.len() < 3 + name_len + 4 {
+                    return false;
+                }
+                let offset = 3 + name_len;
+                let data_len = u32::from_be_bytes([
+                    record[offset],
+                    record[offset + 1],
+                    record[offset + 2],
+                    record[offset + 3],
+                ]) as usize;
+                record.len() >= offset + 4 + data_len
+            }
+
+            if rest.first() == Some(&0x01) && !looks_structurally_valid(rest) {
+                // Only skip the extra byte when treating it as the real
+                // type byte fails to validate — i.e. it really was a
+                // truncation flag.
+                Ok(Some(&rest[1..]))
+            } else {
+                Ok(Some(rest))
+            }
         }
-        [0x02, record @ ..] => Ok(Some(record)),
         _ => Ok(None),
     }
 }
@@ -8677,12 +8711,19 @@ async fn setup_join(
         n.clone()
     } else {
         let default_name = get_hostname();
-        let name: String = Input::new()
-            .with_prompt("Device name")
-            .default(default_name)
-            .interact_text()
-            .map_err(|e| format!("input error: {}", e))?;
-        name
+        if auto_yes {
+            // --yes means fully non-interactive: never block on a TTY prompt
+            // (this path is also hit by callers with no controlling terminal,
+            // e.g. the desktop app invoking `ztlp setup --token ... --yes`).
+            default_name
+        } else {
+            let name: String = Input::new()
+                .with_prompt("Device name")
+                .default(default_name)
+                .interact_text()
+                .map_err(|e| format!("input error: {}", e))?;
+            name
+        }
     };
 
     // Full ZTLP name
@@ -12258,7 +12299,22 @@ async fn cmd_agent_start(
     let config = if let Some(path) = config_path {
         AgentConfig::load_from_path(path)
     } else {
-        AgentConfig::load()
+        // v0.36 fix: `agent start` used to read only `~/.ztlp/agent.toml`,
+        // a file `ztlp setup` never writes. A freshly-enrolled device's
+        // agent silently started against AgentConfig::default()
+        // (127.0.0.1:23096, no relay) instead of the zone the operator
+        // just joined via `ztlp setup --token ... --yes`. load_merged
+        // backfills ns_server/relay/identity from `~/.ztlp/config.toml`
+        // (the file `setup` DOES write) whenever agent.toml leaves those
+        // fields at their bare default — see agent::config for the full
+        // rationale and unit tests.
+        let agent_path = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("agent.toml"))
+            .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
+        let cli_path = dirs::home_dir()
+            .map(|h| h.join(".ztlp").join("config.toml"))
+            .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+        AgentConfig::load_merged(&agent_path, &cli_path)
     };
 
     if !foreground {
@@ -12719,9 +12775,55 @@ async fn cmd_agent_dns_setup_windows(
     zones: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
-    use ztlp_proto::agent::dns_setup_windows;
+    use ztlp_proto::agent::{control, dns_setup_windows};
 
-    let config = AgentConfig::load();
+    // Real bug found live on the Windows AI test machine (2026-08-30): this
+    // used `AgentConfig::load()` (agent.toml ONLY) instead of
+    // `load_merged` (agent.toml backfilled from config.toml — see
+    // `cmd_agent_start`'s identical fix from earlier this project). A
+    // device enrolled via the desktop app's own Setup screen never gets an
+    // `agent.toml` at all, so `config.dns.listen` silently fell back to the
+    // struct default `127.0.0.53:5353` — but the actually-RUNNING agent's
+    // DNS resolver may have fallen back to a DIFFERENT port (15353/25353)
+    // if 5353 was already taken, which is common on Windows (svchost's own
+    // mDNS responder + Chrome both commonly hold it — see the dns.rs
+    // fallback fix). The result: `Add-DnsClientNrptRule -NameServers
+    // @('127.0.0.53:5353')` pointed the NRPT rule at a port nothing was
+    // listening on, and Chrome got ERR_NAME_NOT_RESOLVED even though the
+    // agent's resolver was alive and correctly answering queries on its
+    // real (fallback) port.
+    //
+    // Fix: prefer the LIVE running agent's actual `dns_listen` (queried via
+    // the control-socket `status` command, which always reports the real
+    // bound address post-fallback) over the static config file. Only fall
+    // back to the merged config file's `config.dns.listen` if the agent
+    // isn't reachable (e.g. `dns-setup` run before `agent start`).
+    let agent_path = dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("agent.toml"))
+        .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
+    let cli_path = dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let config = AgentConfig::load_merged(&agent_path, &cli_path);
+
+    let live_dns_listen = {
+        let ipc_addr = config.ipc.listen.clone();
+        let cmd = control::ControlCommand {
+            cmd: "status".to_string(),
+            name: None,
+            token: ztlp_proto::agent::config::load_agent_token(),
+        };
+        match control::send_command(&ipc_addr, &cmd).await {
+            Ok(resp) if resp.ok => resp
+                .data
+                .as_ref()
+                .and_then(|d| d.get("dns_listen"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        }
+    };
+    let effective_dns_listen = live_dns_listen.unwrap_or_else(|| config.dns.listen.clone());
 
     // Same merge order as the Unix path: zones from config, then domain_map
     // keys, then any CLI-passed comma-separated additions. Dedup happens
@@ -12741,8 +12843,30 @@ async fn cmd_agent_dns_setup_windows(
         }
     }
 
+    // NRPT can ONLY take a bare IP (implicit port 53). The live
+    // `effective_dns_listen` may still carry a `:port` (e.g. when the
+    // agent is running with a high-port fallback from an older build, or
+    // when dns-setup is run before `agent start` and the config file says
+    // `127.0.0.53:5353`). Hand NRPT the bare IP rather than the host:port
+    // string — Windows silently stores an EMPTY NameServers list for a
+    // host:port value (the bug this whole fix exists for; see
+    // `dns_setup_windows::plan_windows_nrpt_listen`).
+    let nrpt_server: String = match effective_dns_listen.rsplit_once(':') {
+        Some((ip, _port)) => {
+            if ip.parse::<std::net::IpAddr>().is_err() {
+                return Err(format!(
+                    "cannot derive a bare IP for the NRPT rule from dns.listen {:?} (expected host:port with an IP host)",
+                    effective_dns_listen
+                )
+                .into());
+            }
+            ip.to_string()
+        }
+        None => effective_dns_listen.clone(),
+    };
+
     let api = dns_setup_windows::default_nrpt_api();
-    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &config.dns.listen) {
+    match dns_setup_windows::setup_zones(api.as_ref(), &zone_list, &nrpt_server) {
         Ok(installed) => {
             eprintln!(
                 "{} NRPT rules installed ({} namespace{})",
@@ -12751,7 +12875,10 @@ async fn cmd_agent_dns_setup_windows(
                 if installed.len() == 1 { "" } else { "s" }
             );
             for ns in &installed {
-                eprintln!("  {} → {}", ns, config.dns.listen);
+                eprintln!(
+                    "  {} → {} (resolver listening on {})",
+                    ns, nrpt_server, effective_dns_listen
+                );
             }
             eprintln!();
             eprintln!(
@@ -12760,6 +12887,41 @@ async fn cmd_agent_dns_setup_windows(
                     "Verify with: Get-DnsClientNrptRule | Where-Object Comment -Match 'ZTLP-managed'"
                 )
             );
+
+            // Read back and apply the static-DNS fallback when NRPT didn't
+            // actually stick (the degraded-Dnscache boxes where a correct,
+            // bare-IP NRPT rule still doesn't apply — e.g. DESKTOP-CBSQDNE).
+            // `set_adapter_dns` is a no-op on non-Windows and on a healthy
+            // box (NRPT already honored → returns early).
+            let enrolled_zone = zone_list.first().cloned().unwrap_or_default();
+            if let Ok(rules) = api.list_rules() {
+                if !enrolled_zone.is_empty()
+                    && dns_setup_windows::should_use_static_dns_fallback(&rules, &enrolled_zone)
+                {
+                    eprintln!(
+                        "{} NRPT rule not applied by the OS (degraded Dnscache) — falling back to static adapter DNS → {}",
+                        c_yellow("→"), nrpt_server
+                    );
+                    match dns_setup_windows::set_adapter_dns(&nrpt_server) {
+                        Ok(true) => {
+                            eprintln!(
+                                "{} adapter DNS pointed at {} (all active interfaces)",
+                                c_green("✓"),
+                                nrpt_server
+                            );
+                        }
+                        Ok(false) => {
+                            eprintln!(
+                                "{} no active adapters to update (static DNS fallback skipped)",
+                                c_yellow("→")
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("{} static DNS fallback failed: {}", c_red("✗"), e);
+                        }
+                    }
+                }
+            }
         }
         Err(e) => {
             eprintln!("{} NRPT setup failed: {}", c_red("✗"), e);
@@ -13564,6 +13726,48 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── ns_record_payload KEY-type/truncation-flag ambiguity (2026-08-30) ──
+    //
+    // Real bug found live: `ns_record_payload` (used by `ztlp ns lookup`)
+    // treats `[0x02, 0x01, ...]` as ALWAYS meaning "0x02 FOUND + 0x01
+    // truncation flag, strip 2 bytes" — but a KEY record's own type byte is
+    // ALSO 0x01, so every complete, correctly-sized KEY record response
+    // was silently misparsed (one byte too many stripped), corrupting the
+    // name/data that `print_ns_record` then reported as "Type: UNKNOWN /
+    // Raw: (truncated record)" even though the record was genuinely
+    // complete. `ns_query_raw` a few hundred lines above (used by `ztlp
+    // connect`) already disambiguates this correctly via structural
+    // validation (see its 'parse: block) — `ns_record_payload` needs the
+    // same treatment.
+    #[test]
+    fn ns_record_payload_does_not_misparse_untruncated_key_record() {
+        // Real capture: a live, padded (256-byte query) response from the
+        // demo NS server (34.221.165.244:24096) for
+        // web.demo.spongebob.ztlp's KEY record — confirmed complete/
+        // untruncated (339 bytes total).
+        let hex = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+        let data: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        let record = ns_record_payload(&data)
+            .expect("ns_record_payload must not error on a valid response")
+            .expect("must find a record payload");
+
+        // record[0] is the type byte; must be 0x01 (KEY), and record[1..3]
+        // must be the correct name_len (23, for "web.demo.spongebob.ztlp"),
+        // proving the byte offset wasn't shifted by the bogus truncation-
+        // flag detection.
+        assert_eq!(record[0], 0x01, "type byte must be KEY (1)");
+        let name_len = u16::from_be_bytes([record[1], record[2]]) as usize;
+        assert_eq!(
+            name_len, 23,
+            "name_len must be 23, not shifted by a phantom truncation flag"
+        );
+        assert_eq!(&record[3..3 + name_len], b"web.demo.spongebob.ztlp");
+    }
 
     // ── resolve_ns_address (TDD) ─────────────────────────────
     // The NS address parser must accept BOTH IP:PORT (fast path) and

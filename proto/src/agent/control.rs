@@ -422,6 +422,44 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     ControlResponse::ok_empty()
 }
 
+/// Read the enrolled zone name from whichever ZTLP config file exists on
+/// disk, checking both known shapes.
+///
+/// - `~/.ztlp/config.toml` (written by `ztlp setup --token ...`, the exact
+///   path the desktop app's own enroll flow uses): flat `zone = "..."` key.
+/// - `~/.ztlp/agent.toml` (the older/manual agent-config shape): `zones =
+///   [...]` under a `[dns]` section — the first entry is used.
+///
+/// Returns `None` if neither file exists or neither yields a zone.
+fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
+    let ztlp_dir = home.join(".ztlp");
+
+    if let Ok(text) = std::fs::read_to_string(ztlp_dir.join("config.toml")) {
+        let flat_zone = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("zone "))
+            .or_else(|| text.lines().find(|l| l.trim_start().starts_with("zone=")))
+            .and_then(|l| l.split('"').nth(1))
+            .map(|s| s.to_string());
+        if let Some(z) = flat_zone {
+            return Some(z);
+        }
+    }
+
+    if let Ok(text) = std::fs::read_to_string(ztlp_dir.join("agent.toml")) {
+        let dns_zone = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("zones"))
+            .and_then(|l| l.split('"').nth(1))
+            .map(|s| s.to_string());
+        if let Some(z) = dns_zone {
+            return Some(z);
+        }
+    }
+
+    None
+}
+
 /// Compute the wizard's setup status.
 ///
 /// This is a thin observability call: it reads the filesystem and (on
@@ -439,23 +477,32 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
     let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
     let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
 
-    // Identity / enrollment: read identity.json and look for zone.
-    let (identity_present, identity_enrolled, zone) = match std::fs::read_to_string(&identity_path)
-    {
-        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(v) => {
-                let z = v
-                    .get("zone")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let enrolled = !z.is_empty();
-                (true, enrolled, z)
-            }
-            Err(_) => (false, false, String::new()),
-        },
-        Err(_) => (false, false, String::new()),
-    };
+    // Identity presence: does identity.json exist and parse?
+    //
+    // Real bug found live on the Windows AI test machine (2026-08-30): this
+    // used to ALSO try to read a `"zone"` field directly out of
+    // identity.json to decide `identity_enrolled` — but identity.json's
+    // real schema (confirmed live, repeatedly) is
+    // `{node_id, static_private_key, static_public_key, signing_key_seed}`.
+    // There has never been a `zone` field in identity.json; the zone lives
+    // in `config.toml` (written by `ztlp setup`, flat `zone = "..."` key)
+    // or the older `agent.toml` ([dns] `zones = [...]`). So
+    // `identity_enrolled` was ALWAYS false for every real device, which
+    // silently blocked the ENTIRE zero-click auto-provisioning chain in
+    // app.js's `autoProvision()` (its very first gate is
+    // `status.identity_enrolled`) even on a genuinely, successfully
+    // enrolled device — confirmed live: Home showed "Active" (a different,
+    // correct code path) while CA-init/CA-install/DNS-setup silently never
+    // ran, and a real Chrome navigation to the zone hostname failed with
+    // ERR_NAME_NOT_RESOLVED because the NRPT rule was never (correctly)
+    // installed.
+    let identity_present = std::fs::read_to_string(&identity_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some();
+
+    let zone = read_zone_from_config(&home).unwrap_or_default();
+    let identity_enrolled = identity_present && !zone.is_empty();
 
     // CA initialized: both root + intermediate PEMs present AND parseable as X.509.
     let ca_initialized = ca_root_path.exists()
@@ -472,9 +519,20 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
             let api = crate::agent::dns_setup_windows::default_nrpt_api();
             match api.list_rules() {
                 Ok(rules) => Some(rules.iter().any(|r| {
+                    // The rule must target this zone AND carry a usable
+                    // NameServers list: Windows NRPT silently stores an
+                    // EMPTY list when handed a host:port string (real bug,
+                    // 2026-08-30, DESKTOP-CBSQDNE — Chrome got
+                    // DNS_PROBE_FINISHED_NXDOMAIN because the rule
+                    // "existed" but pointed nowhere). A rule with no usable
+                    // server must count as NOT configured so the wizard
+                    // re-runs dns-setup instead of showing a false green
+                    // checkmark.
                     r.namespace
                         .trim_start_matches('.')
                         .eq_ignore_ascii_case(&zone)
+                        && !r.name_servers.is_empty()
+                        && r.name_servers.iter().all(|s| !s.contains(':'))
                 })),
                 Err(_) => Some(false),
             }
@@ -583,11 +641,48 @@ pub fn is_process_running(pid: u32) -> bool {
         // by POSIX (IEEE Std 1003.1-2017, kill(2)).
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // v0.36 fix: this used to be hardcoded `false` on every non-Unix
+        // target, which silently disabled `ztlp agent start`'s
+        // "already running" duplicate-start guard on Windows — the
+        // platform the desktop app actually ships on. Shell out to
+        // `tasklist /FI "PID eq N"` (no extra crate/dependency needed) and
+        // check whether that PID is actually listed in the output.
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                tasklist_output_contains_pid(&stdout, pid)
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
     }
+}
+
+/// Pure parsing core of the Windows liveness check: does `tasklist`'s
+/// stdout actually list `pid`? Separated from the `Command::new("tasklist")`
+/// call so this logic is unit-testable without a live Windows process.
+///
+/// Uses `/FO CSV` output (`"ztlp.exe","12345","Console","1","18,432 K"`) and
+/// checks the quoted PID field exactly — a naive substring search on the raw
+/// table output would let PID 123 false-positive-match a row for PID 12345.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tasklist_output_contains_pid(output: &str, pid: u32) -> bool {
+    let pid_str = pid.to_string();
+    output.lines().any(|line| {
+        line.split(',')
+            .nth(1)
+            .map(|field| field.trim().trim_matches('"') == pid_str)
+            .unwrap_or(false)
+    })
 }
 
 /// Test-only helpers exposed for integration tests in `tests/`.
@@ -642,6 +737,61 @@ impl AgentState {
 mod tests {
     use super::*;
 
+    // ── read_zone_from_config (2026-08-30) ─────────────────────────────
+    //
+    // Real bug found live on the Windows AI test machine: `cmd_setup_status`
+    // used to read a `"zone"` field directly out of identity.json to decide
+    // `identity_enrolled` -- but identity.json never has a `zone` field
+    // (confirmed live, repeatedly: its real schema is
+    // {node_id, static_private_key, static_public_key, signing_key_seed}).
+    // This silently blocked app.js's ENTIRE auto-provisioning chain
+    // (CA-init, CA-install, DNS-setup) on every real device, even ones that
+    // had just completed a genuinely successful UI enrollment -- Home
+    // showed "Active" (a different, correct code path) while a real Chrome
+    // navigation to the zone hostname failed with ERR_NAME_NOT_RESOLVED.
+
+    #[test]
+    fn reads_zone_from_config_toml_flat_key() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-a", std::process::id()));
+        let ztlp_dir = dir.join(".ztlp");
+        std::fs::create_dir_all(&ztlp_dir).unwrap();
+        std::fs::write(
+            ztlp_dir.join("config.toml"),
+            "# ZTLP Configuration\nzone = \"demo.spongebob.ztlp\"\nns_server = \"34.221.165.244:24096\"\n",
+        )
+        .unwrap();
+
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_zone_from_agent_toml_dns_section() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-b", std::process::id()));
+        let ztlp_dir = dir.join(".ztlp");
+        std::fs::create_dir_all(&ztlp_dir).unwrap();
+        std::fs::write(
+            ztlp_dir.join("agent.toml"),
+            "[dns]\nzones = [\"demo.spongebob.ztlp\"]\n",
+        )
+        .unwrap();
+
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone.as_deref(), Some("demo.spongebob.ztlp"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn returns_none_when_no_config_files_exist() {
+        let dir = std::env::temp_dir().join(format!("ztlp-control-test-{}-c", std::process::id()));
+        // Deliberately do NOT create the directory or any files.
+        let zone = read_zone_from_config(&dir);
+        assert_eq!(zone, None);
+    }
+
     #[test]
     fn test_control_response_ok() {
         let resp = ControlResponse::ok(serde_json::json!({"test": true}));
@@ -691,5 +841,50 @@ mod tests {
     fn test_default_pid_path() {
         let path = default_pid_path();
         assert!(path.to_string_lossy().contains("agent.pid"));
+    }
+
+    // ── Windows liveness check (2026-08-30) ──────────────────────────────
+    //
+    // `is_process_running` was hardcoded `false` on every non-Unix target
+    // (`#[cfg(not(unix))] { let _ = pid; false }`), so `ztlp agent start`'s
+    // "already running" duplicate-start guard silently never fired on
+    // Windows — the platform every desktop-app user actually runs on. The
+    // symptom this produced: the desktop app's "Connect" button spawning a
+    // SECOND `ztlp agent start` on top of an already-running agent, which
+    // then failed to bind its IPC/DNS ports and surfaced as a spurious
+    // error banner even though an agent was already up and working fine.
+    //
+    // `tasklist_output_contains_pid` is the pure, OS-call-free parsing core
+    // of the Windows liveness check — it takes `tasklist /FI "PID eq N"`'s
+    // stdout and decides whether that PID is actually listed. Kept
+    // separate from the `Command::new("tasklist")` call itself so the
+    // matching logic is unit-testable without a live Windows process.
+
+    #[test]
+    fn test_tasklist_output_contains_pid_when_present() {
+        // Real `tasklist /FI "PID eq N" /NH /FO CSV` output shape.
+        let output = "\"ztlp.exe\",\"12345\",\"Console\",\"1\",\"18,432 K\"";
+        assert!(tasklist_output_contains_pid(output, 12345));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_absent_when_not_found() {
+        // tasklist with a /FI filter that matches nothing prints exactly
+        // this message instead of a CSV row — must not be misread as a hit.
+        let output = "INFO: No tasks are running which match the specified criteria.";
+        assert!(!tasklist_output_contains_pid(output, 12345));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_does_not_false_positive_on_substring() {
+        // PID 123 must not match a row for PID 12345 (naive substring
+        // search on the raw output would get this wrong).
+        let output = "\"ztlp.exe\",\"12345\",\"Console\",\"1\",\"18,432 K\"";
+        assert!(!tasklist_output_contains_pid(output, 123));
+    }
+
+    #[test]
+    fn test_tasklist_output_contains_pid_empty_output() {
+        assert!(!tasklist_output_contains_pid("", 12345));
     }
 }

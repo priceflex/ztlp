@@ -211,7 +211,11 @@ pub fn setup_install_dns(zone: String) -> Result<String, String> {
             None
         };
 
-        let ztlp_bin = if cfg!(target_os = "windows") { "ztlp.exe" } else { "ztlp" };
+        let ztlp_bin = if cfg!(target_os = "windows") {
+            "ztlp.exe"
+        } else {
+            "ztlp"
+        };
         let out = match elevator {
             Some(e) => Command::new(e)
                 .args([ztlp_bin, "agent", "dns-setup", "--zones", z])

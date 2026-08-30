@@ -3155,6 +3155,78 @@ pub fn encode_service_name(name: &str) -> Result<[u8; 16], String> {
     Ok(buf)
 }
 
+/// Magic bytes prefixing every CLIENT_ROUTE frame — mirrors
+/// `GATEWAY_REGISTER_MAGIC` / the relay's `udp_listener.ex` magic check
+/// (`0x5A 0x37`).
+pub const CLIENT_ROUTE_MAGIC: [u8; 2] = [0x5A, 0x37];
+/// Frame-type byte identifying a CLIENT_ROUTE (as opposed to
+/// GATEWAY_REGISTER=0x0A, GATEWAY_REGISTER_V2=0x0E, CLIENT_ROUTE_V2=0x0F).
+pub const CLIENT_ROUTE_TYPE: u8 = 0x0B;
+/// Max service-name length a CLIENT_ROUTE frame can carry (1-byte length
+/// prefix caps this well below 255, matched to the CLI's existing limit).
+pub const CLIENT_ROUTE_MAX_SVC_LEN: usize = 63;
+
+/// Build a CLIENT_ROUTE frame: `[magic(2) | type(1) | node_id(16) |
+/// svc_len(1) | service(N) | timestamp(8, i64 BE) | hmac(32)]`.
+///
+/// Real root cause found live (2026-08-30): the Elixir relay
+/// (`udp_listener.ex`) does not treat a raw Noise HELLO packet as
+/// routable on its own — it installs a `{:client_map, sender} ->
+/// gateway_addr` mapping ONLY after receiving this CLIENT_ROUTE frame,
+/// and forwards subsequent UDP from that same 5-tuple based on that
+/// mapping. The agent's automatic VIP tunnel dialer
+/// (`daemon.rs::establish_tunnel`) sent only the raw HELLO with no prior
+/// CLIENT_ROUTE, so the relay silently dropped it — the tunnel timed out
+/// even though NS resolution, the VIP listener, and the peer-verification
+/// fix were all already working. `ztlp connect`'s `cmd_connect` sends
+/// this frame unconditionally whenever `--service` is set (see
+/// `bin/ztlp-cli.rs`'s original private copy of this function, which is
+/// exactly why the manual CLI path worked while the automatic agent path
+/// didn't). This is the library-shared, public version so `daemon.rs`
+/// can call it too instead of duplicating a private copy.
+pub fn build_client_route_packet(
+    node_id: &[u8; 16],
+    service_name: &str,
+    timestamp: i64,
+    secret: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let svc_bytes = service_name.as_bytes();
+    if svc_bytes.is_empty() {
+        return Err("service_name must not be empty".to_string());
+    }
+    if svc_bytes.len() > CLIENT_ROUTE_MAX_SVC_LEN {
+        return Err("service_name exceeds CLIENT_ROUTE_MAX_SVC_LEN".to_string());
+    }
+
+    let svc_len = svc_bytes.len() as u8;
+    let mut signed = Vec::with_capacity(1 + 16 + 1 + svc_bytes.len() + 8);
+    signed.push(CLIENT_ROUTE_TYPE);
+    signed.extend_from_slice(node_id);
+    signed.push(svc_len);
+    signed.extend_from_slice(svc_bytes);
+    signed.extend_from_slice(&timestamp.to_be_bytes());
+
+    let hmac: [u8; 32] = match secret {
+        None => [0u8; 32],
+        Some(key) => {
+            use hmac::{Hmac, Mac};
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
+                .map_err(|_| "invalid HMAC key length".to_string())?;
+            mac.update(&signed);
+            let out = mac.finalize().into_bytes();
+            let mut h = [0u8; 32];
+            h.copy_from_slice(&out);
+            h
+        }
+    };
+
+    let mut packet = Vec::with_capacity(2 + signed.len() + 32);
+    packet.extend_from_slice(&CLIENT_ROUTE_MAGIC);
+    packet.extend_from_slice(&signed);
+    packet.extend_from_slice(&hmac);
+    Ok(packet)
+}
+
 /// Parse a single `--forward` argument.
 ///
 /// Formats:
@@ -3246,6 +3318,51 @@ pub fn parse_local_forward(s: &str) -> Result<(u16, String), String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // ── build_client_route_packet (2026-08-30) ─────────────────────────
+    //
+    // Real bug this makes fixable: the agent's automatic VIP tunnel
+    // dialer (daemon.rs::establish_tunnel) never sent a CLIENT_ROUTE
+    // frame before its raw HELLO, so the Elixir relay (which only
+    // forwards a client's UDP once it has a `{:client_map, sender}`
+    // mapping installed by CLIENT_ROUTE) silently dropped every automatic
+    // tunnel attempt — even though DNS resolution and the VIP listener
+    // were both already fixed and working. `ztlp connect`'s cmd_connect
+    // sends this frame whenever `--service` is set; this is the same
+    // wire format, promoted from a private copy in ztlp-cli.rs to a
+    // shared public function so daemon.rs can call it too.
+    #[test]
+    fn build_client_route_packet_produces_correct_wire_layout() {
+        let node_id = [0xAAu8; 16];
+        let pkt = build_client_route_packet(&node_id, "web", 1_700_000_000i64, None).unwrap();
+
+        // magic(2) + type(1) + node_id(16) + svc_len(1) + "web"(3) +
+        // timestamp(8) + hmac(32) = 63 bytes total.
+        assert_eq!(pkt.len(), 2 + 1 + 16 + 1 + 3 + 8 + 32);
+        assert_eq!(&pkt[0..2], &CLIENT_ROUTE_MAGIC);
+        assert_eq!(pkt[2], CLIENT_ROUTE_TYPE);
+        assert_eq!(&pkt[3..19], &node_id);
+        assert_eq!(pkt[19], 3u8, "svc_len must be 3 for \"web\"");
+        assert_eq!(&pkt[20..23], b"web");
+        let ts_bytes: [u8; 8] = pkt[23..31].try_into().unwrap();
+        assert_eq!(i64::from_be_bytes(ts_bytes), 1_700_000_000i64);
+        // No secret => all-zero HMAC (dev-mode / unverified path, matches
+        // the relay's "[STAGING] Accepting unverified CLIENT_ROUTE" branch).
+        assert_eq!(&pkt[31..63], &[0u8; 32]);
+    }
+
+    #[test]
+    fn build_client_route_packet_rejects_empty_service_name() {
+        let node_id = [0u8; 16];
+        assert!(build_client_route_packet(&node_id, "", 0, None).is_err());
+    }
+
+    #[test]
+    fn build_client_route_packet_rejects_oversized_service_name() {
+        let node_id = [0u8; 16];
+        let too_long = "x".repeat(CLIENT_ROUTE_MAX_SVC_LEN + 1);
+        assert!(build_client_route_packet(&node_id, &too_long, 0, None).is_err());
+    }
 
     // ── ReassemblyBuffer tests ──────────────────────────────────────────
 

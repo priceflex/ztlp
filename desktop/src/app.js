@@ -114,6 +114,15 @@ async function maybeAutoConnect() {
       LiveLog.setup('Auto-connect: connecting and staying ready…');
       await invoke('connect', { relay, zone: (identity && identity.zone_name) || 'default' });
       await refresh(); // repaint Home + log the transition
+
+      // Zero-click provisioning: once the agent is up, finish whatever the
+      // one-time environment setup still needs (CA chain, CA trust, DNS
+      // routing) automatically so a plain browser visit to a zone hostname
+      // "just works" with no return trip to Setup. Each step is a no-op if
+      // already done. CA-trust/DNS installs pop a native OS elevation
+      // prompt (UAC/pkexec) — that's an OS security boundary the user must
+      // confirm once, not an in-app button.
+      await SetupComponent.autoProvision();
     } else if (!enrolled) {
       LiveLog.log('warn', 'This device is not enrolled yet — open Setup to enroll it.');
     }

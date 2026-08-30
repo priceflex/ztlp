@@ -75,6 +75,150 @@ pub struct DnsResolverState {
 
 // ─── DNS resolver server ────────────────────────────────────────────────────
 
+/// Parse a "host:port" listen address into (host, port), defaulting the port
+/// to 5353 if the string has no `:port` suffix (defensive — `config.rs`
+/// always supplies one, but this keeps `bind_dns_socket_with_fallback`
+/// robust to a bare-host caller too).
+fn split_host_port(listen_addr: &str) -> (String, u16) {
+    match listen_addr.rsplit_once(':') {
+        Some((host, port_str)) => match port_str.parse::<u16>() {
+            Ok(port) => (host.to_string(), port),
+            Err(_) => (listen_addr.to_string(), 5353),
+        },
+        None => (listen_addr.to_string(), 5353),
+    }
+}
+
+/// Ensure the dedicated ZTLP loopback alias `127.0.0.53` exists on the
+/// Windows loopback adapter (a no-op when it's already present — which is
+/// the default on stock Windows 10/11). The NRPT fix needs the resolver on
+/// `127.0.0.53:53`; a bare `127.0.0.1/8` loopback only has `127.0.0.1`
+/// unless an alias is added. Requires elevation (matches the NRPT rule
+/// write, which also requires Administrator).
+///
+/// Failure is non-fatal: the bind step that follows is the real gate, and
+/// the NRPT step then fails loudly with a clear error if the alias is
+/// still missing.
+#[cfg(target_os = "windows")]
+pub fn ensure_loopback_alias_127_0_0_53() {
+    use std::process::Command;
+    let out = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r#"Get-NetIPConfiguration -Loopback | Where-Object { $_.IPv4Address -notcontains 127.0.0.53 } | ForEach-Object { New-NetIPAddress -InterfaceIndex $_.InterfaceIndex -IPAddress 127.0.0.53 -PrefixLength 32 -PrefixOrigin Dhcp -SuffixOrigin Dhcp -AddressFamily IPv4 }"#,
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            debug!("ensured loopback alias 127.0.0.53 present");
+        }
+        Ok(o) => {
+            warn!(
+                "could not ensure loopback alias 127.0.0.53 (exit {}): {}",
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        Err(e) => {
+            warn!("could not invoke PowerShell for loopback alias check: {e}");
+        }
+    }
+}
+
+/// Real bug found live on Windows (2026-08-30): the configured DNS listen
+/// port (`5353`, standard mDNS) is frequently ALREADY occupied system-wide —
+/// Windows' own mDNS responder service (svchost) and even Chrome itself both
+/// bind it — so `UdpSocket::bind` on the configured address fails with
+/// `WSAEACCES`/`os error 10013` (confirmed via a raw .NET UdpClient bind
+/// probe on a real Windows box: `Get-NetUDPEndpoint -LocalPort 5353` showed
+/// BOTH svchost and chrome already owning it). On Linux/macOS this port is
+/// typically free, so the bug was invisible until tested on real Windows
+/// hardware. The old code had no fallback at all — a bind failure killed the
+/// whole automatic DNS-capture flow with a Linux-oriented error message
+/// ("port 53 requires root") that didn't even describe the real problem.
+///
+/// Fix: try the configured port first (unchanged behavior when it's free —
+/// the common case on Linux/macOS), then fall back to a small set of
+/// alternate high ports before giving up. Returns the bound socket AND the
+/// actual `SocketAddr` it ended up on, so callers (Windows NRPT/DNS-routing
+/// setup) can be told the REAL port instead of assuming the configured one.
+pub async fn bind_dns_socket_with_fallback(
+    listen_addr: &str,
+) -> Result<(UdpSocket, SocketAddr), std::io::Error> {
+    let (host, primary_port) = split_host_port(listen_addr);
+
+    // Fallback ports tried in order after the configured one. 15353/25353
+    // are unassigned by IANA and unlikely to collide with anything else a
+    // desktop OS or browser claims by default (unlike 5353/mDNS).
+    //
+    // Windows gets EXTRA candidates up front: NRPT (the Windows NRPT rule
+    // installer) can only route a namespace to an IP with an implicit
+    // port 53, so on Windows the resolver's end goal is port 53 on the
+    // dedicated loopback alias 127.0.0.53 (see
+    // `dns_setup_windows::plan_windows_nrpt_listen`). If the configured
+    // high port is taken (common: svchost mDNS + Chrome both hold 5353),
+    // falling back to port 53 on the alias FIRST means NRPT can point at
+    // `127.0.0.53` and the rule actually works. A real bug found live
+    // (2026-08-30, DESKTOP-CBSQDNE): NRPT given `127.0.0.53:15353`
+    // silently stored an EMPTY NameServers list and Chrome got
+    // DNS_PROBE_FINISHED_NXDOMAIN — the high-port fallback "worked" but
+    // the rule pointed at nothing NRPT can express.
+    #[cfg(target_os = "windows")]
+    let mut candidates: Vec<u16> = {
+        // Ensure the alias exists before attempting the port-53 bind.
+        ensure_loopback_alias_127_0_0_53();
+        let mut c = Vec::new();
+        if primary_port == 53 {
+            c.push(53);
+        } else if primary_port != 53 {
+            // Port 53 on the alias first (the NRPT-compatible address),
+            // then the configured high port as a last resort.
+            c.push(53);
+            c.push(primary_port);
+        }
+        for fallback in [15353u16, 25353u16] {
+            if !c.contains(&fallback) {
+                c.push(fallback);
+            }
+        }
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut candidates: Vec<u16> = {
+        let mut c = vec![primary_port];
+        for fallback in [15353u16, 25353u16] {
+            if fallback != primary_port {
+                c.push(fallback);
+            }
+        }
+        c
+    };
+
+    let mut last_err: Option<std::io::Error> = None;
+    for port in candidates {
+        let addr = format!("{}:{}", host, port);
+        match UdpSocket::bind(&addr).await {
+            Ok(socket) => {
+                let bound_addr = socket.local_addr()?;
+                if port != primary_port {
+                    warn!(
+                        "DNS resolver: configured port {} unavailable, fell back to {}",
+                        primary_port, port
+                    );
+                }
+                return Ok((socket, bound_addr));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AddrInUse, "no candidate port available")
+    }))
+}
+
 /// Run the DNS resolver on the given address.
 ///
 /// This is a long-running task that processes DNS queries in a loop.
@@ -83,16 +227,37 @@ pub async fn run_dns_resolver(
     listen_addr: &str,
     state: Arc<Mutex<DnsResolverState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let socket = UdpSocket::bind(listen_addr).await.map_err(|e| {
-        format!(
-            "failed to bind DNS resolver on {}: {} \
-             (hint: port 53 requires root; use 5353 or configure systemd-resolved)",
-            listen_addr, e
-        )
-    })?;
+    let (socket, bound_addr) = bind_dns_socket_with_fallback(listen_addr)
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to bind DNS resolver on {} or any fallback port: {} \
+                 (hint: on Linux, port 53 requires root — use 5353 or configure \
+                 systemd-resolved; on Windows, port 5353 is often already used by \
+                 the OS mDNS responder or a browser — this should have fallen back \
+                 automatically, so a failure here means even the fallback ports are \
+                 taken)",
+                listen_addr, e
+            )
+        })?;
 
-    info!("DNS resolver listening on {}", listen_addr);
+    info!("DNS resolver listening on {}", bound_addr);
+    run_dns_resolver_on_socket(socket, state).await
+}
 
+/// Same as [`run_dns_resolver`] but takes an already-bound socket.
+///
+/// Split out so callers that need to know the REAL listening address before
+/// the resolver loop starts (e.g. `run_daemon`, which must publish the
+/// actual bound port into `AgentState.dns_listen` for the control API and
+/// for Windows NRPT/DNS-routing setup — both of which are wrong if they
+/// assume the *configured* port when a fallback silently kicked in) can
+/// bind up front via [`bind_dns_socket_with_fallback`], read
+/// `socket.local_addr()`, and only then hand the socket off to this loop.
+pub async fn run_dns_resolver_on_socket(
+    socket: UdpSocket,
+    state: Arc<Mutex<DnsResolverState>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = vec![0u8; MAX_DNS_MSG];
 
     loop {
@@ -196,9 +361,19 @@ async fn process_dns_query(
             let mut st = state.lock().await;
             let ttl = Duration::from_secs(DEFAULT_TTL as u64);
             if let Some(ip) = st.vip_pool.allocate(&ztlp_name, Some(ttl)) {
-                // Store the resolved peer address
+                // Store the resolved peer address AND NodeID.
+                //
+                // The NodeID matters for the automatic tunnel dialer's
+                // CLIENT_ROUTE frame — a shared relay's fallback-by-
+                // NodeID lookup requires the PEER's NodeID (not the
+                // client's own), and without caching it here alongside
+                // peer_addr, `run_tcp_proxy` (which reads cached
+                // `VipEntry.peer_node_id`, not a fresh NS lookup) always
+                // saw `None` even after `ns_resolve` itself was fixed to
+                // return a real NodeID — found live 2026-08-30.
                 if let Some(entry) = st.vip_pool.lookup_name_mut(&ztlp_name) {
                     entry.peer_addr = Some(resolution.addr);
+                    entry.peer_node_id = resolution.node_id;
                 }
                 drop(st);
 
@@ -485,6 +660,70 @@ pub async fn forward_to_upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── bind_dns_socket_with_fallback / split_host_port (2026-08-30) ──────
+    //
+    // Real bug found live on Windows: port 5353 (the configured DNS listen
+    // port) is frequently already occupied system-wide by Windows' own mDNS
+    // responder service AND by Chrome — confirmed via `Get-NetUDPEndpoint
+    // -LocalPort 5353` on a real Windows box showing both svchost and
+    // chrome.exe already bound. The old code had zero fallback, so the
+    // entire automatic DNS-capture flow died with a Linux-oriented "port 53
+    // requires root" message that didn't even match the real problem.
+
+    #[test]
+    fn split_host_port_parses_host_and_port() {
+        assert_eq!(
+            split_host_port("127.0.0.53:5353"),
+            ("127.0.0.53".to_string(), 5353)
+        );
+    }
+
+    #[test]
+    fn split_host_port_defaults_port_when_missing() {
+        assert_eq!(
+            split_host_port("127.0.0.53"),
+            ("127.0.0.53".to_string(), 5353)
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_dns_socket_with_fallback_uses_configured_port_when_free() {
+        // Use port 0 (OS picks a free ephemeral port) as the "configured"
+        // port to avoid any real port-collision flakiness in CI — this
+        // still exercises the "primary port succeeds" path since port 0
+        // always succeeds immediately (no fallback needed).
+        let (_, bound_addr) = bind_dns_socket_with_fallback("127.0.0.1:0").await.unwrap();
+        assert_eq!(bound_addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(bound_addr.port(), 0, "OS must have assigned a real port");
+    }
+
+    #[tokio::test]
+    async fn bind_dns_socket_with_fallback_falls_back_when_primary_port_taken() {
+        // Occupy an arbitrary high port first (simulating "something else
+        // already has 5353"), then verify bind_dns_socket_with_fallback
+        // configured to use THAT exact port still succeeds by falling
+        // through to one of its hardcoded fallback candidates (15353/25353)
+        // instead of failing outright.
+        let blocker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let taken_port = blocker.local_addr().unwrap().port();
+
+        let (_, bound_addr) = bind_dns_socket_with_fallback(&format!("127.0.0.1:{}", taken_port))
+            .await
+            .unwrap();
+
+        assert_ne!(
+            bound_addr.port(),
+            taken_port,
+            "must NOT report success on the already-taken port"
+        );
+        assert!(
+            bound_addr.port() == 15353 || bound_addr.port() == 25353,
+            "must fall back to one of the documented fallback ports, got {}",
+            bound_addr.port()
+        );
+        drop(blocker);
+    }
 
     #[test]
     fn test_encode_dns_name() {

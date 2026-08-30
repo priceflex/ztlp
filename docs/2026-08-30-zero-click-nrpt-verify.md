@@ -275,14 +275,69 @@ On deadline expiry:
 This converts a 45s silent spinner into a clear, named error page in 15s.
 Highest-UX-value part of the whole fix.
 
-### Layer 3 — backpressure instead of unbounded pileup (separate PR)
-Track in-flight connections per (vip, port) — plumbing exists
-(`inc_connections`/`dec_connections` in the VIP pool). When a new connection
-arrives while existing ones to the same backend are stalled past a threshold,
-fast-fail with 503 (or queue with its own deadline). Prevents the exact
-Chrome-refresh pileup pattern.
+### Layer 3 — production-grade backpressure (this is the part that makes it "reliable," not just "fails cleanly")
+
+Layers 1+2 alone only turn a silent 45s hang into a fast, honest 504. They do
+**not** make Chrome's refresh (two simultaneous connections against a
+fast-but-serial backend) actually succeed — one of the two connections still
+gets a 504 instead of the page, because the backend genuinely can't answer it
+yet. To make concurrent requests against a serial (or momentarily overloaded)
+backend actually succeed instead of just failing fast, backpressure needs
+five pieces working together, not just "queue or fail":
+
+**3a. Per-backend concurrency limiter.** Each distinct backend — keyed by
+(vip, port), or by service name once that concept exists — gets its own
+bounded permit pool (e.g. `max_concurrent = 4`, configurable per service
+later, sane default now). A connection must acquire a permit before a tunnel
+is dialed. This is the general mechanism; Chrome's two speculative
+connections are just the smallest instance of "N clients arrive at once
+against a backend that can't handle N concurrently."
+
+**3b. Bounded queue with ONE deadline covering the whole journey.** When no
+permit is free, the connection waits in a queue — capped depth (e.g. 16
+waiters per backend); once full, reject new arrivals immediately with 503
+(don't let queue depth grow unbounded during an outage — that's how a demo
+hang becomes a production OOM). The deadline from Layer 1 must be set the
+moment the connection is **accepted**, not restarted when it's dequeued —
+otherwise queue-wait + first-byte-wait can each independently consume the
+full budget and a user waits ~2x the intended worst case for their eventual
+504. One deadline, started at accept, covers queue time + tunnel dial +
+first-byte time as one budget.
+
+**3c. Circuit breaker for a genuinely dead backend.** Queueing is correct
+behavior for "backend is momentarily busy but fast when free" (our actual
+case — single-threaded, ~38ms per request). It is the *wrong* behavior for
+"backend is dead" — queueing in front of a dead backend just delays every
+connection out to its full deadline and wastes queue slots that could serve
+other connections. Track consecutive timeouts/failures per backend; after N
+in a row (e.g. 5), trip a breaker that fast-fails immediately (skip the queue
+entirely, 503 right away) for a cooldown window (e.g. 10s), then let exactly
+one probe connection through to test recovery before resuming normal
+queueing. This is the difference between "reliable under load" and "reliable
+until the backend actually goes down, then every connection slow-walks to
+its own timeout."
+
+**3d. FIFO fairness.** Use an explicit ordered structure (small `VecDeque` +
+`Notify`, or equivalent) rather than relying on bare `tokio::sync::Semaphore`
+acquisition order, which is not guaranteed FIFO under contention in all
+executor scheduling scenarios. Connections should be served in arrival order
+— don't let a semaphore starve an early arrival in favor of a later one.
+
+**3e. Observability — not optional for "production ready."** You cannot
+operate a queueing/circuit-breaker system blind; you need to see backend
+degradation before users report a hang, not after. Minimum: queue depth
+(gauge, per backend), queue wait time (histogram), first-byte latency
+(histogram), timeout count, circuit-breaker state transitions (closed →
+open → half-open → closed). Surface a summary in `agent status` too,
+matching the existing VIP/tunnel-count pattern.
+
+**3f. Graceful load-shedding at the front door.** When the queue is full,
+reject immediately with a clear 503 body ("backend overloaded, retry") —
+never accept a connection you already know you can't serve within budget.
 
 ## TDD plan
+
+### Layers 1+2 (deadline + loud failure)
 1. Extract pure policy functions first, unit-test trivially:
    - `first_byte_deadline(port, config) -> Duration`
    - `stall_response_for_port(port) -> Option<Vec<u8>>` (canned 504 bytes)
@@ -296,7 +351,33 @@ Chrome-refresh pileup pattern.
      steady-state bridge.
 3. **Regression test pinning tonight's packet trace:** two simultaneous client
    connections against a serve-one-at-a-time mock backend; the second must get
-   a timely 504 instead of hanging.
+   a timely 504 instead of hanging (this is the Layer-1/2-only behavior —
+   Layer 3 below is what upgrades this test's expectation from "504" to
+   "eventually succeeds").
+
+### Layer 3 (backpressure) — reliability bar, not "works once"
+- **Load test:** N concurrent connections against a mock backend with fixed
+  concurrency C. Assert: all N eventually succeed within the total deadline
+  budget when N ≤ (permits + queue depth); assert clean, immediate 503s (not
+  hangs, not crashes, not silent drops) when N exceeds queue capacity.
+- **Chaos test:** backend accepts then never responds (today's exact bug, at
+  scale). Assert the circuit breaker trips after N consecutive timeouts and
+  subsequent connections fail fast (skip the queue) instead of re-queueing
+  into a black hole.
+- **Recovery test:** backend comes back after being marked down. Assert the
+  breaker's cooldown probe succeeds and normal queueing resumes — no manual
+  intervention required.
+- **Soak test:** sustained load over an extended run. Assert no memory growth
+  (queue never silently leaks entries), no permit leaks (semaphore/permit
+  count returns to max when idle).
+- **Fairness test:** interleaved arrivals under contention. Assert FIFO
+  service order — no starvation of early arrivals by later ones.
+- **The Chrome-refresh regression test, upgraded:** two simultaneous
+  connections against a fast-but-serial mock backend (~38ms per request, one
+  at a time — i.e. today's actual demo backend shape) — assert **both
+  succeed** within the deadline budget, not just "one gets a clean 504."
+  This is the test that proves the fix actually makes refresh work, not just
+  fail politely.
 
 ## Fix-adjacent items (same neighborhood, do while in there)
 - `daemon.rs` VIP bind failure is swallowed at debug level
@@ -314,19 +395,36 @@ Chrome-refresh pileup pattern.
   silently failed for `127.100.0.1` until `New-NetIPAddress ... 127.100.0.1` was
   run manually).
 - Demo server: switch `HTTPServer` → `ThreadingHTTPServer` (one-line Python
-  change) so the demo exercises real concurrency instead of masking it.
+  change). Note: this is now a defense-in-depth item, not the primary fix —
+  Layer 3's per-backend queueing is what actually makes concurrent requests
+  succeed against a serial backend; fixing the demo server just removes the
+  scenario that exercises the bug, it doesn't replace the agent-side fix
+  (real production backends stall under load too, they just don't do it via
+  Python's default single-threaded `http.server`).
 
 ## What NOT to do
 - No global session timeout (kills websockets/RDP/long polls).
-- No automatic tunnel retry — retries against a stalled single-threaded backend
-  double the pileup. Fail fast; let the client retry.
+- No automatic tunnel retry on top of the queue — retries against a stalled
+  backend just add more waiters; let the queue + deadline + circuit breaker
+  handle it, and let the *client* retry if it still fails after that.
 - No HTTP parsing in the proxy beyond "is this an HTTP port with zero response
-  bytes" — the agent stays a dumb fast byte pipe.
+  bytes" — the agent stays a dumb fast byte pipe; the queue/breaker operate on
+  connection-level signals (permits, timeouts), not request content.
+- Don't restart the deadline clock on dequeue (see 3b) — one budget, set at
+  accept, covers the whole journey.
 
 ## Sizing
-Layers 1+2: contained change in daemon.rs, ~100–150 lines + tests, one PR.
-Layer 3: second PR. Layers 1+2 alone make the silent Chrome hang impossible —
-worst case becomes a clear 504 in 15s.
+- **PR 1 (Layers 1+2):** accept-to-first-byte deadline + loud 504/RST on
+  expiry. Contained change in daemon.rs, ~100–150 lines + tests. Makes the
+  silent hang impossible — worst case becomes a clear, fast 504.
+- **PR 2 (Layer 3 — the reliability PR):** per-backend concurrency limiter +
+  bounded FIFO queue + circuit breaker + metrics + `agent status` surfacing.
+  Meaningfully larger than PR 1 — realistically its own design pass, not a
+  bolt-on. This is the PR that makes Chrome's refresh (and any real
+  concurrent-load scenario) actually *succeed* instead of *fail cleanly*.
+  Do not ship this as "queue with a timeout" — that's the toy version; the
+  five sub-pieces (3a–3f) all matter for something you'd trust in production.
+
 
 ## Evidence artifacts
 - `/tmp/capture.pcapng` (Hermes VM, loopback-only filter) — the 45s idle

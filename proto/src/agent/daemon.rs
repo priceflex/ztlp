@@ -303,20 +303,19 @@ pub async fn run_daemon(
     let (dns_socket_and_addr, nrpt_bind_overridden) = {
         #[cfg(target_os = "windows")]
         {
-            let dns_setup_windows::WindowsNrptListenPlan {
+            let crate::agent::dns_setup_windows::WindowsNrptListenPlan {
                 bind_addr,
                 nrpt_server: _nrpt,
                 needs_alias,
-            } = dns_setup_windows::plan_windows_nrpt_listen(&config.dns.listen).unwrap_or_else(
-                |e| {
+            } = crate::agent::dns_setup_windows::plan_windows_nrpt_listen(&config.dns.listen)
+                .unwrap_or_else(|e| {
                     return Err(format!(
                         "Windows NRPT requires a loopback dns.listen on port 53 (got {}): {e} \
                          — set dns.listen to 127.0.0.53:53 in config.toml",
                         config.dns.listen
                     )
                     .into());
-                },
-            );
+                });
             let _ = needs_alias; // alias is ensured by the bind step
             match &dns_socket_and_addr {
                 Some((_, bound)) if bound.port() != 53 => {

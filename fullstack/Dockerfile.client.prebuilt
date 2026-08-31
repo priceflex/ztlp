@@ -1,0 +1,29 @@
+# ZTLP Full-Stack: Client container — PREBUILT BINARY variant
+# Uses a pre-compiled ztlp binary (built on a beefier host) instead of
+# compiling the workspace in-container.
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    openssh-client \
+    sshpass \
+    iproute2 \
+    bc \
+    coreutils \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY fullstack/ztlp-bin /usr/local/bin/ztlp
+RUN chmod +x /usr/local/bin/ztlp
+
+RUN useradd --system --create-home ztlp
+
+COPY fullstack/client-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER ztlp
+WORKDIR /home/ztlp
+
+ENV SSHPASS=ztlptest
+
+ENTRYPOINT ["/entrypoint.sh"]

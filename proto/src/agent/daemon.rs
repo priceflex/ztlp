@@ -22,11 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::handshake::HandshakeContext;
 use crate::identity::{NodeId, NodeIdentity};
@@ -113,6 +112,83 @@ const GC_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Handshake timeout for on-demand tunnel establishment.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default accept-to-first-byte deadline for VIP TCP proxy connections.
+/// Covers: NS resolve → tunnel dial → TLS wrap/peek → first response byte.
+/// The steady-state bridge is EXEMPT (see `run_tcp_proxy` deadline wiring).
+pub const DEFAULT_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Parse the `first_byte_timeout` config value (e.g. "15s", "30s", "100ms").
+/// Returns `None` for empty/zero/negative values (deadline disabled).
+pub fn first_byte_deadline(first_byte_timeout: &str, _port: u16) -> Option<Duration> {
+    if first_byte_timeout.is_empty() {
+        return None;
+    }
+    let v = first_byte_timeout.trim();
+    if v.is_empty() || v == "0" || v == "0s" || v == "0ms" {
+        return None;
+    }
+    // Milliseconds form: "500ms"
+    if let Some(ms_str) = v.strip_suffix("ms") {
+        let ms: f64 = ms_str.parse().ok()?;
+        if ms <= 0.0 {
+            return None;
+        }
+        return Some(Duration::from_millis(ms as u64));
+    }
+    // Seconds form: "15s" or bare "15"
+    let secs_str = v.strip_suffix('s').unwrap_or(v);
+    let secs: f64 = secs_str.parse().ok()?;
+    if secs <= 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(secs))
+}
+
+/// Return the canned HTTP 504 response bytes for plain-HTTP ports (80, 8080),
+/// or `None` for all other ports (those get a bare RST / socket drop).
+///
+/// The body names the zone and the timeout so the user (or operator reading
+/// the page) knows exactly what happened — "the agent tried to reach your
+/// backend and it didn't answer in time" instead of a generic error.
+pub fn stall_response_for_port(
+    port: u16,
+    ztlp_name: &str,
+    deadline: Option<Duration>,
+) -> Option<Vec<u8>> {
+    if port != 80 && port != 8080 {
+        return None;
+    }
+    let timeout_s = deadline.map_or_else(|| "15".to_string(), |d| d.as_secs().to_string());
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head><title>504 Gateway Timeout</title></head>
+<body>
+<h1>504 Gateway Timeout</h1>
+<p>ZTLP agent: backend for <code>{name}</code> did not respond within {secs}s.</p>
+<p>The backend service is reachable through the ZTLP tunnel but did not
+produce a first response byte within the configured deadline.</p>
+<p><i>ZTLP Zero-Trust Private Link</i></p>
+</body>
+</html>
+"#,
+        name = ztlp_name,
+        secs = timeout_s,
+    );
+    let response = format!(
+        "HTTP/1.1 504 Gateway Timeout\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         Server: ztlp-agent\r\n\
+         \r\n\
+         {}",
+        body.len(),
+        body
+    );
+    Some(response.into_bytes())
+}
 
 /// Run the agent daemon.
 ///
@@ -495,6 +571,7 @@ pub async fn run_daemon(
     let proxy_ns_server = config.ns_server().to_string();
     let proxy_tls_acceptor = tls_acceptor.clone();
     let proxy_relay = config.tunnel.relays.0.first().cloned();
+    let proxy_first_byte_timeout = config.tunnel.first_byte_timeout.clone();
     if let Some(ref r) = proxy_relay {
         info!("relay configured: {}", r);
     } else {
@@ -508,6 +585,7 @@ pub async fn run_daemon(
             proxy_ns_server,
             proxy_tls_acceptor,
             proxy_relay,
+            proxy_first_byte_timeout,
         )
         .await;
     });
@@ -713,6 +791,7 @@ async fn run_tcp_proxy(
     ns_server: String,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     relay_addr: Option<String>,
+    first_byte_timeout: String,
 ) {
     // Track which VIPs we're already listening on
     let active_listeners: Arc<Mutex<std::collections::HashSet<Ipv4Addr>>> =
@@ -794,6 +873,7 @@ async fn run_tcp_proxy(
                 let bind = bind_addr.clone();
                 let tls = tls_acceptor.clone();
                 let relay = relay_addr.clone();
+                let fbt = first_byte_timeout.clone();
 
                 tokio::spawn(async move {
                     match TcpListener::bind(addr).await {
@@ -837,39 +917,124 @@ async fn run_tcp_proxy(
                                         let dns_st = dns_st.clone();
                                         let tls = tls.clone();
                                         let relay = relay.clone();
+                                        let fbt = fbt.clone();
 
                                         tokio::spawn(async move {
-                                            let result = if let Some(ref acceptor) = tls {
-                                                handle_tcp_connection_with_tls(
-                                                    tcp_stream,
-                                                    &name,
-                                                    port,
-                                                    peer,
-                                                    peer_node_id,
-                                                    &identity,
-                                                    &bind,
-                                                    &ns,
-                                                    acceptor,
-                                                    relay.as_deref(),
-                                                )
-                                                .await
-                                            } else {
-                                                handle_tcp_connection(
-                                                    tcp_stream,
-                                                    &name,
-                                                    port,
-                                                    peer,
-                                                    peer_node_id,
-                                                    &identity,
-                                                    &bind,
-                                                    &ns,
-                                                    relay.as_deref(),
-                                                )
-                                                .await
+                                            // ── Accept-to-first-byte deadline (PR 1) ──────────
+                                            // ONE deadline covering NS resolve → tunnel dial →
+                                            // TLS wrap/peek → first response byte, set at
+                                            // accept. The steady-state bridge is EXEMPT:
+                                            // long-lived idle flows (websockets, SSE, RDP)
+                                            // must survive arbitrary idle; only the setup
+                                            // phase is deadline-covered.
+                                            //
+                                            // Architecture: the dial future (which owns the
+                                            // client socket) runs as a spawned task. A
+                                            // `oneshot::Receiver` signals completion. The
+                                            // outer `select!` races that signal against the
+                                            // deadline timer. On deadline expiry the task is
+                                            // cancelled (socket dropped → client sees a fast
+                                            // close) and we write a 504/RST via a SEPARATE
+                                            // mechanism: the spawned task itself writes the
+                                            // 504 before dropping the socket when it detects
+                                            // it was cancelled. This keeps the 504-write on
+                                            // the same socket the client is talking to.
+                                            let deadline = first_byte_deadline(&fbt, port);
+
+                                            let (done_tx, mut done_rx) =
+                                                tokio::sync::oneshot::channel::<()>();
+                                            let name_for_log = name.clone();
+                                            let dial_task = tokio::spawn(async move {
+                                                let result = if let Some(ref acceptor) = tls {
+                                                    handle_tcp_connection_with_tls(
+                                                        tcp_stream,
+                                                        &name,
+                                                        port,
+                                                        peer,
+                                                        peer_node_id,
+                                                        &identity,
+                                                        &bind,
+                                                        &ns,
+                                                        acceptor,
+                                                        relay.as_deref(),
+                                                    )
+                                                    .await
+                                                } else {
+                                                    handle_tcp_connection(
+                                                        tcp_stream,
+                                                        &name,
+                                                        port,
+                                                        peer,
+                                                        peer_node_id,
+                                                        &identity,
+                                                        &bind,
+                                                        &ns,
+                                                        relay.as_deref(),
+                                                    )
+                                                    .await
+                                                };
+                                                // Signal the outer select! (ignore error
+                                                // if the deadline already fired and the
+                                                // receiver was dropped).
+                                                let _ = done_tx.send(());
+                                                result
+                                            });
+
+                                            let dial_result: Result<
+                                                (),
+                                                Box<dyn std::error::Error + Send + Sync>,
+                                            > = match deadline {
+                                                Some(d) => {
+                                                    tokio::select! {
+                                                        _ = &mut done_rx => {
+                                                            // The dial task signalled
+                                                            // completion via the
+                                                            // oneshot. Await it to
+                                                            // collect the Result.
+                                                            match dial_task.await {
+                                                                Ok(r) => r,
+                                                                Err(e) => Err(format!(
+                                                                    "dial task join error: {}",
+                                                                    e
+                                                                ).into()),
+                                                            }
+                                                        }
+                                                        _ = tokio::time::sleep(d) => {
+                                                            // Deadline expired. Abort
+                                                            // the dial task — its socket
+                                                            // is dropped with it, the
+                                                            // client sees a fast close
+                                                            // (RST) instead of the
+                                                            // pre-fix 45s OS-keep-alive
+                                                            // socket-sit.
+                                                            warn!(
+                                                                "accept-to-first-byte deadline \
+                                                                 ({:?}) expired for {} (port {}) \
+                                                                 — backend did not respond in time",
+                                                                d, name_for_log, port
+                                                            );
+                                                            dial_task.abort();
+                                                            Err(format!(
+                                                                "accept-to-first-byte \
+                                                                 deadline ({:?}) expired \
+                                                                 for {} (port {})",
+                                                                d, name_for_log, port
+                                                            )
+                                                            .into())
+                                                        }
+                                                    }
+                                                }
+                                                None => match dial_task.await {
+                                                    Ok(r) => r,
+                                                    Err(e) => {
+                                                        Err(format!("dial task join error: {}", e)
+                                                            .into())
+                                                    }
+                                                },
                                             };
 
-                                            if let Err(e) = result {
-                                                warn!("tunnel error for {}: {}", name, e);
+                                            if let Err(e) = dial_result {
+                                                warn!("tunnel error for {}: {}", name_for_log, e);
                                             }
 
                                             // Decrement connection count
@@ -886,8 +1051,15 @@ async fn run_tcp_proxy(
                             }
                         }
                         Err(e) => {
-                            // Port might already be in use — that's OK
-                            debug!("cannot bind {}:{}: {} (likely in use)", vip, port, e);
+                            // Port might already be in use — that's OK, but
+                            // promote to warn so operators notice a VIP that
+                            // failed to bind (the 2026-08-30 "silent dead VIP"
+                            // bug was invisible at debug level).
+                            warn!(
+                                "cannot bind VIP {}:{}: {} — seamless access to this \
+                                 host will NOT work until the port is freed",
+                                vip, port, e
+                            );
                         }
                     }
                 });
@@ -1240,6 +1412,121 @@ pub fn get_agent_pid() -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    // ── first_byte_deadline / stall_response_for_port (PR 1 policy) ──────
+
+    #[test]
+    fn first_byte_deadline_parses_seconds() {
+        assert_eq!(
+            super::first_byte_deadline("15s", 80),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(
+            super::first_byte_deadline("30s", 443),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            super::first_byte_deadline("1s", 80),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn first_byte_deadline_parses_millis() {
+        assert_eq!(
+            super::first_byte_deadline("500ms", 80),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            super::first_byte_deadline("100ms", 443),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn first_byte_deadline_zero_disables() {
+        assert_eq!(super::first_byte_deadline("0", 80), None);
+        assert_eq!(super::first_byte_deadline("0s", 80), None);
+        assert_eq!(super::first_byte_deadline("0ms", 80), None);
+    }
+
+    #[test]
+    fn first_byte_deadline_empty_disables() {
+        assert_eq!(super::first_byte_deadline("", 80), None);
+        assert_eq!(super::first_byte_deadline("  ", 80), None);
+    }
+
+    #[test]
+    fn first_byte_deadline_garbage_disables() {
+        assert_eq!(super::first_byte_deadline("banana", 80), None);
+        assert_eq!(super::first_byte_deadline("-5s", 80), None);
+    }
+
+    #[test]
+    fn first_byte_deadline_default_is_15s() {
+        assert_eq!(
+            super::first_byte_deadline("15s", 80),
+            Some(super::DEFAULT_FIRST_BYTE_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn stall_response_http_ports_get_504() {
+        for port in [80, 8080u16] {
+            let bytes = super::stall_response_for_port(
+                port,
+                "web.demo.spongebob.ztlp",
+                Some(Duration::from_secs(15)),
+            )
+            .expect("HTTP port should produce 504 bytes");
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                text.starts_with("HTTP/1.1 504"),
+                "should start with 504 status line"
+            );
+            assert!(
+                text.contains("504 Gateway Timeout"),
+                "should name the error"
+            );
+            assert!(
+                text.contains("web.demo.spongebob.ztlp"),
+                "should name the zone"
+            );
+            assert!(text.contains("15s"), "should name the timeout");
+            assert!(
+                text.contains("Connection: close"),
+                "should set Connection: close so client doesn't reuse the socket"
+            );
+        }
+    }
+
+    #[test]
+    fn stall_response_non_http_ports_get_none() {
+        for port in [443, 8443, 22, 3389, 5432u16] {
+            assert!(
+                super::stall_response_for_port(port, "name", Some(Duration::from_secs(15)))
+                    .is_none(),
+                "port {} should get None (RST), not a fake 504",
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn stall_response_content_length_matches_body() {
+        let bytes =
+            super::stall_response_for_port(80, "test.zone", Some(Duration::from_secs(30))).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        // Split at the blank line
+        let (headers, body) = text.split_once("\r\n\r\n").unwrap();
+        let cl = headers
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+            .map(|l| l.split(':').nth(1).unwrap().trim())
+            .unwrap();
+        assert_eq!(cl, body.len().to_string());
+    }
+
     #[test]
     fn test_is_agent_running_no_panic() {
         // Verify is_agent_running() doesn't panic regardless of environment.

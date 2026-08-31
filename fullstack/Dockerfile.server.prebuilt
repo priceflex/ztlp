@@ -1,0 +1,23 @@
+# ZTLP Full-Stack: Server (listener) container — PREBUILT BINARY variant
+# Uses a pre-compiled ztlp binary (built on a beefier host) instead of
+# compiling the workspace in-container (too slow on burstable 2-vCPU boxes).
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY fullstack/ztlp-bin /usr/local/bin/ztlp
+RUN chmod +x /usr/local/bin/ztlp
+
+RUN useradd --system --create-home ztlp
+
+COPY fullstack/server-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER ztlp
+WORKDIR /home/ztlp
+
+EXPOSE 23095/udp
+
+ENTRYPOINT ["/entrypoint.sh"]

@@ -218,6 +218,27 @@ pub struct TunnelConfig {
 
     /// Maximum concurrent tunnels.
     pub max_tunnels: usize,
+
+    /// Accept-to-first-response-byte deadline for the VIP TCP proxy
+    /// (e.g., "15s").
+    ///
+    /// When a client connects to a VIP listener, the agent must resolve the
+    /// peer, establish the ZTLP tunnel, and (on TLS ports) complete the local
+    /// TLS handshake BEFORE the backend can answer. With no deadline, a
+    /// black-holed backend leaves the client socket open until the client's
+    /// own OS keep-alive gives up (~45s on Windows Chrome) — the
+    /// 2026-08-30 Chrome-refresh-hang root cause (see
+    /// `docs/2026-08-30-zero-click-nrpt-verify.md`, FOLLOW-UP section).
+    ///
+    /// This budget covers the whole "accepted → first response byte" journey
+    /// as ONE deadline (it is NOT restarted when the tunnel becomes ready).
+    /// The steady-state bridge loop is deliberately NOT covered — long-lived
+    /// idle flows (websockets, SSE, RDP) must survive arbitrary idle.
+    ///
+    /// On expiry the agent fails LOUDLY: HTTP-ish ports (80/8080) get a real
+    /// `504 Gateway Timeout` with a ZTLP-branded body; other ports get the
+    /// connection reset. Never silent.
+    pub first_byte_timeout: String,
 }
 
 /// Credential renewal configuration.
@@ -368,6 +389,7 @@ impl Default for TunnelConfig {
             prefer_relay: false,
             relays: RelayAddrs::default(),
             max_tunnels: 256,
+            first_byte_timeout: "15s".to_string(),
         }
     }
 }

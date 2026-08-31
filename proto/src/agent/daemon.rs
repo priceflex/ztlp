@@ -190,6 +190,38 @@ produce a first response byte within the configured deadline.</p>
     Some(response.into_bytes())
 }
 
+/// What to do with the client socket when the accept-to-first-byte
+/// deadline expires (Option A, PR #108).
+///
+/// - 504-class ports (plain HTTP 80/8080, TLS 443/8443): deliver the
+///   branded `504 Gateway Timeout` page through the retained client
+///   write half, then close. Browsers (Chrome in particular) render the
+///   page cleanly and release the connection — no more "spinner until
+///   RST" on a stalled refresh.
+/// - Everything else (SSH, RDP, DBs, …): bare-close the write half — a
+///   fake HTTP status line on a non-HTTP port would be nonsense bytes.
+///
+/// The 443/8443 arms assume the TLS variant terminates the TLS handshake
+/// FIRST (fast, client-driven) before the deadline-covered dial phase —
+/// so the write half on those ports speaks plain bytes (already
+/// encrypted by the surrounding TLS stream) and the 504 page is a
+/// valid, readable HTTP response inside the encrypted channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallCloseStrategy {
+    /// Write the branded 504 page, then close.
+    Deliver504,
+    /// Bare close (no payload).
+    BareClose,
+}
+
+/// Classify a port's deadline-expiry handling (pure, unit-tested).
+pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
+    match port {
+        80 | 8080 | 443 | 8443 => StallCloseStrategy::Deliver504,
+        _ => StallCloseStrategy::BareClose,
+    }
+}
+
 /// Run the agent daemon.
 ///
 /// This is the main entry point called by `ztlp agent start`.
@@ -1070,11 +1102,14 @@ async fn handle_tcp_connection_with_tls(
     }
 }
 
-/// The result of the deadline-covered dial phase (Option A restructure).
+/// The result of the deadline-covered dial phase (Option A, PR #108).
 ///
 /// The dial future owns ONLY the client socket's read half (plus the
-/// tunnel establishment); the write half stays with the outer task so it
-/// can write the branded 504 page on deadline expiry.
+/// tunnel establishment); the client's write half stays with the caller
+/// for the whole lifetime of the connection — the dial phase never writes
+/// to it. On deadline expiry the caller writes the branded 504 page
+/// (HTTP-ish ports) or bare-closes (non-HTTP ports) through that write
+/// half, then shuts the connection down cleanly (FIN, not RST).
 ///
 /// - `Complete`: the backend produced its first response byte and it was
 ///   delivered to the client. The steady-state bridge runs next (no
@@ -1082,34 +1117,36 @@ async fn handle_tcp_connection_with_tls(
 ///   QUIC stream ends (no type erasure).
 /// - `ClientClosedBeforeFirstByte`: the client hung up during dial (EOF or
 ///   write error), or the tunnel/backend closed before the first response
-///   byte. Nothing to deliver; the socket is already gone.
+///   byte. The caller bare-closes the retained write half.
 pub enum DialOutcome {
     Complete {
         /// Client read half (exhausted on EOF, or still valid).
         client_read: tokio::net::tcp::OwnedReadHalf,
-        /// Client write half (first backend bytes already delivered).
-        client_write: tokio::net::tcp::OwnedWriteHalf,
         /// Tunnel read side (backend → client direction).
         tunnel_read: quinn::RecvStream,
         /// Tunnel write side (client → backend direction).
         tunnel_write: quinn::SendStream,
     },
-    /// The tunnel/backend closed before a first response byte. The client
-    /// write half comes back so the caller can bare-close it.
-    ClientClosedBeforeFirstByte {
-        client_write: tokio::net::tcp::OwnedWriteHalf,
-    },
+    /// The client or tunnel/backend closed before a first response byte.
+    ClientClosedBeforeFirstByte,
 }
 
-/// Establish the tunnel dial phase (Option A): NS resolve → QUIC dial →
+/// Establish the tunnel dial phase (Option A, PR #108): NS resolve → QUIC dial →
 /// forward the client's request bytes → wait for the backend's first
 /// response byte.
 ///
-/// This is the phase the accept-to-first-byte deadline (PR #106 / PR #107)
-/// covers. It owns ONLY `client_read` — the client's write half must stay
-/// with the caller so the caller can deliver the branded 504 page on
-/// deadline expiry (the PR #106 gap: the write half used to be dropped
-/// with the aborted task).
+/// This is the phase the accept-to-first-byte deadline (PR #106 → #108)
+/// covers. It owns ONLY `client_read` — the client's write half stays with
+/// the caller for the connection's entire lifetime so the caller can
+/// deliver the branded 504 page on deadline expiry (the PR #106/#107 gap:
+/// the write half used to die with the aborted task).
+///
+/// The dial phase NEVER writes to the client: the backend's first response
+/// bytes are held in the tunnel (QUIC receive buffer) and the steady-state
+/// bridge (run by the caller right after `Complete`) is what delivers them
+/// to the client. This is safe for HTTP because the response is a reply to
+/// the request this phase just forwarded — there is no out-of-band client
+/// input during dial that the backend could depend on.
 #[allow(clippy::too_many_arguments)]
 async fn proxy_dial_phase(
     mut client_read: tokio::net::tcp::OwnedReadHalf,
@@ -1121,7 +1158,6 @@ async fn proxy_dial_phase(
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
-    mut client_write: tokio::net::tcp::OwnedWriteHalf,
 ) -> Result<DialOutcome, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncReadExt;
 
@@ -1222,90 +1258,85 @@ async fn proxy_dial_phase(
     //
     // Two concurrent pumps run until the first backend byte arrives:
     //   pump_up: client read half → tunnel write (client → backend)
-    //   pump_down: tunnel read → client write half (backend → client)
-    // When either pump finishes (EOF or error), both are aborted. The
-    // first backend byte is relayed to the client's write half BEFORE the
-    // handoff to the outer task (which then runs the steady-state bridge).
-
+    //   pump_down: tunnel read → (holds the first backend frame)
+    // Each pump handles exactly ONE frame and exits; the caller awaits
+    // pump_down first, then aborts pump_up and hands the tunnel halves to
+    // the steady-state bridge.
+    //
+    // PR #108 — why pump_up stops after the FIRST client frame (the
+    // Chrome double-refresh stall): the pre-#108 up-pump drained the
+    // client socket in an unbounded loop (up to ~64KB per read) BEFORE
+    // forwarding. A browser request is a single small frame, so that was
+    // harmless in practice — but any client streaming more bytes before
+    // the backend speaks (large request bodies, chunked uploads, or a
+    // client that sends the request in multiple packets over a slow link)
+    // starved the backend: nothing reached it until the read drained to
+    // EOF. With one-stop-after-first-frame semantics the request reaches
+    // the backend as soon as its first frame is complete, and the
+    // steady-state bridge takes over with the same one-frame-at-a-time
+    // rhythm it already uses.
     let (mut q_send, mut q_recv) = quic_conn
         .open_bi()
         .await
         .map_err(|e| format!("failed to open QUIC data stream (dial): {}", e))?;
 
-    // Pump up: client → tunnel. Owns `client_read` + `q_send`.
-    // Returns both ends so the caller can hand them to the bridge.
+    // Pump up: client → tunnel. Reads at most ONE client frame (the
+    // complete request) and forwards it to the backend. Owns
+    // `client_read` + `q_send`; returns both ends so the caller can hand
+    // them to the steady-state bridge.
     let pump_up_task = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 65000];
-        loop {
-            match client_read.read(&mut buf).await {
-                Ok(0) => break, // client closed before we got the first byte
-                Ok(n) => {
-                    if crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &buf[..n])
+        let client_eof = match client_read.read(&mut buf).await {
+            Ok(0) => true, // client closed before sending anything
+            Ok(n) => {
+                let _ =
+                    crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &buf[..n])
                         .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => break,
+                        .is_err();
+                false
             }
-        }
-        (client_read, q_send)
+            Err(_) => true,
+        };
+        (client_read, q_send, client_eof)
     });
 
-    // Pump down: tunnel → client. Owns `q_recv` + `client_write`.
-    // Relays the first backend frame to the client's write half, then
-    // returns the ends so the caller can hand them to the bridge.
-    // pump_down: tunnel → client. Owns `q_recv` + `client_write`.
-    // Relays the first backend frame to the client's write half.
-    // The deadline is handled by the OUTER task (proxy_dial_then_bridge)
-    // via select! on the done-signal — on expiry it aborts this task and
-    // the client socket halves die with it (fast close, the PR #106
-    // behavior). The branded 504 page is a KNOWN GAP: quinn::RecvStream
-    // is !Unpin, so we can't race the frame read against a deadline Sleep
-    // inside the task, and the write half is owned by this task (not the
-    // outer one), so the outer task can't write the 504 page either.
+    // Pump down: tunnel → (held). Reads exactly ONE backend frame (the
+    // first response byte) and holds it — the steady-state bridge, run by
+    // the caller right after this phase, is what delivers backend bytes to
+    // the client. The dial phase NEVER writes to the client: the client's
+    // write half stays with the caller for the whole connection lifetime
+    // (Option A, PR #108) so the caller can write the branded 504 page
+    // through it on deadline expiry instead of the socket dying with an
+    // aborted task.
     let pump_down_task = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        // Read exactly ONE frame (the first backend response byte), relay
-        // it to the client. No loop — the steady-state bridge takes over
-        // after the dial phase.
-        let delivered = match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await
-        {
-            Ok(payload) => {
-                if client_write.write_all(&payload).await.is_err() {
-                    false
-                } else {
-                    // First backend byte delivered to the client — the
-                    // deadline phase is done.
-                    true
-                }
-            }
+        let got = match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
+            Ok(_) => true,
             Err(_) => false,
         };
-        (client_write, q_recv, delivered)
+        (q_recv, got)
     });
 
     // Wait for the first backend byte (pump_down finishing), then abort
     // the upstream pump.
-    let (client_write, q_recv, delivered) = pump_down_task.await.expect("pump_down task panicked");
+    let (q_recv, got_first_byte) = pump_down_task.await.expect("pump_down task panicked");
     pump_up_task.abort();
-    let (client_read, q_send) = pump_up_task.await.expect("pump_up task panicked");
+    let (client_read, q_send, client_eof) = pump_up_task.await.expect("pump_up task panicked");
 
-    if delivered {
+    if got_first_byte && !client_eof {
+        // First backend byte received and held in the tunnel. The steady-
+        // state bridge (called by the caller) delivers it to the client
+        // and keeps pumping both directions.
         Ok(DialOutcome::Complete {
             client_read,
-            client_write,
             tunnel_read: q_recv,
             tunnel_write: q_send,
         })
     } else {
-        // pump_down hit EOF/error OR deadline fired (504 already written).
-        // We can't distinguish the two from here, so we return
-        // ClientClosedBeforeFirstByte — the outer task treats both as
-        // "dial phase failed, clean up".
-        Ok(DialOutcome::ClientClosedBeforeFirstByte { client_write })
+        // The client hung up during dial (EOF), or the tunnel/backend
+        // closed before the first response byte. The caller bare-closes
+        // the retained client write half.
+        Ok(DialOutcome::ClientClosedBeforeFirstByte)
     }
 }
 
@@ -1361,26 +1392,25 @@ async fn proxy_bridge_streams(
     let _ = tokio::join!(pump_up, pump_down);
 }
 
-/// Option A (PR #107): the full accept → first-byte → bridge handler with
+/// Option A (PR #108): the full accept → first-byte → bridge handler with
 /// split-socket 504 delivery.
 ///
-/// Restructure of the PR #106 wiring: the client socket is split up front —
-/// the READ half enters the deadline-covered dial task, the WRITE half
-/// stays with the outer task. On deadline expiry the outer task writes the
-/// branded 504 page (HTTP-ish ports) or bare-closes (non-HTTP ports)
-/// through the write half it still owns — closing the PR #106 gap where
-/// the socket was dropped with the aborted task and the client saw a
-/// silent RST instead of the named 504 page.
+/// The client socket is split UP FRONT — the READ half enters the
+/// deadline-covered dial task, the WRITE half stays with this outer task
+/// for the connection's entire lifetime. On deadline expiry the outer
+/// task writes the branded 504 page (HTTP-ish ports) or bare-closes
+/// (non-HTTP ports) through the write half it still owns, then shuts the
+/// connection down cleanly (FIN, not RST) — closing the PR #106/#107 gap
+/// where the socket died with the aborted task and the client (Chrome in
+/// particular) saw a silent RST instead of a real error page.
 ///
 /// - `deadline = Some(d)`: one budget, started at accept, covering
-///   dial + first-byte. Expiry → abort dial task, deliver 504/RST.
+///   dial + first-byte. Expiry → abort dial task, deliver 504/FIN.
 /// - `deadline = None`: no deadline (dial runs forever; bridge takes over).
 ///
 /// This is the plain-TCP path. The TLS variant (443/8443) terminates TLS
-/// FIRST (client-driven, fast, already guarded by `HANDSHAKE_TIMEOUT` in
-/// the acceptor), then runs the same split-socket dial over the TLS
-/// stream — the 504 goes out encrypted. (See `proxy_dial_then_bridge_tls`
-/// for the TLS variant; the plain path is the one the tests exercise.)
+/// FIRST (client-driven, fast), then runs the same split-socket dial over
+/// the TLS stream — the 504 goes out encrypted.
 #[allow(clippy::too_many_arguments)]
 pub async fn proxy_dial_then_bridge(
     client: tokio::net::TcpStream,
@@ -1398,9 +1428,10 @@ pub async fn proxy_dial_then_bridge(
     use tokio::io::AsyncWriteExt;
 
     // Split the client socket: the read half goes into the dial task, the
-    // write half stays with us — on deadline expiry we write the 504 page
-    // through it (Option A).
-    let (mut client_read, mut client_write) = client.into_split();
+    // write half stays with us for the WHOLE connection lifetime — the
+    // dial phase never writes to the client (the steady-state bridge does),
+    // and on deadline expiry we write the 504 page through it (Option A).
+    let (client_read, mut client_write) = client.into_split();
 
     let name_for_log = ztlp_name.to_string();
 
@@ -1412,13 +1443,12 @@ pub async fn proxy_dial_then_bridge(
     let ns_owned = ns_server.to_string();
     let relay_owned = relay_addr.map(|r| r.to_string());
 
-    // Inner task: the deadline-covered dial phase. It owns BOTH client
-    // socket halves + the tunnel. On success it returns them; on deadline
-    // expiry (from the outer select! aborting this task) the halves die
-    // with it — the client sees a fast close (the PR #106 behavior for
-    // the abort path). The branded 504 page is written by the OUTER task
-    // through... no — the write half is gone. So the 504 page is a FUTURE
-    // enhancement; for now the deadline gives a fast close.
+    // Inner task: the deadline-covered dial phase. It owns the client READ
+    // half + the tunnel. On success it returns the tunnel halves; the
+    // steady-state bridge (called below) takes over with our write half.
+    // On deadline expiry the outer select! aborts this task — the read
+    // half and tunnel die with it, but the write half is still ours, so
+    // the client gets a clean 504 page + FIN, not a bare RST.
     let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
     let dial_task = tokio::spawn(async move {
         let result = proxy_dial_phase(
@@ -1431,7 +1461,6 @@ pub async fn proxy_dial_then_bridge(
             &bind_owned,
             &ns_owned,
             relay_owned.as_deref(),
-            client_write,
         )
         .await;
         let _ = done_tx.send(());
@@ -1444,20 +1473,44 @@ pub async fn proxy_dial_then_bridge(
             _ = &mut done_rx => match dial_task.await {
                 Ok(r) => r,
                 Err(e) => {
+                    // Dial task panicked/aborted — the client socket read
+                    // half died with it; close the write half cleanly.
+                    let _ = client_write.shutdown().await;
                     return Err(format!("dial task join error: {}", e).into());
                 }
             },
             _ = tokio::time::sleep(d) => {
-                // Deadline expired. Abort the dial task — the client
-                // socket halves die with it, so the client sees a fast
-                // close (RST) instead of the pre-fix 45s OS-keep-alive
-                // socket-sit.
+                // Deadline expired. Abort the dial task (read half +
+                // tunnel die with it), then deliver the outcome the port
+                // class deserves through the write half we still own:
+                // branded 504 page for HTTP-ish ports, bare close for
+                // everything else. The subsequent shutdown() sends FIN
+                // (not RST) so browsers render the page cleanly.
                 warn!(
                     "accept-to-first-byte deadline ({:?}) expired for {} (port {}) \
                      — backend did not respond in time",
                     d, name_for_log, port
                 );
                 dial_task.abort();
+
+                if stall_close_strategy(port) == StallCloseStrategy::Deliver504 {
+                    if let Some(page) =
+                        stall_response_for_port(port, &name_for_log, Some(d))
+                    {
+                        if client_write.write_all(&page).await.is_err() {
+                            warn!(
+                                "failed to write 504 page to {} (port {}): client gone?",
+                                name_for_log, port
+                            );
+                        }
+                    }
+                }
+                // Graceful close: FIN after the page (or immediately for
+                // bare-close ports). The write half is dropped at function
+                // exit, which would also close the socket — but the
+                // explicit shutdown gives the client a clean EOF marker
+                // to finish reading the 504 body first.
+                let _ = client_write.shutdown().await;
 
                 return Err(format!(
                     "accept-to-first-byte deadline ({:?}) expired for {} (port {})",
@@ -1475,23 +1528,23 @@ pub async fn proxy_dial_then_bridge(
     match dial_result {
         Ok(DialOutcome::Complete {
             client_read,
-            client_write,
             tunnel_read,
             tunnel_write,
         }) => {
-            // The first backend bytes were already delivered to the client
-            // by the dial phase (pump_down wrote them to `client_write`).
-            // Hand off to the steady-state bridge (no deadline).
+            // The first backend bytes are held in the tunnel (QUIC
+            // receive buffer) — the steady-state bridge delivers them to
+            // the client through our retained write half, then keeps
+            // pumping both directions with NO deadline (long-lived flows).
             proxy_bridge_streams(client_read, client_write, tunnel_read, tunnel_write).await;
 
             debug!("tunnel closed: {} (port {})", ztlp_name, port);
             Ok(())
         }
-        Ok(DialOutcome::ClientClosedBeforeFirstByte { client_write }) => {
+        Ok(DialOutcome::ClientClosedBeforeFirstByte) => {
             // The client hung up during dial (or the tunnel/backend closed
-            // before the first response byte). Drop the write half to
-            // clean up.
-            drop(client_write);
+            // before the first response byte). Bare-close the retained
+            // write half to clean up.
+            let _ = client_write.shutdown().await;
             debug!("client closed during dial: {} (port {})", ztlp_name, port);
             Ok(())
         }
@@ -1864,11 +1917,71 @@ mod tests {
 
     #[test]
     fn stall_response_non_http_ports_get_none() {
+        // NOTE: 443/8443 are in the DELIVER-504 class for the deadline-expiry
+        // path (see `stall_close_strategy`) because the TLS variant terminates
+        // the TLS handshake BEFORE the deadline-covered dial phase, so the
+        // write half speaks plain (already-encrypted) bytes. This test pins
+        // the PLAIN-TCP policy function only, which must not fabricate an
+        // HTTP 504 on a port whose traffic is still raw TLS ClientHello
+        // bytes (the plain path can't terminate TLS here — that would need
+        // the SNI cert resolver, which is the TLS variant's job).
         for port in [443, 8443, 22, 3389, 5432u16] {
             assert!(
                 super::stall_response_for_port(port, "name", Some(Duration::from_secs(15)))
                     .is_none(),
                 "port {} should get None (RST), not a fake 504",
+                port
+            );
+        }
+    }
+
+    // ── stall_close_strategy (PR #108 Option A policy) ───────────────────
+    //
+    // The deadline-expiry decision table for the outer task: which ports
+    // get the branded 504 page through the retained client write half,
+    // and which get a bare close.
+
+    #[test]
+    fn stall_close_strategy_504_class_ports() {
+        use super::StallCloseStrategy::*;
+        for port in [80, 8080, 443, 8443u16] {
+            assert_eq!(
+                super::stall_close_strategy(port),
+                Deliver504,
+                "port {} must be 504-class",
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn stall_close_strategy_non_http_ports_bare_close() {
+        use super::StallCloseStrategy::*;
+        for port in [22, 3389, 3306, 5432, 6379, 9050u16] {
+            assert_eq!(
+                super::stall_close_strategy(port),
+                BareClose,
+                "port {} must be bare-close class (no fake 504)",
+                port
+            );
+        }
+    }
+
+    #[test]
+    fn stall_close_strategy_504_class_matches_page_availability_on_plain_ports() {
+        // On plain-HTTP ports (80/8080) the Deliver504 class and the
+        // `stall_response_for_port` page producer must AGREE — the outer
+        // task only writes a page when both the strategy says deliver AND
+        // the page producer returns bytes.
+        for port in [80, 8080u16] {
+            assert_eq!(
+                super::stall_close_strategy(port),
+                super::StallCloseStrategy::Deliver504
+            );
+            assert!(
+                super::stall_response_for_port(port, "x.ztlp", Some(Duration::from_secs(15)))
+                    .is_some(),
+                "strategy/page-policy mismatch on port {}",
                 port
             );
         }
@@ -2139,27 +2252,37 @@ pub fn ensure_token_file(path: &Path) -> std::io::Result<String> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Option A — split-socket 504 delivery (follow-up to PR #106)
+// Option A — split-socket 504 delivery (PR #108, follow-up to PR #106/#107)
 //
 // PR #106 shipped the accept-to-first-byte deadline, but on expiry the client
 // socket was DROPPED with the aborted dial task (fast RST) — the branded 504
-// page could not be written through a socket we no longer owned. These tests
-// pin the restructured behavior: `proxy_dial_then_bridge` takes the client
-// socket SPLIT — read half only enters the dial task (which owns the tunnel
-// dial), the write half stays with the outer task so on deadline expiry it
-// can write the branded 504 (HTTP ports) or bare-close (non-HTTP ports).
+// page could not be written through a socket we no longer owned. PR #107
+// restructured the deadline to spawned-task + outer-select but kept the same
+// abort-drops-socket behavior.
+//
+// PR #108 completes Option A: the client socket is split UP FRONT — the
+// dial task owns ONLY the read half, the write half stays with the outer
+// task. On deadline expiry the outer task writes the branded 504 page
+// (HTTP-ish ports) through the write half it still owns, then shuts the
+// connection down cleanly (FIN, not RST) so browsers render the page
+// instead of showing a raw connection error. Also fixes the Chrome
+// double-refresh stall: the up-pump now stops after the FIRST client frame
+// (the complete HTTP request) instead of draining the socket unboundedly
+// before forwarding.
 //
 // A real QUIC tunnel can't be stood up hermetically (needs NS + relay +
-// gateway — explicitly skipped in the original TDD plan 2026-08-30; the live
-// AI-computer test against the real demo backend substitutes as integration
-// proof). These tests therefore drive the deadline path through a
-// black-hole "NS" TCP listener that accepts and never answers — the exact
-// stall shape of the single-threaded demo backend — and assert on what the
-// CLIENT actually receives.
+// gateway — explicitly skipped in the original TDD plan 2026-08-30; the
+// live AI-computer test against the real demo backend substitutes as
+// integration proof). These tests therefore drive the deadline path through
+// a black-hole "NS" TCP listener that accepts and never answers — the
+// exact stall shape of the single-threaded demo backend — and assert on
+// what the CLIENT actually receives.
 // ────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod option_a_tests {
-    use super::{first_byte_deadline, proxy_dial_then_bridge, stall_response_for_port};
+    use super::{
+        first_byte_deadline, proxy_dial_then_bridge, stall_close_strategy, stall_response_for_port,
+    };
     use crate::identity::NodeIdentity;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2236,15 +2359,13 @@ mod option_a_tests {
         (got, result)
     }
 
-    /// HTTP port (80): deadline expiry must give the client a FAST CLOSE
-    /// (no 45s socket-sit). KNOWN GAP: the branded 504 page is NOT
-    /// delivered — quinn::RecvStream is !Unpin, so we can't race the frame
-    /// read against a deadline inside the task, and the write half is
-    /// owned by the (aborted) dial task, so the outer task can't write the
-    /// 504 page either. This test pins the FAST CLOSE behavior (the PR
-    /// #106 win) and documents the 504-page gap for the follow-up PR.
+    /// HTTP port (80): deadline expiry must give the client the branded
+    /// 504 Gateway Timeout page, delivered through the write half the
+    /// outer task retains (Option A, PR #108) — NOT a silent RST. The
+    /// page lets Chrome render a real error page and release the
+    /// connection cleanly instead of spinning until an OS-level reset.
     #[tokio::test]
-    async fn client_gets_fast_close_on_dial_timeout_http_port() {
+    async fn client_gets_504_page_on_dial_timeout_http_port() {
         let (bytes, err) = dial_against_blackhole(80, Duration::from_millis(300)).await;
 
         let err = err.expect("dial against a black-hole NS must time out");
@@ -2252,27 +2373,35 @@ mod option_a_tests {
             err.to_string().contains("deadline"),
             "error must name the deadline expiry, got: {err:?}"
         );
-        // The client gets a fast close: zero bytes (the socket is dropped
-        // with the aborted dial task). This is the PR #106 behavior —
-        // the 504 page is a known gap (see the follow-up PR).
+        let text = String::from_utf8_lossy(&bytes);
         assert!(
-            bytes.is_empty(),
-            "client must get a fast close (zero bytes), got {} bytes: {:?} \
-             (KNOWN GAP: branded 504 page not yet delivered)",
-            bytes.len(),
-            String::from_utf8_lossy(&bytes)
+            text.starts_with("HTTP/1.1 504"),
+            "client must receive the branded 504 page, got {} bytes: {text:?}",
+            bytes.len()
         );
-        // The policy function still classifies port 80 as 504-class —
-        // pinning the intent for the follow-up PR.
         assert!(
-            stall_response_for_port(80, "blackhole.test", Some(Duration::from_secs(15))).is_some(),
-            "port 80 must be 504-class (the page just isn't delivered yet)"
+            text.contains("504 Gateway Timeout"),
+            "504 page must name the error"
+        );
+        assert!(
+            text.contains("blackhole.test"),
+            "504 page must name the zone"
+        );
+        assert!(
+            text.contains("Connection: close"),
+            "504 page must set Connection: close (client must not reuse the socket)"
+        );
+        // The policy chain agrees: strategy = Deliver504, page = produced.
+        assert_eq!(
+            stall_close_strategy(80),
+            super::StallCloseStrategy::Deliver504,
+            "port 80 must be 504-class"
         );
     }
 
-    /// HTTP-ish port (8080): same fast-close behavior as port 80.
+    /// HTTP-ish port (8080): same branded 504 delivery as port 80.
     #[tokio::test]
-    async fn client_gets_fast_close_on_dial_timeout_8080() {
+    async fn client_gets_504_page_on_dial_timeout_8080() {
         let (bytes, err) = dial_against_blackhole(8080, Duration::from_millis(300)).await;
 
         assert!(
@@ -2281,9 +2410,10 @@ mod option_a_tests {
                 .unwrap_or(false),
             "deadline expiry must be the error, got: {err:?}"
         );
+        let text = String::from_utf8_lossy(&bytes);
         assert!(
-            bytes.is_empty(),
-            "port 8080 must get a fast close (zero bytes), got {} bytes",
+            text.starts_with("HTTP/1.1 504"),
+            "port 8080 must get the branded 504 page, got {} bytes: {text:?}",
             bytes.len()
         );
         assert!(
@@ -2293,7 +2423,7 @@ mod option_a_tests {
     }
 
     /// Non-HTTP port (3306): deadline expiry must NOT send a 504 page —
-    /// the client gets a bare close (RST/FIN with zero payload). This pins
+    /// the client gets a bare close (FIN with zero payload). This pins
     /// the port-class split: a fake HTTP status line on a database port
     /// would be nonsense bytes.
     #[tokio::test]
@@ -2308,15 +2438,20 @@ mod option_a_tests {
         );
         assert!(
             bytes.is_empty(),
-            "non-HTTP port must get ZERO bytes (bare close/RST), got {} bytes: {:?}",
+            "non-HTTP port must get ZERO bytes (bare close/FIN), got {} bytes: {:?}",
             bytes.len(),
             String::from_utf8_lossy(&bytes)
         );
 
-        // And the policy function itself classifies this port.
+        // And the policy functions themselves classify this port.
         assert!(
             stall_response_for_port(3306, "db.test", Some(Duration::from_secs(15))).is_none(),
             "port 3306 must be RST-class, not 504-class"
+        );
+        assert_eq!(
+            stall_close_strategy(3306),
+            super::StallCloseStrategy::BareClose,
+            "port 3306 must be bare-close class"
         );
     }
 

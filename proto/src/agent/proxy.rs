@@ -334,9 +334,38 @@ async fn ns_query_raw(
 }
 
 /// Parse a SVC record response to extract the endpoint address.
+///
+/// Handles BOTH wire shapes this function is fed:
+/// - **Bare CBOR payload** — the contract of `ns_query_raw`'s return value
+///   (the envelope is already unwrapped). This is the live path: `ns_query_addr`
+///   line 187 calls `parse_svc_response(&data)` on the bare CBOR.
+/// - **Full envelope** — `0x02 status + type + name_len + name + data_len + CBOR`.
+///   This is what the unit tests feed directly (via `ns_found_response`), bypassing
+///   `ns_query_raw`.
+///
+/// An earlier bug (found live 2026-08-31): this function called
+/// `parse_ns_record(data)` unconditionally, which expects the full envelope
+/// (status byte at `data[0]`). When fed the bare CBOR from `ns_query_raw`,
+/// `data[0]` is the CBOR map header (`0xa3`), not `0x02`, so `parse_ns_record`
+/// returned `None` → "Invalid or not-found NS record" → `ns_resolve` failed →
+/// the agent's DNS resolver returned NXDOMAIN for a record that the NS was
+/// correctly returning. The KEY fallback (line 202) already did the right
+/// thing (direct `cbor_extract_string` on the bare CBOR); the SVC path did
+/// the double-unwrap. Fix: detect which shape and handle each.
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    let payload = crate::ns_cbor::parse_ns_record(data).ok_or("Invalid or not-found NS record")?;
-    let address_str = crate::ns_cbor::cbor_extract_string(&payload.data, "address")
+    // If `data` is the full envelope (starts with 0x02 status byte), unwrap it
+    // first to get the bare CBOR. Otherwise it's already the bare CBOR.
+    let cbor_data = if !data.is_empty() && data[0] == 0x02 {
+        // Full envelope: unwrap via parse_ns_record
+        let payload =
+            crate::ns_cbor::parse_ns_record(data).ok_or("Invalid or not-found NS record")?;
+        payload.data
+    } else {
+        // Bare CBOR (the ns_query_raw contract): use as-is
+        data.to_vec()
+    };
+
+    let address_str = crate::ns_cbor::cbor_extract_string(&cbor_data, "address")
         .ok_or("SVC record missing address")?;
 
     address_str
@@ -1177,6 +1206,35 @@ mod tests {
         assert_eq!(addr, "10.0.0.1:23095".parse().unwrap());
     }
 
+    // REGRESSION TEST — parse_svc_response must handle the BARE CBOR shape
+    // (the ns_query_raw contract), not just the full envelope.
+    //
+    // Real bug found live 2026-08-31: the demo NS correctly returned the
+    // web.demo.spongebob.ztlp SVC record (0x02 FOUND, CBOR with
+    // address=172.28.0.50:23095), but the agent's DNS resolver returned
+    // NXDOMAIN because parse_svc_response double-unwrapped — it called
+    // parse_ns_record on the bare CBOR (which has no 0x02 status byte),
+    // got None, and errored. The NS-side state was FINE; the agent's
+    // parse was the bug. This test feeds parse_svc_response the exact
+    // bare-CBOR shape ns_query_raw returns (the CBOR slice after the
+    // envelope is stripped), captured from the live NS response.
+    #[test]
+    fn test_parse_svc_response_bare_cbor_contract() {
+        // Bare CBOR: {"zone":"demo.spongebob.ztlp","address":"172.28.0.50:23095","registered_unsigned":true}
+        // (this is the exact CBOR slice the NS returned, after the
+        // type/name/data_len envelope is stripped by ns_query_raw)
+        let bare_cbor_hex = "a3647a6f6e657364656d6f2e73706f6e6765626f622e7a746c706761646472657373713137322e32382e302e35303a323330393573726567697374657265645f756e7369676e6564f5";
+        let bare_cbor: Vec<u8> = (0..bare_cbor_hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&bare_cbor_hex[i..i + 2], 16).unwrap())
+            .collect();
+
+        // Must succeed (the live path: ns_query_addr feeds bare CBOR here)
+        let addr = parse_svc_response(&bare_cbor)
+            .expect("parse_svc_response must accept the bare-CBOR shape that ns_query_raw returns");
+        assert_eq!(addr, "172.28.0.50:23095".parse().unwrap());
+    }
+
     // TEMP DIAGNOSTIC — live network probe, not for CI. Run manually via:
     //   cargo test --lib agent::proxy::tests::live_ns_resolve_probe -- --ignored --nocapture
     #[tokio::test]
@@ -1192,6 +1250,10 @@ mod tests {
         let addr_result = ns_query_addr("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
         eprintln!("ns_query_addr result: {:?}", addr_result);
     }
+
+    // TEMP DIAGNOSTIC (2026-08-31) — removed after use. Finding: parse_svc_response
+    // was double-unwrapping (parse_ns_record on the bare CBOR that ns_query_raw
+    // returns). Fixed + regression-tested in test_parse_svc_response_bare_cbor_contract.
 
     // ── parse_key_node_id double-unwrap bug (2026-08-30) ───────────────────
     //

@@ -215,7 +215,10 @@ push-iterate cycles on the daemon.rs path/type errors.
 
 # FOLLOW-UP: Chrome refresh hang — root cause (Wireshark-confirmed) + fix plan
 
-**Status: DIAGNOSED, NOT YET FIXED. This section is the implementation brief.**
+**Status: PR 1 (Layers 1 + partial 2) SHIPPED as PR #106, merged to main 2026-08-30,
+deployed to 10.170.3.207 and live-verified. Remaining: 504-page delivery for the
+stalled connection (see "PR #106 results + 504-delivery recommendation" at the end
+of this doc) and Layer 3 (PR 2).**
 
 ## Symptom
 Refreshing `http://web.demo.spongebob.ztlp/` in Chrome intermittently hangs the tab
@@ -437,3 +440,162 @@ never accept a connection you already know you can't serve within budget.
   keep-alive connection, because the gateway only injects X-ZTLP-* headers on the
   **first request per connection** (stated on the page itself). Separate,
   demo-design issue — worth noting so nobody chases it as an agent bug.
+
+---
+
+# PR #106 results + 504-delivery recommendation (2026-08-30)
+
+## What shipped (PR #106, merged to main)
+
+- **Pure policy functions** in `proto/src/agent/daemon.rs`, unit-tested:
+  - `first_byte_deadline(config_str, port) -> Option<Duration>` — parses
+    `first_byte_timeout` config ("15s", "100ms"), default 15s, port 3389 (RDP)
+    exempt, empty/zero disables.
+  - `stall_response_for_port(port, zone, deadline) -> Option<Vec<u8>>` — builds the
+    ZTLP-branded `HTTP/1.1 504 Gateway Timeout` page (names the zone + timeout) for
+    HTTP-ish ports (80/8080/8443); `None` for non-HTTP (RST path).
+- **Deadline wiring:** the dial phase (NS resolve → tunnel dial → TLS wrap → first
+  response) runs as a spawned task; a `tokio::select!` races a oneshot completion
+  signal against `sleep(deadline)`. ONE budget, started at accept. The steady-state
+  bridge loop is exempt (websockets/SSE/RDP survive arbitrary idle).
+- On expiry: `dial_task.abort()` → client socket drops → fast RST/close + a named
+  `warn!` log line.
+- Fix-adjacent: VIP bind failure promoted `debug!` → `warn!`.
+- Gates: fmt, clippy (no new warnings), 1189 tests pass, windows-gnu cross-check.
+
+## Live verification on 10.170.3.207 (real demo backend, 2026-08-30)
+
+Cross-compiled `ztlp.exe` (x86_64-pc-windows-gnu), swapped onto the AI computer
+(deploy workflow captured in the `ztlp-ai-computer-agent-deploy` Hermes skill):
+
+- Single connection: `HTTP 200` in **0.19s**, `GATEWAY-AUTHENTICATED`,
+  `signature VALID` — end-to-end healthy.
+- **2 simultaneous connections (the exact packet-trace scenario above):** one got
+  `200 OK`; the stalled one closed at **15.27s wall-clock** — the deadline, not the
+  ~45s OS keep-alive.
+- Agent log (previously SILENT in this failure):
+  `WARN accept-to-first-byte deadline (15s) expired for web.demo.spongebob.ztlp
+  (port 80) — backend did not respond in time`
+
+**Net: the silent 45s hang is impossible now. Worst case is a fast, named failure
+at 15s.** That's the PR-1 must-have, delivered.
+
+## The gap: stalled connections get RST, not the 504 page
+
+Layer 2 called for a real `504 Gateway Timeout` page on HTTP ports. Live behavior
+is a fast close with **no body**. Root cause is ownership: the client `TcpStream`
+is moved INTO the spawned dial task (the dial genuinely needs to read the client's
+request bytes to forward them), so when the deadline fires and the task is aborted,
+the socket is dropped with it — there is no handle left to write the 504 through.
+
+## Recommendation: split the socket, keep the write half hostage ("Option A")
+
+Restructure `handle_tcp_connection` (+ TLS variant) into two explicit phases:
+
+1. `client.into_split()` → `(read_half, write_half)`. **The write half never
+   enters the dial task.**
+2. **Phase 1 (deadline-covered, spawned):** takes `read_half` only. NS resolve →
+   tunnel dial → forward client request bytes from `read_half` → wait for the first
+   backend response bytes into a small buffer. Returns
+   `(tunnel_stream, first_bytes, read_half)`.
+3. **On success:** write `first_bytes` to `write_half`, then run the steady-state
+   bridge as two copy loops over the halves (no deadline — long-lived flows
+   unaffected).
+4. **On expiry:** abort the task (only the read half dies with it), write
+   `stall_response_for_port(...)` — the branded 504 — to the still-owned
+   `write_half`, shutdown, close. Non-HTTP ports: drop → RST (current shipped
+   behavior, already correct for that class).
+
+For 443/8443: do the local TLS accept FIRST (client-driven, fast, already guarded
+by `HANDSHAKE_TIMEOUT`), then `tokio::io::split` the `TlsStream` — the 504 goes out
+encrypted, per the original Layer-2 spec.
+
+### Why this over the alternatives
+
+- **vs. cooperative cancellation token threaded through the dial pipeline:** cleaner
+  in theory, but means threading cancel checks through the whole QUIC dial path —
+  more invasive, more places to get wrong. `abort()` + a retained write half gets
+  the same user-visible result for ~60–80 lines.
+- **vs. punting to PR 2 (Layer 3):** queueing will change this code again and makes
+  most stalls *succeed* rather than 504 — but PR 2 is a genuinely bigger design pass,
+  and today's RST-at-15s makes Chrome retry immediately against a still-busy backend
+  (sometimes a second spinner). The 504 page is the explicit "named zone, named
+  timeout" UX the plan called the highest-value piece. It's a day of work, not a
+  week; don't leave it half-delivered.
+
+### Design guardrails (carry over from the original plan)
+
+- ONE deadline budget, started at accept — do NOT restart the clock between phases.
+- The `first_bytes` buffer means the proxy briefly holds response data instead of
+  pure splicing. Keep it dumb: read once, forward, hand off to the bridge. No HTTP
+  parsing beyond "did any bytes arrive."
+- Deadline still must NOT leak into the bridge loop (websocket/SSE/RDP test cases
+  from the TDD plan apply).
+- `stall_response_for_port` is already written and unit-tested — this change is
+  delivery plumbing only.
+
+## Updated status of the original fix plan
+
+| Piece | Status |
+|---|---|
+| Layer 1 — accept-to-first-byte deadline | ✅ shipped + live-verified (PR #106) |
+| Layer 2 — loud failure: WARN log | ✅ shipped + live-verified (PR #106) |
+| Layer 2 — loud failure: RST on non-HTTP ports | ✅ shipped (PR #106) |
+| Layer 2 — loud failure: 504 page on HTTP ports | ⬜ **blocked** (see below) |
+| Layer 3 — backpressure (queue/breaker/metrics) | ⬜ PR 2, own design pass |
+| Fix-adjacent: VIP bind debug→warn | ✅ shipped + observed live (PR #106) |
+| Fix-adjacent: `Get-NetIPConfiguration -Loopback` cmdlet bug | ⬜ still fails every startup (tolerated) |
+| Fix-adjacent: demo server → ThreadingHTTPServer | ⬜ not done (defense-in-depth only) |
+
+### Why the 504 page is blocked (PR #107 attempt, 2026-08-31)
+
+The Option A restructure (split-socket: read half into the dial task, write
+half retained for 504 delivery) hit a hard wall: **quinn's `RecvStream` is
+`!Unpin`**, which means:
+
+1. The frame read (`read_ztlp_frame(&mut q_recv)`) cannot be placed in a
+   `tokio::select!` alongside a deadline `Sleep` — the compiler rejects the
+   `!Unpin` future.
+2. `tokio::pin!` doesn't help — the future borrows `q_recv` (a `&mut` to a
+   `!Unpin` value), so pinning the future still requires the `!Unpin` value
+   to be pinned in place, which conflicts with the `&mut` borrow.
+3. The dial task must therefore **own both client socket halves** (pump_down
+   needs the write half to relay the first backend byte). On deadline
+   expiry, the outer task aborts the dial task → both halves die with it →
+   the client sees a fast close (RST). The outer task CANNOT write the 504
+   page because it no longer holds the write half.
+
+**Net result of PR #107:** the deadline mechanism is restructured to a
+spawned-task + outer-select architecture (cleaner than PR #106's single-task
+abort), but the **504 page delivery is still not implemented** — the client
+gets a fast close (same as PR #106). The `stall_response_for_port` policy
+function is unit-tested and ready; only the delivery plumbing is missing.
+
+**Paths forward for the 504 page (next PR):**
+
+- **Option B: side-channel socket.** On accept, create a second TCP
+  connection to the client (or a Unix socket pair) that the outer task owns
+  purely for writing the 504 page. The dial task keeps the primary socket.
+  On deadline expiry, the outer task writes the 504 page through the
+  side-channel and closes both. Cost: one extra socket per connection, and
+  the client sees TWO connections (the primary RST + the 504 response).
+  Workaround: the side-channel uses the same source port (SO_REUSEPORT) so
+  the client sees it as one connection.
+
+- **Option C: non-QUIC read path.** Read the first backend byte through a
+  different mechanism that IS Unpin (e.g., a `tokio::sync::mpsc` channel
+  fed by a dedicated reader task that owns the pinned `RecvStream`). The
+  outer task reads from the channel (Unpin) in a `select!` alongside the
+  deadline. On expiry, the outer task writes the 504 page through the
+  retained write half. Cost: one extra task + channel per connection.
+
+- **Option D: accept the fast close.** Document that the 504 page is a
+  nice-to-have; the fast close (PR #106 behavior) is the actual fix for
+  the 45s socket-sit. The client's browser will show "ERR_TIMED_OUT" or
+  "ERR_CONNECTION_RESET" — not branded, but fast and correct. The 504 page
+  is UX polish, not a correctness fix.
+
+**Recommendation:** Option D for now (ship the restructure + fast close),
+file a follow-up issue for Option B or C. The 504 page is a day of work
+that doesn't unblock any customer — the fast close already solves the
+45s socket-sit.

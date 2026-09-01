@@ -46,6 +46,31 @@ const SetupComponent = (() => {
         </div>
       </div>
 
+      <!-- 1b — Create identity in the NS (first-run, no enrollment string needed) -->
+      <div class="card">
+        <div class="card-title">1b · Create an identity in the name server (optional)</div>
+        <p class="setup-help">
+          No <code>ztlp://enroll/…</code> string from an admin? Create a fresh
+          identity in the name server here — it registers the identity record and
+          (optionally) links this device to it, so you get a real identity from
+          scratch. The app picks it up automatically.
+        </p>
+        <div class="form-group">
+          <label class="form-label" for="identity-name">Identity name</label>
+          <input type="text" id="identity-name" class="form-input"
+                 placeholder="e.g. steve@trs.ztlp" spellcheck="false" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="identity-device">Device name to link (optional)</label>
+          <input type="text" id="identity-device" class="form-input"
+                 placeholder="e.g. laptop-01.trs.ztlp — leave blank to skip"
+                 spellcheck="false" autocomplete="off">
+          <div class="form-hint">Leave blank to create the identity only; link the device later via <code>ztlp admin link-device</code>.</div>
+        </div>
+        <button class="btn btn-primary" id="btn-create-identity">🆔 Create identity</button>
+        <div class="setup-step-state" id="step-create-identity-state"></div>
+      </div>
+
       <!-- 2 — CA chain (no admin) -->
       <div class="card">
         <div class="card-title">2 · Certificate Authority chain</div>
@@ -106,6 +131,7 @@ const SetupComponent = (() => {
     wire('btn-install-ca', installCa);
     wire('btn-install-dns', installDns);
     wire('btn-test-browse', testBrowse);
+    wire('btn-create-identity', createIdentity);
   }
 
   function wire(id, fn) {
@@ -249,7 +275,18 @@ const SetupComponent = (() => {
   function stateLine(ok, text) {
     if (ok === true) return `<span class="setup-ok">✓ ${escapeHtml(text)}</span>`;
     if (ok === false) return `<span class="setup-err">✗ ${escapeHtml(text)}</span>`;
+    // `null`/`undefined` = unknown / not-applicable (e.g. ca_installed_system_trust
+    // is null on an unsupported OS). Render as a neutral "…" so the UI never
+    // shows a misleading red ✗ for a step that simply isn't measurable here.
     return `<span class="setup-pending">… ${escapeHtml(text)}</span>`;
+  }
+
+  // `stateLine` treats null as "unknown", but an Option<bool> that is
+  // explicitly `false` must show red. This helper normalizes the three
+  // distinct cases so the checklist reads honestly:
+  //   true → green check, false → red x, null/undefined → grey unknown.
+  function optionBool(ok) {
+    return ok === true ? true : ok === false ? false : null;
   }
 
   function setStepMessage(id, html) {
@@ -290,12 +327,20 @@ const SetupComponent = (() => {
 
     const zone = s.zone || '(none)';
     body.innerHTML = `
-      <p>Agent: <span class="setup-ok">✓ running</span> · Zone: <code>${escapeHtml(zone)}</code></p>
+      <p>Zone: <code>${escapeHtml(zone)}</code></p>
       <ul class="setup-checklist">
+        <li>${stateLine(s.daemon_running, s.daemon_running ? 'Agent running' : 'Agent not running')}</li>
+        <li>${stateLine(s.identity_present, s.identity_present ? 'Identity generated' : 'Identity not generated')}</li>
         <li>${stateLine(s.identity_enrolled, s.identity_enrolled ? 'Identity enrolled' : 'Identity not enrolled')}</li>
         <li>${stateLine(s.ca_initialized, s.ca_initialized ? 'CA chain generated' : 'CA chain missing')}</li>
-        <li>${stateLine(s.ca_installed_system_trust, s.ca_installed_system_trust ? 'CA installed in system trust' : 'CA not installed in system trust')}</li>
-        <li>${stateLine(s.dns_configured, s.dns_configured ? 'DNS routes configured' : 'DNS routes missing')}</li>
+        <li>${stateLine(optionBool(s.ca_installed_system_trust),
+          s.ca_installed_system_trust === true ? 'CA installed in system trust'
+          : s.ca_installed_system_trust === false ? 'CA not installed in system trust'
+          : 'CA system-trust status unknown')}</li>
+        <li>${stateLine(optionBool(s.dns_configured),
+          s.dns_configured === true ? 'DNS routes configured'
+          : s.dns_configured === false ? 'DNS routes missing'
+          : 'DNS status unknown')}</li>
       </ul>
       <button class="btn btn-secondary" id="setup-refresh">🔄 Refresh</button>
     `;
@@ -316,12 +361,22 @@ const SetupComponent = (() => {
         ? stateLine(true, 'DNS routes active')
         : stateLine(null, 'click to configure (admin required)'));
     setStepMessage('step-test-browse-state', '');
+    // Identity-create step: show a done state once the device is enrolled
+    // (identity present + enrolled means the NS identity exists). Otherwise
+    // leave it neutral (the user can run it from scratch).
+    setStepMessage('step-create-identity-state',
+      (s.identity_present && s.identity_enrolled)
+        ? stateLine(true, `identity '${s.zone || ''}' present & enrolled`)
+        : (s.identity_present
+            ? stateLine(null, 'identity generated — create more or link a device below')
+            : stateLine(null, 'no identity yet — create one below (no admin string needed)')));
 
     setControls(true, s);
   }
 
   function setControls(daemonUp, s) {
     const map = {
+      'btn-create-identity': !!daemonUp,
       'btn-ca-init': daemonUp && !!(s && s.identity_enrolled),
       'btn-install-ca': daemonUp && !!(s && s.ca_initialized),
       'btn-install-dns': daemonUp && !!(s && s.ca_initialized),
@@ -333,7 +388,41 @@ const SetupComponent = (() => {
     }
   }
 
-  // ── the four init operations ────────────────────────────────────────
+  // ── the init operations ────────────────────────────────────────────────
+  async function createIdentity() {
+    const nameInput = document.getElementById('identity-name');
+    const deviceInput = document.getElementById('identity-device');
+    const name = nameInput ? nameInput.value.trim() : '';
+    const device = deviceInput ? deviceInput.value.trim() : '';
+    if (!name) {
+      setStepMessage('step-create-identity-state', stateLine(false, 'enter an identity name (e.g. steve@trs.ztlp)'));
+      LiveLog.fail('Create identity: name required.');
+      return;
+    }
+    busy = true;
+    setStepMessage('step-create-identity-state', stateLine(null, `creating '${name}' in the NS…`));
+    LiveLog.setup(`Creating identity '${name}' (role admin) in the name server.`);
+    try {
+      const result = await invoke('setup_create_identity', {
+        name,
+        role: 'admin',
+        deviceName: device,
+        nsServer: '',
+      });
+      setStepMessage('step-create-identity-state',
+        stateLine(true, result.message));
+      LiveLog.success(result.message);
+      // Refresh so the checklist (identity_present / identity_enrolled) updates.
+      await load();
+    } catch (e) {
+      setStepMessage('step-create-identity-state', stateLine(false, String(e)));
+      LiveLog.fail(`Create identity failed: ${e}`);
+    } finally {
+      busy = false;
+      setControls(true, lastStatus);
+    }
+  }
+
   async function runCaInit() {
     if (!lastStatus || !lastStatus.zone) {
       setStepMessage('step-ca-init-state', stateLine(false, 'enroll a zone first'));

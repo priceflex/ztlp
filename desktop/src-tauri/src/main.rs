@@ -67,6 +67,7 @@ fn main() {
             setup::setup_install_ca,
             setup::setup_install_dns,
             setup::setup_test_browse,
+            setup::setup_create_identity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running ZTLP desktop application");

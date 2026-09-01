@@ -315,6 +315,166 @@ pub fn setup_test_browse(hostname: String) -> Result<String, String> {
     }
 }
 
+// ── Identity creation (B: first-run "create identity as admin in the NS") ──
+//
+// These power the new "Create identity" step in the Setup wizard. From a
+// clean machine the user wants: create an admin identity in the NS, bind
+// this device to it, and have the app pick it up — so the device gets a
+// real identity without needing a pre-issued enrollment token string.
+//
+// We shell out to `ztlp admin create-user --json` and `ztlp admin
+// link-device --json` (both support machine-readable JSON + resolve the NS
+// server from `~/.ztlp/agent.toml`, so the GUI never needs to know the NS
+// address). No elevation required — creating NS records is a user-scoped
+// operation (the NS registration path authenticates by the caller's key).
+
+/// Parsed result of `ztlp admin create-user --json`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateUserResult {
+    pub status: String,
+    pub name: String,
+    pub role: String,
+    pub pubkey: String,
+    pub key_file: String,
+}
+
+/// Parsed result of `ztlp admin link-device --json`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LinkDeviceResult {
+    pub status: String,
+    pub device: String,
+    pub owner: String,
+}
+
+/// Combined result the UI shows after a first-run identity create.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IdentityCreateResult {
+    pub user: CreateUserResult,
+    pub device: Option<LinkDeviceResult>,
+    /// Human-readable summary the UI can show verbatim.
+    pub message: String,
+}
+
+fn parse_create_user_json(raw: &str) -> Result<CreateUserResult, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("empty create-user output".into());
+    }
+    serde_json::from_str::<CreateUserResult>(raw)
+        .map_err(|e| format!("could not parse create-user JSON: {e}"))
+}
+
+fn parse_link_device_json(raw: &str) -> Result<LinkDeviceResult, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("empty link-device output".into());
+    }
+    serde_json::from_str::<LinkDeviceResult>(raw)
+        .map_err(|e| format!("could not parse link-device JSON: {e}"))
+}
+
+/// The NS `UserRole` values the CLI accepts (mirrors `role_to_str` in the
+/// CLI). The GUI validates against this so a bad role never reaches the CLI.
+const VALID_ROLES: [&str; 3] = ["admin", "tech", "user"];
+
+/// Create an identity in the NS (role: admin/tech/user) and, when a
+/// `device_name` is given, link the local device to it. This is the
+/// "start from scratch" first-run step: no enrollment token string needed.
+///
+/// `name` is the identity name (e.g. `steve@trs.ztlp`). `role` defaults to
+/// `admin` for the first-run case. `device_name` is optional — when empty,
+/// only the user identity is created (the device link can be done later).
+/// `ns_server` is optional; the CLI resolves it from config when omitted.
+#[tauri::command]
+pub fn setup_create_identity(
+    name: String,
+    role: String,
+    device_name: String,
+    ns_server: String,
+) -> Result<IdentityCreateResult, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("identity name is required".into());
+    }
+    let role = role.trim().to_lowercase();
+    if !VALID_ROLES.contains(&role.as_str()) {
+        return Err(format!(
+            "invalid role '{role}' (use one of admin/tech/user)"
+        ));
+    }
+
+    // ── Step 1: create the user identity ────────────────────────────────
+    let mut cmd = ztlp_cmd();
+    cmd.args([
+        "admin",
+        "create-user",
+        name.as_str(),
+        "--role",
+        role.as_str(),
+        "--json",
+    ]);
+    if !ns_server.trim().is_empty() {
+        cmd.args(["--ns-server", ns_server.trim()]);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn ztlp for create-user: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(format!(
+            "create-user failed (exit {}): {stderr}",
+            out.status.code().unwrap_or(-1)
+        ));
+    }
+    let user = parse_create_user_json(&stdout)?;
+
+    // ── Step 2: link the device (optional) ──────────────────────────────
+    let device = if device_name.trim().is_empty() {
+        None
+    } else {
+        let dev = device_name.trim();
+        let mut dcmd = ztlp_cmd();
+        dcmd.args([
+            "admin",
+            "link-device",
+            dev,
+            "--owner",
+            name.as_str(),
+            "--json",
+        ]);
+        if !ns_server.trim().is_empty() {
+            dcmd.args(["--ns-server", ns_server.trim()]);
+        }
+        match dcmd.output() {
+            Ok(dout) if dout.status.success() => {
+                parse_link_device_json(&String::from_utf8_lossy(&dout.stdout)).ok()
+            }
+            _ => None,
+        }
+    };
+
+    let message = match &device {
+        Some(d) if d.status == "linked" => {
+            format!(
+                "✓ identity '{name}' (role {role}) created; device '{dev}' linked.",
+                dev = device_name.trim()
+            )
+        }
+        Some(d) => format!(
+            "⚠ identity '{name}' (role {role}) created, but device link reported: {}",
+            d.status
+        ),
+        None => format!("✓ identity '{name}' (role {role}) created in the NS."),
+    };
+
+    Ok(IdentityCreateResult {
+        user,
+        device,
+        message,
+    })
+}
+
 /// Windows-only: elevate `ztlp.exe <args>` via ShellExecuteExW("runas").
 ///
 /// Pops a UAC prompt. We don't capture stdout/stderr (ShellExecute
@@ -423,5 +583,82 @@ mod tests {
     fn setup_test_browse_rejects_empty_hostname() {
         let r = setup_test_browse(String::new());
         assert!(r.is_err());
+    }
+
+    // ── setup_create_identity (B: first-run identity in the NS) ─────────
+    //
+    // These tests lock the input-validation guards + the JSON parsing of the
+    // `ztlp admin create-user --json` / `link-device --json` output. They
+    // do NOT shell out (no daemon / NS during `cargo test`), so they exercise
+    // the pure logic that the UI depends on.
+
+    /// An empty identity name must be rejected before any spawn.
+    #[test]
+    fn setup_create_identity_rejects_empty_name() {
+        let r = setup_create_identity(
+            String::new(),
+            "admin".to_string(),
+            String::new(),
+            String::new(),
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("identity name is required"));
+    }
+
+    /// A whitespace-only name must be rejected the same way.
+    #[test]
+    fn setup_create_identity_rejects_whitespace_name() {
+        let r = setup_create_identity(
+            "   \t  ".to_string(),
+            "admin".to_string(),
+            String::new(),
+            String::new(),
+        );
+        assert!(r.is_err());
+    }
+
+    /// The `--json` output of `create-user` parses into the result struct
+    /// with the expected fields. This is the seam the UI reads, so a
+    /// regression in the parser shape shows up here before it reaches the UI.
+    #[test]
+    fn test_parse_create_user_json() {
+        let raw = r#"{"status":"created","name":"steve@trs.ztlp","role":"admin","pubkey":"0a1b","key_file":"/h/.ztlp/users/steve_at_trs.ztlp.json"}"#;
+        let parsed = parse_create_user_json(raw).expect("should parse");
+        assert_eq!(parsed.status, "created");
+        assert_eq!(parsed.name, "steve@trs.ztlp");
+        assert_eq!(parsed.role, "admin");
+        assert_eq!(parsed.pubkey, "0a1b");
+        assert!(parsed.key_file.ends_with("steve_at_trs.ztlp.json"));
+    }
+
+    /// A malformed / non-JSON `create-user` output is an error, not a panic.
+    #[test]
+    fn parse_create_user_json_rejects_garbage() {
+        assert!(parse_create_user_json("not json at all").is_err());
+        assert!(parse_create_user_json("").is_err());
+    }
+
+    /// The `--json` output of `link-device` parses into the result struct.
+    #[test]
+    fn test_parse_link_device_json() {
+        let raw = r#"{"status":"linked","device":"laptop-01.trs.ztlp","owner":"steve@trs.ztlp"}"#;
+        let parsed = parse_link_device_json(raw).expect("should parse");
+        assert_eq!(parsed.status, "linked");
+        assert_eq!(parsed.device, "laptop-01.trs.ztlp");
+        assert_eq!(parsed.owner, "steve@trs.ztlp");
+    }
+
+    /// Role validation: only admin/tech/user are accepted (mirrors the NS
+    /// UserRole). Prevents the UI from passing a garbage role to the CLI.
+    #[test]
+    fn setup_create_identity_rejects_bad_role() {
+        let r = setup_create_identity(
+            "steve@trs.ztlp".to_string(),
+            "superuser".to_string(),
+            String::new(),
+            String::new(),
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("invalid role"));
     }
 }

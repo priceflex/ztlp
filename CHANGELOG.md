@@ -1,5 +1,29 @@
 # Changelog
 
+## Desktop v1.1.0 — 2026-09-01 (first-run "start from scratch" setup)
+
+### Setup wizard: create an identity from scratch + polished status checklist
+
+**The Setup page now lets a brand-new user get a working identity without a
+pre-issued enrollment string, and shows an honest, complete status checklist.**
+This is the "download → install → run → get identity" first-run path.
+
+- **New "1b · Create an identity in the name server" step** — creates an admin
+  identity in the NS (`ztlp admin create-user --role admin --json`) and
+  optionally links the local device to it (`ztlp admin link-device --json`), so
+  a device gets a real identity without needing an admin's
+  `ztlp://enroll/…` string. New `setup_create_identity` Tauri command (with
+  TDD-locked input validation + JSON parsing of the CLI `--json` output).
+- **Polished status checklist** — the status body now shows six honest rows:
+  Agent running, Identity generated, Identity enrolled, CA chain, CA
+  system-trust, DNS routes. `Option<bool>` fields that are `null` (e.g. CA
+  trust on an unsupported OS) now render as a neutral "…" instead of a
+  misleading red "✗", so the checklist reads truthfully.
+- **Persistent name server (demo/production)** — the NS now runs in
+  `disc_copies` mode (Mnesia on the persistent volume) instead of `ram_copies`,
+  so SVC + identity + device-link records survive an NS container restart. A
+  fresh agent can always resolve its gateway; 443 no longer dies on NS restart.
+
 ## v0.35.6 — 2026-09-01
 
 ### Agent: Local TLS termination on the 443/8443 VIP (HTTPS by default)

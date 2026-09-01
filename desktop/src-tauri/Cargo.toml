@@ -1,6 +1,6 @@
 [package]
 name = "ztlp-desktop"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2021"
 description = "ZTLP Desktop — Zero Trust Layer Protocol client"
 authors = ["Steven Price <steve@techrockstars.com>"]

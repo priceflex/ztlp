@@ -65,7 +65,7 @@ name = "ztlp-proto"
 # demo path verified live end-to-end on the AI computer, and the PoC backend
 # committed to examples/gateway-auth-poc (Dockerfile + compose + direct
 # verification harness). Floor ratcheted to 0.35.5 in version_pin_test.rs.
-version = "0.35.5"
+version = "0.35.6"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

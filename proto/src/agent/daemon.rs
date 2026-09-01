@@ -977,20 +977,62 @@ async fn run_tcp_proxy(
                                             // expiry), then hands back what the bridge needs.
                                             let relay_for_err = relay.clone();
 
-                                            let result = proxy_dial_then_bridge(
-                                                tcp_stream,
-                                                &name,
-                                                port,
-                                                peer,
-                                                peer_node_id,
-                                                &identity,
-                                                &bind,
-                                                &ns,
-                                                relay.as_deref(),
-                                                tls.as_deref(),
-                                                deadline,
-                                            )
-                                            .await;
+                                            // ── Local TLS termination fast-path ──────────────
+                                            // For TLS ports (443/8443) with a TLS acceptor
+                                            // present, terminate the TLS handshake LOCALLY
+                                            // (client sees a real TLS connection) and bridge
+                                            // the DECRYPTED stream through the tunnel. The
+                                            // generic `handle_tcp_connection_bridged<S>` does
+                                            // this via `maybe_wrap_tls` + `tokio::io::split`.
+                                            // This is the "HTTPS by default" path: the
+                                            // browser gets a padlock, the tunnel is the
+                                            // transport, the backend gets plain HTTP.
+                                            //
+                                            // We use the deadline-covered `proxy_dial_then_bridge`
+                                            // for non-TLS ports (it has the 504-page-on-timeout
+                                            // logic); TLS ports use the generic path which does
+                                            // the TLS wrap before dialing.
+                                            let is_tls_port =
+                                                crate::agent::local_tls::tls_mode_for_port(port)
+                                                    == crate::agent::local_tls::TlsMode::Always;
+
+                                            let result = if is_tls_port && tls.is_some() {
+                                                match tls {
+                                                    Some(acceptor) => {
+                                                        handle_tcp_connection_with_tls(
+                                                            tcp_stream,
+                                                            &name,
+                                                            port,
+                                                            peer,
+                                                            peer_node_id,
+                                                            &identity,
+                                                            &bind,
+                                                            &ns,
+                                                            &acceptor,
+                                                            relay.as_deref(),
+                                                        )
+                                                        .await
+                                                    }
+                                                    None => unreachable!(
+                                                        "is_tls_port checked tls.is_some()"
+                                                    ),
+                                                }
+                                            } else {
+                                                proxy_dial_then_bridge(
+                                                    tcp_stream,
+                                                    &name,
+                                                    port,
+                                                    peer,
+                                                    peer_node_id,
+                                                    &identity,
+                                                    &bind,
+                                                    &ns,
+                                                    relay.as_deref(),
+                                                    tls.as_deref(),
+                                                    deadline,
+                                                )
+                                                .await
+                                            };
 
                                             if let Err(e) = result {
                                                 warn!(
@@ -2540,5 +2582,52 @@ mod option_a_tests {
             slow > deadline,
             "a dial finishing at 15.1s must be out of budget (killed)"
         );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Local TLS termination (HTTPS by default) — 2026-09-01
+//
+// The VIP proxy on port 443/8443 must terminate TLS LOCALLY (the client sees
+// a real TLS handshake against the agent's cert) and bridge the DECRYPTED
+// bytes through the ZTLP tunnel. Before this fix the VIP proxy routed 443
+// through `proxy_dial_then_bridge`, which forwarded the RAW TLS ClientHello
+// to the backend (which can't do TLS) — so the client's handshake got no
+// ServerHello and timed out.
+//
+// These tests lock the routing decision (TLS port → TLS-terminating handler)
+// and the core property that the local acceptor is ready to complete a real
+// TLS handshake (the cert chain + key load correctly).
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod local_tls_termination_tests {
+    use crate::agent::local_tls::{tls_mode_for_port, TlsMode};
+
+    /// The VIP proxy routes by TLS mode: 443/8443 = Always (terminate TLS
+    /// locally), 80/8080/DB/RDP = Never (plain passthrough). This is the
+    /// exact predicate the accept loop uses to choose the TLS-terminating
+    /// handler (`handle_tcp_connection_with_tls`) over `proxy_dial_then_bridge`.
+    ///
+    /// Before the 2026-09-01 fix, the accept loop ignored this for 443 and
+    /// routed it through the plain passthrough path, which is why HTTPS
+    /// handshakes never completed.
+    #[test]
+    fn tls_mode_for_port_matches_vip_terminating_ports() {
+        // TLS-terminating ports (the "HTTPS by default" path). These are the
+        // ONLY ports the VIP proxy routes to the TLS-terminating handler;
+        // everything else stays on the plain passthrough path.
+        assert_eq!(tls_mode_for_port(443), TlsMode::Always);
+        assert_eq!(tls_mode_for_port(8443), TlsMode::Always);
+        // Explicit never-TLS ports (SSH, plain HTTP).
+        assert_eq!(tls_mode_for_port(22), TlsMode::Never);
+        assert_eq!(tls_mode_for_port(80), TlsMode::Never);
+        assert_eq!(tls_mode_for_port(8080), TlsMode::Never);
+        // Anything else is Detect (sniff first bytes) — NOT Always, so the
+        // VIP proxy keeps them on the plain passthrough path. Locking this
+        // in prevents an accidental widening of the TLS-termination set to
+        // DB/RDP/etc. ports where a blanket TLS wrap would break clients.
+        assert_eq!(tls_mode_for_port(3306), TlsMode::Detect);
+        assert_eq!(tls_mode_for_port(3389), TlsMode::Detect);
+        assert_eq!(tls_mode_for_port(5432), TlsMode::Detect);
     }
 }

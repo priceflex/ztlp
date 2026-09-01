@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.35.6 — 2026-09-01
+
+### Agent: Local TLS termination on the 443/8443 VIP (HTTPS by default)
+
+**The agent's 443/8443 VIP proxy now terminates TLS locally, so browsers
+can connect via `https://` and see a secure-connection indicator — the
+"HTTPS by default" path.** Previously the VIP proxy passed the raw TLS
+ClientHello bytes through the tunnel to the (HTTP-only) backend, which
+couldn't speak TLS, so every `https://` handshake timed out.
+
+- **`daemon.rs::run_tcp_proxy` (VIP accept loop)** — routes `TlsMode::Always`
+  ports (443/8443) to the existing `handle_tcp_connection_with_tls` handler
+  (which calls `maybe_wrap_tls` + the already-generic
+  `handle_tcp_connection_bridged<S>`), instead of `proxy_dial_then_bridge`
+  (which forwarded raw bytes and never invoked the TLS acceptor — its
+  `_tls_acceptor` param was unused). No bridge refactor needed:
+  `handle_tcp_connection_bridged<S>` is already generic over
+  `S: AsyncRead + AsyncWrite + Unpin + Send` and splits the stream via
+  `tokio::io::split`.
+- **Non-TLS ports (80/8080/DB/RDP) unchanged** — still use
+  `proxy_dial_then_bridge` (first-byte deadline + branded 504 page).
+- **TDD test** `local_tls_termination_tests::tls_mode_for_port_matches_vip_terminating_ports`
+  locks the routing predicate: `443|8443 → Always`, `22|80|8080 → Never`,
+  `3306|3389|5432 → Detect` (only Always ports get TLS-terminated).
+  `cargo test --lib` 1207 passed (was 1206, +1).
+
+**Verified live (2026-09-01, demo tenant `demo.spongebob.ztlp`):**
+- `curl --insecure https://web.demo.spongebob.ztlp/` → HTTP 200 +
+  `GATEWAY-AUTHENTICATED` + `signature VALID` (full page through the
+  TLS-terminated tunnel).
+- Python `urllib` with the ZTLP CA bundle (`cafile=root+intermediate.pem`) →
+  HTTP 200 (full-chain validation; proves the cert chain is valid).
+- Chrome (real UI): `https://web.demo.spongebob.ztlp/` renders the PoC page
+  with no certificate error / no "Not Secure" banner; secure-connection
+  indicator in the address bar; page DOM shows `GATEWAY-AUTHENTICATED` +
+  `signature VALID` + `Authenticated as spongebob@demo.spongebob.ztlp`.
+
 ## v0.35.5 — 2026-09-01
 
 ### Gateway-Auth: Per-Request Signed Identity Headers (proto)

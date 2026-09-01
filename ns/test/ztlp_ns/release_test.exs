@@ -67,17 +67,17 @@ defmodule ZtlpNs.ReleaseTest do
              """
     end
 
-    test "mix.exs version is at least 0.35.4 (v0.35.4 security-audit-patch tag)" do
+    test "mix.exs version is at least 0.35.5 (v0.35.5 gateway-auth tag)" do
       # Floor guard: prevents an accidental down-bump that would make the NS
-      # misreport itself as a pre-v0.35.4 version. Ratcheted from 0.35.3 →
-      # 0.35.4 for the SAST-audit security patch release (gateway per-stream
-      # mux authorization bypass + CRL fail-closed). Using Version.compare
-      # (rather than asserting a literal string) means this test does NOT need
-      # maintenance on every routine version bump — it only fails on a
-      # down-bump below the 0.35.4 floor.
+      # misreport itself as a pre-v0.35.5 version. Ratcheted from 0.35.4 →
+      # 0.35.5 in release/v0.35.5 (gateway-auth per-request header injection
+      # + PoC backend committed to examples/gateway-auth-poc). Using
+      # Version.compare (rather than asserting a literal string) means this
+      # test does NOT need maintenance on every routine version bump — it
+      # only fails on a down-bump below the 0.35.5 floor.
       declared = ZtlpNs.MixProject.project()[:version]
-      assert Version.compare(declared, "0.35.4") in [:gt, :eq],
-             "mix.exs version #{declared} is older than the v0.35.4 security-audit-patch tag"
+      assert Version.compare(declared, "0.35.5") in [:gt, :eq],
+             "mix.exs version #{declared} is older than the v0.35.5 gateway-auth tag"
     end
   end
 

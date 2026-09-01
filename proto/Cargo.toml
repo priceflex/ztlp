@@ -59,7 +59,13 @@ name = "ztlp-proto"
 # from --relay (if given) or the --ns-server host at the well-known relay
 # port 23095 (NS and relay are co-located). Floor ratcheted to 0.35.1 in
 # version_pin_test.rs.
-version = "0.35.4"
+# Bumped 0.35.4 → 0.35.5 in release/v0.35.5: gateway-auth per-request header
+# injection (RequestInjector streaming state machine, 8-field IdentityBundle,
+# audience binding + timestamp freshness on the verifier side), the 200-OK
+# demo path verified live end-to-end on the AI computer, and the PoC backend
+# committed to examples/gateway-auth-poc (Dockerfile + compose + direct
+# verification harness). Floor ratcheted to 0.35.5 in version_pin_test.rs.
+version = "0.35.5"
 edition = "2021"
 description = "ZTLP (Zero Trust Layer Protocol) Phase 1 prototype — handshake, session, encrypted transport"
 license = "MIT"

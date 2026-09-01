@@ -1060,7 +1060,7 @@ pub mod noise_stream {
         conn: &QuicConnection,
         identity: &NodeIdentity,
         initiator_id: NodeId,
-    ) -> Result<(HandshakeResult, [u8; 16]), QuicTransportError> {
+    ) -> Result<(HandshakeResult, [u8; 16], Option<String>), QuicTransportError> {
         let (mut send, mut recv) = conn.accept_bi().await?;
         let mut ctx = HandshakeContext::new_responder(identity)?;
 
@@ -1078,6 +1078,13 @@ pub mod noise_stream {
         let msg3 = read_ztlp_frame(&mut recv).await?;
         ctx.read_message(&msg3)?;
 
+        // The Noise IK handshake authenticates the initiator's static
+        // X25519 key — capture it BEFORE finalize consumes the context.
+        // This is the tunnel's cryptographic identity: callers map it to
+        // an operator identity (e.g. admin email) for per-request header
+        // injection without any additional per-request authentication.
+        let peer_pubkey_hex = ctx.remote_static_hex();
+
         let (_, resp_sess) = ctx.finalize(initiator_id, session_id)?;
 
         let _ = send.finish();
@@ -1090,6 +1097,7 @@ pub mod noise_stream {
                 session_id,
             },
             service_hash,
+            peer_pubkey_hex,
         ))
     }
 }

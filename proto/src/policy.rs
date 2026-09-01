@@ -240,6 +240,32 @@ impl PolicyEngine {
         })
     }
 
+    /// Resolve WHICH `group:` rule (if any) authorizes `identity` for
+    /// `service` — for surfacing "this is the group that granted access"
+    /// in signed identity headers, without disclosing the identity's full
+    /// group membership list.
+    ///
+    /// Returns `Some(group_name)` for the first matching `group:` pattern
+    /// (patterns are evaluated in the order they were configured, same as
+    /// `authorize_async`), or `None` if no `group:` pattern matched (either
+    /// an exact/wildcard rule matched instead, or nothing matched at all).
+    pub async fn matched_group_for(
+        &self,
+        identity: &str,
+        service: &str,
+        resolver: &dyn NsResolver,
+    ) -> Option<String> {
+        let patterns = self.rules.get(service)?;
+        for p in patterns {
+            if let Some(group_name) = p.strip_prefix("group:") {
+                if matches_pattern_async(identity, p, resolver).await {
+                    return Some(group_name.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Add or update a policy rule at runtime.
     pub fn put_rule(&mut self, service: &str, allow: Vec<String>) {
         self.rules.insert(service.to_string(), allow);
@@ -861,5 +887,92 @@ allow = ["group:techs@tunnel.ztlp"]
         let engine = PolicyEngine::from_toml(toml).unwrap();
         // Sync authorize: "group:techs@tunnel.ztlp" is not == "alice.tunnel.ztlp"
         assert!(!engine.authorize("alice.tunnel.ztlp", "ssh"));
+    }
+
+    #[tokio::test]
+    async fn test_matched_group_for_returns_matching_group_name() {
+        // Two group: rules for the same service; identity is only in the
+        // second one. matched_group_for must surface WHICH group matched,
+        // not just true/false.
+        let toml = r#"
+default = "deny"
+
+[[services]]
+name = "web"
+allow = ["group:sales@tunnel.ztlp", "group:techs@tunnel.ztlp"]
+"#;
+        let engine = PolicyEngine::from_toml(toml).unwrap();
+        let mut resolver = MockResolver::new();
+        resolver.groups.insert(
+            "sales@tunnel.ztlp".to_string(),
+            vec!["alice@tunnel.ztlp".to_string()],
+        );
+        resolver.groups.insert(
+            "techs@tunnel.ztlp".to_string(),
+            vec!["bob@tunnel.ztlp".to_string()],
+        );
+
+        assert_eq!(
+            engine
+                .matched_group_for("bob@tunnel.ztlp", "web", &resolver)
+                .await,
+            Some("techs@tunnel.ztlp".to_string())
+        );
+        assert_eq!(
+            engine
+                .matched_group_for("alice@tunnel.ztlp", "web", &resolver)
+                .await,
+            Some("sales@tunnel.ztlp".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_matched_group_for_none_when_exact_rule_matched_instead() {
+        // Exact-match rule (not group:) grants access — matched_group_for
+        // must return None since no GROUP record authorized it.
+        let toml = r#"
+default = "deny"
+
+[[services]]
+name = "web"
+allow = ["alice.tunnel.ztlp"]
+"#;
+        let engine = PolicyEngine::from_toml(toml).unwrap();
+        let resolver = MockResolver::new();
+
+        assert!(
+            engine.authorize("alice.tunnel.ztlp", "web"),
+            "exact match should authorize"
+        );
+        assert_eq!(
+            engine
+                .matched_group_for("alice.tunnel.ztlp", "web", &resolver)
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_matched_group_for_none_when_denied() {
+        let toml = r#"
+default = "deny"
+
+[[services]]
+name = "web"
+allow = ["group:techs@tunnel.ztlp"]
+"#;
+        let engine = PolicyEngine::from_toml(toml).unwrap();
+        let mut resolver = MockResolver::new();
+        resolver.groups.insert(
+            "techs@tunnel.ztlp".to_string(),
+            vec!["bob@tunnel.ztlp".to_string()],
+        );
+
+        assert_eq!(
+            engine
+                .matched_group_for("eve@tunnel.ztlp", "web", &resolver)
+                .await,
+            None
+        );
     }
 }

@@ -1,0 +1,39 @@
+# ZTLP Gateway-Auth PoC — docker compose
+#
+# Just the PoC backend (the "dashboard" the tunnel delivers to). The ZTLP
+# gateway / NS / relay are NOT part of this compose file — they run on the
+# demo host via the main docker-compose. This file exists so the hot-patched
+# app.py (item #5 in ztlp-gateway-auth-next-steps.md) is built from source
+# instead of hand-docker-cp'd into a running container.
+#
+# The two env vars MUST match the gateway's launch args exactly, or every
+# request will be rejected:
+#   ZTLP_HEADER_HMAC_SECRET == the gateway's --header-hmac-secret (64-hex)
+#   ZTLP_EXPECTED_AUDIENCE  == the service name the gateway injects into
+#                              X-ZTLP-Audience (matches its --forward <name>:... arg)
+#
+# Usage (on the demo host):
+#   docker compose -f examples/gateway-auth-poc/docker-compose.yml up -d --build
+#
+# The container listens on 8080; the demo gateway forwards web:172.28.0.2:8080
+# to it (adjust the 18080 host-port mapping if you publish it differently).
+
+services:
+  poc:
+    build: .
+    image: ztlp-poc:latest
+    container_name: ztlp-poc
+    ports:
+      - "18080:8080"
+    environment:
+      # PLACEHOLDERS — replace with the real demo values before `up`:
+      # ZTLP_HEADER_HMAC_SECRET: <64-hex, must match gateway --header-hmac-secret>
+      # ZTLP_EXPECTED_AUDIENCE: web
+      ZTLP_HEADER_HMAC_SECRET: ""
+      ZTLP_EXPECTED_AUDIENCE: web
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/up',timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s

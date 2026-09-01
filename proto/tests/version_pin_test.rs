@@ -65,7 +65,11 @@ use ztlp_proto::updater::SemVer;
 /// large `addresses` ICE lists unresolvable by name ("no SVC record").
 /// Ratcheted 0.35.3 → 0.35.4 for the SAST-audit security patch release
 /// (gateway per-stream mux authorization bypass + CRL fail-closed).
-const MINIMUM_VERSION: &str = "0.35.4";
+/// Ratcheted 0.35.4 → 0.35.5 in release/v0.35.5: gateway-auth per-request
+/// header injection (RequestInjector streaming state machine + 8-field
+/// IdentityBundle), audience binding + timestamp freshness on the verifier
+/// side, and the PoC backend committed under examples/gateway-auth-poc.
+const MINIMUM_VERSION: &str = "0.35.5";
 
 #[test]
 fn cargo_pkg_version_is_parseable_semver() {

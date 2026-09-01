@@ -5007,6 +5007,96 @@ fn spawn_relay_registration(
     });
 }
 
+// ─── Gateway identity resolution (pubkey → NS-authoritative bundle) ───────
+//
+// Resolves the full X-ZTLP-* identity bundle for one authenticated tunnel,
+// by the tunnel's verified peer pubkey — NEVER from anything the connecting
+// agent self-reports. Called ONCE per tunnel (right after the Noise
+// handshake), and the result is cached for the tunnel's lifetime so the
+// per-request streaming injector (RequestInjector) doesn't re-hit NS on
+// every keep-alive request.
+//
+// Resolution chain (mirrors the DEVICE/GROUP registry ops in
+// cmd_admin_devices / cmd_admin_group_check):
+//   pubkey --(ns_pubkey_lookup, type 0x05)--> device_name
+//   device_name --(DEVICE record, type 0x10)--> owner, zone, assurance
+//   owner + target service's policy rules --(GROUP record, type 0x12)--> group
+//
+// Falls back to the static `--admin-map` (pubkey=email pairs) when no
+// `--ns-server` is configured, or when NS is unreachable — this keeps the
+// no-NS PoC/demo path working without a live NS server.
+async fn resolve_identity_bundle(
+    pubkey_hex: &str,
+    ns_server: &Option<String>,
+    admin_map: &std::collections::HashMap<String, String>,
+    policy: &PolicyEngine,
+    audience: &str,
+) -> ztlp_proto::http_injector::IdentityBundle {
+    let pubkey_lower = pubkey_hex.to_lowercase();
+    let fingerprint = pubkey_lower.chars().take(16).collect::<String>();
+
+    let ns = match ns_server {
+        Some(ns) => ns.clone(),
+        None => {
+            // No NS configured — fall back to the static admin map only.
+            return ztlp_proto::http_injector::IdentityBundle {
+                owner_email: admin_map.get(&pubkey_lower).cloned().unwrap_or_default(),
+                pubkey_fingerprint: fingerprint,
+                ..Default::default()
+            };
+        }
+    };
+
+    // 1. pubkey -> device_name (reverse lookup, NS query type 0x05).
+    let device_name = match ns_pubkey_lookup(&pubkey_lower, &ns).await {
+        Ok(Some(name)) => name,
+        _ => {
+            // No DEVICE enrolled for this pubkey in NS — fall back to the
+            // static admin map so existing `--admin-map` deployments keep
+            // working while NS-backed enrollment rolls out.
+            return ztlp_proto::http_injector::IdentityBundle {
+                owner_email: admin_map.get(&pubkey_lower).cloned().unwrap_or_default(),
+                pubkey_fingerprint: fingerprint,
+                ..Default::default()
+            };
+        }
+    };
+
+    // 2. device_name -> DEVICE record (owner, zone, assurance).
+    let (owner, zone, assurance) = match ns_query_raw(&device_name, &ns, 0x10).await {
+        Ok(Some(result)) => {
+            let owner = cbor_extract_string(&result.data_bytes, "owner").unwrap_or_default();
+            let zone = cbor_extract_string(&result.data_bytes, "zone").unwrap_or_default();
+            // "assurance" is only present if it was recorded at enrollment
+            // time (see agent/hardware_key.rs::assurance_level) — not
+            // currently attested, so treat as advisory.
+            let assurance = cbor_extract_string(&result.data_bytes, "assurance")
+                .unwrap_or_else(|| "unknown".to_string());
+            (owner, zone, assurance)
+        }
+        _ => (String::new(), String::new(), "unknown".to_string()),
+    };
+
+    // 3. owner + this service's policy rules -> which group: pattern (if
+    // any) actually authorized access, so we can surface it without
+    // disclosing the owner's full group membership list.
+    let resolver = UdpNsResolver::new(&ns);
+    let group = policy.matched_group_for(&owner, audience, &resolver).await;
+
+    ztlp_proto::http_injector::IdentityBundle {
+        owner_email: if owner.is_empty() {
+            admin_map.get(&pubkey_lower).cloned().unwrap_or_default()
+        } else {
+            owner
+        },
+        device_name,
+        zone,
+        group: group.unwrap_or_default(),
+        assurance,
+        pubkey_fingerprint: fingerprint,
+    }
+}
+
 // ─── Listen ─────────────────────────────────────────────────────────────────
 
 /// `ztlp listen` — Listen for incoming connections
@@ -5016,7 +5106,7 @@ async fn cmd_listen(
     key: &Option<PathBuf>,
     _gateway_mode: bool,
     forward: &[String],
-    _policy_path: &Option<PathBuf>,
+    policy_path: &Option<PathBuf>,
     ns_server: &Option<String>,
     _stun_server: &Option<String>,
     _nat_assist: bool,
@@ -5036,6 +5126,25 @@ async fn cmd_listen(
     advertise_all_interfaces: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
+
+    // Owned, 'static-friendly copies for the per-connection async closures
+    // below (identity bundle resolution needs NS server + policy engine
+    // available inside `tokio::spawn`).
+    let ns_server_owned: Option<String> = ns_server.clone();
+    let policy_engine: PolicyEngine = match policy_path {
+        Some(path) => match PolicyEngine::from_file(path) {
+            Ok(engine) => engine,
+            Err(e) => {
+                eprintln!(
+                    "⚠ Failed to load --policy file '{}': {} — falling back to allow-all",
+                    path.display(),
+                    e
+                );
+                PolicyEngine::allow_all()
+            }
+        },
+        None => PolicyEngine::allow_all(),
+    };
 
     let server_cfg = QuicEndpointConfig {
         bind: Some(bind.parse().unwrap()),
@@ -5523,7 +5632,7 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
-        let (_session, service_hash_bytes) =
+        let (_session, service_hash_bytes, tunnel_peer_pubkey) =
             match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
                 &conn,
                 &identity_clone,
@@ -5532,8 +5641,11 @@ async fn cmd_listen(
             .await
             {
                 Ok(res) => {
-                    println!("Responder handshake success");
-                    (res.0.session, res.1)
+                    println!(
+                        "Responder handshake success (peer pubkey: {})",
+                        res.2.as_deref().unwrap_or("unknown")
+                    );
+                    (res.0.session, res.1, res.2)
                 }
                 Err(e) => {
                     // A single failed handshake (timeout, malformed Noise,
@@ -5555,7 +5667,7 @@ async fn cmd_listen(
         let target_clone = match service_registry_clone.resolve(&service_hash_bytes) {
             Some((name, addr)) => {
                 println!("Resolved service hash to backend {} at {}", name, addr);
-                addr.to_string()
+                (name.to_string(), addr.to_string())
             }
             None => {
                 eprintln!(
@@ -5565,52 +5677,43 @@ async fn cmd_listen(
                 continue;
             }
         };
+        let (audience, backend_addr) = target_clone;
+
+        // Resolve the full NS-authoritative identity bundle ONCE per
+        // tunnel (right after the handshake, using the cryptographically
+        // verified peer pubkey) and cache it for the tunnel's lifetime.
+        // Every HTTP request on this tunnel gets the SAME resolved bundle
+        // + a fresh per-request timestamp/signature — no NS round-trip
+        // per request. See resolve_identity_bundle() for the pubkey ->
+        // device -> owner -> group resolution chain and its static
+        // --admin-map fallback.
+        let identity_bundle = if http_inject_headers_copy {
+            let pubkey = tunnel_peer_pubkey.clone().unwrap_or_default();
+            resolve_identity_bundle(
+                &pubkey,
+                &ns_server_owned,
+                &admin_map,
+                &policy_engine,
+                &audience,
+            )
+            .await
+        } else {
+            ztlp_proto::http_injector::IdentityBundle::default()
+        };
 
         tokio::spawn(async move {
             loop {
                 if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
-                    let tcp = tokio::net::TcpStream::connect(&target_clone).await.unwrap();
+                    let tcp = tokio::net::TcpStream::connect(&backend_addr).await.unwrap();
                     let (mut t_read, mut t_write) = tcp.into_split();
 
                     let hmac = hmac_secret.clone();
-                    let map = admin_map.clone();
+                    let bundle = identity_bundle.clone();
+                    let aud = audience.clone();
+                    let inject_enabled = http_inject_headers_copy;
 
                     tokio::spawn(async move {
                         use tokio::io::AsyncWriteExt;
-
-                        if http_inject_headers_copy {
-                            if let Ok(frame) =
-                                ztlp_proto::quic_transport::noise_stream::read_ztlp_frame(
-                                    &mut q_recv,
-                                )
-                                .await
-                            {
-                                let mut injected = false;
-                                if let Some((_, email)) = map.iter().next() {
-                                    // Ensure exact ISO8601 formatting since chronos produces dynamic timestamps correctly now
-                                    let now = SystemTime::now();
-                                    let ts = chrono::DateTime::<chrono::Utc>::from(now)
-                                        .format("%Y-%m-%dT%H:%M:%SZ")
-                                        .to_string();
-                                    let slice = &frame[..];
-                                    let rewrite_result = ztlp_proto::http_injector::inject_headers(
-                                        slice,
-                                        email,
-                                        &ts,
-                                        hmac.as_bytes(),
-                                    );
-                                    if let Ok(rewritten) = rewrite_result {
-                                        let _ = t_write.write_all(&rewritten).await;
-                                        injected = true;
-                                    }
-                                }
-                                if !injected {
-                                    let _ = t_write.write_all(&frame[..]).await;
-                                }
-                            } else {
-                                return;
-                            }
-                        }
 
                         let mut read_buf = vec![0u8; 65000];
 
@@ -5660,10 +5763,35 @@ async fn cmd_listen(
                         let pump_quic_to_backend = tokio::spawn(async move {
                             use tokio::io::AsyncWriteExt;
                             use ztlp_proto::quic_transport::noise_stream;
+
+                            // Streaming per-request injector: stamps the
+                            // cached identity bundle onto EVERY HTTP
+                            // request on this tunnel (not just the first
+                            // frame), so HTTP keep-alive works normally
+                            // instead of forcing a new tunnel per request.
+                            let mut injector = inject_enabled.then(|| {
+                                ztlp_proto::http_injector::RequestInjector::new(
+                                    bundle,
+                                    &aud,
+                                    hmac.as_bytes(),
+                                )
+                            });
+
                             loop {
                                 match noise_stream::read_ztlp_frame(&mut q_recv).await {
                                     Ok(frame) => {
-                                        if t_write.write_all(&frame).await.is_err() {
+                                        let out = if let Some(inj) = injector.as_mut() {
+                                            let ts = chrono::DateTime::<chrono::Utc>::from(
+                                                SystemTime::now(),
+                                            )
+                                            .format("%Y-%m-%dT%H:%M:%SZ")
+                                            .to_string();
+                                            inj.feed(&frame, &ts)
+                                        } else {
+                                            frame
+                                        };
+                                        if !out.is_empty() && t_write.write_all(&out).await.is_err()
+                                        {
                                             eprintln!(
                                                 "gateway QUIC->TCP write error; closing pump"
                                             );

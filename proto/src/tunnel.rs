@@ -4853,16 +4853,99 @@ pub struct HttpInjectionConfig {
 }
 
 pub async fn run_bridge_demuxed_with_http_injection(
-    _tcp_stream: tokio::net::TcpStream,
-    _udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
-    _recv_socket: std::sync::Arc<tokio::net::UdpSocket>,
-    _pipeline: std::sync::Arc<tokio::sync::Mutex<crate::pipeline::Pipeline>>,
-    _session_id: crate::packet::SessionId,
-    _send_addr: std::net::SocketAddr,
-    _initial_packets: Vec<crate::packet::ZtlpPacket>,
-    _http_injection: std::sync::Arc<HttpInjectionConfig>,
-    _peer_pubkey_hex: Option<String>,
+    tcp_stream: tokio::net::TcpStream,
+    udp_send_socket: std::sync::Arc<tokio::net::UdpSocket>,
+    recv_socket: std::sync::Arc<tokio::net::UdpSocket>,
+    pipeline: std::sync::Arc<tokio::sync::Mutex<crate::pipeline::Pipeline>>,
+    session_id: crate::packet::SessionId,
+    send_addr: std::net::SocketAddr,
+    initial_packets: Vec<crate::packet::ZtlpPacket>,
+    http_injection: std::sync::Arc<HttpInjectionConfig>,
+    peer_pubkey_hex: Option<String>,
 ) -> Result<crate::tunnel::BridgeOutcome, String> {
-    // Stub implementation to fix compilation
-    Ok(crate::tunnel::BridgeOutcome::Closed)
+    info!(
+        "run_bridge_demuxed_with_http_injection: starting for session {} peer={:?} initial_packets={} injection={}",
+        session_id, send_addr, initial_packets.len(), http_injection.enabled
+    );
+
+    // Convert initial ZtlpPackets to raw bytes, applying HTTP header
+    // injection to EVERY packet that looks like an HTTP request. Per
+    // the ZTLP spec, all requests are identified and carry signed
+    // X-ZTLP-* identity headers (X-ZTLP-Authenticated, X-ZTLP-Admin-Email,
+    // X-ZTLP-Device-Name, X-ZTLP-Zone, X-ZTLP-Group, X-ZTLP-Assurance,
+    // X-ZTLP-Audience, X-ZTLP-Timestamp, X-ZTLP-Signature) so the backend
+    // can verify the client's full NS-resolved identity on every request.
+    //
+    // NOTE: this dead-code path (multi-session listener, never wired to a
+    // live entry point — see cmd_listen_multi_session) only had a pubkey
+    // string to work with, not a real IdentityBundle. The live gateway
+    // path (cmd_listen, single-session) is what resolves owner/device/
+    // zone/group/assurance from NS and should be preferred; this stub
+    // bundle keeps the dead path compiling without pretending to have
+    // real identity data.
+    let bundle = crate::http_injector::IdentityBundle {
+        owner_email: peer_pubkey_hex
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        ..Default::default()
+    };
+    let audience = send_addr.to_string();
+    let hmac_key = http_injection.hmac_secret.as_bytes();
+
+    let mut initial_bytes: Vec<Vec<u8>> = Vec::new();
+    for (i, pkt) in initial_packets.into_iter().enumerate() {
+        let raw = pkt.serialize();
+        if http_injection.enabled && !hmac_key.is_empty() {
+            // Apply HTTP header injection to every request frame.
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string();
+            match crate::http_injector::inject_headers(
+                &raw, &bundle, &audience, &timestamp, hmac_key,
+            ) {
+                Ok(injected) => {
+                    info!(
+                        "http_injection: applied X-ZTLP-* headers to request {} ({} → {} bytes)",
+                        i,
+                        raw.len(),
+                        injected.len()
+                    );
+                    initial_bytes.push(injected);
+                }
+                Err(e) => {
+                    // Not a valid HTTP request (binary data, keep-alive
+                    // fragment, etc.) — pass through unmodified.
+                    debug!(
+                        "http_injection: skipping request {} (not HTTP or injection failed: {})",
+                        i, e
+                    );
+                    initial_bytes.push(raw);
+                }
+            }
+        } else {
+            initial_bytes.push(raw);
+        }
+    }
+
+    // Delegate to the real bridge implementation (TCP ↔ UDP tunnel forwarding).
+    let result = run_bridge_inner(
+        tcp_stream,
+        udp_send_socket,
+        Some(recv_socket),
+        pipeline,
+        session_id,
+        send_addr,
+        false, // send_initial_reset
+        initial_bytes,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!(
+        "run_bridge_demuxed_with_http_injection: finished for session {} outcome={:?}",
+        session_id, result
+    );
+    Ok(result)
 }

@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.35.5 — 2026-09-01
+
+### Gateway-Auth: Per-Request Signed Identity Headers (proto)
+
+**The ZTLP gateway now stamps signed `X-ZTLP-*` identity headers on EVERY
+HTTP request over a tunnel — keep-alive included — not just the first
+request of a fresh tunnel.** This closes the 200-OK demo path: the
+`web.demo.spongebob.ztlp` PoC page is reachable only through a tunnel, and
+every request it receives carries a fresh, verifier-checkable identity.
+
+- **`http_injector.rs::RequestInjector`** — streaming state machine
+  (`Headers → Body(n) → Headers → …`) that buffers each request until
+  `\r\n\r\n`, injects + signs, then passes exactly `Content-Length` body
+  bytes through before returning to `Headers`. Correctly handles
+  pipelined/keep-alive requests arriving in one chunk or split across many.
+  `chunked-encoding` / `Upgrade:` requests fall back to passthrough. One
+  Noise handshake per tunnel; the injector re-stamps headers + a fresh
+  timestamp + fresh HMAC on every subsequent request (proven live: two
+  keep-alive requests 3s apart on the same TCP connection get independent
+  `X-ZTLP-Timestamp` / `X-ZTLP-Signature`).
+- **`http_injector.rs::IdentityBundle`** — replaces the bare `email: &str`
+  with 8 signed fields: `Authenticated`, `Admin-Email`, `Device-Name`,
+  `Zone`, `Group`, `Assurance`, `Audience`, `Timestamp` (+ `Signature`).
+- **`ztlp-cli.rs::resolve_identity_bundle`** — resolves the bundle ONCE per
+  tunnel from the cryptographically-verified Noise peer pubkey
+  (pubkey → NS DEVICE record → owner/zone/assurance → `PolicyEngine::matched_group_for`),
+  cached in the gateway task. Falls back to the static `--admin-map` (email
+  only) when no `--ns-server` is configured or the pubkey isn't enrolled —
+  fixing the old `map.iter().next()` mis-attribution bug.
+- **`run_responder_handshake`** now returns the peer's Noise static pubkey
+  (captured before `ctx.finalize()` consumes the context) so identity
+  resolution keys off the ACTUAL authenticated peer.
+- **`run_bridge_demuxed_with_http_injection`** — the former no-op stub now
+  forwards real data (delegates to `run_bridge_inner`).
+- **Verifier side (PoC `app.py`)** — enforces **audience binding**
+  (`ZTLP_EXPECTED_AUDIENCE`: reject cross-service replay) and **timestamp
+  freshness** (`ZTLP_MAX_TIMESTAMP_AGE`, default 30s: reject stale
+  signatures even with a valid HMAC; small negative-skew tolerance for
+  clock drift).
+
+**Verified live end-to-end (2026-09-01, AI computer `10.170.3.207` + AWS
+`ztlp-test` box):** single curl through the real QUIC tunnel → `HTTP 200`
+~0.19s, body shows `GATEWAY-AUTHENTICATED` + `✓ signature VALID`
+(expected == provided), audience `web`, age < 1s. Four direct
+replay/forgery scenarios (valid-fresh, cross-audience, stale-timestamp,
+forged-secret) all behave correctly (accept / reject / reject / reject).
+
+### PoC backend committed to the repo (examples/gateway-auth-poc)
+
+The deployed `/app/app.py` was previously hand-`docker cp`'d into the
+running `ztlp-poc` container (a recreate silently reverted it — open item
+#5 in the gateway-auth next-steps doc). It is now the source of truth:
+`examples/gateway-auth-poc/` holds `app.py`, a stdlib-only `Dockerfile`
+(with the same `/up` healthcheck as the live container),
+`docker-compose.yml`, `verify_direct.py` (raw-socket forgery harness for
+the 4 scenarios — raw sockets, because `urllib` silently drops blank
+header values, and the canonical string signs empty values verbatim), and
+a README documenting the header contract.
+
+**Tests:** proto `cargo test --lib` 1206 passed, 0 failed (incl. 10 new
+`http_injector` tests: keep-alive, split-across-chunks, body passthrough,
+non-HTTP passthrough, spoofed-header stripping,
+audience-binding-replay); `policy.rs` 23/23 (incl. 4 new
+`matched_group_for` tests). Rust fmt + clippy clean.
+
+### Version pinning
+- proto 0.35.4 → 0.35.5; relay/ns/gateway mix.exs 0.35.4 → 0.35.5. Floor
+  ratcheted to 0.35.5 (`version_pin_test.rs` + NS `release_test.exs`).
+
 ## v0.34.10 — 2026-06-06
 
 ### Auto-Reconnect Supervisor Default-On (proto)

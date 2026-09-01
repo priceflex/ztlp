@@ -829,7 +829,7 @@ async fn run_tcp_proxy(
     let active_listeners: Arc<Mutex<std::collections::HashSet<Ipv4Addr>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
 
-    let mut poll_interval = tokio::time::interval(Duration::from_millis(500));
+    let mut poll_interval = tokio::time::interval(Duration::from_millis(50));
 
     loop {
         poll_interval.tick().await;
@@ -1126,6 +1126,13 @@ pub enum DialOutcome {
         tunnel_read: quinn::RecvStream,
         /// Tunnel write side (client → backend direction).
         tunnel_write: quinn::SendStream,
+        /// The first backend frame's payload, held by the dial phase.
+        /// The bridge MUST write this to the client before reading more
+        /// from `tunnel_read` — the tunnel may be closed after the first
+        /// frame (the gateway sends the response and FINs the stream),
+        /// so the bridge would otherwise read 0 bytes and the client
+        /// gets nothing (HTTP 000).
+        first_frame: Option<Vec<u8>>,
     },
     /// The client or tunnel/backend closed before a first response byte.
     ClientClosedBeforeFirstByte,
@@ -1310,16 +1317,28 @@ async fn proxy_dial_phase(
     // through it on deadline expiry instead of the socket dying with an
     // aborted task.
     let pump_down_task = tokio::spawn(async move {
-        let got = match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
-            Ok(_) => true,
-            Err(_) => false,
+        info!("[DIAL] pump_down: waiting for first backend frame from tunnel");
+        let result = match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
+            Ok(payload) => {
+                info!(
+                    "[DIAL] pump_down: got first backend frame ({} bytes)",
+                    payload.len()
+                );
+                (true, Some(payload))
+            }
+            Err(e) => {
+                warn!("[DIAL] pump_down: tunnel read error: {}", e);
+                (false, None)
+            }
         };
-        (q_recv, got)
+        let (got, first_frame) = result;
+        (q_recv, got, first_frame)
     });
 
     // Wait for the first backend byte (pump_down finishing), then abort
     // the upstream pump.
-    let (q_recv, got_first_byte) = pump_down_task.await.expect("pump_down task panicked");
+    let (q_recv, got_first_byte, first_frame) =
+        pump_down_task.await.expect("pump_down task panicked");
     pump_up_task.abort();
     let (client_read, q_send, client_eof) = pump_up_task.await.expect("pump_up task panicked");
 
@@ -1331,6 +1350,7 @@ async fn proxy_dial_phase(
             client_read,
             tunnel_read: q_recv,
             tunnel_write: q_send,
+            first_frame,
         })
     } else {
         // The client hung up during dial (EOF), or the tunnel/backend
@@ -1376,16 +1396,43 @@ async fn proxy_bridge_streams(
 
     let pump_down = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
+        info!("[BRIDGE] pump_down starting: reading tunnel → writing client");
+        let mut frame_count = 0u32;
+        let mut total_bytes = 0u64;
         loop {
             match crate::quic_transport::noise_stream::read_ztlp_frame(&mut tunnel_read).await {
                 Ok(payload) => {
+                    frame_count += 1;
+                    total_bytes += payload.len() as u64;
+                    if frame_count <= 5 {
+                        info!(
+                            "[BRIDGE] pump_down frame {}: {} bytes (total {} bytes)",
+                            frame_count,
+                            payload.len(),
+                            total_bytes
+                        );
+                    }
                     if client_write.write_all(&payload).await.is_err() {
+                        warn!(
+                            "[BRIDGE] pump_down: client write failed after {} frames / {} bytes",
+                            frame_count, total_bytes
+                        );
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    warn!(
+                        "[BRIDGE] pump_down: tunnel read error after {} frames / {} bytes: {}",
+                        frame_count, total_bytes, e
+                    );
+                    break;
+                }
             }
         }
+        info!(
+            "[BRIDGE] pump_down done: {} frames, {} bytes total",
+            frame_count, total_bytes
+        );
         let _ = client_write.shutdown().await;
     });
 
@@ -1530,11 +1577,28 @@ pub async fn proxy_dial_then_bridge(
             client_read,
             tunnel_read,
             tunnel_write,
+            first_frame,
         }) => {
-            // The first backend bytes are held in the tunnel (QUIC
-            // receive buffer) — the steady-state bridge delivers them to
-            // the client through our retained write half, then keeps
-            // pumping both directions with NO deadline (long-lived flows).
+            // Write the first backend frame to the client immediately —
+            // the tunnel may be closed after the first frame (the gateway
+            // sends the response and FINs the stream), so the bridge
+            // would otherwise read 0 bytes and the client gets nothing.
+            if let Some(frame) = &first_frame {
+                if let Err(e) = client_write.write_all(frame).await {
+                    warn!(
+                        "failed to write first frame ({} bytes) to {} (port {}): {}",
+                        frame.len(),
+                        ztlp_name,
+                        port,
+                        e
+                    );
+                    let _ = client_write.shutdown().await;
+                    return Ok(());
+                }
+            }
+            // The steady-state bridge delivers any remaining backend bytes
+            // to the client, then keeps pumping both directions with NO
+            // deadline (long-lived flows).
             proxy_bridge_streams(client_read, client_write, tunnel_read, tunnel_write).await;
 
             debug!("tunnel closed: {} (port {})", ztlp_name, port);

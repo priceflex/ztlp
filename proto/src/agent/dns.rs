@@ -354,13 +354,20 @@ async fn process_dns_query(
     }
 
     // Resolve via ZTLP-NS and allocate a VIP
-    debug!("DNS: resolving {} via ZTLP-NS ({})", ztlp_name, ns_server);
+    info!("[DNS] resolving {} via ZTLP-NS ({})", ztlp_name, ns_server);
 
     match proxy::ns_resolve(&ztlp_name, &ns_server).await {
         Ok(resolution) => {
             let mut st = state.lock().await;
             let ttl = Duration::from_secs(DEFAULT_TTL as u64);
-            if let Some(ip) = st.vip_pool.allocate(&ztlp_name, Some(ttl)) {
+            let pool_before = st.vip_pool.allocated_count();
+            let alloc_result = st.vip_pool.allocate(&ztlp_name, Some(ttl));
+            let pool_after = st.vip_pool.allocated_count();
+            info!(
+                "[DNS] allocate({}) → {:?} (pool {} → {})",
+                ztlp_name, alloc_result, pool_before, pool_after
+            );
+            if let Some(ip) = alloc_result {
                 // Store the resolved peer address AND NodeID.
                 //
                 // The NodeID matters for the automatic tunnel dialer's
@@ -376,6 +383,15 @@ async fn process_dns_query(
                     entry.peer_node_id = resolution.node_id;
                 }
                 drop(st);
+
+                // Give the TCP proxy's poll loop a chance to create the
+                // listener on the newly-allocated VIP before we return the
+                // A record to the client. The client's TCP connect follows
+                // the DNS response within milliseconds; if the listener
+                // isn't bound yet, the connect is refused. The proxy polls
+                // every 50ms, so a 60ms sleep guarantees the listener is
+                // up before the client connects.
+                tokio::time::sleep(Duration::from_millis(60)).await;
 
                 debug!("DNS: {} → {} (VIP {})", qname_lower, ztlp_name, ip);
                 build_a_response(query, ip, DEFAULT_TTL)

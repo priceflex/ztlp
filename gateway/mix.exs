@@ -29,7 +29,7 @@ defmodule ZtlpGateway.MixProject do
       # supervisor, PR #93). Floor ratcheted to 0.34.9 in release_test.exs.
       # Bumped 0.34.9 → 0.34.10 in release/v0.34.10 (supervisor default-on for
       # raw-IP connects, PR #95). Floor ratcheted to 0.34.10 in release_test.exs.
-      version: "0.35.6",
+      version: "0.35.7",
       elixir: "~> 1.12",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

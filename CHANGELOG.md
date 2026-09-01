@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.35.7 — 2026-09-01
+
+Bundle release carrying the desktop v1.1.0 first-run setup work (below). No
+core protocol changes — the agent/relay/ns/gateway behave identically to
+v0.35.6. The version bump keeps the release-tag == core-version invariant
+that the Image Version Gate enforces.
+
+See **Desktop v1.1.0** for the user-facing changes.
+
 ## Desktop v1.1.0 — 2026-09-01 (first-run "start from scratch" setup)
 
 ### Setup wizard: create an identity from scratch + polished status checklist

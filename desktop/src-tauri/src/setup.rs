@@ -78,14 +78,33 @@ fn ztlp_cmd() -> Command {
 /// banner instead of an error. This is the only command in this module
 /// that's safe to call before anything else — the others assume the
 /// daemon is up.
+///
+/// We retry once on failure: a transient connect hiccup (the daemon busy
+/// accepting a tunnel connection) must not permanently flip the wizard to
+/// "agent not running" when the daemon is in fact up. A genuinely-down
+/// daemon still fails both attempts fast (OS RST) and returns the default.
 #[tauri::command]
 pub fn setup_status() -> SetupStatusUi {
-    match ipc::ipc_request("setup_status", None) {
-        Ok(v) => serde_json::from_value(v).unwrap_or_default(),
-        Err(_) => SetupStatusUi {
-            daemon_running: false,
-            ..Default::default()
-        },
+    for attempt in 0..2 {
+        match ipc::ipc_request("setup_status", None) {
+            Ok(v) => return serde_json::from_value(v).unwrap_or_default(),
+            Err(_) if attempt == 0 => {
+                // brief backoff, then retry once
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                continue;
+            }
+            Err(_) => {
+                return SetupStatusUi {
+                    daemon_running: false,
+                    ..Default::default()
+                }
+            }
+        }
+    }
+    // Unreachable (the loop always returns), but keep the compiler happy.
+    SetupStatusUi {
+        daemon_running: false,
+        ..Default::default()
     }
 }
 

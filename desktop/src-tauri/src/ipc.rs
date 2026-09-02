@@ -13,11 +13,16 @@ use ztlp_proto::agent::control::{ControlCommand, ControlResponse};
 /// connection after a long retransmission window (Windows defaults to ~2s for
 /// the first SYN retry — long enough to freeze the UI on every nav click).
 ///
-/// Cap connect at 100 ms so unreachable-daemon failures surface immediately
-/// and the UI can render a clean "Agent not running" state instead of
-/// blocking. Loopback connects on a live listener complete in <1 ms so this
-/// budget never trips a healthy agent.
-const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
+/// A genuinely-down daemon is rejected by the OS *immediately* (RST), so a
+/// generous timeout does NOT slow the "agent not running" path. But a
+/// *healthy* daemon under real load (tunnel activity + the app's own 2s
+/// polling) can take tens of ms to accept a connection — observed at ~35ms in
+/// the interactive session, with bursts higher under load. The old 100ms
+/// budget tripped intermittently on a live agent and made `setup_status`
+/// fall back to `daemon_running: false` (a false "agent not running" in the
+/// Setup wizard). 500ms matches `IPC_IO_TIMEOUT` and gives a healthy agent
+/// 5x headroom while a down agent still fails instantly on RST.
+const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Bound on read/write so a hung/half-open daemon socket can't lock up the UI.
 /// Real responses come back in single-digit ms over loopback, so 500 ms is
@@ -156,13 +161,18 @@ mod tests {
         assert!(res.unwrap_err().contains("Failed to connect"));
     }
 
-    /// Regression: connect to an un-listened port must fail fast (<= 200 ms)
-    /// instead of blocking the UI thread for Windows' default ~2s SYN
-    /// retransmission window. See IPC_CONNECT_TIMEOUT in this module.
+    /// Regression: connect to an unreachable host must fail within a bounded
+    /// time (not the OS ~2s SYN retransmission window) so it never freezes the
+    /// UI thread. See `IPC_CONNECT_TIMEOUT` in this module.
     ///
-    /// We use a TEST_NET-1 address (192.0.2.0/24, RFC 5737) routed nowhere so
-    /// the OS produces a connect timeout rather than an immediate RST — this
+    /// We use a TEST-NET-1 address (192.0.2.0/24, RFC 5737) routed nowhere so
+    /// the OS produces a connect *timeout* rather than an immediate RST — this
     /// is what makes the slowness visible to users with no agent running.
+    ///
+    /// The bound is `IPC_CONNECT_TIMEOUT + slack` (not a hardcoded literal) so
+    /// it stays correct if the timeout is tuned. A down daemon on loopback
+    /// fails on immediate RST (well under this); only a *non-routable* address
+    /// exercises the full timeout path.
     #[test]
     fn test_ipc_request_unreachable_fails_fast() {
         use std::time::Instant;
@@ -170,10 +180,11 @@ mod tests {
         let res = ipc_request_with_addr("192.0.2.1:4433", "status", None);
         let elapsed = start.elapsed();
         assert!(res.is_err(), "expected connect to fail on TEST-NET-1");
+        let bound = IPC_CONNECT_TIMEOUT + Duration::from_millis(500);
         assert!(
-            elapsed < Duration::from_millis(500),
+            elapsed < bound,
             "ipc_request_with_addr took {:?} on unreachable host; \
-             must fail within IPC_CONNECT_TIMEOUT + slack to keep UI responsive",
+             must fail within IPC_CONNECT_TIMEOUT + 500ms slack to keep UI responsive",
             elapsed
         );
     }

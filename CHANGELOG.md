@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.35.8 — 2026-09-02
+
+### Desktop: fix false "agent not running" in the Setup wizard
+
+The Setup page reported the agent as not running even when it was up and
+connected. Root cause: `IPC_CONNECT_TIMEOUT` (100ms) tripped on a healthy
+agent under real load (observed ~35ms connect in the interactive session,
+bursts higher), so `setup_status` silently fell back to
+`daemon_running: false`. Fix: raise the connect timeout to 500ms (a down
+daemon still fails fast on immediate RST) + retry `setup_status` once. Also
+bumps the Tauri product version to 1.1.0 so installer filenames read
+`ZTLP_1.1.0_*`. No core protocol changes.
+
 ## v0.35.7 — 2026-09-01
 
 Bundle release carrying the desktop v1.1.0 first-run setup work (below). No

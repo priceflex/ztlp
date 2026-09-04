@@ -11681,21 +11681,42 @@ fn cmd_admin_cert_issue(
         return Ok(());
     }
 
-    // Generate cert key
-    let cert_key = generate_signing_key();
-    let serial = hex::encode(&cert_key.verifying_key().as_bytes()[..8]).to_uppercase();
+    // ── Mint a REAL leaf certificate via the intermediate CA ─────────
+    // (Was a "PEM stub" — wrote a fake cert with no signed bytes. That made
+    // `cert-issue` produce a file browsers reject ("Not secure"). Now we call
+    // the real on-demand minter (`cert_mint::IntermediateCa::mint_leaf`), the
+    // same path the agent's local TLS uses, so the leaf has a valid SAN
+    // (`dns:<hostname>`), a real signature by the intermediate, and a proper
+    // key. `persist` writes `<hostname>.pem` (leaf+intermediate chain,
+    // browser-loadable) + `<hostname>.key`.)
+    use ztlp_proto::agent::cert_mint::IntermediateCa;
+    let ca = IntermediateCa::load_from_dir(&ca_dir)
+        .map_err(|e| format!("failed to load intermediate CA from {}: {}", ca_dir.display(), e))?;
+
+    // `mint_leaf` mints a 90-day leaf (the module's sweet spot for browsers).
+    // The `days` arg is kept for the index/expiry display; the minted cert's
+    // own `not_valid_after` is authoritative.
+    let leaf = ca
+        .mint_leaf(hostname)
+        .map_err(|e| format!("failed to mint leaf for {}: {}", hostname, e))?;
 
     let output_dir = output.clone().unwrap_or_else(|| ca_dir.join("certs"));
     std::fs::create_dir_all(&output_dir)?;
+    leaf.persist(&output_dir)?;
 
-    // Write key
-    let key_filename = format!("{}.key", hostname.replace('.', "_"));
-    let key_path = output_dir.join(&key_filename);
-    std::fs::write(&key_path, cert_key.to_bytes())?;
+    let cert_path = output_dir.join(format!("{}.pem", hostname.replace('.', "_")));
+    let key_path = output_dir.join(format!("{}.key", hostname.replace('.', "_")));
+    // Derive a display serial from the leaf key's public bytes (matches the
+    // pre-fix convention; the minted cert's own serial is authoritative for
+    // X.509, this is just a human-readable identifier for the index).
+    let serial = {
+        let kp = rcgen::KeyPair::from_pem(&leaf.key_pem)
+            .map_err(|e| format!("failed to parse minted leaf key: {}", e))?;
+        hex::encode(&kp.public_key_raw()[..8]).to_uppercase()
+    };
 
-    // Write cert (PEM stub)
-    let cert_filename = format!("{}.pem", hostname.replace('.', "_"));
-    let cert_path = output_dir.join(&cert_filename);
+    // Compute the displayed expiry from the `days` arg (matches what the
+    // index shows; the minted cert's own validity is the source of truth).
     let now_secs = unix_now();
     let now_iso = utc_timestamp_iso();
     let expiry_secs = now_secs + (days as u64) * 86400;
@@ -11712,16 +11733,6 @@ fn cmd_admin_cert_issue(
             tod % 60
         )
     };
-
-    let cert_pem = format!(
-        "-----BEGIN CERTIFICATE-----\n# Subject: {}\n# Serial: {}\n# Not Before: {}\n# Not After: {}\n# Key: {}\n-----END CERTIFICATE-----\n",
-        hostname,
-        serial,
-        now_iso,
-        expiry_iso,
-        hex::encode(cert_key.verifying_key().as_bytes()),
-    );
-    std::fs::write(&cert_path, &cert_pem)?;
 
     // Update index
     let index_path = ca_dir.join("certs").join("index.json");
@@ -13854,6 +13865,97 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── cert-issue must mint a REAL leaf (2026-09-04) ──────────────────
+    //
+    // Regression: `ztlp admin cert-issue` used to write a "PEM stub"
+    // (BEGIN/END markers + metadata comments, NO signed certificate bytes).
+    // Browsers reject such a file ("Not secure") because there's no valid
+    // X.509 cert to present. The fix routes through the real on-demand
+    // minter (`IntermediateCa::mint_leaf`), so the output is a genuine
+    // leaf with SAN `dns:<hostname>`, signed by the intermediate, chaining
+    // to the root, with a matching key. This test pins that contract.
+    #[test]
+    fn cert_issue_produces_real_signed_leaf_not_stub() {
+        use std::time::Duration;
+        let tmp = std::env::temp_dir().join(format!(
+            "ztlp-cert-issue-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let ca_dir = tmp.join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+
+        // Seed a real root + intermediate (mirrors `ztlp admin ca-init`).
+        let (root_pem, root_key, intermediate_pem, intermediate_key) =
+            generate_real_ca_chain("test.ztlp").unwrap();
+        fs::write(ca_dir.join("root.pem"), &root_pem).unwrap();
+        fs::write(ca_dir.join("root.key"), &root_key).unwrap();
+        fs::write(ca_dir.join("intermediate.pem"), &intermediate_pem).unwrap();
+        fs::write(ca_dir.join("intermediate.key"), &intermediate_key).unwrap();
+
+        // Mint a leaf for `web.test.ztlp`.
+        let out = cmd_admin_cert_issue(
+            "web.test.ztlp",
+            90,
+            &Some(ca_dir.clone()),
+            &None,
+            true,
+        )
+        .expect("cert-issue should succeed");
+        let _ = out;
+
+        let cert_path = ca_dir.join("certs").join("web_test_ztlp.pem");
+        assert!(
+            cert_path.exists(),
+            "cert-issue must write the leaf PEM at {cert_path:?}"
+        );
+        let leaf_pem = fs::read_to_string(&cert_path).unwrap();
+
+        // 1. It's a real cert, not a stub: has a real base64 body AND no
+        //    '#' metadata comment lines. The stub was ~200 bytes with
+        //    `# Subject:`/`# Serial:` comments and no body; a real leaf
+        //    cert is >500 bytes of clean PEM.
+        assert!(
+            leaf_pem.contains("BEGIN CERTIFICATE") && leaf_pem.contains("END CERTIFICATE"),
+            "must be a PEM certificate"
+        );
+        assert!(
+            leaf_pem.len() > 500,
+            "stub PEMs are tiny (~200B); a real signed leaf cert is >500 bytes (got {})",
+            leaf_pem.len()
+        );
+        assert!(
+            !leaf_pem.contains('#'),
+            "real leaf must be clean PEM (no '#' comment lines): got\n{leaf_pem}"
+        );
+        // A real PEM cert has base64 lines (the body); the stub had none.
+        let body_lines: Vec<&str> = leaf_pem
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect();
+        assert!(
+            body_lines.len() >= 5,
+            "real cert must have a base64 body (got {} body lines)",
+            body_lines.len()
+        );
+        // The body must look like base64 (alphanumeric/+/=), not comments.
+        let is_b64 = body_lines.iter().all(|l| {
+            l.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        });
+        assert!(is_b64, "cert body must be base64-encoded, got:\n{leaf_pem}");
+
+        // 3. The key file exists and is non-empty (the leaf's private key).
+        let key_path = ca_dir.join("certs").join("web_test_ztlp.key");
+        assert!(key_path.exists(), "cert-issue must write the leaf key");
+        assert!(fs::read(key_path).unwrap().len() > 0, "key must be non-empty");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ── ns_record_payload KEY-type/truncation-flag ambiguity (2026-08-30) ──
     //

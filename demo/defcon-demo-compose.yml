@@ -36,7 +36,7 @@ services:
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
     volumes:
-      - ./ca:/data/ca
+      - ~/.ztlp/ca:/data/ca
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 5s

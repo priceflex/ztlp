@@ -24,10 +24,12 @@
 #   docker compose -f defcon-laptop-compose.yml up -d --build
 #   docker compose -f defcon-laptop-compose.yml ps
 #
-# CA: a fresh CA is auto-generated on first boot and stored in ./ca/
-# (recreated if you `down` without -v). After `up`, export the root CA
-# and install it in the laptop's trust store + browser (see README note
-# in the checklist; the gateway mints leaf certs from this CA).
+# CA: a fresh CA is auto-generated on first boot and stored in ~/.ztlp/ca/
+# (shared with the host agent's CA location — matches the original DEF CON
+# layout). On first `up`, run:  sudo mkdir -p ~/.ztlp/ca && sudo chmod 777 ~/.ztlp/ca
+# (the NS container runs as a non-root uid and needs write access).
+# A fresh `down -v` + `up` generates a NEW random CA — re-trust it in any
+# browser that trusted the old one.
 #
 # NS is RAM-only (ram_copies): any `down`/reboot wipes all identity
 # records — re-seed with `ztlp ns register` / `ztlp admin` (see the
@@ -64,7 +66,7 @@ services:
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
     volumes:
-      - ./ca:/data/ca
+      - ~/.ztlp/ca:/data/ca
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 5s

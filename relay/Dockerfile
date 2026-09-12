@@ -35,6 +35,21 @@ RUN mix compile && \
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM debian:bullseye-slim
 
+# bullseye is EOL on the regular mirror network — deb.debian.org's
+# bullseye-security InRelease has an expired Valid-Until. Point apt at the
+# permanent archive instead (needed for libssl1.1, which matches the OpenSSL
+# ABI the elixir:1.12.3-otp-24 builder's Erlang :crypto NIF was linked
+# against — don't bump this to bookworm without checking that first).
+#
+# No debian-security line: archive.debian.org/debian-security only goes up to
+# buster (bullseye-security hasn't been archived there yet). The packages we
+# need (libncurses6/libtinfo6/libssl1.1/locales) are all in the plain
+# "bullseye main" component too — just without security backports, which is
+# fine for a local dev/test image but worth knowing if this ever needs to be
+# a hardened production build.
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf 'deb http://archive.debian.org/debian bullseye main\n' > /etc/apt/sources.list
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libncurses6 libtinfo6 libssl1.1 locales \
     && rm -rf /var/lib/apt/lists/* \

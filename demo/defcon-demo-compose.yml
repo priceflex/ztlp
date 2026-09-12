@@ -1,0 +1,121 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP DEF CON Demo — Full Stack (Phase 2 + gateway)
+# ─────────────────────────────────────────────────────────────
+# Topology:
+#   Kali client → relay1/relay2 → NS (identity)
+#   Kali browser → localhost/gateway (TLS termination)
+#                      → dashboard (8420, HTTP backend)
+
+networks:
+  ztlp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  # ── Namespace Server ──────────────────────────────────────
+  ns:
+    build: /home/trs/ztlp/ns
+    container_name: ztlp-ns-defcon
+    hostname: ns
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "23096:23096/udp"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "10000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
+      ZTLP_ENROLLMENT_SECRET: "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103"
+      ZTLP_CA_DIR: "/data/ca"
+      ZTLP_CA_AUTO_INIT: "true"
+      ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+    volumes:
+      - /home/trs/.ztlp/ca:/data/ca
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  # Relay 1 (primary)
+  relay1:
+    build: /home/trs/ztlp/relay
+    container_name: ztlp-relay1-defcon
+    hostname: relay1
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "23095:23095/udp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  # Relay 2 (secondary — failover demo)
+  relay2:
+    build: /home/trs/ztlp/relay
+    container_name: ztlp-relay2-defcon
+    hostname: relay2
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.21
+    ports:
+      - "23098:23095/udp"
+      - "23105:23095/tcp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  # ── Elixir Gateway (TLS termination + header injection) ───
+  gateway:
+    build:
+      context: /home/trs/ztlp
+      dockerfile: gateway/Dockerfile
+    container_name: ztlp-gateway-defcon
+    hostname: gateway
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.30
+    ports:
+      - "23097:23097/udp"
+    environment:
+      ZTLP_GATEWAY_PORT: "23097"
+      ZTLP_NS_SERVER: "172.28.0.10:23096"
+      ZTLP_GATEWAY_BACKENDS: "tcp:443:172.28.0.40:8420"
+      ZTLP_GATEWAY_POLICIES: "role:admin:admin-panel,*:tcp:443"
+      ZTLP_GATEWAY_TRUST_ANCHORS: "defcon.ztlp:3f8b8ad5bf2c26f3e799fac1b8a378607aa37d9fb2c6602e2d4ab947bb756861"
+      ZTLP_HEADER_SIGNING_ENABLED: "true"
+      ZTLP_HEADER_HMAC_SECRET: "supersecretkey"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+    depends_on:
+      ns:
+        condition: service_healthy
+
+  # ── Demo Dashboard (Flask backend behind gateway) ─────────
+  dashboard:
+    build:
+      context: /home/trs/defcon/dashboard
+      dockerfile: Dockerfile.dashboard
+    container_name: ztlp-dashboard-defcon
+    hostname: dashboard
+    networks:
+      ztlp-net:
+        ipv4_address: 172.28.0.40
+    ports:
+      - "8420:8420"
+    environment:
+      ZTLP_DEMO_HMAC_KEY: "supersecretkey"

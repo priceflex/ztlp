@@ -16,7 +16,7 @@ networks:
 services:
   # ── Namespace Server ──────────────────────────────────────
   ns:
-    build: /home/trs/ztlp/ns
+    build: ../ns
     container_name: ztlp-ns-defcon
     hostname: ns
     networks:
@@ -36,7 +36,7 @@ services:
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
     volumes:
-      - /home/trs/.ztlp/ca:/data/ca
+      - ./ca:/data/ca
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 5s
@@ -46,7 +46,7 @@ services:
 
   # Relay 1 (primary)
   relay1:
-    build: /home/trs/ztlp/relay
+    build: ../relay
     container_name: ztlp-relay1-defcon
     hostname: relay1
     networks:
@@ -63,7 +63,7 @@ services:
 
   # Relay 2 (secondary — failover demo)
   relay2:
-    build: /home/trs/ztlp/relay
+    build: ../relay
     container_name: ztlp-relay2-defcon
     hostname: relay2
     networks:
@@ -82,7 +82,7 @@ services:
   # ── Elixir Gateway (TLS termination + header injection) ───
   gateway:
     build:
-      context: /home/trs/ztlp
+      context: ..
       dockerfile: gateway/Dockerfile
     container_name: ztlp-gateway-defcon
     hostname: gateway
@@ -108,7 +108,7 @@ services:
   # ── Demo Dashboard (Flask backend behind gateway) ─────────
   dashboard:
     build:
-      context: /home/trs/defcon/dashboard
+      context: ./defcon-dashboard
       dockerfile: Dockerfile.dashboard
     container_name: ztlp-dashboard-defcon
     hostname: dashboard

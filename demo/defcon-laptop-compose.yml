@@ -1,0 +1,150 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP DEF CON-style Demo — laptop edition
+# ─────────────────────────────────────────────────────────────
+# Topology (same as the DEF CON 2026 demo):
+#   Local client/agent → relay1/relay2 → NS (identity, RAM-only)
+#   Browser → agent VIP (127.100.x.x:443) → gateway (TLS)
+#                      → dashboard (8420, plain HTTP backend)
+#
+# Laptop requirements:
+#   - Docker 20.10+ with Compose v2
+#   - This directory lives INSIDE a clone of the ztlp repo:
+#       .../ztlp/
+#         ├── ns/          (build context)
+#         ├── relay/       (build context)
+#         ├── gateway/     (build context, dockerfile: gateway/Dockerfile)
+#         └── demo/
+#             ├── defcon-laptop-compose.yml  (this file)
+#             └── defcon-dashboard/
+#                 ├── Dockerfile
+#                 └── app.py
+#
+# Usage:
+#   cd demo
+#   docker compose -f defcon-laptop-compose.yml up -d --build
+#   docker compose -f defcon-laptop-compose.yml ps
+#
+# CA: a fresh CA is auto-generated on first boot and stored in ./ca/
+# (recreated if you `down` without -v). After `up`, export the root CA
+# and install it in the laptop's trust store + browser (see README note
+# in the checklist; the gateway mints leaf certs from this CA).
+#
+# NS is RAM-only (ram_copies): any `down`/reboot wipes all identity
+# records — re-seed with `ztlp ns register` / `ztlp admin` (see the
+# ztlp-defcon-demo-recovery skill for the full seed sequence).
+
+networks:
+  ztlp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.42.0.0/24
+
+services:
+  # ── Namespace Server (identity + DNS, RAM-only) ────────────
+  ns:
+    build: ../ns
+    container_name: ztlp-ns-defcon
+    hostname: ns
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.0.10
+    ports:
+      - "23096:23096/udp"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "10000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
+      # Demo enrollment secret — throwaway, safe to publish (demo stack).
+      ZTLP_ENROLLMENT_SECRET: "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103"
+      ZTLP_CA_DIR: "/data/ca"
+      ZTLP_CA_AUTO_INIT: "true"
+      ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+    volumes:
+      - ./ca:/data/ca
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  # ── Relay 1 (primary) ───────────────────────────────────────
+  relay1:
+    build: ../relay
+    container_name: ztlp-relay1-defcon
+    hostname: relay1
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.0.20
+    ports:
+      - "23095:23095/udp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  # ── Relay 2 (secondary — failover demo) ────────────────────
+  relay2:
+    build: ../relay
+    container_name: ztlp-relay2-defcon
+    hostname: relay2
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.0.21
+    ports:
+      - "23098:23095/udp"
+      - "23105:23095/tcp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  # ── Elixir Gateway (TLS termination + header injection) ────
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    container_name: ztlp-gateway-defcon
+    hostname: gateway
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.0.30
+    ports:
+      - "23097:23097/udp"
+    environment:
+      ZTLP_GATEWAY_PORT: "23097"
+      ZTLP_NS_SERVER: "172.42.0.10:23096"
+      # Backend = the dashboard service (Docker embedded DNS), named
+      # 'admin-panel' to match the policy below.
+      ZTLP_GATEWAY_BACKENDS: "tcp:443:172.42.0.40:8420"
+      ZTLP_GATEWAY_POLICIES: "role:admin:admin-panel,*:tcp:443"
+      ZTLP_GATEWAY_TRUST_ANCHORS: "defcon.ztlp:3f8b8ad5bf2c26f3e799fac1b8a378607aa37d9fb2c6602e2d4ab947bb756861"
+      ZTLP_HEADER_SIGNING_ENABLED: "true"
+      # Demo HMAC key — throwaway, safe to publish (demo stack).
+      ZTLP_HEADER_HMAC_SECRET: "supersecretkey"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+    depends_on:
+      ns:
+        condition: service_healthy
+
+  # ── Demo Dashboard (Flask backend behind the gateway) ──────
+  dashboard:
+    build: ./defcon-dashboard
+    container_name: ztlp-dashboard-defcon
+    hostname: dashboard
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.0.40
+    ports:
+      - "8420:8420"
+    environment:
+      ZTLP_DEMO_HMAC_KEY: "supersecretkey"

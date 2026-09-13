@@ -701,6 +701,24 @@ enum Commands {
         /// Skip confirmation prompts
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Re-enroll even if ~/.ztlp/identity.json already exists.
+        ///
+        /// Without this flag setup REFUSES to touch an existing identity
+        /// (even with --yes). With it, identity.json, config.toml and
+        /// agent.toml are first moved to `<name>.<unix-ts>.bak`.
+        #[arg(long)]
+        force: bool,
+
+        /// Relay CLIENT_ROUTE HMAC secret (64 hex / `base64:...` / raw) to
+        /// write into ~/.ztlp/agent.toml `[tunnel] relay_secret`. Required
+        /// when the zone's relays run ZTLP_RELAY_HMAC_MODE=prod.
+        #[arg(long, conflicts_with = "relay_secret_file")]
+        relay_secret: Option<String>,
+
+        /// Read the relay secret from a file instead (contents trimmed).
+        #[arg(long)]
+        relay_secret_file: Option<PathBuf>,
     },
 
     /// Admin operations — manage zones and enrollment tokens
@@ -8819,6 +8837,7 @@ async fn cmd_setup(
     _owner_arg: &Option<String>,
     bind_user: bool,
     auto_yes: bool,
+    opts: &SetupOpts,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use dialoguer::{Input, Select};
 
@@ -8834,7 +8853,7 @@ async fn cmd_setup(
 
     // If token provided, skip menu and go straight to enrollment
     if let Some(token_str) = token_arg {
-        return setup_join(token_str, name_arg, bind_user, auto_yes).await;
+        return setup_join(token_str, name_arg, bind_user, auto_yes, opts).await;
     }
 
     // Interactive menu
@@ -8858,7 +8877,7 @@ async fn cmd_setup(
                 .interact_text()
                 .map_err(|e| format!("input error: {}", e))?;
 
-            setup_join(&token_str, name_arg, bind_user, auto_yes).await
+            setup_join(&token_str, name_arg, bind_user, auto_yes, opts).await
         }
         1 => {
             // CodeRabbit #4 (ztlp-cli.rs:509): --bind-user is meaningful only for
@@ -8885,8 +8904,9 @@ async fn setup_join(
     name_arg: &Option<String>,
     bind_user: bool,
     auto_yes: bool,
+    opts: &SetupOpts,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use dialoguer::{Confirm, Input};
+    use dialoguer::Input;
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, Duration};
     use ztlp_proto::enrollment::EnrollmentToken;
@@ -8946,25 +8966,14 @@ async fn setup_join(
 
     let key_path = ztlp_dir.join("identity.json");
     let config_path = ztlp_dir.join("config.toml");
+    let agent_config_path = ztlp_dir.join("agent.toml");
 
-    // Check if identity already exists
-    if key_path.exists() {
-        if auto_yes {
-            eprintln!("  {} Overwriting existing identity", c_yellow("⚠"));
-        } else {
-            let overwrite = Confirm::new()
-                .with_prompt(format!(
-                    "Identity file already exists at {}. Overwrite?",
-                    key_path.display()
-                ))
-                .default(false)
-                .interact()
-                .map_err(|e| format!("input error: {}", e))?;
-
-            if !overwrite {
-                eprintln!("  Aborted. Use --key to specify a different path.");
-                return Ok(());
-            }
+    // Never silently clobber an enrolled identity (was the behaviour of
+    // `--yes` before 2026-09-12). --force moves the old files aside first.
+    if let Some(backed_up) = guard_existing_identity(&ztlp_dir, opts.force)? {
+        eprintln!("  {} Existing enrollment backed up:", c_yellow("⚠"));
+        for p in &backed_up {
+            eprintln!("      {}", p.display());
         }
     }
 
@@ -9057,6 +9066,33 @@ async fn setup_join(
                         &relay_addrs,
                         &gateway_addrs,
                     )?;
+
+                    // agent.toml so `ztlp agent start` works with zero hand
+                    // edits (relay HMAC secret, DNS zone). Existing file is
+                    // left alone (hand-tuned configs win).
+                    if agent_config_path.exists() {
+                        eprintln!(
+                            "  {} {} already exists — left untouched",
+                            c_yellow("⚠"),
+                            agent_config_path.display()
+                        );
+                    } else {
+                        write_agent_config_file(
+                            &agent_config_path,
+                            &key_path,
+                            &token.zone,
+                            &token.ns_addr,
+                            &relay_addrs,
+                            opts.relay_secret.as_deref(),
+                        )?;
+                        if opts.relay_secret.is_none() {
+                            eprintln!(
+                                "  {} no --relay-secret given: agent.toml has no relay_secret. \
+                                 Fine for dev/staging relays; prod-HMAC relays will reject every route.",
+                                c_yellow("⚠")
+                            );
+                        }
+                    }
 
                     // Confirm enrollment with Bootstrap (best-effort)
                     if let Some(ref url) = token.callback_url {
@@ -9675,6 +9711,145 @@ zone = {zone}
     std::fs::write(path, &content)?;
     eprintln!("  {} Config written to {}", c_green("✓"), path.display());
 
+    Ok(())
+}
+
+/// Options for `ztlp setup` that don't fit the legacy positional signature.
+struct SetupOpts {
+    /// Allow re-enrolling over an existing ~/.ztlp identity (with backup).
+    force: bool,
+    /// Relay CLIENT_ROUTE HMAC secret to persist in agent.toml (as given —
+    /// 64-hex, `base64:`, or raw; the agent decodes it at load time).
+    relay_secret: Option<String>,
+}
+
+/// Resolve `--relay-secret` / `--relay-secret-file` for `ztlp setup`.
+fn resolve_setup_relay_secret(
+    inline: &Option<String>,
+    file: &Option<PathBuf>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(s) = inline {
+        return Ok(Some(s.trim().to_string()));
+    }
+    if let Some(p) = file {
+        let c = std::fs::read_to_string(p)
+            .map_err(|e| format!("cannot read --relay-secret-file {}: {}", p.display(), e))?;
+        return Ok(Some(c.trim().to_string()));
+    }
+    Ok(None)
+}
+
+/// Refuse to overwrite an existing enrollment unless `force`.
+///
+/// Returns `Ok(None)` when there is nothing to protect, `Ok(Some(paths))`
+/// with the backup paths when `force` moved identity.json / config.toml /
+/// agent.toml aside, or `Err` (nothing touched) when an identity exists and
+/// `force` is false. `--yes` deliberately does NOT imply force: the old
+/// behaviour ("--yes overwrites") orphaned enrolled devices on NS.
+fn guard_existing_identity(
+    ztlp_dir: &std::path::Path,
+    force: bool,
+) -> Result<Option<Vec<PathBuf>>, Box<dyn std::error::Error>> {
+    let identity = ztlp_dir.join("identity.json");
+    if !identity.exists() {
+        return Ok(None);
+    }
+    if !force {
+        return Err(format!(
+            "this machine is already enrolled ({} exists).\n  \
+             Re-run with --force to re-enroll (the current identity.json, config.toml and \
+             agent.toml are backed up to *.<timestamp>.bak first), \
+             or `ztlp status --identity` to see what it is.",
+            identity.display()
+        )
+        .into());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut backed = Vec::new();
+    for name in ["identity.json", "config.toml", "agent.toml"] {
+        let src = ztlp_dir.join(name);
+        if src.exists() {
+            let dst = ztlp_dir.join(format!("{}.{}.bak", name, ts));
+            std::fs::rename(&src, &dst)
+                .map_err(|e| format!("backup {} -> {}: {}", src.display(), dst.display(), e))?;
+            backed.push(dst);
+        }
+    }
+    Ok(Some(backed))
+}
+
+/// Default agent DNS listen address written by `ztlp setup`.
+///
+/// 127.0.0.53:53 belongs to systemd-resolved and 127.0.0.54:53 to its
+/// extra stub on recent Ubuntu, so the agent uses its own loopback alias +
+/// high port. Matches what the demo docs hand-wrote before setup did it.
+const SETUP_DEFAULT_DNS_LISTEN: &str = "127.0.0.55:15353";
+
+/// Write `~/.ztlp/agent.toml` for a freshly enrolled device so `ztlp agent
+/// start` works without hand edits. Refuses to overwrite an existing file.
+fn write_agent_config_file(
+    path: &std::path::Path,
+    key_path: &std::path::Path,
+    zone: &str,
+    ns_server: &str,
+    relay_addrs: &[String],
+    relay_secret: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() {
+        return Err(format!("{} already exists; not overwriting", path.display()).into());
+    }
+    let relays = relay_addrs
+        .iter()
+        .map(|a| toml_string(a))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let secret_line = match relay_secret {
+        Some(s) => format!("relay_secret = {}", toml_string(s)),
+        None => "# relay_secret = \"<64-hex shared with the relay's ZTLP_RELAY_REGISTRATION_SECRET>\"  # required for prod-HMAC relays".to_string(),
+    };
+    let content = format!(
+        r#"# ZTLP agent configuration — generated by `ztlp setup`
+# Zone: {zone_c}
+
+[identity]
+path = {key_path}
+
+[ns]
+servers = [{ns_server}]
+
+[tunnel]
+relays = [{relays}]
+{secret_line}
+
+[dns]
+enabled = true
+listen = {dns_listen}
+zones = [{zone}]
+
+[tls]
+# Local TLS termination on the VIP. Run `ztlp admin ca-init --zone {zone_c}`
+# first, then set to true and restart the agent.
+enabled = false
+"#,
+        zone_c = zone,
+        key_path = toml_string(&key_path.display().to_string()),
+        ns_server = toml_string(ns_server),
+        relays = relays,
+        secret_line = secret_line,
+        dns_listen = toml_string(SETUP_DEFAULT_DNS_LISTEN),
+        zone = toml_string(zone),
+    );
+    std::fs::write(path, &content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // holds the relay secret
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+    eprintln!("  {} Agent config written to {}", c_green("✓"), path.display());
     Ok(())
 }
 
@@ -13756,7 +13931,19 @@ async fn main() {
             owner,
             bind_user,
             yes,
-        } => cmd_setup(token, name, *r#type, owner, *bind_user, *yes).await,
+            force,
+            relay_secret,
+            relay_secret_file,
+        } => match resolve_setup_relay_secret(relay_secret, relay_secret_file) {
+            Err(e) => Err(e),
+            Ok(relay_secret) => {
+                let opts = SetupOpts {
+                    force: *force,
+                    relay_secret,
+                };
+                cmd_setup(token, name, *r#type, owner, *bind_user, *yes, &opts).await
+            }
+        },
 
         Commands::Admin(subcmd) => match subcmd {
             AdminCommands::InitZone {
@@ -14426,6 +14613,123 @@ mod tests {
         assert_eq!(parsed.ns_server.as_deref(), Some("10.69.95.14:23096"));
         assert_eq!(parsed.relay.as_deref(), Some("10.69.95.14:23095"));
         assert_eq!(parsed.gateway.as_deref(), Some(r#"bootstrap\gateway"#));
+    }
+
+    // ── `ztlp setup` "just works" (cloud demo polish, 2026-09-12) ─────────
+    //
+    // Two gaps found rebuilding the DEF CON cloud demo from CLOUD-QUICKSTART.md:
+    //  (a) `setup --yes` with an existing ~/.ztlp/identity.json silently
+    //      OVERWROTE the enrolled identity (a fresh NodeID; the old device
+    //      record on NS is orphaned). Must refuse unless --force, and --force
+    //      must back the old files up first.
+    //  (b) `setup` never wrote agent.toml, so the operator hand-authored
+    //      relay_secret / dns zones / tls before `agent start` could work
+    //      against a prod-HMAC relay.
+
+    fn fresh_tmp(label: &str) -> PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "ztlp-setup-{}-{}-{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn guard_existing_identity_refuses_without_force_even_with_yes() {
+        let tmp = fresh_tmp("guard-refuse");
+        fs::write(tmp.join("identity.json"), b"{\"node_id\":\"old\"}").unwrap();
+        let err = guard_existing_identity(&tmp, false).unwrap_err().to_string();
+        assert!(err.contains("already"), "err was: {err}");
+        assert!(err.contains("--force"), "err was: {err}");
+        // untouched
+        assert_eq!(fs::read(tmp.join("identity.json")).unwrap(), b"{\"node_id\":\"old\"}");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn guard_existing_identity_is_noop_when_absent() {
+        let tmp = fresh_tmp("guard-absent");
+        assert!(guard_existing_identity(&tmp, false).unwrap().is_none());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn guard_existing_identity_force_backs_up_all_three_files() {
+        let tmp = fresh_tmp("guard-force");
+        fs::write(tmp.join("identity.json"), b"id").unwrap();
+        fs::write(tmp.join("config.toml"), b"cfg").unwrap();
+        fs::write(tmp.join("agent.toml"), b"agent").unwrap();
+        let backed = guard_existing_identity(&tmp, true).unwrap().expect("backup made");
+        assert_eq!(backed.len(), 3, "{backed:?}");
+        for p in &backed {
+            assert!(p.exists(), "{}", p.display());
+            assert!(p.to_string_lossy().ends_with(".bak"), "{}", p.display());
+        }
+        // originals moved away so setup starts clean
+        assert!(!tmp.join("identity.json").exists());
+        assert!(!tmp.join("config.toml").exists());
+        assert!(!tmp.join("agent.toml").exists());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_agent_config_file_produces_loadable_agent_config() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = fresh_tmp("agent-toml");
+        let path = tmp.join("agent.toml");
+        let key_path = tmp.join("identity.json");
+        write_agent_config_file(
+            &path,
+            &key_path,
+            "defcon.ztlp",
+            "44.240.16.59:23096",
+            &["44.240.16.59:23095".to_string(), "44.240.16.59:23098".to_string()],
+            Some("03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"),
+        )
+        .unwrap();
+
+        let cfg = AgentConfig::load_from_path(&path);
+        assert_eq!(cfg.ns.servers, vec!["44.240.16.59:23096"]);
+        assert_eq!(cfg.tunnel.relays.0, vec!["44.240.16.59:23095", "44.240.16.59:23098"]);
+        assert_eq!(cfg.dns.zones, vec!["defcon.ztlp"]);
+        assert_eq!(cfg.identity_path(), key_path);
+        // 64-hex secret decodes to 32 raw bytes (same rule as the relay)
+        assert_eq!(cfg.tunnel.relay_secret_bytes().unwrap().len(), 32);
+        assert!(!cfg.tls.enabled, "tls must default off; ca-init is a separate step");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_agent_config_file_without_secret_leaves_relay_secret_unset() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = fresh_tmp("agent-toml-nosecret");
+        let path = tmp.join("agent.toml");
+        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
+            .unwrap();
+        let cfg = AgentConfig::load_from_path(&path);
+        assert!(cfg.tunnel.relay_secret.is_none());
+        assert!(cfg.tunnel.relays.0.is_empty());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("relay_secret"), "must leave a commented hint: {content}");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_agent_config_file_refuses_to_clobber_existing() {
+        let tmp = fresh_tmp("agent-toml-existing");
+        let path = tmp.join("agent.toml");
+        fs::write(&path, b"# hand-tuned\n").unwrap();
+        let r = write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None);
+        assert!(r.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"# hand-tuned\n");
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     fn sample_ns_record(data_len: u32) -> Vec<u8> {

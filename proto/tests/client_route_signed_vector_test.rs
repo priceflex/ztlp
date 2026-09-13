@@ -32,7 +32,10 @@ fn client_route_signed_vector_matches_relay_rules_and_is_written() {
     // Layout: magic(2) type(1) node_id(16) svc_len(1) svc(14) ts(8) hmac(32)
     assert_eq!(signed.len(), 2 + 1 + 16 + 1 + service.len() + 8 + 32);
     assert_eq!(&signed[..3], &[0x5A, 0x37, 0x0B]);
-    assert_eq!(&signed[..signed.len() - 32], &unsigned[..unsigned.len() - 32]);
+    assert_eq!(
+        &signed[..signed.len() - 32],
+        &unsigned[..unsigned.len() - 32]
+    );
     assert_ne!(&signed[signed.len() - 32..], &[0u8; 32]);
     assert_eq!(&unsigned[unsigned.len() - 32..], &[0u8; 32]);
 
@@ -43,7 +46,10 @@ fn client_route_signed_vector_matches_relay_rules_and_is_written() {
         let signed_material = &signed[2..signed.len() - 32];
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
         mac.update(signed_material);
-        assert_eq!(mac.finalize().into_bytes().as_slice(), &signed[signed.len() - 32..]);
+        assert_eq!(
+            mac.finalize().into_bytes().as_slice(),
+            &signed[signed.len() - 32..]
+        );
     }
 
     let hex = |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
@@ -65,5 +71,7 @@ fn client_route_signed_vector_matches_relay_rules_and_is_written() {
         .join("client_route_signed_vector.json");
     fs::create_dir_all(out.parent().unwrap()).unwrap();
     fs::write(&out, &json).unwrap();
-    assert!(fs::read_to_string(&out).unwrap().contains("frame_signed_hex"));
+    assert!(fs::read_to_string(&out)
+        .unwrap()
+        .contains("frame_signed_hex"));
 }

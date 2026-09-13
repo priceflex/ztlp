@@ -2034,7 +2034,6 @@ fn cmd_keygen(
     let ed25519_signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_seed);
     let ed25519_public = ed25519_signing_key.verifying_key().to_bytes();
 
-
     match format {
         KeygenFormat::Json => {
             let extended = serde_json::json!({
@@ -9805,7 +9804,13 @@ fn create_network_files(
         }
     }
 
-    Ok(CreatedNetworkFiles { secret_hex, secret_path, identity, identity_path, backed_up })
+    Ok(CreatedNetworkFiles {
+        secret_hex,
+        secret_path,
+        identity,
+        identity_path,
+        backed_up,
+    })
 }
 
 /// Default agent DNS listen address written by `ztlp setup`.
@@ -9884,7 +9889,11 @@ enabled = {tls_enabled}
         // holds the relay secret
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
     }
-    eprintln!("  {} Agent config written to {}", c_green("✓"), path.display());
+    eprintln!(
+        "  {} Agent config written to {}",
+        c_green("✓"),
+        path.display()
+    );
     Ok(())
 }
 
@@ -12043,8 +12052,13 @@ fn cmd_admin_cert_issue(
     // key. `persist` writes `<hostname>.pem` (leaf+intermediate chain,
     // browser-loadable) + `<hostname>.key`.)
     use ztlp_proto::agent::cert_mint::IntermediateCa;
-    let ca = IntermediateCa::load_from_dir(&ca_dir)
-        .map_err(|e| format!("failed to load intermediate CA from {}: {}", ca_dir.display(), e))?;
+    let ca = IntermediateCa::load_from_dir(&ca_dir).map_err(|e| {
+        format!(
+            "failed to load intermediate CA from {}: {}",
+            ca_dir.display(),
+            e
+        )
+    })?;
 
     // `mint_leaf` mints a 90-day leaf (the module's sweet spot for browsers).
     // The `days` arg is kept for the index/expiry display; the minted cert's
@@ -14308,7 +14322,11 @@ mod tests {
 
         // CLI literal wins over everything.
         assert_eq!(
-            resolve_relay_secret(&Some("clisecret".to_string()), &Some(secret_file.clone()), &cfg),
+            resolve_relay_secret(
+                &Some("clisecret".to_string()),
+                &Some(secret_file.clone()),
+                &cfg
+            ),
             Some(b"clisecret".to_vec())
         );
         // File beats agent.toml.
@@ -14317,12 +14335,21 @@ mod tests {
             Some(b"filesecret".to_vec())
         );
         // agent.toml is the fallback.
-        assert_eq!(resolve_relay_secret(&None, &None, &cfg), Some(b"agentsecret".to_vec()));
+        assert_eq!(
+            resolve_relay_secret(&None, &None, &cfg),
+            Some(b"agentsecret".to_vec())
+        );
         // Nothing configured -> unsigned.
-        assert_eq!(resolve_relay_secret(&None, &None, &AgentConfig::default()), None);
+        assert_eq!(
+            resolve_relay_secret(&None, &None, &AgentConfig::default()),
+            None
+        );
         // 64-hex CLI value is decoded to 32 raw bytes (relay rules).
         let hex = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103".to_string();
-        assert_eq!(resolve_relay_secret(&Some(hex), &None, &cfg).unwrap().len(), 32);
+        assert_eq!(
+            resolve_relay_secret(&Some(hex), &None, &cfg).unwrap().len(),
+            32
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14435,14 +14462,8 @@ mod tests {
         fs::write(ca_dir.join("intermediate.key"), &intermediate_key).unwrap();
 
         // Mint a leaf for `web.test.ztlp`.
-        let out = cmd_admin_cert_issue(
-            "web.test.ztlp",
-            90,
-            &Some(ca_dir.clone()),
-            &None,
-            true,
-        )
-        .expect("cert-issue should succeed");
+        let out = cmd_admin_cert_issue("web.test.ztlp", 90, &Some(ca_dir.clone()), &None, true)
+            .expect("cert-issue should succeed");
         let _ = out;
 
         let cert_path = ca_dir.join("certs").join("web_test_ztlp.pem");
@@ -14489,7 +14510,10 @@ mod tests {
         // 3. The key file exists and is non-empty (the leaf's private key).
         let key_path = ca_dir.join("certs").join("web_test_ztlp.key");
         assert!(key_path.exists(), "cert-issue must write the leaf key");
-        assert!(fs::read(key_path).unwrap().len() > 0, "key must be non-empty");
+        assert!(
+            fs::read(key_path).unwrap().len() > 0,
+            "key must be non-empty"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -14742,11 +14766,16 @@ mod tests {
     fn guard_existing_identity_refuses_without_force_even_with_yes() {
         let tmp = fresh_tmp("guard-refuse");
         fs::write(tmp.join("identity.json"), b"{\"node_id\":\"old\"}").unwrap();
-        let err = guard_existing_identity(&tmp, false).unwrap_err().to_string();
+        let err = guard_existing_identity(&tmp, false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("already"), "err was: {err}");
         assert!(err.contains("--force"), "err was: {err}");
         // untouched
-        assert_eq!(fs::read(tmp.join("identity.json")).unwrap(), b"{\"node_id\":\"old\"}");
+        assert_eq!(
+            fs::read(tmp.join("identity.json")).unwrap(),
+            b"{\"node_id\":\"old\"}"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14763,7 +14792,9 @@ mod tests {
         fs::write(tmp.join("identity.json"), b"id").unwrap();
         fs::write(tmp.join("config.toml"), b"cfg").unwrap();
         fs::write(tmp.join("agent.toml"), b"agent").unwrap();
-        let backed = guard_existing_identity(&tmp, true).unwrap().expect("backup made");
+        let backed = guard_existing_identity(&tmp, true)
+            .unwrap()
+            .expect("backup made");
         assert_eq!(backed.len(), 3, "{backed:?}");
         for p in &backed {
             assert!(p.exists(), "{}", p.display());
@@ -14784,12 +14815,21 @@ mod tests {
         let tmp = fresh_tmp("guard-zonekey");
         fs::write(tmp.join("identity.json"), b"id").unwrap();
         fs::write(tmp.join("zone.key"), b"deadbeef").unwrap();
-        let backed = guard_existing_identity(&tmp, true).unwrap().expect("backup made");
+        let backed = guard_existing_identity(&tmp, true)
+            .unwrap()
+            .expect("backup made");
         assert!(
-            backed.iter().any(|p| p.file_name().unwrap().to_string_lossy().starts_with("zone.key.")),
+            backed.iter().any(|p| p
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("zone.key.")),
             "zone.key not backed up: {backed:?}"
         );
-        assert!(!tmp.join("zone.key").exists(), "zone.key must be moved aside");
+        assert!(
+            !tmp.join("zone.key").exists(),
+            "zone.key must be moved aside"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14801,7 +14841,10 @@ mod tests {
         let err = create_network_files(&tmp, false).unwrap_err().to_string();
         assert!(err.contains("--force"), "err was: {err}");
         // nothing touched
-        assert_eq!(fs::read(tmp.join("identity.json")).unwrap(), b"{\"node_id\":\"old\"}");
+        assert_eq!(
+            fs::read(tmp.join("identity.json")).unwrap(),
+            b"{\"node_id\":\"old\"}"
+        );
         assert_eq!(fs::read(tmp.join("zone.key")).unwrap(), b"oldsecret");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -14826,12 +14869,26 @@ mod tests {
         use ztlp_proto::agent::config::AgentConfig;
         let tmp = fresh_tmp("agent-toml-ca-present");
         fs::create_dir_all(tmp.join("ca")).unwrap();
-        fs::write(tmp.join("ca").join("intermediate.pem"), b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        fs::write(
+            tmp.join("ca").join("intermediate.pem"),
+            b"-----BEGIN CERTIFICATE-----\n",
+        )
+        .unwrap();
         let path = tmp.join("agent.toml");
-        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
-            .unwrap();
+        write_agent_config_file(
+            &path,
+            &tmp.join("identity.json"),
+            "z.ztlp",
+            "1.2.3.4:23096",
+            &[],
+            None,
+        )
+        .unwrap();
         let cfg = AgentConfig::load_from_path(&path);
-        assert!(cfg.tls.enabled, "CA already initialised in this ~/.ztlp -> tls must be on");
+        assert!(
+            cfg.tls.enabled,
+            "CA already initialised in this ~/.ztlp -> tls must be on"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14840,8 +14897,15 @@ mod tests {
         use ztlp_proto::agent::config::AgentConfig;
         let tmp = fresh_tmp("agent-toml-flip");
         let path = tmp.join("agent.toml");
-        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], Some("aa"))
-            .unwrap();
+        write_agent_config_file(
+            &path,
+            &tmp.join("identity.json"),
+            "z.ztlp",
+            "1.2.3.4:23096",
+            &[],
+            Some("aa"),
+        )
+        .unwrap();
         assert!(!AgentConfig::load_from_path(&path).tls.enabled);
         let changed = enable_tls_in_agent_config(&path).unwrap();
         assert!(changed, "first call must report a change");
@@ -14851,7 +14915,10 @@ mod tests {
         assert_eq!(cfg.ns.servers, vec!["1.2.3.4:23096"]);
         assert_eq!(cfg.tunnel.relay_secret.as_deref(), Some("aa"));
         // idempotent
-        assert!(!enable_tls_in_agent_config(&path).unwrap(), "second call must be a no-op");
+        assert!(
+            !enable_tls_in_agent_config(&path).unwrap(),
+            "second call must be a no-op"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14859,12 +14926,18 @@ mod tests {
     fn enable_tls_in_agent_config_is_noop_when_file_missing_or_hand_tuned_without_tls_section() {
         let tmp = fresh_tmp("agent-toml-flip-missing");
         let path = tmp.join("agent.toml");
-        assert!(!enable_tls_in_agent_config(&path).unwrap(), "missing file -> false, no error");
+        assert!(
+            !enable_tls_in_agent_config(&path).unwrap(),
+            "missing file -> false, no error"
+        );
         assert!(!path.exists(), "must not create the file");
         // hand-tuned file with no [tls] section: leave byte-identical
         fs::write(&path, b"[ns]\nservers = [\"1.2.3.4:23096\"]\n").unwrap();
         assert!(!enable_tls_in_agent_config(&path).unwrap());
-        assert_eq!(fs::read(&path).unwrap(), b"[ns]\nservers = [\"1.2.3.4:23096\"]\n");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"[ns]\nservers = [\"1.2.3.4:23096\"]\n"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14873,8 +14946,15 @@ mod tests {
         use ztlp_proto::agent::config::AgentConfig;
         let tmp = fresh_tmp("ca-init-flips-tls");
         let agent_toml = tmp.join("agent.toml");
-        write_agent_config_file(&agent_toml, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
-            .unwrap();
+        write_agent_config_file(
+            &agent_toml,
+            &tmp.join("identity.json"),
+            "z.ztlp",
+            "1.2.3.4:23096",
+            &[],
+            None,
+        )
+        .unwrap();
         assert!(!AgentConfig::load_from_path(&agent_toml).tls.enabled);
         cmd_admin_ca_init("z.ztlp", &Some(tmp.join("ca")), true).unwrap();
         assert!(tmp.join("ca").join("intermediate.pem").exists());
@@ -14896,19 +14976,28 @@ mod tests {
             &key_path,
             "defcon.ztlp",
             "44.240.16.59:23096",
-            &["44.240.16.59:23095".to_string(), "44.240.16.59:23098".to_string()],
+            &[
+                "44.240.16.59:23095".to_string(),
+                "44.240.16.59:23098".to_string(),
+            ],
             Some("03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"),
         )
         .unwrap();
 
         let cfg = AgentConfig::load_from_path(&path);
         assert_eq!(cfg.ns.servers, vec!["44.240.16.59:23096"]);
-        assert_eq!(cfg.tunnel.relays.0, vec!["44.240.16.59:23095", "44.240.16.59:23098"]);
+        assert_eq!(
+            cfg.tunnel.relays.0,
+            vec!["44.240.16.59:23095", "44.240.16.59:23098"]
+        );
         assert_eq!(cfg.dns.zones, vec!["defcon.ztlp"]);
         assert_eq!(cfg.identity_path(), key_path);
         // 64-hex secret decodes to 32 raw bytes (same rule as the relay)
         assert_eq!(cfg.tunnel.relay_secret_bytes().unwrap().len(), 32);
-        assert!(!cfg.tls.enabled, "tls must default off; ca-init is a separate step");
+        assert!(
+            !cfg.tls.enabled,
+            "tls must default off; ca-init is a separate step"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14917,13 +15006,23 @@ mod tests {
         use ztlp_proto::agent::config::AgentConfig;
         let tmp = fresh_tmp("agent-toml-nosecret");
         let path = tmp.join("agent.toml");
-        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
-            .unwrap();
+        write_agent_config_file(
+            &path,
+            &tmp.join("identity.json"),
+            "z.ztlp",
+            "1.2.3.4:23096",
+            &[],
+            None,
+        )
+        .unwrap();
         let cfg = AgentConfig::load_from_path(&path);
         assert!(cfg.tunnel.relay_secret.is_none());
         assert!(cfg.tunnel.relays.0.is_empty());
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("relay_secret"), "must leave a commented hint: {content}");
+        assert!(
+            content.contains("relay_secret"),
+            "must leave a commented hint: {content}"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -14932,7 +15031,14 @@ mod tests {
         let tmp = fresh_tmp("agent-toml-existing");
         let path = tmp.join("agent.toml");
         fs::write(&path, b"# hand-tuned\n").unwrap();
-        let r = write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None);
+        let r = write_agent_config_file(
+            &path,
+            &tmp.join("identity.json"),
+            "z.ztlp",
+            "1.2.3.4:23096",
+            &[],
+            None,
+        );
         assert!(r.is_err());
         assert_eq!(fs::read(&path).unwrap(), b"# hand-tuned\n");
         let _ = fs::remove_dir_all(&tmp);

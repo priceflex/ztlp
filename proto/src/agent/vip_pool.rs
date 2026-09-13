@@ -244,7 +244,10 @@ impl VipPool {
             entries: self
                 .name_to_vip
                 .values()
-                .map(|e| PersistedVipEntry { name: e.ztlp_name.clone(), ip: e.ip })
+                .map(|e| PersistedVipEntry {
+                    name: e.ztlp_name.clone(),
+                    ip: e.ip,
+                })
                 .collect(),
         };
         let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
@@ -568,7 +571,10 @@ mod tests {
             "ztlp-vip-state-{}-{}-{}.json",
             tag,
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = std::fs::remove_file(&p);
         p
@@ -578,22 +584,36 @@ mod tests {
     fn save_then_restore_gives_same_ip_to_same_name_in_a_fresh_pool() {
         let path = tmp_state_file("roundtrip");
         let mut pool = VipPool::new("127.100.0.0/24").unwrap();
-        let ip_dash = pool.allocate("demo-dashboard.defcon.ztlp", Some(Duration::from_secs(300))).unwrap();
-        let ip_api = pool.allocate("api.defcon.ztlp", Some(Duration::from_secs(300))).unwrap();
+        let ip_dash = pool
+            .allocate("demo-dashboard.defcon.ztlp", Some(Duration::from_secs(300)))
+            .unwrap();
+        let ip_api = pool
+            .allocate("api.defcon.ztlp", Some(Duration::from_secs(300)))
+            .unwrap();
         pool.save_to(&path).unwrap();
 
         // "agent restart": brand new pool, restore from disk
         let mut fresh = VipPool::new("127.100.0.0/24").unwrap();
         let restored = fresh.restore_from(&path).unwrap();
         assert_eq!(restored, 2);
-        assert_eq!(fresh.lookup_name("demo-dashboard.defcon.ztlp").unwrap().ip, ip_dash);
+        assert_eq!(
+            fresh.lookup_name("demo-dashboard.defcon.ztlp").unwrap().ip,
+            ip_dash
+        );
         assert_eq!(fresh.lookup_name("api.defcon.ztlp").unwrap().ip, ip_api);
         // listeners are what matters: the proxy iterates entries()
         assert_eq!(fresh.entries().count(), 2);
         // peer info must be re-resolved lazily, never trusted from disk
-        assert!(fresh.lookup_name("api.defcon.ztlp").unwrap().peer_addr.is_none());
+        assert!(fresh
+            .lookup_name("api.defcon.ztlp")
+            .unwrap()
+            .peer_addr
+            .is_none());
         // a later DNS resolve for the same name keeps its IP (browser cache stays valid)
-        assert_eq!(fresh.allocate("demo-dashboard.defcon.ztlp", None).unwrap(), ip_dash);
+        assert_eq!(
+            fresh.allocate("demo-dashboard.defcon.ztlp", None).unwrap(),
+            ip_dash
+        );
         // and a brand-new name does not collide with a restored one
         let ip_new = fresh.allocate("new.defcon.ztlp", None).unwrap();
         assert_ne!(ip_new, ip_dash);
@@ -605,12 +625,17 @@ mod tests {
     fn restored_entries_are_not_garbage_collected() {
         let path = tmp_state_file("nogc");
         let mut pool = VipPool::new("127.100.0.0/24").unwrap();
-        pool.allocate("a.z.ztlp", Some(Duration::from_millis(1))).unwrap();
+        pool.allocate("a.z.ztlp", Some(Duration::from_millis(1)))
+            .unwrap();
         pool.save_to(&path).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let mut fresh = VipPool::new("127.100.0.0/24").unwrap();
         fresh.restore_from(&path).unwrap();
-        assert_eq!(fresh.gc_expired(), 0, "restored allocations must be sticky until re-resolved");
+        assert_eq!(
+            fresh.gc_expired(),
+            0,
+            "restored allocations must be sticky until re-resolved"
+        );
         assert!(fresh.lookup_name("a.z.ztlp").is_some());
         let _ = std::fs::remove_file(&path);
     }
@@ -624,16 +649,27 @@ mod tests {
         let mut other = VipPool::new("127.200.0.0/24").unwrap();
         assert_eq!(other.restore_from(&path).unwrap(), 0);
         assert_eq!(other.allocated_count(), 0);
-        assert!(!path.exists(), "stale file for another range must be removed");
+        assert!(
+            !path.exists(),
+            "stale file for another range must be removed"
+        );
     }
 
     #[test]
     fn restore_tolerates_missing_and_garbage_files() {
         let path = tmp_state_file("garbage");
         let mut pool = VipPool::new("127.100.0.0/24").unwrap();
-        assert_eq!(pool.restore_from(&path).unwrap(), 0, "missing file is not an error");
+        assert_eq!(
+            pool.restore_from(&path).unwrap(),
+            0,
+            "missing file is not an error"
+        );
         std::fs::write(&path, b"{not json").unwrap();
-        assert_eq!(pool.restore_from(&path).unwrap(), 0, "garbage file is not an error");
+        assert_eq!(
+            pool.restore_from(&path).unwrap(),
+            0,
+            "garbage file is not an error"
+        );
         assert_eq!(pool.allocated_count(), 0);
         let _ = std::fs::remove_file(&path);
     }
@@ -646,12 +682,21 @@ mod tests {
         pool.lookup_name_mut("a.z.ztlp").unwrap().peer_addr = Some("1.2.3.4:5".parse().unwrap());
         pool.save_to(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("a.z.ztlp") && raw.contains("127.100.0.1"), "{raw}");
-        assert!(!raw.contains("1.2.3.4"), "peer address must not be persisted: {raw}");
+        assert!(
+            raw.contains("a.z.ztlp") && raw.contains("127.100.0.1"),
+            "{raw}"
+        );
+        assert!(
+            !raw.contains("1.2.3.4"),
+            "peer address must not be persisted: {raw}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         let _ = std::fs::remove_file(&path);
     }

@@ -19,9 +19,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use ztlp_proto::identity::NodeIdentity;
-use ztlp_proto::quic_transport::noise_stream::{
-    run_initiator_handshake, run_responder_handshake,
-};
+use ztlp_proto::quic_transport::noise_stream::{run_initiator_handshake, run_responder_handshake};
 use ztlp_proto::quic_transport::tokio_endpoint::QuicEndpoint;
 use ztlp_proto::quic_transport::QuicEndpointConfig;
 
@@ -164,10 +162,9 @@ async fn quic_handshake_vector_fixture_matches_live_rust_handshake() {
     // Re-read and validate the on-disk fixture matches the structural
     // contract (this is what makes the test meaningful on re-runs: it's
     // not just a write-once dump, it fails if the wire format regresses).
-    let on_disk: Value = serde_json::from_str(
-        &std::fs::read_to_string(&path).expect("read back fixture"),
-    )
-    .expect("fixture must be valid JSON");
+    let on_disk: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read back fixture"))
+            .expect("fixture must be valid JSON");
     assert_eq!(on_disk["stream0_magic_v1"], "0x5A");
     assert_eq!(on_disk["alpn"], "ztlp/1");
     assert_eq!(on_disk["service_hash_len_bytes"], 16);

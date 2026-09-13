@@ -65,7 +65,9 @@ pub(crate) fn build_signed_client_route(
     service_name: &str,
     timestamp: i64,
 ) -> Result<Vec<u8>, String> {
-    let guard = RELAY_SECRET.read().map_err(|_| "relay secret lock poisoned".to_string())?;
+    let guard = RELAY_SECRET
+        .read()
+        .map_err(|_| "relay secret lock poisoned".to_string())?;
     tunnel::build_client_route_packet(node_id, service_name, timestamp, guard.as_deref())
 }
 
@@ -348,7 +350,10 @@ pub async fn run_daemon(
     // otherwise get ECONNREFUSED until they resolved again.
     let restored = dns_resolver_state.restore_vips();
     if restored > 0 {
-        info!("VIP pool: restored {} allocation(s) from previous run", restored);
+        info!(
+            "VIP pool: restored {} allocation(s) from previous run",
+            restored
+        );
     }
     let dns_state = Arc::new(Mutex::new(dns_resolver_state));
 
@@ -649,7 +654,10 @@ pub async fn run_daemon(
     // ZTLP_RELAY_HMAC_MODE=prod (unsigned frames are rejected there).
     match config.tunnel.relay_secret_bytes() {
         Some(secret) => {
-            info!("relay CLIENT_ROUTE signing enabled ({}-byte secret)", secret.len());
+            info!(
+                "relay CLIENT_ROUTE signing enabled ({}-byte secret)",
+                secret.len()
+            );
             set_relay_secret(Some(secret));
         }
         None => {
@@ -1999,7 +2007,8 @@ mod tests {
         let node_id = [0x22u8; 16];
 
         set_relay_secret(None);
-        let unsigned = build_signed_client_route(&node_id, "demo-dashboard", 1_800_000_000).unwrap();
+        let unsigned =
+            build_signed_client_route(&node_id, "demo-dashboard", 1_800_000_000).unwrap();
         assert_eq!(&unsigned[unsigned.len() - 32..], &[0u8; 32]);
 
         let key = crate::tunnel::decode_relay_secret(
@@ -2007,9 +2016,13 @@ mod tests {
         );
         set_relay_secret(Some(key.clone()));
         let signed = build_signed_client_route(&node_id, "demo-dashboard", 1_800_000_000).unwrap();
-        let expected =
-            crate::tunnel::build_client_route_packet(&node_id, "demo-dashboard", 1_800_000_000, Some(&key))
-                .unwrap();
+        let expected = crate::tunnel::build_client_route_packet(
+            &node_id,
+            "demo-dashboard",
+            1_800_000_000,
+            Some(&key),
+        )
+        .unwrap();
         assert_eq!(signed, expected);
         assert_ne!(&signed[signed.len() - 32..], &[0u8; 32]);
         set_relay_secret(None);

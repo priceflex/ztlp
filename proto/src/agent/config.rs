@@ -750,7 +750,10 @@ relay_secret = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103
             tmp.display().to_string().replace('\\', "/")
         );
         let cfg: AgentConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(cfg.tunnel.relay_secret_bytes().unwrap(), b"supersecretkey".to_vec());
+        assert_eq!(
+            cfg.tunnel.relay_secret_bytes().unwrap(),
+            b"supersecretkey".to_vec()
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

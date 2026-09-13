@@ -3377,11 +3377,20 @@ mod tests {
         assert_eq!(decode_relay_secret(&hex.to_uppercase()), decoded);
 
         // base64: prefix
-        let b64 = format!("base64:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"0123456789abcdef"));
+        let b64 = format!(
+            "base64:{}",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"0123456789abcdef"
+            )
+        );
         assert_eq!(decode_relay_secret(&b64), b"0123456789abcdef".to_vec());
 
         // Raw ASCII (not 64 hex chars) is used verbatim.
-        assert_eq!(decode_relay_secret("supersecretkey"), b"supersecretkey".to_vec());
+        assert_eq!(
+            decode_relay_secret("supersecretkey"),
+            b"supersecretkey".to_vec()
+        );
 
         // Surrounding whitespace/newline (from a secret file) is trimmed.
         assert_eq!(decode_relay_secret(&format!("{}\n", hex)), decoded);
@@ -3395,11 +3404,15 @@ mod tests {
         let hex = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103";
         let key = decode_relay_secret(hex);
         let node_id = [0x11u8; 16];
-        let pkt = build_client_route_packet(&node_id, "demo-dashboard", 1_800_000_000, Some(&key)).unwrap();
+        let pkt = build_client_route_packet(&node_id, "demo-dashboard", 1_800_000_000, Some(&key))
+            .unwrap();
         let signed = &pkt[2..pkt.len() - 32];
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
         mac.update(signed);
-        assert_eq!(&pkt[pkt.len() - 32..], mac.finalize().into_bytes().as_slice());
+        assert_eq!(
+            &pkt[pkt.len() - 32..],
+            mac.finalize().into_bytes().as_slice()
+        );
         assert_ne!(&pkt[pkt.len() - 32..], &[0u8; 32]);
     }
 

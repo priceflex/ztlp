@@ -103,7 +103,11 @@ impl DnsResolverState {
         }
         if let Some(path) = &self.vip_state_path {
             if let Err(e) = self.vip_pool.save_to(path) {
-                warn!("[DNS] could not persist VIP state to {}: {}", path.display(), e);
+                warn!(
+                    "[DNS] could not persist VIP state to {}: {}",
+                    path.display(),
+                    e
+                );
             }
         }
         Some(ip)
@@ -111,11 +115,17 @@ impl DnsResolverState {
 
     /// Restore persisted VIP allocations (agent start). Returns the count.
     pub fn restore_vips(&mut self) -> usize {
-        let Some(path) = &self.vip_state_path else { return 0 };
+        let Some(path) = &self.vip_state_path else {
+            return 0;
+        };
         match self.vip_pool.restore_from(path) {
             Ok(n) => n,
             Err(e) => {
-                warn!("[DNS] could not restore VIP state from {}: {}", path.display(), e);
+                warn!(
+                    "[DNS] could not restore VIP state from {}: {}",
+                    path.display(),
+                    e
+                );
                 0
             }
         }
@@ -728,7 +738,10 @@ mod tests {
             "ztlp-dns-vipstate-{}-{}-{}.json",
             tag,
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = std::fs::remove_file(&path);
         let st = DnsResolverState {
@@ -753,18 +766,30 @@ mod tests {
     fn allocate_resolved_vip_persists_to_state_file_and_survives_restart() {
         let (mut st, path) = state_with_persist("persist");
         let ip = st
-            .allocate_resolved_vip("demo-dashboard.defcon.ztlp", &fake_resolution("demo-dashboard.defcon.ztlp"))
+            .allocate_resolved_vip(
+                "demo-dashboard.defcon.ztlp",
+                &fake_resolution("demo-dashboard.defcon.ztlp"),
+            )
             .expect("pool not exhausted");
         assert!(path.exists(), "state file must be written on allocate");
         // peer info cached in memory as before
-        let e = st.vip_pool.lookup_name("demo-dashboard.defcon.ztlp").unwrap();
+        let e = st
+            .vip_pool
+            .lookup_name("demo-dashboard.defcon.ztlp")
+            .unwrap();
         assert_eq!(e.peer_addr, Some("10.9.8.7:23095".parse().unwrap()));
 
         // restart: new state, same file
         let (mut st2, _) = state_with_persist("persist-unused");
         st2.vip_state_path = Some(path.clone());
         assert_eq!(st2.restore_vips(), 1);
-        assert_eq!(st2.vip_pool.lookup_name("demo-dashboard.defcon.ztlp").unwrap().ip, ip);
+        assert_eq!(
+            st2.vip_pool
+                .lookup_name("demo-dashboard.defcon.ztlp")
+                .unwrap()
+                .ip,
+            ip
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -772,7 +797,8 @@ mod tests {
     fn allocate_resolved_vip_without_persist_path_writes_nothing() {
         let (mut st, path) = state_with_persist("nopersist");
         st.vip_state_path = None;
-        st.allocate_resolved_vip("a.z.ztlp", &fake_resolution("a.z.ztlp")).unwrap();
+        st.allocate_resolved_vip("a.z.ztlp", &fake_resolution("a.z.ztlp"))
+            .unwrap();
         assert!(!path.exists());
         assert_eq!(st.restore_vips(), 0);
     }

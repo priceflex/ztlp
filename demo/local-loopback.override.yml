@@ -16,6 +16,7 @@ services:
     volumes: !override
       - /tmp/ztlp-demo-local/ca:/data/ca
       - ./ns-config.yaml:/data/ns-config.yaml:ro
+      - ./ns-registration.key:/data/ns-registration.key:ro
   relay1:
     ports: !override
       - "33095:23095/udp"

@@ -49,6 +49,12 @@ services:
       ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
+      # Pinned NS registration-signing key (demo-only, safe to publish).
+      # NS signs every device KEY/SVC record with this key; the gateway's
+      # ZTLP_GATEWAY_TRUST_ANCHORS below MUST be its Ed25519 public key or
+      # identity lookups fail with :untrusted_signer ("unknown:<hex>" on
+      # the dashboard). Pinned by ns/test/ztlp_ns/demo_trust_anchor_consistency_test.exs.
+      ZTLP_NS_IDENTITY_KEY_FILE: "/data/ns-registration.key"
       # component_auth wiring: contrary to the original cloud-demo-plan.md
       # Task 1 (which assumed NS had zero config-file support for
       # component_auth_*), YamlConfig.load_and_apply/0 already parses a
@@ -62,6 +68,7 @@ services:
     volumes:
       - /var/lib/ztlp/ca:/data/ca
       - ./ns-config.yaml:/data/ns-config.yaml:ro
+      - ./ns-registration.key:/data/ns-registration.key:ro
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 5s
@@ -180,7 +187,7 @@ services:
       # hot-patching NS at runtime. Single `docker compose up -d --build`,
       # no two-step dance, no RPC ever.
       ZTLP_GATEWAY_CONFIG: "/data/gateway-config.yaml"
-      ZTLP_GATEWAY_TRUST_ANCHORS: "defcon.ztlp:3f8b8ad5bf2c26f3e799fac1b8a378607aa37d9fb2c6602e2d4ab947bb756861"
+      ZTLP_GATEWAY_TRUST_ANCHORS: "defcon.ztlp:384c5f1d4c97fda1b760550152de3f8175db8293469e0a8e2cb6ee2451bee387"
       ZTLP_HEADER_SIGNING_ENABLED: "true"
       ZTLP_HEADER_HMAC_SECRET: "supersecretkey"
       ZTLP_LOG_FORMAT: "json"

@@ -40,7 +40,7 @@ BOX=ubuntu@44.240.16.59; KEY=~/.ssh/ztlp-defcon-demo.pem
 scp -i $KEY /tmp/ztlp-demo-images.tar $BOX:/tmp/
 ssh -i $KEY $BOX 'mkdir -p ~/ztlp/demo'
 scp -i $KEY demo/defcon-cloud-compose.yml demo/gateway-config.yaml \
-    demo/gateway-identity.key demo/ns-config.yaml $BOX:~/ztlp/demo/
+    demo/gateway-identity.key demo/ns-config.yaml demo/ns-registration.key $BOX:~/ztlp/demo/
 ```
 
 ## 2. Bring the stack up (cloud box)
@@ -156,16 +156,20 @@ Reference numbers (Hermes VM in Monrovia -> us-west-2): ~165 ms per request,
   address `172.42.90.30:23097`, which is the local Docker bridge, so it hits
   the local gateway and trips the TOFU pin. Test-rig artifact only; the
   agent path uses the configured relay and is unaffected.
-- Dashboard shows `node name: unknown:<hex>` — the device KEY record is
-  signed by the device's own key, which the gateway does not trust as a
-  signer (`:untrusted_signer`). Header injection + HMAC still verify.
-  Known, parked.
+- **Trust anchor must match NS's registration-signing key.** NS signs every
+  device KEY/SVC record with the key in `demo/ns-registration.key`
+  (`ZTLP_NS_IDENTITY_KEY_FILE`); `ZTLP_GATEWAY_TRUST_ANCHORS` is that key's
+  Ed25519 pubkey. If they drift (or the key file is unreadable and NS
+  generates a random one) every lookup is `:untrusted_signer` and the
+  dashboard shows `node name: unknown:<hex>` while HMAC still verifies.
+  Pinned by `ns/test/ztlp_ns/demo_trust_anchor_consistency_test.exs`.
 
 ## What is inside (for the curious)
 
 | Piece | Where | Notes |
 |---|---|---|
 | NS component-auth allowlist | `demo/ns-config.yaml` (`ZTLP_NS_CONFIG`) | fixed gateway pubkey, no RPC |
+| NS record-signing key | `demo/ns-registration.key` (`ZTLP_NS_IDENTITY_KEY_FILE`) | pubkey = gateway `ZTLP_GATEWAY_TRUST_ANCHORS`; gives real device names in X-ZTLP-Node-Name |
 | Gateway identity | `demo/gateway-identity.key` (`:ro`) + `gateway-config.yaml` | fixed seed, demo-only |
 | QUIC listener | `ZTLP_GATEWAY_QUIC_ENABLED=true`, port 23097 | ALPN `ztlp/1`, ECDSA P-256 self-signed, persisted |
 | Relay registration | `ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR=":23097"` | `GATEWAY_REGISTER_ADDR` (0x5A 0x37 0x0D) frame; msquic owns the UDP socket so the register is sent from a side socket declaring the QUIC port |

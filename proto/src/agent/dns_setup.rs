@@ -120,16 +120,19 @@ pub fn teardown_dns() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 const RESOLVED_CONF_DIR: &str = "/etc/systemd/resolved.conf.d";
 const RESOLVED_CONF_FILE: &str = "ztlp.conf";
 
-fn setup_systemd_resolved(
-    listen_addr: &str,
-    zones: &[String],
-) -> Result<DnsSetupResult, Box<dyn std::error::Error>> {
-    let conf_dir = Path::new(RESOLVED_CONF_DIR);
-    let conf_path = conf_dir.join(RESOLVED_CONF_FILE);
-
-    // Parse listen address to get just the IP and port
-    let (dns_ip, dns_port) = parse_listen_addr(listen_addr)?;
-
+/// Build the resolved.conf.d/ztlp.conf content for a given DNS listen
+/// address and zone list. Pure/testable — no filesystem or root required.
+///
+/// IMPORTANT: systemd-resolved's `DNS=` directive uses `ip:port` for a
+/// non-default port. `#` is a DIFFERENT separator reserved for DNS-over-TLS
+/// SNI server names (`DNS=1.1.1.1#cloudflare-dns.com`). Using `#` for a
+/// port (e.g. `127.0.0.53#5353`) is silently mis-parsed: resolved reads
+/// `127.0.0.53` as the server, treats `5353` as a bogus TLS name, and
+/// defaults the port to 53 — where nothing is listening. The zone's
+/// `Domains=` routing entry stays configured, but every lookup silently
+/// fails, and `resolvectl status` shows no working DNS server. Any future
+/// change here MUST keep using `:` for the port.
+fn generate_resolved_conf(dns_ip: &str, dns_port: u16, zones: &[String]) -> String {
     // Build domain list with ~ prefix (routing-only domains)
     let mut domain_entries = vec!["~ztlp".to_string()];
     for zone in zones {
@@ -140,12 +143,12 @@ fn setup_systemd_resolved(
     }
 
     let dns_addr = if dns_port != 53 {
-        format!("{}#{}", dns_ip, dns_port)
+        format!("{}:{}", dns_ip, dns_port)
     } else {
         dns_ip.to_string()
     };
 
-    let content = format!(
+    format!(
         "# Managed by ztlp-agent — do not edit manually\n\
          # Remove with: ztlp agent dns-teardown\n\
          [Resolve]\n\
@@ -153,7 +156,20 @@ fn setup_systemd_resolved(
          Domains={}\n",
         dns_addr,
         domain_entries.join(" ")
-    );
+    )
+}
+
+fn setup_systemd_resolved(
+    listen_addr: &str,
+    zones: &[String],
+) -> Result<DnsSetupResult, Box<dyn std::error::Error>> {
+    let conf_dir = Path::new(RESOLVED_CONF_DIR);
+    let conf_path = conf_dir.join(RESOLVED_CONF_FILE);
+
+    // Parse listen address to get just the IP and port
+    let (dns_ip, dns_port) = parse_listen_addr(listen_addr)?;
+
+    let content = generate_resolved_conf(&dns_ip, dns_port, zones);
 
     // Create directory if needed (requires root)
     fs::create_dir_all(conf_dir)?;
@@ -566,6 +582,62 @@ mod tests {
     fn test_generate_systemd_unit_custom_path() {
         let unit = generate_systemd_unit("/opt/ztlp/bin/ztlp");
         assert!(unit.contains("/opt/ztlp/bin/ztlp"));
+    }
+
+    // Regression tests: resolved.conf DNS= line must use ':' for the port,
+    // never '#' (which systemd-resolved parses as a DoT SNI server name,
+    // not a port separator). A '#'-separated port is silently mis-parsed:
+    // resolved falls back to port 53 for that server and every lookup
+    // through the ztlp agent fails, even though dns-setup reports success
+    // and Domains= routing is configured correctly. See 2026-09-11 field
+    // report: dns-setup wrote `DNS=127.0.0.53#5353`, resolvectl showed no
+    // working DNS server under Global, and `resolvectl query` returned
+    // "Name ... not found" even though the agent was answering fine on
+    // 127.0.0.53:5353 directly (confirmed via `dig -p 5353`).
+    #[test]
+    fn test_resolved_conf_uses_colon_for_nonstandard_port() {
+        let conf = generate_resolved_conf("127.0.0.53", 5353, &["defcon.ztlp".to_string()]);
+        let dns_line = conf
+            .lines()
+            .find(|l| l.starts_with("DNS="))
+            .expect("conf must contain a DNS= line");
+        assert_eq!(dns_line, "DNS=127.0.0.53:5353");
+        assert!(
+            !dns_line.contains('#'),
+            "'#' in the DNS= line is DoT SNI syntax, not a port separator: {dns_line}"
+        );
+    }
+
+    #[test]
+    fn test_resolved_conf_omits_port_for_standard_port_53() {
+        let conf = generate_resolved_conf("127.0.0.53", 53, &["defcon.ztlp".to_string()]);
+        let dns_line = conf
+            .lines()
+            .find(|l| l.starts_with("DNS="))
+            .expect("conf must contain a DNS= line");
+        assert_eq!(dns_line, "DNS=127.0.0.53");
+    }
+
+    #[test]
+    fn test_resolved_conf_domains_includes_ztlp_and_zone() {
+        let conf = generate_resolved_conf("127.0.0.53", 15353, &["defcon.ztlp".to_string()]);
+        let domains_line = conf
+            .lines()
+            .find(|l| l.starts_with("Domains="))
+            .expect("conf must contain a Domains= line");
+        assert_eq!(domains_line, "Domains=~ztlp ~defcon.ztlp");
+    }
+
+    #[test]
+    fn test_resolved_conf_dedupes_zone_already_tilde_prefixed() {
+        // Callers might pass a zone that already has a leading '~' —
+        // must not double it up to '~~zone'.
+        let conf = generate_resolved_conf("127.0.0.53", 5353, &["~defcon.ztlp".to_string()]);
+        let domains_line = conf
+            .lines()
+            .find(|l| l.starts_with("Domains="))
+            .expect("conf must contain a Domains= line");
+        assert_eq!(domains_line, "Domains=~ztlp ~defcon.ztlp");
     }
 
     // [CWE-22 ugx-wepq] Regression tests: validate_zone_for_filename

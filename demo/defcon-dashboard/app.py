@@ -16,29 +16,48 @@ HMAC_KEY = os.environ.get("ZTLP_DEMO_HMAC_KEY", "supersecretkey").encode()
 START_TIME = time.time()
 
 
-def verify_hmac():
-    """Verify the gateway's HMAC header over the identity headers, if present."""
-    sig = request.headers.get("X-ZTLP-HEADER-SIG", "")
+def canonical_string(headers):
+    """Mirror ZtlpGateway.HeaderSigner.canonical_string/1:
+    all X-ZTLP-* headers except X-ZTLP-Signature, sorted by lowercase name,
+    each as "name:value" (name lowercased), joined with "\\n"."""
+    pairs = [
+        (name.lower(), value)
+        for name, value in headers
+        if name.lower().startswith("x-ztlp-") and name.lower() != "x-ztlp-signature"
+    ]
+    pairs.sort(key=lambda kv: kv[0])
+    return "\n".join(f"{n}:{v}" for n, v in pairs)
+
+
+def verify_signature(headers, key):
+    """Verify the gateway's X-ZTLP-Signature (HMAC-SHA256 hex over the
+    canonical string). Returns (True|False|None, detail)."""
+    sig = next((v for n, v in headers if n.lower() == "x-ztlp-signature"), "")
     if not sig:
         return None, "no signature header"
-    body = request.headers.get("X-ZTLP-HEADER-BODY", "")
-    if not body:
-        return None, "no header body"
-    expected = hmac.new(HMAC_KEY, body.encode(), hashlib.sha256).hexdigest()
-    return (hmac.compare_digest(expected, sig), "signature matches") if expected == sig else (False, "signature mismatch")
+    expected = hmac.new(key, canonical_string(headers).encode(), hashlib.sha256).hexdigest()
+    if hmac.compare_digest(expected, sig.lower()):
+        return True, "signature matches"
+    return False, "signature mismatch"
+
+
+def verify_hmac():
+    """Verify the gateway's HMAC signature over the injected identity headers."""
+    return verify_signature(list(request.headers.items()), HMAC_KEY)
 
 
 ZTLP_HEADERS = [
     ("X-ZTLP-Node-Name", "node name"),
     ("X-ZTLP-Node-Id", "node id"),
     ("X-ZTLP-Zone", "zone"),
-    ("X-ZTLP-Role", "role"),
+    ("X-ZTLP-Authenticated", "authenticated"),
     ("X-ZTLP-Assurance", "assurance level"),
-    ("X-ZTLP-Device", "device"),
-    ("X-ZTLP-Owner", "owning user"),
-    ("X-ZTLP-Session-Id", "session id"),
-    ("X-ZTLP-HEADER-BODY", "signed header body"),
-    ("X-ZTLP-HEADER-SIG", "HMAC signature"),
+    ("X-ZTLP-Key-Source", "key source"),
+    ("X-ZTLP-Key-Attestation", "key attestation"),
+    ("X-ZTLP-Timestamp", "timestamp"),
+    ("X-ZTLP-Nonce", "nonce"),
+    ("X-ZTLP-Request-Id", "request id"),
+    ("X-ZTLP-Signature", "HMAC signature"),
 ]
 
 

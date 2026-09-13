@@ -133,7 +133,8 @@ defmodule ZtlpRelay.UdpListener do
     #
     # We match the EXACT control-type bytes the relay handles
     # (0x0A GATEWAY_REGISTER, 0x0B CLIENT_ROUTE, 0x0E GATEWAY_REGISTER_V2,
-    # 0x0F CLIENT_ROUTE_V2) rather than any `0x5A 0x37 0x??` prefix.
+    # 0x0F CLIENT_ROUTE_V2, 0x0D GATEWAY_REGISTER_ADDR) rather than any
+    # `0x5A 0x37 0x??` prefix.
     # The wider prefix match would have a 1-in-65536 chance of false-
     # positiving on legitimate Noise transport ciphertext whose first
     # two bytes happen to be `5A 37`, which on a busy tunnel translates
@@ -150,11 +151,7 @@ defmodule ZtlpRelay.UdpListener do
     # — the bug is latent since v0.29 (commit bf687ec) but only
     # manifests after a client connects and then the gateway tries to
     # send its next heartbeat from the same 5-tuple.
-    is_ztlp_control_frame =
-      case data do
-        <<0x5A, 0x37, type, _rest::binary>> when type in [0x0A, 0x0B, 0x0E, 0x0F] -> true
-        _ -> false
-      end
+    is_ztlp_control_frame = relay_control_frame?(data)
 
     # First attempt to route known data flows dynamically
     is_data_forwarded =
@@ -348,6 +345,12 @@ defmodule ZtlpRelay.UdpListener do
         <<0x5A, 0x37, 0x0F, rest::binary>> ->
           handle_client_route_v2(rest, sender, state)
 
+        # GATEWAY_REGISTER_ADDR — gateway declares the address the relay
+        # should forward to (QUIC gateways can't send from the msquic-owned
+        # listening socket). See handle_gateway_register_addr/2.
+        <<0x5A, 0x37, 0x0D, rest::binary>> ->
+          handle_gateway_register_addr(rest, sender)
+
         _ ->
           handle_packet(data, sender, state)
       end
@@ -538,6 +541,112 @@ defmodule ZtlpRelay.UdpListener do
 
       _pid ->
         GatewayForwarder.register_dynamic_gateway(sender, node_id, service_name, ttl)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # GATEWAY_REGISTER_ADDR (0x5A 0x37 0x0D)
+  # ---------------------------------------------------------------------------
+  #
+  # Identical to V1 GATEWAY_REGISTER except the gateway DECLARES the address
+  # the relay must forward client traffic to, instead of the relay using
+  # the datagram's source tuple. Needed by the QUIC gateway: msquic owns the
+  # listening UDP socket, so registrations are sent from an ephemeral port
+  # (an SO_REUSEPORT side socket steals inbound QUIC datagrams — measured
+  # 300/300 stolen in the R1 spike, ztlp-cloud-demo-plan.md Task Q5).
+  #
+  # Wire format (after magic+type):
+  #
+  #   [1  addr_len]
+  #   [addr_len addr]        ASCII "ip:port" or ":port" (1..=64 bytes)
+  #   [16 node_id]
+  #   [16 service_padded]
+  #   [4  ttl]
+  #   [8  timestamp]
+  #   [32 hmac]              HMAC-SHA256 over 0x0D || addr_len || addr ||
+  #                          node_id || service_padded || ttl || timestamp
+  #
+  # ":port" = "the source IP you observed me from, but this port". That form
+  # cannot redirect traffic to a third party (only the port differs from the
+  # sender) and is what NAT'd/containerised gateways should use. The full
+  # "ip:port" form is accepted for fixed-address deployments; it is covered
+  # by the HMAC, so under prod/staging-with-secret policy only a holder of
+  # the zone secret can point the relay anywhere.
+  @doc false
+  @spec relay_control_frame?(binary()) :: boolean()
+  def relay_control_frame?(<<0x5A, 0x37, type, _::binary>>) when type in [0x0A, 0x0B, 0x0D, 0x0E, 0x0F],
+    do: true
+
+  def relay_control_frame?(_), do: false
+
+  defp handle_gateway_register_addr(<<addr_len::8, rest::binary>>, sender)
+       when addr_len >= 1 and addr_len <= 64 do
+    case rest do
+      <<addr::binary-size(addr_len), node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
+        timestamp::64, hmac::binary-size(32)>> ->
+        service_name =
+          service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
+
+        zone_id = derive_zone_from_service(service_name)
+
+        signed_data =
+          <<0x0D, addr_len::8, addr::binary, node_id::binary, service_raw::binary, ttl::32,
+            timestamp::64>>
+
+        with {:ok, gw_addr} <- resolve_declared_addr(addr, sender),
+             {:ok, class} <- ZtlpRelay.HmacSecrets.verify_with_policy(zone_id, signed_data, hmac) do
+          Logger.info(
+            "[UdpListener] GATEWAY_REGISTER_ADDR from #{inspect(sender)} declares #{inspect(gw_addr)} " <>
+              "service=#{service_name} (#{class})"
+          )
+
+          guard_timestamp_then_register(gw_addr, node_id, service_name, ttl, timestamp)
+        else
+          {:error, :bad_addr} ->
+            Logger.warning(
+              "[UdpListener] GATEWAY_REGISTER_ADDR from #{inspect(sender)} rejected: bad addr #{inspect(addr)}"
+            )
+
+          {:error, reason} ->
+            Logger.warning(
+              "[UdpListener] GATEWAY_REGISTER_ADDR from #{inspect(sender)} rejected: #{inspect(reason)} " <>
+                "(zone=#{zone_id})"
+            )
+        end
+
+      _ ->
+        Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (body too short)")
+    end
+  end
+
+  defp handle_gateway_register_addr(_data, sender) do
+    Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (addr_len out of range)")
+  end
+
+  # ":port"  -> {sender_ip, port}
+  # "ip:port" -> {ip, port}
+  defp resolve_declared_addr(addr, {sender_ip, _sender_port}) do
+    case String.split(addr, ":", parts: 2) do
+      [ip_str, port_str] ->
+        with {port, ""} <- Integer.parse(port_str),
+             true <- port >= 1 and port <= 65_535,
+             {:ok, ip} <- declared_ip(ip_str, sender_ip) do
+          {:ok, {ip, port}}
+        else
+          _ -> {:error, :bad_addr}
+        end
+
+      _ ->
+        {:error, :bad_addr}
+    end
+  end
+
+  defp declared_ip("", sender_ip), do: {:ok, sender_ip}
+
+  defp declared_ip(ip_str, _sender_ip) do
+    case :inet.parse_address(String.to_charlist(ip_str)) do
+      {:ok, ip} -> {:ok, ip}
+      _ -> {:error, :bad_addr}
     end
   end
 

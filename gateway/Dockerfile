@@ -7,10 +7,22 @@
 # ─────────────────────────────────────────────────────────────
 
 # ── Stage 1: Build ──────────────────────────────────────────
-FROM elixir:1.12.3-otp-24 AS builder
+# Bumped bullseye/OTP-24 -> bookworm/OTP-26 for Task Q1 (Session 3):
+# quicer (msquic NIF) states OTP >= 25 and its CI/prebuilts only cover
+# OTP 26/27/28. msquic is compiled from source at deps.compile time
+# (network access to github.com needed), which needs cmake >= 3.16 —
+# not present in the old bullseye-based builder image. See
+# ztlp-rust-elixir-interop skill / SESSION 3 status update in
+# ztlp-cloud-demo-plan.md for the OTP-24->26 bump rationale and R4
+# (re-run the FULL mix test suite after the bump before touching QUIC).
+FROM hexpm/elixir:1.15.7-erlang-26.2.5-debian-bookworm-20240423 AS builder
 
 ENV MIX_ENV=prod
 WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git curl patch pkg-config libssl-dev perl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mix local.hex --force && mix local.rebar --force
 
@@ -40,25 +52,14 @@ RUN mix compile && \
     mix release ztlp_gateway
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM debian:bullseye-slim
-
-# bullseye is EOL on the regular mirror network — deb.debian.org's
-# bullseye-security InRelease has an expired Valid-Until. Point apt at the
-# permanent archive instead (needed for libssl1.1, which matches the OpenSSL
-# ABI the elixir:1.12.3-otp-24 builder's Erlang :crypto NIF was linked
-# against — don't bump this to bookworm without checking that first).
-#
-# No debian-security line: archive.debian.org/debian-security only goes up to
-# buster (bullseye-security hasn't been archived there yet). The packages we
-# need (libncurses6/libtinfo6/libssl1.1/locales) are all in the plain
-# "bullseye main" component too — just without security backports, which is
-# fine for a local dev/test image but worth knowing if this ever needs to be
-# a hardened production build.
-RUN rm -f /etc/apt/sources.list.d/debian.sources && \
-    printf 'deb http://archive.debian.org/debian bullseye main\n' > /etc/apt/sources.list
+# Runtime bumped bullseye -> bookworm to match the builder's glibc/OpenSSL
+# ABI (Task Q1, Session 3 — see builder stage comment). quicer's msquic NIF
+# needs libstdc++6/libnuma1 in addition to the OTP/crypto libs the legacy
+# gateway already required.
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libncurses6 libtinfo6 libssl1.1 locales \
+    libncurses6 libtinfo6 libssl3 libstdc++6 libnuma1 locales ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
     && locale-gen

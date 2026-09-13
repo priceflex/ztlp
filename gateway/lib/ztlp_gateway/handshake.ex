@@ -164,10 +164,14 @@ defmodule ZtlpGateway.Handshake do
   The key is mixed into the handshake hash but NOT encrypted
   (no encryption key exists yet).
 
+  `payload` (default empty) is sent in CLEARTEXT after `e` — no key exists
+  yet — but is mixed into `h`. The Rust client always sends its 16-byte
+  NodeID here (`proto/src/handshake.rs::write_message`).
+
   Returns `{updated_state, message_bytes}`.
   """
-  @spec create_msg1(state()) :: {state(), binary()}
-  def create_msg1(state) do
+  @spec create_msg1(state(), binary()) :: {state(), binary()}
+  def create_msg1(state, payload \\ <<>>) do
     # Generate ephemeral keypair
     {e_pub, e_priv} = Crypto.generate_keypair()
 
@@ -176,9 +180,9 @@ defmodule ZtlpGateway.Handshake do
 
     # EncryptAndHash(payload): no key yet, so plaintext passthrough + MixHash
     # Even with empty payload, we must MixHash it per the Noise spec
-    h = Crypto.hash(h <> <<>>)
+    h = Crypto.hash(h <> payload)
 
-    msg = e_pub
+    msg = e_pub <> payload
 
     {%{state | e_pub: e_pub, e_priv: e_priv, h: h, phase: :received_msg1}, msg}
   end
@@ -341,21 +345,22 @@ defmodule ZtlpGateway.Handshake do
   Extracts the initiator's ephemeral public key and mixes it into
   the handshake hash. No encryption/decryption at this stage.
 
-  Returns `{updated_state, <<>>}` (no payload in msg1) or `{:error, reason}`.
+  Returns `{updated_state, payload}` — the cleartext bytes following `e`
+  (empty for the legacy raw-UDP client, 16-byte NodeID for the QUIC
+  client) — or `{:error, reason}`.
   """
   @spec handle_msg1(state(), binary()) :: {state(), binary()} | {:error, atom()}
   def handle_msg1(state, message) do
     case message do
-      <<re::binary-size(32), _rest::binary>> ->
+      <<re::binary-size(32), payload::binary>> ->
         # Mix remote ephemeral into handshake hash
         h = Crypto.hash(state.h <> re)
 
         # DecryptAndHash(payload): no key yet, so plaintext passthrough + MixHash
-        # msg1 has no payload after the ephemeral key, but Noise requires
-        # MixHash of the (empty) payload data per the framework spec
-        h = Crypto.hash(h <> <<>>)
+        # (Noise requires MixHash of the payload even when it is empty.)
+        h = Crypto.hash(h <> payload)
 
-        {%{state | re: re, h: h, phase: :received_msg1}, <<>>}
+        {%{state | re: re, h: h, phase: :received_msg1}, payload}
 
       _ ->
         {:error, :msg1_too_short}

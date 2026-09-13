@@ -62,6 +62,8 @@ services:
       ZTLP_ENROLLMENT_SECRET: "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103"
       ZTLP_CA_DIR: "/data/ca"
       ZTLP_CA_AUTO_INIT: "true"
+      # Demo CA passphrase — throwaway, safe to publish (demo stack).
+      ZTLP_CA_PASSPHRASE: "defcon-demo-ca-passphrase-not-for-production"
       ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
@@ -112,8 +114,8 @@ services:
   # ── Elixir Gateway (TLS termination + header injection) ────
   gateway:
     build:
-      context: ..
-      dockerfile: gateway/Dockerfile
+      context: ../gateway
+      dockerfile: Dockerfile
     container_name: ztlp-gateway-defcon
     hostname: gateway
     networks:

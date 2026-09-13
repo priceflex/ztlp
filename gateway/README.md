@@ -158,6 +158,73 @@ After the handshake:
 Each handshake generates fresh ephemeral keypairs. Compromising the
 gateway's static key doesn't reveal past session traffic.
 
+## QUIC transport
+
+Since 0.35.8 the gateway can accept the Rust client's DEFAULT transport:
+real QUIC (msquic via the `quicer` NIF) carrying ZTLP's own framing and
+Noise handshake inside the first stream. Enable with:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `ZTLP_GATEWAY_QUIC_ENABLED` | `false` | start `ZtlpGateway.Quic.Listener` |
+| `ZTLP_GATEWAY_QUIC_PORT` | `23097` | UDP port |
+| `ZTLP_GATEWAY_QUIC_DATA_DIR` | `/var/lib/ztlp/gateway` | persisted `quic-cert.pem`, `quic-key.pem`, `quic-static.key` |
+| `ZTLP_GATEWAY_QUIC_ACCEPTORS` | `8` | parallel acceptor processes |
+| `ZTLP_GATEWAY_UDP_ENABLED` | `true` | set `false` to drop the legacy raw-UDP `Listener` |
+| `ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR` | unset | e.g. `":23097"`; makes `RelayRegistrar` emit `GATEWAY_REGISTER_ADDR` from a side socket, because msquic owns the QUIC socket (SO_REUSEPORT was measured: 300/300 inbound datagrams stolen) |
+
+QUIC/TLS layer: ALPN exactly `ztlp/1`; SNI `localhost`; self-signed ECDSA
+P-256 cert generated once with `:public_key.pkix_test_root_cert/2` and
+persisted (the client TOFU-pins its SHA-256 in `~/.ztlp/quic_pins/localhost.pin`,
+so it must be stable across restarts). No client certs, no 0-RTT, no
+datagrams. `peer_bidi_stream_count` 256 in both listen and accept opts.
+
+Stream model: the first client-opened bidi stream is the handshake control
+stream; every later client-opened bidi stream is one TCP connection to the
+backend. The gateway never opens streams. TCP EOF <-> QUIC FIN.
+
+Frame (used for handshake messages and every data frame):
+
+```
++------+-------------+--------------+
+| 0x5A | len u16 BE  | payload[len] |    0x5A = STREAM0_MAGIC_V1, max 65535
++------+-------------+--------------+
+```
+
+Frames may straddle QUIC STREAM frames; `Quic.Frame.decode/1` reassembles.
+Data-frame boundaries carry no meaning; payloads are concatenated.
+
+Handshake on stream 0 (`Quic.Handshake`, reusing `ZtlpGateway.Handshake`):
+
+```
+C->S  service_hash   16 raw bytes (first 16 of SHA-256(lowercase name)), not framed
+C->S  frame(msg1)    Noise XX msg1: e(32) || cleartext NodeID(16)
+S->C  session_id     12 random bytes, not framed
+S->C  frame(msg2)    e(32) || enc s(48) || enc payload(32)   payload = gateway NodeID
+C->S  frame(msg3)    enc s(48) || enc payload(32)            payload = client NodeID
+both finish()
+```
+
+`Noise_XX_25519_ChaChaPoly_BLAKE2s`, empty prologue, no PSK. Every Noise
+payload starts with the sender's 16-byte NodeID (msg1 cleartext payload is
+MixHashed — older `Handshake.handle_msg1/2` dropped it; fixed). After the
+handshake the Noise transport keys are NOT used for data: confidentiality
+and integrity are QUIC TLS 1.3; Noise provides client authentication
+(static key -> `X-ZTLP-Node-Id`) and session-id binding.
+
+Per connection: `service_hash` -> backend, `PolicyEngine.authorize?`,
+`HttpHeaderInjector` + `HeaderSigner` on each request, `Stats`,
+`SessionRegistry`, `AuditLog` — identical to the legacy path. Unknown
+service, policy deny, bad magic or wrong ALPN close the connection.
+
+Relay side: `GATEWAY_REGISTER_ADDR` = `0x5A 0x37 0x0D` then
+`[1 addr_len][addr "ip:port" | ":port"][16 node_id][16 svc_padded][4 ttl][8 ts][32 hmac]`,
+HMAC over `0x0D||addr_len||addr||node_id||svc||ttl||ts`. `":port"` means
+relay-observed source IP + declared port (cannot redirect to a third party).
+
+Log line per successful tunnel:
+`[Quic] handshake ok session=<24 hex> peer=<64 hex> service=<name> from=<relay>`.
+
 ## Audit Logging
 
 Every session event is recorded:

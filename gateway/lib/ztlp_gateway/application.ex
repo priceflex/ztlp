@@ -50,7 +50,7 @@ defmodule ZtlpGateway.Application do
         ZtlpGateway.NsClient,
         ZtlpGateway.BackendPool,
         {DynamicSupervisor, strategy: :one_for_one, name: ZtlpGateway.SessionSupervisor},
-        ZtlpGateway.Listener,
+      ] ++ udp_listener_children() ++ quic_children() ++ [
         ZtlpGateway.RelayRegistrar,
         ZtlpGateway.ServiceRegistrar,
         ZtlpGateway.CertProvisioner,
@@ -69,6 +69,26 @@ defmodule ZtlpGateway.Application do
     end
 
     result
+  end
+
+  # Legacy raw-UDP ZTLP listener (0x5A37 magic). Set ZTLP_GATEWAY_UDP_ENABLED=false
+  # to run a QUIC-only gateway (avoids bad_magic log spam when both would
+  # otherwise want port 23097).
+  defp udp_listener_children do
+    case System.get_env("ZTLP_GATEWAY_UDP_ENABLED") do
+      v when v in ["0", "false", "FALSE", "no"] -> []
+      _ -> [ZtlpGateway.Listener]
+    end
+  end
+
+  # QUIC (msquic/quicer) listener — ALPN ztlp/1, ZTLP magic-framed Noise_XX
+  # inside QUIC. Enabled with ZTLP_GATEWAY_QUIC_ENABLED=true.
+  defp quic_children do
+    if ZtlpGateway.Quic.Listener.enabled?() do
+      [{ZtlpGateway.Quic.Listener, [name: ZtlpGateway.Quic.Listener]}]
+    else
+      []
+    end
   end
 
   defp tls_children do

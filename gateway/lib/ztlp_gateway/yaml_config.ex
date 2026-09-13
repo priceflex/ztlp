@@ -63,16 +63,22 @@ defmodule ZtlpGateway.YamlConfig do
     errors = []
     config = %{}
 
-    {config, errors} = validate_field(config, errors, raw, "port", :port, :integer, 23097, 1..65535)
-    {config, errors} = validate_field(config, errors, raw, "session_timeout", :session_timeout_ms, :duration, 300_000, nil)
-    {config, errors} = validate_field(config, errors, raw, "max_sessions", :max_sessions, :integer, 10_000, 1..1_000_000)
+    # These keys are ALSO set from env vars by config/runtime.exs
+    # (ZTLP_GATEWAY_PORT, ZTLP_GATEWAY_SESSION_TIMEOUT_MS, ZTLP_GATEWAY_MAX_SESSIONS,
+    # ZTLP_NS_SERVER) before this module runs. Pass `nil` defaults so an ABSENT
+    # yaml key leaves the env-derived value alone instead of clobbering it with
+    # the built-in default (Config.get/1 already applies the same defaults when
+    # neither source sets the key). Pinned by yaml_config_env_precedence_test.exs.
+    {config, errors} = validate_field(config, errors, raw, "port", :port, :integer, nil, 1..65535)
+    {config, errors} = validate_field(config, errors, raw, "session_timeout", :session_timeout_ms, :duration, nil, nil)
+    {config, errors} = validate_field(config, errors, raw, "max_sessions", :max_sessions, :integer, nil, 1..1_000_000)
 
     # NS section
     {config, errors} = case Map.get(raw, "ns", %{}) do
       ns when is_map(ns) ->
-        {config, errors} = validate_field(config, errors, ns, "host", :ns_server_host, :ip_address, {127, 0, 0, 1}, nil)
-        {config, errors} = validate_field(config, errors, ns, "port", :ns_server_port, :integer, 23096, 1..65535)
-        validate_field(config, errors, ns, "query_timeout", :ns_query_timeout_ms, :duration, 2_000, nil)
+        {config, errors} = validate_field(config, errors, ns, "host", :ns_server_host, :ip_address, nil, nil)
+        {config, errors} = validate_field(config, errors, ns, "port", :ns_server_port, :integer, nil, 1..65535)
+        validate_field(config, errors, ns, "query_timeout", :ns_query_timeout_ms, :duration, nil, nil)
       nil -> {config, errors}
       other -> {config, ["ns: expected a map, got: #{inspect(other)}" | errors]}
     end

@@ -30,7 +30,7 @@ defmodule ZtlpGateway.MixProject do
       # Bumped 0.34.9 → 0.34.10 in release/v0.34.10 (supervisor default-on for
       # raw-IP connects, PR #95). Floor ratcheted to 0.34.10 in release_test.exs.
       version: "0.35.8",
-      elixir: "~> 1.12",
+      elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -54,7 +54,14 @@ defmodule ZtlpGateway.MixProject do
   # communicate purely over UDP wire protocol.
   defp deps do
     [
-      {:ztlp_ns, path: "../ns", only: :test, runtime: false}
+      {:ztlp_ns, path: "../ns", only: :test, runtime: false},
+      # Task Q1 (ztlp-cloud-demo-plan.md, Session 3): msquic-backed QUIC
+      # NIF, used to add a real QUIC listener (ALPN "ztlp/1") alongside
+      # the existing legacy raw-UDP gateway. Requires OTP >= 25 (we're on
+      # 26 via the bumped Dockerfile) and cmake in the build image (msquic
+      # is compiled from source at `mix deps.compile` time unless the
+      # prebuilt NIF release matches the exact OTP/distro combo).
+      {:quicer, "~> 0.4.8"}
     ]
   end
 

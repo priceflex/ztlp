@@ -1,0 +1,33 @@
+# DEF CON cloud demo — NS component-auth config.
+#
+# Loaded via ZTLP_NS_CONFIG (ZtlpNs.YamlConfig.load_and_apply/0, called at
+# app boot before the supervision tree starts — see
+# ns/lib/ztlp_ns/yaml_config.ex). This is the SAME mechanism the gateway
+# already uses via ZTLP_GATEWAY_CONFIG; no runtime.exs code change needed
+# (contrary to the original cloud-demo-plan.md Task 1, which assumed NS had
+# zero config-file wiring for component_auth — that was checking runtime.exs
+# only and missed YamlConfig, confirmed by
+# ns/test/ztlp_ns/yaml_config_component_auth_test.exs, all green with no
+# code changes).
+#
+# allowed_keys pins the gateway's fixed demo identity (see
+# demo/gateway-identity.key, gateway-config.yaml) so cert issuance
+# (opcode 0x14 0x03) authorizes on every fresh `docker compose up`, no
+# manual RPC allowlisting.
+#
+# This pubkey is the CORRECT Ed25519 public key for the seed in
+# gateway-identity.key, verified two ways: (1) `ztlp keygen`'s printed
+# ed25519_public_key (after the 2026-09-12 fix — see
+# proto/src/bin/ztlp-cli.rs mod tests::
+# keygen_ed25519_public_key_matches_dalek_derivation_from_seed, and the
+# ztlp-cli.rs cmd_keygen fix itself: it used to hash the seed with BLAKE2s
+# instead of deriving the real Ed25519 public key via ed25519-dalek), and
+# (2) independently re-derived via Erlang's :crypto.generate_key(:eddsa,
+# :ed25519, seed) against the live gateway container — both agree.
+# Regenerate this file with the FIXED `ztlp keygen` (proto/target/release/
+# ztlp, rebuilt after the fix) if the seed ever changes; do NOT trust a
+# pre-fix binary's printed pubkey.
+component_auth:
+  enabled: true
+  allowed_keys:
+    - "cb49ea0f8d0dead28ced384261d6a8f0f678eee8031b76724068daa9d232b8a1"

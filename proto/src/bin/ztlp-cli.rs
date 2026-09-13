@@ -1925,18 +1925,20 @@ fn cmd_keygen(
     let identity = NodeIdentity::generate()?;
 
     // Generate Ed25519 signing keypair
-    // We use ring-compatible Ed25519 via a simple seed-based approach
     let mut ed25519_seed = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut ed25519_seed);
 
-    // For Ed25519, we store seed as private key. The public key is derived
-    // by the NS server during registration. We'll store both for convenience.
-    // Use BLAKE2s to derive a deterministic "public key" representation for display.
-    // (In production, the Ed25519 public key would be computed properly.)
-    use blake2::{Blake2s256, Digest};
-    let mut hasher = Blake2s256::new();
-    hasher.update(ed25519_seed);
-    let ed25519_public = hasher.finalize();
+    // The public key MUST be the real Ed25519 public key derived from the
+    // seed via standard curve math (ed25519-dalek), not a hash of the seed.
+    // Regression pinned by
+    // `mod tests::keygen_ed25519_public_key_matches_dalek_derivation_from_seed`
+    // (2026-09-12): a prior version computed this field as
+    // BLAKE2s256(ed25519_seed), which is NOT the actual public key — any
+    // consumer allowlisting this printed value (e.g. NS component_auth) would
+    // reject the real signing key the identity presents at runtime.
+    let ed25519_signing_key = ed25519_dalek::SigningKey::from_bytes(&ed25519_seed);
+    let ed25519_public = ed25519_signing_key.verifying_key().to_bytes();
+
 
     match format {
         KeygenFormat::Json => {
@@ -13865,6 +13867,69 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── `ztlp keygen`'s ed25519_public_key must be the REAL curve-derived
+    //    public key (2026-09-12) ─────────────────────────────────────────
+    //
+    // Regression: cmd_keygen computed `ed25519_public_key` as
+    // BLAKE2s256(ed25519_seed) — a hash, NOT the Ed25519 public key you get
+    // by actually deriving it via ed25519-dalek::SigningKey::from_bytes(seed)
+    // .verifying_key(). Found live during ZTLP DEF CON cloud-demo bringup:
+    // NS's ComponentAuth (Erlang :crypto.generate_key(:eddsa, :ed25519, seed))
+    // derived a COMPLETELY DIFFERENT 32-byte pubkey from the same seed than
+    // what `ztlp keygen`'s JSON output printed, so a pubkey copied verbatim
+    // out of `ztlp keygen`'s output into an NS allowlist never matches what
+    // the gateway actually presents at runtime — cert issuance rejected with
+    // :unauthorized every time, looking like an NS-side config bug when the
+    // CLI's printed pubkey was simply wrong.
+    //
+    // This test pins that the printed ed25519_public_key is recoverable by
+    // standard Ed25519 key derivation from the printed ed25519_seed (i.e. it
+    // actually IS the Ed25519 public key, not a hash of the seed).
+    #[test]
+    fn keygen_ed25519_public_key_matches_dalek_derivation_from_seed() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ztlp-keygen-ed25519-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let out_path = tmp.join("identity.json");
+
+        cmd_keygen(&Some(out_path.clone()), &KeygenFormat::Json)
+            .expect("cmd_keygen should succeed");
+
+        let content = fs::read_to_string(&out_path).expect("identity file should be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("identity file must be valid JSON");
+
+        let seed_hex = parsed["ed25519_seed"]
+            .as_str()
+            .expect("ed25519_seed must be present");
+        let printed_pub_hex = parsed["ed25519_public_key"]
+            .as_str()
+            .expect("ed25519_public_key must be present");
+
+        let seed_bytes = hex::decode(seed_hex).unwrap();
+        let seed_arr: [u8; 32] = seed_bytes.try_into().expect("seed must be 32 bytes");
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed_arr);
+        let real_pub = signing_key.verifying_key();
+        let real_pub_hex = hex::encode(real_pub.to_bytes());
+
+        assert_eq!(
+            printed_pub_hex, real_pub_hex,
+            "ztlp keygen printed an ed25519_public_key that does NOT match the \
+             actual Ed25519 public key derived from ed25519_seed via \
+             ed25519-dalek. Any consumer that allowlists the printed pubkey \
+             (e.g. NS component_auth.allowed_keys) will reject the real \
+             signing key presented by the running identity."
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     // ── cert-issue must mint a REAL leaf (2026-09-04) ──────────────────
     //

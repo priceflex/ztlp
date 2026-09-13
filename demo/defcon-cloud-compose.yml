@@ -1,0 +1,207 @@
+# ─────────────────────────────────────────────────────────────
+# ZTLP DEF CON-style Demo — cloud edition (AWS Lightsail Ubuntu)
+# ─────────────────────────────────────────────────────────────
+# Same topology as the laptop demo, adapted for a low-powered cloud box:
+#   agent (run separately, NOT in this compose) → relay1/relay2 → NS
+#   Browser → agent VIP:443 → gateway (TLS) → dashboard (8420)
+#
+# Differences from defcon-laptop-compose.yml:
+#   - CA lives at /var/lib/ztlp/ca (durable, not tmpfs, not a FUSE home)
+#   - No ~ expansion in the volumes: line (compose ~ expansion is
+#     unreliable across engines) — uses the explicit path.
+#   - Subnet 172.42.90.0/24 to avoid the default docker0 range collisions
+#     seen on other TRS boxes.
+#
+# Usage (from ~/ztlp/demo on the cloud box):
+#   sudo docker compose -f defcon-cloud-compose.yml up -d --build
+#   sudo docker compose -f defcon-cloud-compose.yml ps
+#
+# NS is RAM-only (ram_copies): any `down`/reboot wipes all identity
+# records. Re-seed with the ztlp CLI (see setup-defcon-demo.sh).
+
+networks:
+  ztlp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.42.90.0/24
+
+services:
+  ns:
+    build: ../ns
+    container_name: ztlp-ns-defcon
+    hostname: ns
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.90.10
+    ports:
+      - "23096:23096/udp"
+    environment:
+      ZTLP_NS_PORT: "23096"
+      ZTLP_NS_MAX_RECORDS: "10000"
+      ZTLP_NS_STORAGE_MODE: "ram_copies"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "false"
+      ZTLP_ENROLLMENT_SECRET: "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103"
+      ZTLP_CA_DIR: "/data/ca"
+      ZTLP_CA_AUTO_INIT: "true"
+      # Demo CA passphrase — throwaway, safe to publish (demo stack).
+      ZTLP_CA_PASSPHRASE: "defcon-demo-ca-passphrase-not-for-production"
+      ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+      # component_auth wiring: contrary to the original cloud-demo-plan.md
+      # Task 1 (which assumed NS had zero config-file support for
+      # component_auth_*), YamlConfig.load_and_apply/0 already parses a
+      # `component_auth` YAML section at boot — same mechanism the gateway
+      # already uses via ZTLP_GATEWAY_CONFIG. No runtime.exs patch, no NS
+      # image rebuild. Pins the gateway's fixed demo pubkey (see
+      # ns-config.yaml, gateway-identity.key) as an allowed cert-issuance
+      # requester — see ns/test/ztlp_ns/yaml_config_component_auth_test.exs
+      # for the TDD pin proving this path.
+      ZTLP_NS_CONFIG: "/data/ns-config.yaml"
+    volumes:
+      - /var/lib/ztlp/ca:/data/ca
+      - ./ns-config.yaml:/data/ns-config.yaml:ro
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  relay1:
+    build: ../relay
+    container_name: ztlp-relay1-defcon
+    hostname: relay1
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.90.20
+    ports:
+      - "23095:23095/udp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      # Demo stack: relay defaults to PROD HMAC mode which requires a
+      # per-zone secret or it silently drops every client route
+      # ("CLIENT_ROUTE ... REJECTED: no secret configured for zone=...").
+      # Downgrading to staging mode is simplest for a throwaway demo.
+      ZTLP_RELAY_HMAC_MODE: "staging"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  relay2:
+    build: ../relay
+    container_name: ztlp-relay2-defcon
+    hostname: relay2
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.90.21
+    ports:
+      - "23098:23095/udp"
+      - "23105:23095/tcp"
+    environment:
+      ZTLP_RELAY_PORT: "23095"
+      ZTLP_RELAY_MAX_SESSIONS: "1000"
+      ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
+      ZTLP_RELAY_HMAC_MODE: "staging"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+
+  gateway:
+    build:
+      context: ../gateway
+      dockerfile: Dockerfile
+    container_name: ztlp-gateway-defcon
+    hostname: gateway
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.90.30
+    ports:
+      - "23097:23097/udp"
+    environment:
+      # --- QUIC transport (Session 3/4 decision: real QUIC, ALPN ztlp/1,
+      # ZTLP 0x5A-magic-framed Noise_XX inside the QUIC stream) ---------
+      # The Rust client's default transport is QUIC. The legacy raw-UDP
+      # listener (0x5A37 magic) is disabled so it cannot squat on :23097
+      # and spam bad_magic for every QUIC packet.
+      ZTLP_GATEWAY_QUIC_ENABLED: "true"
+      ZTLP_GATEWAY_QUIC_PORT: "23097"
+      ZTLP_GATEWAY_UDP_ENABLED: "false"
+      # Persisted self-signed QUIC cert + Noise static key (client TOFU-pins
+      # the cert; must survive restarts -> host volume below).
+      ZTLP_GATEWAY_QUIC_DATA_DIR: "/var/lib/ztlp/gateway"
+      # msquic owns the QUIC UDP socket, so RelayRegistrar cannot send
+      # GATEWAY_REGISTER from :23097. It sends GATEWAY_REGISTER_ADDR (0x0D)
+      # from an ephemeral port and declares ":23097" = "my observed source
+      # IP, port 23097" for the relay to forward to.
+      ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR: ":23097"
+      ZTLP_GATEWAY_PORT: "23097"
+      ZTLP_NS_SERVER: "172.42.90.10:23096"
+      # Register with the relay so it forwards CLIENT_ROUTE packets for
+      # this service to the gateway (without this, relay logs "no gateway
+      # registered for service=<name>" and drops every client route).
+      ZTLP_RELAY_SERVER: "172.42.90.20:23095"
+      # Public address the gateway advertises to NS/relay for routing.
+      ZTLP_GATEWAY_PUBLIC_ADDR: "172.42.90.30:23097"
+      # ZTLP_GATEWAY_SERVICE_ZONE belongs HERE (ServiceRegistrar reads it),
+      # not on the ns service — that was a bug carried over from the
+      # original DEF CON compose file (ns doesn't consume this var; the
+      # gateway silently fell back to its @default_zone "techrockstars.ztlp"
+      # and registered SVC records under the wrong zone).
+      ZTLP_GATEWAY_SERVICE_ZONE: "defcon.ztlp"
+      # Backend/service name MUST match the first label of the hostname
+      # clients resolve (demo-dashboard.defcon.ztlp) — the relay's
+      # gateway_forwarder.ex name_match_fn does an EXACT string match
+      # against what the gateway announces via RelayRegistrar. There is
+      # NO wildcard fallback for name-based routing (only the all-zero
+      # hash sentinel gets round-robin fallback) — a mismatched name here
+      # produces "no gateway registered for service=<name>" on the relay
+      # and every client tunnel times out at the QUIC handshake stage.
+      ZTLP_GATEWAY_BACKENDS: "demo-dashboard:dashboard:8420"
+      ZTLP_GATEWAY_POLICIES: "*:demo-dashboard"
+      # Relay registration uses a THIRD, SEPARATE name list from backends/
+      # policies (Config.service_names/0, default ["default"]) — this is
+      # what RelayRegistrar announces to the relay for CLIENT_ROUTE
+      # matching. Must also equal the hostname's first label or the relay
+      # rejects every client route with "no gateway registered".
+      ZTLP_GATEWAY_SERVICE_NAMES: "demo-dashboard"
+      # Points at gateway-config.yaml, which sets component_auth.enabled +
+      # a FIXED, pre-generated identity_key_file (demo/gateway-identity.key,
+      # mounted read-only below). Original default behavior (identity
+      # auto-generated fresh on every load_or_generate_identity() call, no
+      # persistence) made it impossible to allowlist a stable pubkey on the
+      # NS side for authenticated cert issuance (opcode 0x14 0x03) —
+      # discovered live 2026-09-12: cert issuance kept returning
+      # :unauthorized even right after allowlisting a freshly-read key,
+      # because the NEXT issuance call generated yet another new key.
+      # Fix: pin a fixed Ed25519 keypair (throwaway/demo-only, same pattern
+      # as ZTLP_ENROLLMENT_SECRET above) instead of auto-generating +
+      # hot-patching NS at runtime. Single `docker compose up -d --build`,
+      # no two-step dance, no RPC ever.
+      ZTLP_GATEWAY_CONFIG: "/data/gateway-config.yaml"
+      ZTLP_GATEWAY_TRUST_ANCHORS: "defcon.ztlp:3f8b8ad5bf2c26f3e799fac1b8a378607aa37d9fb2c6602e2d4ab947bb756861"
+      ZTLP_HEADER_SIGNING_ENABLED: "true"
+      ZTLP_HEADER_HMAC_SECRET: "supersecretkey"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_LOG_LEVEL: "info"
+    volumes:
+      - ./gateway-config.yaml:/data/gateway-config.yaml:ro
+      - ./gateway-identity.key:/data/gw/gateway-identity.key:ro
+      - /var/lib/ztlp/gateway:/var/lib/ztlp/gateway
+    depends_on:
+      ns:
+        condition: service_healthy
+
+  dashboard:
+    build: ./defcon-dashboard
+    container_name: ztlp-dashboard-defcon
+    hostname: dashboard
+    networks:
+      ztlp-net:
+        ipv4_address: 172.42.90.40
+    ports:
+      - "8420:8420"
+    environment:
+      ZTLP_DEMO_HMAC_KEY: "supersecretkey"
+

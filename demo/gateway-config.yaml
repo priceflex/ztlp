@@ -1,0 +1,8 @@
+# Demo stack gateway config — pins the component-auth identity so NS can
+# allowlist a STABLE pubkey (default identity is regenerated on every call
+# with no persistence, making cert-issuance authorization impossible to
+# configure statically — see seed-cloud-demo.sh / defcon-cloud-compose.yml
+# comments for the full story).
+component_auth:
+  enabled: true
+  identity_key_file: /data/gw/gateway-identity.key

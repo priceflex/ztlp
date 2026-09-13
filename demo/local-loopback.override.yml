@@ -1,0 +1,34 @@
+# Local Hermes-VM loopback override for Task Q6 (ztlp-cloud-demo-plan.md).
+#
+# The Hermes VM already runs the TRS prod `ztlp-relay`/`ztlp-gateway`
+# containers on host UDP 23095/23097, so the demo stack is remapped to
+# 33095-33097 / 38420 on the HOST only. Container-internal ports and the
+# 172.42.90.x addresses are unchanged, so nothing inside the stack differs
+# from the AWS deployment. CA/gateway state lives under /tmp so the real
+# /var/lib/ztlp on this box is never touched.
+#
+#   docker compose -f defcon-cloud-compose.yml -f local-loopback.override.yml up -d
+#
+services:
+  ns:
+    ports: !override
+      - "33096:23096/udp"
+    volumes: !override
+      - /tmp/ztlp-demo-local/ca:/data/ca
+      - ./ns-config.yaml:/data/ns-config.yaml:ro
+  relay1:
+    ports: !override
+      - "33095:23095/udp"
+  relay2:
+    ports: !override
+      - "33094:23095/udp"
+  gateway:
+    ports: !override
+      - "33097:23097/udp"
+    volumes: !override
+      - ./gateway-config.yaml:/data/gateway-config.yaml:ro
+      - ./gateway-identity.key:/data/gw/gateway-identity.key:ro
+      - /tmp/ztlp-demo-local/gateway:/var/lib/ztlp/gateway
+  dashboard:
+    ports: !override
+      - "38420:8420"

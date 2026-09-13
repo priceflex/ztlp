@@ -65,6 +65,11 @@ defmodule ZtlpGateway.RelayRegistrar do
   @default_ttl 60
   @type_byte_v1 0x0A
   @type_byte_v2 0x0E
+  # GATEWAY_REGISTER_ADDR: like V1 but carries the address the relay must
+  # forward to. Used by the QUIC gateway (msquic owns the listening socket, so
+  # we cannot send from it). Enabled by ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR
+  # (":port" = relay-observed source IP + this port; or "ip:port").
+  @type_byte_addr 0x0D
 
   # Client API
 
@@ -118,7 +123,9 @@ defmodule ZtlpGateway.RelayRegistrar do
           services: Config.service_names(),
           legacy_secret: Config.registration_secret(),
           use_v2: use_v2,
-          test_socket: test_socket
+          test_socket: test_socket,
+          advertise_addr: advertise_addr(),
+          own_socket: nil
         }
 
         # Give the Listener time to start and bind its socket
@@ -139,32 +146,41 @@ defmodule ZtlpGateway.RelayRegistrar do
   end
 
   def handle_info(:register, state) do
+    state = ensure_own_socket(state)
+
     # Use an injected test socket if provided, otherwise get the main listener
     # socket so the relay sees our listener port (e.g. 23098) for NAT traversal.
     socket =
-      case Map.get(state, :test_socket) do
-        nil ->
+      cond do
+        state.own_socket != nil ->
+          state.own_socket
+
+        Map.get(state, :test_socket) != nil ->
+          state.test_socket
+
+        true ->
           try do
             ZtlpGateway.Listener.socket()
           catch
             :exit, _ -> nil
           end
-
-        sock ->
-          sock
       end
 
     if socket do
       for service <- state.services do
-        send_registration(
-          socket,
-          state.relay,
-          state.node_id,
-          service,
-          state.ttl,
-          state.legacy_secret,
-          state.use_v2
-        )
+        if state.advertise_addr do
+          send_registration_addr(socket, state.relay, state.advertise_addr, state.node_id, service, state.ttl, state.legacy_secret)
+        else
+          send_registration(
+            socket,
+            state.relay,
+            state.node_id,
+            service,
+            state.ttl,
+            state.legacy_secret,
+            state.use_v2
+          )
+        end
       end
 
       # Re-register at TTL/2
@@ -183,9 +199,39 @@ defmodule ZtlpGateway.RelayRegistrar do
   end
 
   @impl true
-  def terminate(_reason, _state) do
-    # Socket is owned by Listener — don't close it here
+  def terminate(_reason, state) do
+    # Listener/test sockets are owned elsewhere; only close the one we opened.
+    if state[:own_socket], do: :gen_udp.close(state.own_socket)
     :ok
+  end
+
+  @doc """
+  `ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR` — when set, register with
+  GATEWAY_REGISTER_ADDR (0x0D) from a dedicated socket and tell the relay
+  to forward to this address instead of the datagram source. Required for
+  the QUIC listener. `":23097"` (recommended) or `"1.2.3.4:23097"`.
+  """
+  @spec advertise_addr() :: String.t() | nil
+  def advertise_addr do
+    case System.get_env("ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR") do
+      nil -> Application.get_env(:ztlp_gateway, :relay_advertise_addr)
+      "" -> nil
+      v -> v
+    end
+  end
+
+  defp ensure_own_socket(%{advertise_addr: nil} = state), do: state
+  defp ensure_own_socket(%{own_socket: s} = state) when s != nil, do: state
+
+  defp ensure_own_socket(state) do
+    case :gen_udp.open(0, [:binary, active: false]) do
+      {:ok, sock} ->
+        %{state | own_socket: sock}
+
+      {:error, reason} ->
+        Logger.warning("[RelayRegistrar] could not open registration socket: #{inspect(reason)}")
+        state
+    end
   end
 
   # Public for tests + future explicit callers.
@@ -222,6 +268,43 @@ defmodule ZtlpGateway.RelayRegistrar do
   def derive_zone_from_service(other) when is_binary(other), do: other
 
   # Internal
+
+  @doc false
+  @spec build_registration_packet_addr(String.t(), binary(), String.t(), non_neg_integer(), binary() | nil) ::
+          binary()
+  def build_registration_packet_addr(addr, node_id, service_name, ttl, secret)
+      when byte_size(addr) >= 1 and byte_size(addr) <= 64 do
+    service_padded = pad_service_name(service_name)
+    timestamp = System.system_time(:second)
+
+    signed_data =
+      <<@type_byte_addr, byte_size(addr)::8, addr::binary, node_id::binary, service_padded::binary,
+        ttl::32, timestamp::64>>
+
+    hmac =
+      case secret do
+        nil -> <<0::256>>
+        s when is_binary(s) -> :crypto.mac(:hmac, :sha256, s, signed_data)
+      end
+
+    <<0x5A, 0x37, signed_data::binary, hmac::binary>>
+  end
+
+  defp send_registration_addr(socket, {relay_ip, relay_port}, addr, node_id, service, ttl, secret) do
+    packet = build_registration_packet_addr(addr, node_id, service, ttl, secret)
+
+    case :gen_udp.send(socket, relay_ip, relay_port, packet) do
+      :ok ->
+        Logger.debug(
+          "[RelayRegistrar] Sent GATEWAY_REGISTER_ADDR(#{addr}) to #{inspect({relay_ip, relay_port})} service=#{service}"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "[RelayRegistrar] Failed to send GATEWAY_REGISTER_ADDR to #{inspect({relay_ip, relay_port})}: #{inspect(reason)}"
+        )
+    end
+  end
 
   @doc false
   @spec build_registration_packet(binary(), String.t(), non_neg_integer(), binary() | nil) ::

@@ -257,6 +257,47 @@ jobs:
             desktop/src-tauri/target/release/bundle/nsis/*.exe
             desktop/src-tauri/target/release/bundle/msi/*.msi
 
+  # ── Build + push Docker images to Docker Hub ──────────────────
+  docker:
+    name: Docker — ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: ns
+            context: ns
+            image: ztlp-ns
+          - component: relay
+            context: relay
+            image: ztlp-relay
+          - component: gateway
+            context: gateway
+            image: ztlp-gateway
+          - component: dashboard
+            context: demo/defcon-dashboard
+            image: ztlp-dashboard
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.ref_name }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
+
   # ── Package eBPF source ───────────────────────────────────────
   ebpf:
     name: eBPF source
@@ -280,11 +321,12 @@ jobs:
   # ── Publish GitHub Release ────────────────────────────────────
   release:
     name: Publish Release
-    # Desktop is included in `needs` so its artifacts are present, but with
-    # `if: always() && needs.rust.result == 'success' && needs.elixir.result == 'success' && needs.ebpf.result == 'success'`
-    # the release still publishes even if Desktop (Tauri) fails — desktop
-    # installers are best-effort, Rust CLI + Elixir + eBPF are required.
-    needs: [rust, elixir, ebpf, desktop]
+    # Desktop and Docker are included in `needs` so their results gate the
+    # summary, but with `if: always() && ...` the GitHub Release still
+    # publishes even if Desktop (Tauri) or Docker Hub push fails — desktop
+    # installers and Docker images are best-effort, Rust CLI + Elixir + eBPF
+    # are required.
+    needs: [rust, elixir, ebpf, desktop, docker]
     if: |
       always() &&
       needs.rust.result == 'success' &&

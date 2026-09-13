@@ -90,7 +90,8 @@ ztlp setup --token 'ztlp://enroll/...' --name my-laptop-01 --yes \
   `defcon.ztlp`, TLS off). Nothing to edit.
 - **Already enrolled?** `setup` refuses (even with `--yes`) if
   `~/.ztlp/identity.json` exists. Add `--force` to re-enroll; the old
-  identity.json / config.toml / agent.toml are moved to `*.<ts>.bak` first.
+  identity.json / config.toml / agent.toml (and zone.key, on the
+  create-network path) are moved to `*.<ts>.bak` first.
 - The relay runs `ZTLP_RELAY_HMAC_MODE=prod`: without `--relay-secret` the
   relay drops every route and the tunnel times out at the QUIC handshake.
   Forgot it? Add `relay_secret = "..."` under `[tunnel]` in `~/.ztlp/agent.toml`.

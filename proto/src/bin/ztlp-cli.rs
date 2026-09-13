@@ -8892,7 +8892,7 @@ async fn cmd_setup(
                             with an enrollment token to join an existing network."
                     .into());
             }
-            setup_create_network(auto_yes).await
+            setup_create_network(opts.force).await
         }
         _ => unreachable!(),
     }
@@ -9216,10 +9216,8 @@ async fn setup_join(
 }
 
 /// Setup path: create a new ZTLP network.
-async fn setup_create_network(_auto_yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn setup_create_network(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     use dialoguer::Input;
-    use ztlp_proto::enrollment::generate_enrollment_secret;
-    use ztlp_proto::identity::NodeIdentity;
 
     eprintln!("  {}", c_bold("── Create ZTLP Network ───────────────"));
     eprintln!();
@@ -9246,41 +9244,27 @@ async fn setup_create_network(_auto_yes: bool) -> Result<(), Box<dyn std::error:
 
     eprintln!();
 
-    // Generate zone enrollment secret
+    // Generate zone enrollment secret + admin identity (guarded: refuses to
+    // clobber an existing enrollment unless --force, which backs up first).
     eprintln!("  {} Generating zone enrollment secret...", c_dim("→"));
-    let secret = generate_enrollment_secret();
-    let secret_hex = hex::encode(secret);
-
     let ztlp_dir = get_ztlp_dir()?;
-    std::fs::create_dir_all(&ztlp_dir)?;
-
-    let secret_path = ztlp_dir.join("zone.key");
-    std::fs::write(&secret_path, &secret_hex)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600)).ok();
+    let created = create_network_files(&ztlp_dir, force)?;
+    if !created.backed_up.is_empty() {
+        eprintln!("  {} Existing enrollment backed up:", c_yellow("⚠"));
+        for p in &created.backed_up {
+            eprintln!("      {}", p.display());
+        }
     }
+    let secret_hex = created.secret_hex;
+    let secret_path = created.secret_path;
+    let key_path = created.identity_path;
+    let identity = created.identity;
 
     eprintln!(
         "  {} Zone secret saved to {} (chmod 600)",
         c_green("✓"),
         secret_path.display()
     );
-
-    // Generate admin identity
-    eprintln!("  {} Generating admin identity...", c_dim("→"));
-    let identity = NodeIdentity::generate()?;
-    let key_path = ztlp_dir.join("identity.json");
-    identity.save(&key_path)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).ok();
-    }
-
     eprintln!(
         "  {} Admin identity saved to {}",
         c_green("✓"),
@@ -9757,8 +9741,8 @@ fn guard_existing_identity(
     if !force {
         return Err(format!(
             "this machine is already enrolled ({} exists).\n  \
-             Re-run with --force to re-enroll (the current identity.json, config.toml and \
-             agent.toml are backed up to *.<timestamp>.bak first), \
+             Re-run with --force to re-enroll (the current identity.json, config.toml, \
+             agent.toml and zone.key are backed up to *.<timestamp>.bak first), \
              or `ztlp status --identity` to see what it is.",
             identity.display()
         )
@@ -9769,7 +9753,7 @@ fn guard_existing_identity(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let mut backed = Vec::new();
-    for name in ["identity.json", "config.toml", "agent.toml"] {
+    for name in ["identity.json", "config.toml", "agent.toml", "zone.key"] {
         let src = ztlp_dir.join(name);
         if src.exists() {
             let dst = ztlp_dir.join(format!("{}.{}.bak", name, ts));
@@ -9779,6 +9763,49 @@ fn guard_existing_identity(
         }
     }
     Ok(Some(backed))
+}
+
+/// Files produced by the create-network wizard.
+#[derive(Debug)]
+struct CreatedNetworkFiles {
+    secret_hex: String,
+    secret_path: PathBuf,
+    identity: ztlp_proto::identity::NodeIdentity,
+    identity_path: PathBuf,
+    backed_up: Vec<PathBuf>,
+}
+
+/// Write `zone.key` (fresh 32-byte hex enrollment secret) and a fresh admin
+/// `identity.json` into `ztlp_dir`, mode 0600. Goes through
+/// `guard_existing_identity` so an existing enrollment is never clobbered
+/// silently (the pre-2026-09-12 wizard overwrote both files unconditionally).
+fn create_network_files(
+    ztlp_dir: &std::path::Path,
+    force: bool,
+) -> Result<CreatedNetworkFiles, Box<dyn std::error::Error>> {
+    use ztlp_proto::enrollment::generate_enrollment_secret;
+    use ztlp_proto::identity::NodeIdentity;
+
+    std::fs::create_dir_all(ztlp_dir)?;
+    let backed_up = guard_existing_identity(ztlp_dir, force)?.unwrap_or_default();
+
+    let secret_hex = hex::encode(generate_enrollment_secret());
+    let secret_path = ztlp_dir.join("zone.key");
+    std::fs::write(&secret_path, &secret_hex)?;
+
+    let identity = NodeIdentity::generate()?;
+    let identity_path = ztlp_dir.join("identity.json");
+    identity.save(&identity_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for p in [&secret_path, &identity_path] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
+
+    Ok(CreatedNetworkFiles { secret_hex, secret_path, identity, identity_path, backed_up })
 }
 
 /// Default agent DNS listen address written by `ztlp setup`.
@@ -9801,6 +9828,13 @@ fn write_agent_config_file(
     if path.exists() {
         return Err(format!("{} already exists; not overwriting", path.display()).into());
     }
+    // CA already initialised alongside this config (ca-init ran first)?
+    // Then https just works; otherwise default off (enabling without an
+    // intermediate makes every https request fail).
+    let tls_enabled = path
+        .parent()
+        .map(|d| d.join("ca").join("intermediate.pem").exists())
+        .unwrap_or(false);
     let relays = relay_addrs
         .iter()
         .map(|a| toml_string(a))
@@ -9830,11 +9864,12 @@ listen = {dns_listen}
 zones = [{zone}]
 
 [tls]
-# Local TLS termination on the VIP. Run `ztlp admin ca-init --zone {zone_c}`
-# first, then set to true and restart the agent.
-enabled = false
+# Local TLS termination on the VIP. Needs a local CA: `ztlp admin ca-init
+# --zone {zone_c}` (it flips this to true for you), then restart the agent.
+enabled = {tls_enabled}
 "#,
         zone_c = zone,
+        tls_enabled = tls_enabled,
         key_path = toml_string(&key_path.display().to_string()),
         ns_server = toml_string(ns_server),
         relays = relays,
@@ -9851,6 +9886,50 @@ enabled = false
     }
     eprintln!("  {} Agent config written to {}", c_green("✓"), path.display());
     Ok(())
+}
+
+/// Flip the generated `[tls] enabled = false` line to `true` in an existing
+/// agent.toml. Called by `ztlp admin ca-init` so the normal order
+/// (setup -> ca-init) needs no hand edit. Returns `Ok(true)` when the file
+/// was changed, `Ok(false)` when there was nothing to do (file missing,
+/// already enabled, or hand-tuned without the generated `[tls]` layout —
+/// hand-tuned configs are never rewritten).
+fn enable_tls_in_agent_config(path: &std::path::Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(path)?;
+    let Some(tls_at) = content.find("\n[tls]") else {
+        return Ok(false);
+    };
+    // only touch the first `enabled = ...` line inside the [tls] table
+    let (head, tail) = content.split_at(tls_at + 1);
+    let section_end = tail[1..].find("\n[").map(|i| i + 1).unwrap_or(tail.len());
+    let (section, rest) = tail.split_at(section_end);
+    let mut new_section = String::with_capacity(section.len());
+    let mut changed = false;
+    for line in section.split_inclusive('\n') {
+        if !changed && line.trim_start().starts_with("enabled") && line.contains("false") {
+            new_section.push_str(&line.replace("false", "true"));
+            changed = true;
+        } else {
+            new_section.push_str(line);
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let out = format!("{head}{new_section}{rest}");
+    // must still parse strictly (load_from_path silently falls back to
+    // defaults on a parse error, which would hide a botched edit) with tls
+    // on, else leave the file alone
+    let parsed: ztlp_proto::agent::config::AgentConfig = toml::from_str(&out)
+        .map_err(|e| format!("agent.toml edit would not parse; file left unchanged: {e}"))?;
+    if !parsed.tls.enabled {
+        return Err("agent.toml edit did not take effect; file left unchanged".into());
+    }
+    std::fs::write(path, out)?;
+    Ok(true)
 }
 
 /// Get hostname for default device name.
@@ -11717,15 +11796,33 @@ fn cmd_admin_ca_init(
     // Create empty index
     std::fs::write(ca_dir.join("certs").join("index.json"), "[]")?;
 
+    // The agent config generated by `ztlp setup` defaults to [tls] enabled =
+    // false because it needs this intermediate. Now that it exists, flip it
+    // so the normal setup -> ca-init order needs no hand edit.
+    let agent_toml = ca_dir
+        .parent()
+        .map(|d| d.join("agent.toml"))
+        .unwrap_or_else(|| PathBuf::from("agent.toml"));
+    let tls_flipped = enable_tls_in_agent_config(&agent_toml)?;
+
     if json_output {
         println!(
-            "{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"algorithm\":\"ECDSA P-256\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\"}}",
+            "{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"algorithm\":\"ECDSA P-256\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\",\"agent_tls_enabled\":{}}}",
             zone,
             ca_dir.display(),
             zone,
             zone,
+            tls_flipped,
         );
     } else {
+        if tls_flipped {
+            eprintln!(
+                "  {} [tls] enabled = true written to {} — restart the agent to serve https",
+                c_green("✓"),
+                agent_toml.display()
+            );
+            eprintln!();
+        }
         eprintln!("{}", c_bold(&format!("ZTLP CA Initialized for {}", zone)));
         eprintln!();
         eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
@@ -14676,6 +14773,115 @@ mod tests {
         assert!(!tmp.join("identity.json").exists());
         assert!(!tmp.join("config.toml").exists());
         assert!(!tmp.join("agent.toml").exists());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn guard_existing_identity_force_also_backs_up_zone_key() {
+        // zone.key is the network enrollment secret written by the
+        // create-network path; losing it silently is worse than losing
+        // identity.json (every enrolled device trusts it).
+        let tmp = fresh_tmp("guard-zonekey");
+        fs::write(tmp.join("identity.json"), b"id").unwrap();
+        fs::write(tmp.join("zone.key"), b"deadbeef").unwrap();
+        let backed = guard_existing_identity(&tmp, true).unwrap().expect("backup made");
+        assert!(
+            backed.iter().any(|p| p.file_name().unwrap().to_string_lossy().starts_with("zone.key.")),
+            "zone.key not backed up: {backed:?}"
+        );
+        assert!(!tmp.join("zone.key").exists(), "zone.key must be moved aside");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn create_network_files_refuses_when_identity_exists_without_force() {
+        let tmp = fresh_tmp("create-net-refuse");
+        fs::write(tmp.join("identity.json"), b"{\"node_id\":\"old\"}").unwrap();
+        fs::write(tmp.join("zone.key"), b"oldsecret").unwrap();
+        let err = create_network_files(&tmp, false).unwrap_err().to_string();
+        assert!(err.contains("--force"), "err was: {err}");
+        // nothing touched
+        assert_eq!(fs::read(tmp.join("identity.json")).unwrap(), b"{\"node_id\":\"old\"}");
+        assert_eq!(fs::read(tmp.join("zone.key")).unwrap(), b"oldsecret");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn create_network_files_force_backs_up_then_writes_fresh_secret_and_identity() {
+        let tmp = fresh_tmp("create-net-force");
+        fs::write(tmp.join("identity.json"), b"old-id").unwrap();
+        fs::write(tmp.join("zone.key"), b"oldsecret").unwrap();
+        let out = create_network_files(&tmp, true).unwrap();
+        assert_eq!(out.backed_up.len(), 2, "{:?}", out.backed_up);
+        let new_secret = fs::read_to_string(tmp.join("zone.key")).unwrap();
+        assert_eq!(new_secret.len(), 64, "zone.key must be 32 bytes hex");
+        assert_ne!(new_secret, "oldsecret");
+        assert_eq!(out.secret_hex, new_secret);
+        assert_ne!(fs::read(tmp.join("identity.json")).unwrap(), b"old-id");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn write_agent_config_file_enables_tls_when_ca_intermediate_exists() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = fresh_tmp("agent-toml-ca-present");
+        fs::create_dir_all(tmp.join("ca")).unwrap();
+        fs::write(tmp.join("ca").join("intermediate.pem"), b"-----BEGIN CERTIFICATE-----\n").unwrap();
+        let path = tmp.join("agent.toml");
+        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
+            .unwrap();
+        let cfg = AgentConfig::load_from_path(&path);
+        assert!(cfg.tls.enabled, "CA already initialised in this ~/.ztlp -> tls must be on");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn enable_tls_in_agent_config_flips_generated_false_to_true() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = fresh_tmp("agent-toml-flip");
+        let path = tmp.join("agent.toml");
+        write_agent_config_file(&path, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], Some("aa"))
+            .unwrap();
+        assert!(!AgentConfig::load_from_path(&path).tls.enabled);
+        let changed = enable_tls_in_agent_config(&path).unwrap();
+        assert!(changed, "first call must report a change");
+        let cfg = AgentConfig::load_from_path(&path);
+        assert!(cfg.tls.enabled);
+        // rest of the file survives the edit
+        assert_eq!(cfg.ns.servers, vec!["1.2.3.4:23096"]);
+        assert_eq!(cfg.tunnel.relay_secret.as_deref(), Some("aa"));
+        // idempotent
+        assert!(!enable_tls_in_agent_config(&path).unwrap(), "second call must be a no-op");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn enable_tls_in_agent_config_is_noop_when_file_missing_or_hand_tuned_without_tls_section() {
+        let tmp = fresh_tmp("agent-toml-flip-missing");
+        let path = tmp.join("agent.toml");
+        assert!(!enable_tls_in_agent_config(&path).unwrap(), "missing file -> false, no error");
+        assert!(!path.exists(), "must not create the file");
+        // hand-tuned file with no [tls] section: leave byte-identical
+        fs::write(&path, b"[ns]\nservers = [\"1.2.3.4:23096\"]\n").unwrap();
+        assert!(!enable_tls_in_agent_config(&path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"[ns]\nservers = [\"1.2.3.4:23096\"]\n");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ca_init_flips_tls_on_in_sibling_agent_toml() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = fresh_tmp("ca-init-flips-tls");
+        let agent_toml = tmp.join("agent.toml");
+        write_agent_config_file(&agent_toml, &tmp.join("identity.json"), "z.ztlp", "1.2.3.4:23096", &[], None)
+            .unwrap();
+        assert!(!AgentConfig::load_from_path(&agent_toml).tls.enabled);
+        cmd_admin_ca_init("z.ztlp", &Some(tmp.join("ca")), true).unwrap();
+        assert!(tmp.join("ca").join("intermediate.pem").exists());
+        assert!(
+            AgentConfig::load_from_path(&agent_toml).tls.enabled,
+            "ca-init must enable tls in the agent.toml next to its ca dir"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 

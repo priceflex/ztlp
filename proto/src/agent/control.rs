@@ -719,6 +719,7 @@ impl AgentState {
             domain_mapper: super::domain_map::DomainMapper::empty(),
             ns_server: "127.0.0.53:53".to_string(),
             upstream_dns: "1.1.1.1:53".to_string(),
+            vip_state_path: None,
         }));
         let tunnel_pool = Arc::new(Mutex::new(super::tunnel_pool::TunnelPool::new(1)));
         let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);

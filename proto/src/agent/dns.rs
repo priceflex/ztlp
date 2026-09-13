@@ -71,6 +71,55 @@ pub struct DnsResolverState {
     pub ns_server: String,
     /// Upstream DNS server for non-ZTLP queries.
     pub upstream_dns: String,
+    /// Where name→VIP allocations are persisted across agent restarts
+    /// (`~/.ztlp/vip_state.json`). `None` disables persistence.
+    pub vip_state_path: Option<std::path::PathBuf>,
+}
+
+impl DnsResolverState {
+    /// Allocate (or reuse) a VIP for a freshly NS-resolved name, cache the
+    /// peer address/NodeID on the entry, and persist the name→ip map.
+    ///
+    /// Returns `None` when the pool is exhausted.
+    pub fn allocate_resolved_vip(
+        &mut self,
+        ztlp_name: &str,
+        resolution: &proxy::NsResolution,
+    ) -> Option<Ipv4Addr> {
+        let ttl = Duration::from_secs(DEFAULT_TTL as u64);
+        let ip = self.vip_pool.allocate(ztlp_name, Some(ttl))?;
+        // Store the resolved peer address AND NodeID.
+        //
+        // The NodeID matters for the automatic tunnel dialer's CLIENT_ROUTE
+        // frame — a shared relay's fallback-by-NodeID lookup requires the
+        // PEER's NodeID (not the client's own), and without caching it here
+        // alongside peer_addr, `run_tcp_proxy` (which reads cached
+        // `VipEntry.peer_node_id`, not a fresh NS lookup) always saw `None`
+        // even after `ns_resolve` itself was fixed to return a real NodeID —
+        // found live 2026-08-30.
+        if let Some(entry) = self.vip_pool.lookup_name_mut(ztlp_name) {
+            entry.peer_addr = Some(resolution.addr);
+            entry.peer_node_id = resolution.node_id;
+        }
+        if let Some(path) = &self.vip_state_path {
+            if let Err(e) = self.vip_pool.save_to(path) {
+                warn!("[DNS] could not persist VIP state to {}: {}", path.display(), e);
+            }
+        }
+        Some(ip)
+    }
+
+    /// Restore persisted VIP allocations (agent start). Returns the count.
+    pub fn restore_vips(&mut self) -> usize {
+        let Some(path) = &self.vip_state_path else { return 0 };
+        match self.vip_pool.restore_from(path) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("[DNS] could not restore VIP state from {}: {}", path.display(), e);
+                0
+            }
+        }
+    }
 }
 
 // ─── DNS resolver server ────────────────────────────────────────────────────
@@ -359,29 +408,14 @@ async fn process_dns_query(
     match proxy::ns_resolve(&ztlp_name, &ns_server).await {
         Ok(resolution) => {
             let mut st = state.lock().await;
-            let ttl = Duration::from_secs(DEFAULT_TTL as u64);
             let pool_before = st.vip_pool.allocated_count();
-            let alloc_result = st.vip_pool.allocate(&ztlp_name, Some(ttl));
+            let alloc_result = st.allocate_resolved_vip(&ztlp_name, &resolution);
             let pool_after = st.vip_pool.allocated_count();
             info!(
                 "[DNS] allocate({}) → {:?} (pool {} → {})",
                 ztlp_name, alloc_result, pool_before, pool_after
             );
             if let Some(ip) = alloc_result {
-                // Store the resolved peer address AND NodeID.
-                //
-                // The NodeID matters for the automatic tunnel dialer's
-                // CLIENT_ROUTE frame — a shared relay's fallback-by-
-                // NodeID lookup requires the PEER's NodeID (not the
-                // client's own), and without caching it here alongside
-                // peer_addr, `run_tcp_proxy` (which reads cached
-                // `VipEntry.peer_node_id`, not a fresh NS lookup) always
-                // saw `None` even after `ns_resolve` itself was fixed to
-                // return a real NodeID — found live 2026-08-30.
-                if let Some(entry) = st.vip_pool.lookup_name_mut(&ztlp_name) {
-                    entry.peer_addr = Some(resolution.addr);
-                    entry.peer_node_id = resolution.node_id;
-                }
                 drop(st);
 
                 // Give the TCP proxy's poll loop a chance to create the
@@ -686,6 +720,62 @@ mod tests {
     // chrome.exe already bound. The old code had zero fallback, so the
     // entire automatic DNS-capture flow died with a Linux-oriented "port 53
     // requires root" message that didn't even match the real problem.
+
+    // ── VIP persistence wiring (2026-09-12) ─────────────────────────────
+
+    fn state_with_persist(tag: &str) -> (DnsResolverState, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "ztlp-dns-vipstate-{}-{}-{}.json",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let st = DnsResolverState {
+            vip_pool: VipPool::new("127.100.0.0/24").unwrap(),
+            domain_mapper: super::super::domain_map::DomainMapper::empty(),
+            ns_server: "127.0.0.1:1".to_string(),
+            upstream_dns: "1.1.1.1:53".to_string(),
+            vip_state_path: Some(path.clone()),
+        };
+        (st, path)
+    }
+
+    fn fake_resolution(name: &str) -> proxy::NsResolution {
+        proxy::NsResolution {
+            addr: "10.9.8.7:23095".parse().unwrap(),
+            node_id: None,
+            ztlp_name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn allocate_resolved_vip_persists_to_state_file_and_survives_restart() {
+        let (mut st, path) = state_with_persist("persist");
+        let ip = st
+            .allocate_resolved_vip("demo-dashboard.defcon.ztlp", &fake_resolution("demo-dashboard.defcon.ztlp"))
+            .expect("pool not exhausted");
+        assert!(path.exists(), "state file must be written on allocate");
+        // peer info cached in memory as before
+        let e = st.vip_pool.lookup_name("demo-dashboard.defcon.ztlp").unwrap();
+        assert_eq!(e.peer_addr, Some("10.9.8.7:23095".parse().unwrap()));
+
+        // restart: new state, same file
+        let (mut st2, _) = state_with_persist("persist-unused");
+        st2.vip_state_path = Some(path.clone());
+        assert_eq!(st2.restore_vips(), 1);
+        assert_eq!(st2.vip_pool.lookup_name("demo-dashboard.defcon.ztlp").unwrap().ip, ip);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn allocate_resolved_vip_without_persist_path_writes_nothing() {
+        let (mut st, path) = state_with_persist("nopersist");
+        st.vip_state_path = None;
+        st.allocate_resolved_vip("a.z.ztlp", &fake_resolution("a.z.ztlp")).unwrap();
+        assert!(!path.exists());
+        assert_eq!(st.restore_vips(), 0);
+    }
 
     #[test]
     fn split_host_port_parses_host_and_port() {

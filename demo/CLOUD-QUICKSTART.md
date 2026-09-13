@@ -104,11 +104,13 @@ curl -s http://127.100.0.1/api/health                                # {"status"
 curl -s http://127.100.0.1/ | grep -E 'hmac_verified|node name'      # true, my-laptop-01.defcon.ztlp
 ```
 
-**Always resolve first.** The VIP `127.100.0.1` exists only after the agent
+**Resolve first (once).** The VIP `127.100.0.1` exists only after the agent
 has answered a DNS query for the name (log: `allocate(demo-dashboard...) →
-127.100.0.1`). After an agent restart, a `curl --resolve ...:127.100.0.1`
-with no prior `dig` gets `connection refused` on every port — that is not a
-TLS or tunnel fault.
+127.100.0.1`). Allocations are saved to `~/.ztlp/vip_state.json` and
+re-bound on the next agent start (log: `VIP pool: restored N allocation(s)`),
+so browsers with a cached A record and `curl --resolve` keep working across
+agent restarts. On a brand-new `~/.ztlp` with no prior `dig`, `connection
+refused` on every port is expected — not a TLS or tunnel fault.
 
 Gateway side shows one line per tunnel:
 `[Quic] handshake ok session=<24 hex> peer=<64 hex> service=demo-dashboard`.
@@ -123,9 +125,9 @@ the VIP and mints a per-hostname leaf on demand from a local CA:
 
 ```bash
 ztlp admin ca-init --zone defcon.ztlp        # ~/.ztlp/ca/{root,intermediate}.{pem,key}
-sed -i 's/^enabled = false/enabled = true/' ~/.ztlp/agent.toml   # the [tls] section (last one)
+                                             # also flips [tls] enabled = true in ~/.ztlp/agent.toml
 # restart the agent, then:
-dig @127.0.0.55 -p 15353 demo-dashboard.defcon.ztlp +short          # allocate the VIP (see above)
+dig @127.0.0.55 -p 15353 demo-dashboard.defcon.ztlp +short          # allocate the VIP (if not restored)
 curl -s --cacert ~/.ztlp/ca/root.pem \
      --resolve demo-dashboard.defcon.ztlp:443:127.100.0.1 \
      https://demo-dashboard.defcon.ztlp/api/health          # {"status":"ok"}, no -k
@@ -201,8 +203,9 @@ or `--relay-secret-file <path>` and falls back to `agent.toml`. It picks up
   Ed25519 pubkey. If they drift, every lookup is `:untrusted_signer` and the
   dashboard shows `node name: unknown:<hex>` while HMAC still verifies.
   Pinned by `ns/test/ztlp_ns/demo_trust_anchor_consistency_test.exs`.
-- **VIP allocations are not persisted** across agent restarts — see the
-  "Always resolve first" note in section 4.
+- **`ztlp setup` refuses to clobber an existing `~/.ztlp`** (both the join and
+  create-network paths). `--force` moves `identity.json`, `config.toml`,
+  `agent.toml` and `zone.key` to `*.<ts>.bak` first.
 
 ## Doing it by hand (what the ship script does)
 

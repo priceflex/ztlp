@@ -226,6 +226,102 @@ impl VipPool {
     pub fn entries(&self) -> impl Iterator<Item = &VipEntry> {
         self.name_to_vip.values()
     }
+
+    // ─── persistence across agent restarts ──────────────────────────────
+    //
+    // Allocations used to live only in memory, so after an agent restart
+    // 127.100.0.x had no listener until something did DNS again. Anything
+    // that had cached the A record (browsers, `curl --resolve`, long-lived
+    // apps) got ECONNREFUSED. We persist just name→ip; peer_addr / node_id
+    // are deliberately NOT persisted and are re-resolved lazily by the
+    // connection handler (it already does `ns_resolve` when peer_addr is
+    // None).
+
+    /// Save the current name→ip map to `path` (JSON, mode 0600).
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let state = PersistedVipState {
+            cidr: self.cidr_string(),
+            entries: self
+                .name_to_vip
+                .values()
+                .map(|e| PersistedVipEntry { name: e.ztlp_name.clone(), ip: e.ip })
+                .collect(),
+        };
+        let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Restore allocations saved by [`save_to`]. Returns how many were
+    /// restored. Missing / unparseable files and files written for a
+    /// different CIDR are not errors (0 restored; a stale-CIDR file is
+    /// removed). Restored entries have no TTL (sticky until a fresh DNS
+    /// resolve refreshes them) and no peer info.
+    pub fn restore_from(&mut self, path: &std::path::Path) -> std::io::Result<usize> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let state: PersistedVipState = match serde_json::from_str(&raw) {
+            Ok(s) => s,
+            Err(_) => return Ok(0),
+        };
+        if state.cidr != self.cidr_string() {
+            let _ = std::fs::remove_file(path);
+            return Ok(0);
+        }
+        let mut restored = 0;
+        for pe in state.entries {
+            let name = pe.name.to_lowercase();
+            if self.name_to_vip.contains_key(&name) || self.ip_to_name.contains_key(&pe.ip) {
+                continue;
+            }
+            let ip_u32 = u32::from(pe.ip);
+            // must be inside the usable range (base+1 ..= base+pool_size)
+            if ip_u32 <= self.base || ip_u32 > self.base + self.pool_size {
+                continue;
+            }
+            self.name_to_vip.insert(
+                name.clone(),
+                VipEntry {
+                    ip: pe.ip,
+                    ztlp_name: name.clone(),
+                    peer_addr: None,
+                    peer_node_id: None,
+                    created_at: Instant::now(),
+                    expires_at: None,
+                    active_connections: 0,
+                },
+            );
+            self.ip_to_name.insert(pe.ip, name);
+            restored += 1;
+        }
+        Ok(restored)
+    }
+
+    fn cidr_string(&self) -> String {
+        let prefix_len = 32 - (self.pool_size + 2).trailing_zeros();
+        format!("{}/{}", Ipv4Addr::from(self.base), prefix_len)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedVipState {
+    cidr: String,
+    entries: Vec<PersistedVipEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedVipEntry {
+    name: String,
+    ip: Ipv4Addr,
 }
 
 /// Parse a CIDR string like "127.100.0.0/16" into (base_u32, prefix_len).
@@ -464,5 +560,99 @@ mod tests {
         // Now we can allocate again (gets the freed IP)
         let ip3 = pool.allocate("c.ztlp", None).unwrap();
         assert_eq!(ip3, ip1); // reused the released IP
+    }
+
+    // ── persistence across agent restarts ──────────────────────────────
+    fn tmp_state_file(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "ztlp-vip-state-{}-{}-{}.json",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn save_then_restore_gives_same_ip_to_same_name_in_a_fresh_pool() {
+        let path = tmp_state_file("roundtrip");
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        let ip_dash = pool.allocate("demo-dashboard.defcon.ztlp", Some(Duration::from_secs(300))).unwrap();
+        let ip_api = pool.allocate("api.defcon.ztlp", Some(Duration::from_secs(300))).unwrap();
+        pool.save_to(&path).unwrap();
+
+        // "agent restart": brand new pool, restore from disk
+        let mut fresh = VipPool::new("127.100.0.0/24").unwrap();
+        let restored = fresh.restore_from(&path).unwrap();
+        assert_eq!(restored, 2);
+        assert_eq!(fresh.lookup_name("demo-dashboard.defcon.ztlp").unwrap().ip, ip_dash);
+        assert_eq!(fresh.lookup_name("api.defcon.ztlp").unwrap().ip, ip_api);
+        // listeners are what matters: the proxy iterates entries()
+        assert_eq!(fresh.entries().count(), 2);
+        // peer info must be re-resolved lazily, never trusted from disk
+        assert!(fresh.lookup_name("api.defcon.ztlp").unwrap().peer_addr.is_none());
+        // a later DNS resolve for the same name keeps its IP (browser cache stays valid)
+        assert_eq!(fresh.allocate("demo-dashboard.defcon.ztlp", None).unwrap(), ip_dash);
+        // and a brand-new name does not collide with a restored one
+        let ip_new = fresh.allocate("new.defcon.ztlp", None).unwrap();
+        assert_ne!(ip_new, ip_dash);
+        assert_ne!(ip_new, ip_api);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restored_entries_are_not_garbage_collected() {
+        let path = tmp_state_file("nogc");
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        pool.allocate("a.z.ztlp", Some(Duration::from_millis(1))).unwrap();
+        pool.save_to(&path).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let mut fresh = VipPool::new("127.100.0.0/24").unwrap();
+        fresh.restore_from(&path).unwrap();
+        assert_eq!(fresh.gc_expired(), 0, "restored allocations must be sticky until re-resolved");
+        assert!(fresh.lookup_name("a.z.ztlp").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn restore_discards_state_written_for_a_different_cidr() {
+        let path = tmp_state_file("cidr");
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        pool.allocate("a.z.ztlp", None).unwrap();
+        pool.save_to(&path).unwrap();
+        let mut other = VipPool::new("127.200.0.0/24").unwrap();
+        assert_eq!(other.restore_from(&path).unwrap(), 0);
+        assert_eq!(other.allocated_count(), 0);
+        assert!(!path.exists(), "stale file for another range must be removed");
+    }
+
+    #[test]
+    fn restore_tolerates_missing_and_garbage_files() {
+        let path = tmp_state_file("garbage");
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        assert_eq!(pool.restore_from(&path).unwrap(), 0, "missing file is not an error");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert_eq!(pool.restore_from(&path).unwrap(), 0, "garbage file is not an error");
+        assert_eq!(pool.allocated_count(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_writes_only_name_and_ip_with_owner_only_mode() {
+        let path = tmp_state_file("shape");
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        pool.allocate("a.z.ztlp", None).unwrap();
+        pool.lookup_name_mut("a.z.ztlp").unwrap().peer_addr = Some("1.2.3.4:5".parse().unwrap());
+        pool.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("a.z.ztlp") && raw.contains("127.100.0.1"), "{raw}");
+        assert!(!raw.contains("1.2.3.4"), "peer address must not be persisted: {raw}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -679,6 +679,13 @@ pub fn default_token_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.token"))
 }
 
+/// Where the agent persists name→VIP allocations across restarts.
+pub fn vip_state_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".ztlp").join("vip_state.json"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-vip-state.json"))
+}
+
 /// Best-effort load of the agent control-plane Bearer token.
 ///
 /// Reads the file at [`default_token_path`] and returns

@@ -336,12 +336,21 @@ pub async fn run_daemon(
     }
 
     // Shared DNS resolver state
-    let dns_state = Arc::new(Mutex::new(DnsResolverState {
+    let mut dns_resolver_state = DnsResolverState {
         vip_pool,
         domain_mapper,
         ns_server: config.ns_server().to_string(),
         upstream_dns: config.dns.upstream.clone(),
-    }));
+        vip_state_path: Some(config::vip_state_path()),
+    };
+    // Re-bind VIP listeners from the previous run before any DNS query:
+    // clients that cached the A record (browsers, `curl --resolve`) would
+    // otherwise get ECONNREFUSED until they resolved again.
+    let restored = dns_resolver_state.restore_vips();
+    if restored > 0 {
+        info!("VIP pool: restored {} allocation(s) from previous run", restored);
+    }
+    let dns_state = Arc::new(Mutex::new(dns_resolver_state));
 
     // Initialize tunnel pool
     // D3.T2: honor config.tunnel.idle_timeout / keepalive_interval. On parse

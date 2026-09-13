@@ -340,6 +340,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # Only the release-file artifacts, not the buildx cache/provenance
+          # artifacts (priceflex~ztlp~*.dockerbuild) that docker/build-push-action
+          # auto-uploads for the 'docker' job. Those aren't release assets and
+          # one of them broke `download-artifact` with "Artifact download
+          # failed after 5 retries" on the v0.35.9 cut once the Docker job was
+          # added. Pinned here so this doesn't regress silently on a future tag.
+          pattern: "{rust-*,elixir-*,desktop-*,ebpf}"
 
       - name: Collect all release files
         run: |

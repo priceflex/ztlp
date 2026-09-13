@@ -94,7 +94,14 @@ ztlp setup --token 'ztlp://enroll/...' --name my-laptop-01 --yes \
   create-network path) are moved to `*.<ts>.bak` first.
 - The relay runs `ZTLP_RELAY_HMAC_MODE=prod`: without `--relay-secret` the
   relay drops every route and the tunnel times out at the QUIC handshake.
-  Forgot it? Add `relay_secret = "..."` under `[tunnel]` in `~/.ztlp/agent.toml`.
+  Forgot it? Add the zone's relay secret (same value as `ZTLP_RELAY_
+  REGISTRATION_SECRET` in `defcon-cloud-compose.yml`) under `[tunnel]`
+  in `~/.ztlp/agent.toml`:
+
+  ```toml
+  [tunnel]
+  relay_secret = "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
+  ```
 
 ## 4. Client: run the agent and hit the dashboard
 
@@ -165,6 +172,15 @@ or `--relay-secret-file <path>` and falls back to `agent.toml`. It picks up
   regenerates it and every existing client fails with "certificate
   fingerprint ... does not match the pinned value" until
   `rm ~/.ztlp/quic_pins/localhost.pin`. Use `--no-wipe` to avoid it.
+- **Clean slate also orphans device NAMES.** The NS keeps its records in the
+  `ztlp-ns` docker volume, which the ship script's default wipe (`down -v`)
+  deletes — along with every enrolled device's signed KEY record. Existing
+  clients still connect (their `identity.json` is local and the Noise
+  handshake still verifies, so HMAC checks out) but the NS no longer has a
+  KEY record for their pubkey, so the gateway can't resolve a device name and
+  the dashboard shows `node name: unknown:<hex>` with an empty zone. Fix:
+  re-enroll (`ztlp setup --force`) or ship with `--no-wipe`. Prefer
+  `--no-wipe` when clients are already enrolled.
 - **Stale `HOME`.** Every `ztlp` command reads `$HOME/.ztlp`; if a shell has
   `HOME` exported elsewhere you silently enroll into the wrong directory.
 - **Do not pass `--transport udp` or `--no-multi-candidate`.** Real QUIC is

@@ -99,7 +99,7 @@ defmodule ZtlpGateway.HttpHeaderInjector do
     pseudo_identity = %{
       node_id: node_id,
       node_name: identity_str,
-      zone: "",
+      zone: zone_of(identity_str),
       authenticated: true,
       assurance: :device_bound,
       key_source: "ztlp-noise",
@@ -142,6 +142,25 @@ defmodule ZtlpGateway.HttpHeaderInjector do
           "Set ZTLP_HEADER_HMAC_SECRET or :header_signing_secret to enable signing."
       )
       headers
+    end
+  end
+
+  @doc """
+  Derive the zone from a resolved ZTLP device name.
+
+  The zone is the name minus its first (device) label; a trailing dot is
+  ignored. Unresolved identities (`unknown:<hex>`) and single-label names
+  have no zone and yield `""`.
+
+      iex> zone_of("dev1.defcon.ztlp")
+      "defcon.ztlp"
+  """
+  @spec zone_of(String.t()) :: String.t()
+  def zone_of("unknown:" <> _), do: ""
+  def zone_of(name) when is_binary(name) do
+    case name |> String.trim_trailing(".") |> String.split(".", parts: 2) do
+      [_device, zone] when zone != "" -> zone
+      _ -> ""
     end
   end
 

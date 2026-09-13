@@ -208,7 +208,7 @@ enum Commands {
         /// Target address (host:port or ZTLP name, e.g. myserver.clients.techrockstars.ztlp)
         target: String,
 
-        /// Path to identity key file
+        /// Path to identity key file (default: ~/.ztlp/identity.json if present)
         #[arg(short, long)]
         key: Option<PathBuf>,
 
@@ -238,6 +238,18 @@ enum Commands {
         /// and emits a deprecation warning at connect time.
         #[arg(long, default_value = "quic")]
         transport: String,
+
+        /// Shared HMAC secret for signing the relay CLIENT_ROUTE frame.
+        /// Must match the relay's ZTLP_RELAY_REGISTRATION_SECRET (or
+        /// ZTLP_HMAC_SECRET_<ZONE>). Accepts 64 hex chars, `base64:...`, or a
+        /// raw string. Falls back to `[tunnel] relay_secret` in
+        /// ~/.ztlp/agent.toml. Required for relays in prod HMAC mode.
+        #[arg(long)]
+        relay_secret: Option<String>,
+
+        /// File containing the relay CLIENT_ROUTE secret (trimmed).
+        #[arg(long)]
+        relay_secret_file: Option<PathBuf>,
         /// Use QUIC transport instead of ZTLP reliable UDP
         ///
         /// **No-op since the QUIC migration:** QUIC is now the default
@@ -399,7 +411,7 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:23095")]
         bind: String,
 
-        /// Path to identity key file
+        /// Path to identity key file (default: ~/.ztlp/identity.json if present)
         #[arg(short, long)]
         key: Option<PathBuf>,
 
@@ -1769,22 +1781,87 @@ fn parse_duration_arg(s: &str) -> Result<Duration, String> {
     }
 }
 
+/// Resolve the relay `CLIENT_ROUTE` HMAC secret for `ztlp connect`.
+///
+/// Precedence: `--relay-secret` literal, then `--relay-secret-file`, then
+/// `~/.ztlp/agent.toml` `[tunnel] relay_secret` / `relay_secret_file`.
+/// `None` = send an unsigned (zero-HMAC) frame, which relays accept only in
+/// dev/staging HMAC mode. Decoding follows the relay's rules
+/// (`tunnel::decode_relay_secret`: 64-hex, `base64:`, or raw).
+fn resolve_relay_secret(
+    cli_secret: &Option<String>,
+    cli_secret_file: &Option<PathBuf>,
+    agent_cfg: &ztlp_proto::agent::config::AgentConfig,
+) -> Option<Vec<u8>> {
+    if let Some(s) = cli_secret.as_deref() {
+        if !s.trim().is_empty() {
+            return Some(ztlp_proto::tunnel::decode_relay_secret(s));
+        }
+    }
+    if let Some(path) = cli_secret_file {
+        match std::fs::read_to_string(path) {
+            Ok(c) if !c.trim().is_empty() => {
+                return Some(ztlp_proto::tunnel::decode_relay_secret(&c));
+            }
+            Ok(_) => eprintln!("warning: --relay-secret-file {} is empty", path.display()),
+            Err(e) => eprintln!(
+                "warning: cannot read --relay-secret-file {}: {}",
+                path.display(),
+                e
+            ),
+        }
+    }
+    agent_cfg.tunnel.relay_secret_bytes()
+}
+
+/// Resolve which identity file to load.
+///
+/// An explicit `--key` always wins. Otherwise `<ztlp_dir>/identity.json`
+/// (what `ztlp setup` / `ztlp keygen --output ~/.ztlp/identity.json` write)
+/// is used when it exists. `None` means "no persistent identity available".
+fn resolve_identity_path(key_path: &Option<PathBuf>, ztlp_dir: &Path) -> Option<PathBuf> {
+    match key_path {
+        Some(p) => Some(p.clone()),
+        None => {
+            let default = ztlp_dir.join("identity.json");
+            if default.is_file() {
+                Some(default)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 fn load_or_generate_identity(
     key_path: &Option<PathBuf>,
 ) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
-    match key_path {
+    let ztlp_dir = get_ztlp_dir().unwrap_or_else(|_| PathBuf::from(".ztlp"));
+    load_or_generate_identity_in(key_path, &ztlp_dir)
+}
+
+fn load_or_generate_identity_in(
+    key_path: &Option<PathBuf>,
+    ztlp_dir: &Path,
+) -> Result<NodeIdentity, Box<dyn std::error::Error>> {
+    let explicit = key_path.is_some();
+    match resolve_identity_path(key_path, ztlp_dir) {
         Some(p) if p.exists() => {
             info!("loading identity from {}", p.display());
-            let ident = NodeIdentity::load(p)?;
+            let ident = NodeIdentity::load(&p)?;
             info!("loaded NodeID: {}", ident.node_id);
             Ok(ident)
         }
-        Some(p) => Err(format!("key file not found: {}", p.display()).into()),
-        None => {
+        Some(p) if explicit => Err(format!("key file not found: {}", p.display()).into()),
+        _ => {
             let ident = NodeIdentity::generate()?;
             info!("generated ephemeral identity — NodeID: {}", ident.node_id);
             eprintln!("\x1b[33m⚠ Using ephemeral identity (will be lost on exit)\x1b[0m");
-            eprintln!("  Run `ztlp keygen --output ~/.ztlp/identity.json` to persist one.\n");
+            eprintln!(
+                "  No {} found. Run `ztlp setup --token ...` or `ztlp keygen --output {}` to persist one.\n",
+                ztlp_dir.join("identity.json").display(),
+                ztlp_dir.join("identity.json").display()
+            );
             Ok(ident)
         }
     }
@@ -2938,6 +3015,7 @@ async fn cmd_connect(
     transport: &str,
     multi_candidate: bool,
     persistent_ep: bool,
+    relay_route_secret: Option<&[u8]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── Path selection (Issue 2, 2026-05-26) ─────────────────────────
     //
@@ -3464,7 +3542,7 @@ Only enable for legacy NAT-traversal compatibility."
                     identity.node_id.0
                 };
                 if via_relay {
-                    match build_client_route_packet(&cr_node_id, svc_name, ts, None) {
+                    match build_client_route_packet(&cr_node_id, svc_name, ts, relay_route_secret) {
                         Ok(pkt) => {
                             // Send from `node.socket` — the SAME socket the parallel
                             // sessions use — so the relay keys the route to the right
@@ -4108,9 +4186,10 @@ Only enable for legacy NAT-traversal compatibility."
             identity.node_id.0
         };
 
-        // Dev-mode HMAC (None) — production should plumb the zone secret
-        // through here, mirroring the relay's `Config.registration_secret/0`.
-        match build_client_route_packet(&client_route_node_id, svc_name, ts, None) {
+        // HMAC-signed when a relay secret is configured (--relay-secret /
+        // agent.toml [tunnel] relay_secret); zero HMAC otherwise (dev/staging
+        // relays only).
+        match build_client_route_packet(&client_route_node_id, svc_name, ts, relay_route_secret) {
             Ok(pkt) => match std_socket.send_to(&pkt, peer_addr) {
                 Ok(n) => {
                     eprintln!(
@@ -13364,6 +13443,8 @@ async fn main() {
             allow_identity_change,
             persistent_ep,
             transport,
+            relay_secret,
+            relay_secret_file,
         } => {
             // H10 (v0.30.12): when --ns-server is set, both --punch and
             // --relay-pool auto-flip to ON unless the user explicitly opted
@@ -13412,6 +13493,20 @@ async fn main() {
                 *no_reconnect,
             );
 
+            // Relay CLIENT_ROUTE signing (prod HMAC relays reject unsigned).
+            let relay_route_secret = resolve_relay_secret(
+                relay_secret,
+                relay_secret_file,
+                &ztlp_proto::agent::config::AgentConfig::load(),
+            );
+            if relay_route_secret.is_none() {
+                eprintln!(
+                    "{} no relay secret configured (--relay-secret / agent.toml [tunnel] relay_secret): \
+                     CLIENT_ROUTE will be unsigned — only accepted by dev/staging relays",
+                    c_dim("!")
+                );
+            }
+
             if !use_supervisor {
                 cmd_connect(
                     *quic,
@@ -13435,6 +13530,7 @@ async fn main() {
                     &transport,
                     multi_candidate_active,
                     *persistent_ep,
+                    relay_route_secret.as_deref(),
                 )
                 .await
             } else {
@@ -13485,6 +13581,7 @@ async fn main() {
                         &transport,
                         multi_candidate_active,
                         *persistent_ep,
+                        relay_route_secret.as_deref(),
                     )
                     .await;
 
@@ -13867,6 +13964,97 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── `ztlp connect`/`proxy`/`listen` must pick up ~/.ztlp/identity.json
+    //    when --key is omitted (2026-09-13) ─────────────────────────────────
+    //
+    // Regression: load_or_generate_identity(None) ALWAYS generated an
+    // ephemeral identity, even though `ztlp setup` had written
+    // ~/.ztlp/identity.json and the --key help text advertised it as the
+    // default. Seen live on the DEF CON cloud demo: `ztlp connect ...`
+    // printed "Using ephemeral identity" with an enrolled identity on disk.
+    #[test]
+    fn resolve_identity_path_prefers_explicit_key() {
+        let tmp = std::env::temp_dir().join(format!("ztlp-idres-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let explicit = tmp.join("custom.json");
+        let got = resolve_identity_path(&Some(explicit.clone()), &tmp);
+        assert_eq!(got, Some(explicit));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_identity_path_falls_back_to_ztlp_dir_identity_json_when_present() {
+        let tmp = std::env::temp_dir().join(format!("ztlp-idres-fb-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let default_path = tmp.join("identity.json");
+        fs::write(&default_path, b"{}").unwrap();
+        let got = resolve_identity_path(&None, &tmp);
+        assert_eq!(got, Some(default_path));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_identity_path_is_none_when_no_key_and_no_default_file() {
+        let tmp = std::env::temp_dir().join(format!("ztlp-idres-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(resolve_identity_path(&None, &tmp), None);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // ── `ztlp connect` relay CLIENT_ROUTE signing (2026-09-13) ──────────
+    //
+    // Relay in ZTLP_RELAY_HMAC_MODE=prod rejects zero-HMAC CLIENT_ROUTE.
+    // Precedence: --relay-secret > --relay-secret-file > agent.toml
+    // [tunnel] relay_secret / relay_secret_file > None (unsigned).
+    #[test]
+    fn resolve_relay_secret_prefers_cli_then_file_then_agent_config() {
+        use ztlp_proto::agent::config::AgentConfig;
+        let tmp = std::env::temp_dir().join(format!("ztlp-rs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let secret_file = tmp.join("relay.secret");
+        fs::write(&secret_file, "filesecret\n").unwrap();
+
+        let mut cfg = AgentConfig::default();
+        cfg.tunnel.relay_secret = Some("agentsecret".to_string());
+
+        // CLI literal wins over everything.
+        assert_eq!(
+            resolve_relay_secret(&Some("clisecret".to_string()), &Some(secret_file.clone()), &cfg),
+            Some(b"clisecret".to_vec())
+        );
+        // File beats agent.toml.
+        assert_eq!(
+            resolve_relay_secret(&None, &Some(secret_file.clone()), &cfg),
+            Some(b"filesecret".to_vec())
+        );
+        // agent.toml is the fallback.
+        assert_eq!(resolve_relay_secret(&None, &None, &cfg), Some(b"agentsecret".to_vec()));
+        // Nothing configured -> unsigned.
+        assert_eq!(resolve_relay_secret(&None, &None, &AgentConfig::default()), None);
+        // 64-hex CLI value is decoded to 32 raw bytes (relay rules).
+        let hex = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103".to_string();
+        assert_eq!(resolve_relay_secret(&Some(hex), &None, &cfg).unwrap().len(), 32);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_or_generate_identity_loads_default_identity_from_dir() {
+        // End-to-end on the loader: a real identity written to <dir>/identity.json
+        // must be loaded (same NodeID back), not replaced by an ephemeral one.
+        let tmp = std::env::temp_dir().join(format!("ztlp-idload-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let ident = NodeIdentity::generate().unwrap();
+        ident.save(&tmp.join("identity.json")).unwrap();
+        let loaded = load_or_generate_identity_in(&None, &tmp).unwrap();
+        assert_eq!(loaded.node_id, ident.node_id);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     // ── `ztlp keygen`'s ed25519_public_key must be the REAL curve-derived
     //    public key (2026-09-12) ─────────────────────────────────────────

@@ -42,6 +42,33 @@ use super::proxy;
 use super::tunnel_pool::{TunnelPool, DEFAULT_IDLE_TIMEOUT, DEFAULT_KEEPALIVE_INTERVAL};
 use super::vip_pool::VipPool;
 
+// ── Relay CLIENT_ROUTE HMAC secret ───────────────────────────────────────
+//
+// Installed once by `run_daemon` from `[tunnel] relay_secret` /
+// `relay_secret_file`, read by both CLIENT_ROUTE send sites (dial-phase
+// and legacy bridged path). Kept process-wide rather than threaded through
+// the eight `relay_addr`-carrying signatures between here and there.
+static RELAY_SECRET: std::sync::RwLock<Option<Vec<u8>>> = std::sync::RwLock::new(None);
+
+/// Install (or clear) the relay CLIENT_ROUTE signing secret.
+pub(crate) fn set_relay_secret(secret: Option<Vec<u8>>) {
+    if let Ok(mut g) = RELAY_SECRET.write() {
+        *g = secret;
+    }
+}
+
+/// Build a CLIENT_ROUTE frame, HMAC-signed with the installed relay secret
+/// when one is configured (zero HMAC otherwise — accepted only by relays in
+/// dev/staging mode).
+pub(crate) fn build_signed_client_route(
+    node_id: &[u8; 16],
+    service_name: &str,
+    timestamp: i64,
+) -> Result<Vec<u8>, String> {
+    let guard = RELAY_SECRET.read().map_err(|_| "relay secret lock poisoned".to_string())?;
+    tunnel::build_client_route_packet(node_id, service_name, timestamp, guard.as_deref())
+}
+
 /// Verify that a just-accepted local TCP connection actually originates
 /// from loopback (127.0.0.0/8 or ::1) — the property this daemon can
 /// realistically rely on to keep the VIP proxy from being reachable off-box.
@@ -608,6 +635,23 @@ pub async fn run_daemon(
         info!("relay configured: {}", r);
     } else {
         info!("no relay configured, using direct connections");
+    }
+    // Relay CLIENT_ROUTE signing: required when the relay runs
+    // ZTLP_RELAY_HMAC_MODE=prod (unsigned frames are rejected there).
+    match config.tunnel.relay_secret_bytes() {
+        Some(secret) => {
+            info!("relay CLIENT_ROUTE signing enabled ({}-byte secret)", secret.len());
+            set_relay_secret(Some(secret));
+        }
+        None => {
+            if proxy_relay.is_some() {
+                warn!(
+                    "no [tunnel] relay_secret configured: CLIENT_ROUTE frames are unsigned \
+                     (accepted only by relays in dev/staging HMAC mode)"
+                );
+            }
+            set_relay_secret(None);
+        }
     }
     let proxy_handle = tokio::spawn(async move {
         run_tcp_proxy(
@@ -1246,7 +1290,7 @@ async fn proxy_dial_phase(
         let client_route_node_id: [u8; 16] = resolved_node_id
             .map(|nid| *nid.as_bytes())
             .unwrap_or(*identity.node_id.as_bytes());
-        match tunnel::build_client_route_packet(&client_route_node_id, &service_name, ts, None) {
+        match build_signed_client_route(&client_route_node_id, &service_name, ts) {
             Ok(route_pkt) => {
                 if let Err(e) = std_socket.send_to(&route_pkt, send_addr) {
                     warn!("failed to send CLIENT_ROUTE (dial) to {}: {}", send_addr, e);
@@ -1760,7 +1804,7 @@ where
         let client_route_node_id: [u8; 16] = resolved_node_id
             .map(|nid| *nid.as_bytes())
             .unwrap_or(*identity.node_id.as_bytes());
-        match tunnel::build_client_route_packet(&client_route_node_id, &service_name, ts, None) {
+        match build_signed_client_route(&client_route_node_id, &service_name, ts) {
             Ok(route_pkt) => {
                 if let Err(e) = std_socket.send_to(&route_pkt, send_addr) {
                     warn!("failed to send CLIENT_ROUTE to {}: {}", send_addr, e);
@@ -1934,6 +1978,33 @@ pub fn get_agent_pid() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    // ── CLIENT_ROUTE signing via the daemon-wide relay secret (2026-09-13) ──
+    //
+    // The relay in prod HMAC mode rejects a zero-HMAC CLIENT_ROUTE, so the
+    // automatic VIP dialer must sign with `[tunnel] relay_secret`. The
+    // secret is installed once by run_daemon and read at both send sites.
+    #[test]
+    fn build_signed_client_route_uses_installed_relay_secret() {
+        use super::{build_signed_client_route, set_relay_secret};
+        let node_id = [0x22u8; 16];
+
+        set_relay_secret(None);
+        let unsigned = build_signed_client_route(&node_id, "demo-dashboard", 1_800_000_000).unwrap();
+        assert_eq!(&unsigned[unsigned.len() - 32..], &[0u8; 32]);
+
+        let key = crate::tunnel::decode_relay_secret(
+            "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103",
+        );
+        set_relay_secret(Some(key.clone()));
+        let signed = build_signed_client_route(&node_id, "demo-dashboard", 1_800_000_000).unwrap();
+        let expected =
+            crate::tunnel::build_client_route_packet(&node_id, "demo-dashboard", 1_800_000_000, Some(&key))
+                .unwrap();
+        assert_eq!(signed, expected);
+        assert_ne!(&signed[signed.len() - 32..], &[0u8; 32]);
+        set_relay_secret(None);
+    }
     // ── first_byte_deadline / stall_response_for_port (PR 1 policy) ──────
 
     #[test]

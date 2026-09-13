@@ -96,13 +96,20 @@ path = "/home/<you>/.ztlp/identity.json"
 servers = ["44.240.16.59:23096"]
 [tunnel]
 relays = ["44.240.16.59:23095"]
+# Relay runs ZTLP_RELAY_HMAC_MODE=prod: every CLIENT_ROUTE must be HMAC-signed
+# with the relay's ZTLP_RELAY_REGISTRATION_SECRET (demo value, safe to publish).
+# Without it the relay drops the route and the tunnel times out at QUIC handshake.
+relay_secret = "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
 [dns]
 enabled = true
 listen = "127.0.0.55:15353"
 zones = ["defcon.ztlp"]
 [tls]
-enabled = false          # dashboard is plain HTTP behind the gateway
+enabled = true           # local TLS termination on the VIP (https:// with a real cert, see 4b)
 ```
+
+`ztlp connect` (manual tunnel) takes the same secret as `--relay-secret <hex>`
+or `--relay-secret-file <path>`; it also falls back to `agent.toml`.
 
 ## 4. Client: run the agent and hit the dashboard
 
@@ -116,6 +123,33 @@ curl -s http://127.100.0.1/ | grep hmac_verified                     # "hmac_ver
 
 Gateway side shows one line per tunnel:
 `[Quic] handshake ok session=<24 hex> peer=<64 hex> service=demo-dashboard`.
+Relay side (prod HMAC mode) shows `CLIENT_ROUTE ... (legacy)` for each signed
+route; an unsigned/mis-keyed client shows `rejected: invalid HMAC` or
+`REJECTED: no secret configured` and never gets a tunnel.
+
+### 4b. `https://` without `-k` (local TLS termination)
+
+The dashboard is plain HTTP behind the gateway; the AGENT terminates TLS on
+the VIP and mints a per-hostname leaf on demand from a local CA. One-time
+client setup:
+
+```bash
+ztlp admin ca-init --zone defcon.ztlp        # writes ~/.ztlp/ca/{root,intermediate}.{pem,key}
+# [tls] enabled = true in agent.toml (above), then (re)start the agent.
+curl -s --cacert ~/.ztlp/ca/root.pem \
+     --resolve demo-dashboard.defcon.ztlp:443:127.100.0.1 \
+     https://demo-dashboard.defcon.ztlp/api/health          # {"status":"ok"}, no -k
+```
+
+Verified: leaf `CN=demo-dashboard.defcon.ztlp` issued by `ZTLP Intermediate
+CA - defcon.ztlp`, `openssl s_client ... -CAfile ~/.ztlp/ca/root.pem` ->
+`Verify return code: 0 (ok)`; minted leaf cached at
+`~/.ztlp/certs/demo-dashboard_defcon_ztlp.{pem,key}`. To make browsers trust
+it system-wide: `ztlp admin ca-export-root | sudo tee
+/usr/local/share/ca-certificates/ztlp.crt && sudo update-ca-certificates`
+(Linux) or `ztlp agent install-ca-cert --machine-scope` (Windows). The agent
+only mints when `~/.ztlp/ca/intermediate.{pem,key}` exist; without them
+`[tls] enabled = true` falls back to disk-only certs (none) and https fails.
 
 Optional: route the OS resolver for `defcon.ztlp` to `127.0.0.55:15353` so
 `curl http://demo-dashboard.defcon.ztlp/` works without `dig`. That is
@@ -149,8 +183,28 @@ Reference numbers (Hermes VM in Monrovia -> us-west-2): ~165 ms per request,
 - **Three env vars must agree on the service name** (`demo-dashboard`):
   `ZTLP_GATEWAY_BACKENDS`, `ZTLP_GATEWAY_POLICIES`,
   `ZTLP_GATEWAY_SERVICE_NAMES`. The relay does exact-match, no wildcard.
-- **Relay HMAC mode** is `staging` in this compose (accepts unverified
-  routes, logs `unverified_staging`). Production needs per-zone secrets.
+- **Relay HMAC mode is `prod`** (fail-closed). relay1, relay2 and the gateway
+  share `ZTLP_RELAY_REGISTRATION_SECRET`; every client needs the SAME value in
+  `[tunnel] relay_secret` (or `ztlp connect --relay-secret`). Symptoms of a
+  missing/wrong client secret: relay logs `CLIENT_ROUTE ... rejected: invalid
+  HMAC` / `REJECTED: no secret configured`, client times out at the QUIC
+  handshake (15 s). The relay decodes a 64-hex secret to 32 raw bytes before
+  HMAC'ing; both the gateway (`RelayRegistrar.legacy_secret/0`) and the
+  client (`tunnel::decode_relay_secret`) do the same, so use hex everywhere.
+  Note: for V1 frames the relay derives "zone" from the SERVICE name
+  (`demo-dashboard`), so a per-zone `ZTLP_HMAC_SECRET_DEFCON_ZTLP` would never
+  match. Pinned by `ns/test/ztlp_ns/demo_compose_consistency_test.exs`,
+  `relay/test/ztlp_relay/client_route_prod_hmac_test.exs`,
+  `gateway/test/ztlp_gateway/relay_registrar_addr_test.exs`.
+- **`local-loopback.override.yml` uses `volumes: !override`**, which REPLACES
+  the base list. Any mount added to `defcon-cloud-compose.yml` must be
+  mirrored there or the local stack silently runs without it. Pinned by
+  `ns/test/ztlp_ns/demo_compose_consistency_test.exs` (container-path diff).
+- **`ztlp connect` picks up `~/.ztlp/identity.json`** when `--key` is
+  omitted (as of 2026-09-13; before that it silently used an ephemeral
+  identity and printed "Using ephemeral identity").
+- **`X-ZTLP-Zone`** is derived from the resolved device name
+  (`<device>.<zone>` -> `<zone>`); `unknown:<hex>` identities have no zone.
 - **`ztlp connect ... -L` from a machine that ALSO runs the local loopback
   demo stack** (`demo/local-loopback.override.yml`) direct-dials the SVC
   address `172.42.90.30:23097`, which is the local Docker bridge, so it hits

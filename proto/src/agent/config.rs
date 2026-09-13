@@ -239,6 +239,45 @@ pub struct TunnelConfig {
     /// `504 Gateway Timeout` with a ZTLP-branded body; other ports get the
     /// connection reset. Never silent.
     pub first_byte_timeout: String,
+
+    /// Shared HMAC secret for signing relay `CLIENT_ROUTE` frames.
+    ///
+    /// Must equal the relay's `ZTLP_RELAY_REGISTRATION_SECRET` (or the
+    /// per-zone `ZTLP_HMAC_SECRET_<ZONE>`). Accepts 64 hex chars, `base64:...`
+    /// or a raw string (same rules as the relay). Required when the relay
+    /// runs `ZTLP_RELAY_HMAC_MODE=prod`; unset = unsigned frames (dev/staging
+    /// relays only).
+    pub relay_secret: Option<String>,
+
+    /// Path to a file holding the relay secret (alternative to
+    /// `relay_secret`; the file contents are trimmed). `relay_secret` wins
+    /// when both are set.
+    pub relay_secret_file: Option<String>,
+}
+
+impl TunnelConfig {
+    /// Resolved relay HMAC secret bytes, or `None` when unconfigured.
+    pub fn relay_secret_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(s) = self.relay_secret.as_deref() {
+            if !s.trim().is_empty() {
+                return Some(crate::tunnel::decode_relay_secret(s));
+            }
+        }
+        if let Some(path) = self.relay_secret_file.as_deref() {
+            match std::fs::read_to_string(path) {
+                Ok(contents) if !contents.trim().is_empty() => {
+                    return Some(crate::tunnel::decode_relay_secret(&contents));
+                }
+                Ok(_) => {
+                    tracing::warn!("[tunnel] relay_secret_file {} is empty; CLIENT_ROUTE frames will be unsigned", path);
+                }
+                Err(e) => {
+                    tracing::warn!("[tunnel] cannot read relay_secret_file {}: {}; CLIENT_ROUTE frames will be unsigned", path, e);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Credential renewal configuration.
@@ -390,6 +429,8 @@ impl Default for TunnelConfig {
             relays: RelayAddrs::default(),
             max_tunnels: 256,
             first_byte_timeout: "15s".to_string(),
+            relay_secret: None,
+            relay_secret_file: None,
         }
     }
 }
@@ -668,6 +709,43 @@ pub fn load_agent_token() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── [tunnel] relay_secret (2026-09-13) ─────────────────────────────
+    // The relay in prod HMAC mode rejects unsigned CLIENT_ROUTE frames.
+    // The agent must be able to carry the relay's shared secret in
+    // agent.toml so the automatic VIP dialer can sign them.
+    #[test]
+    fn tunnel_relay_secret_defaults_to_none() {
+        let cfg = AgentConfig::default();
+        assert!(cfg.tunnel.relay_secret.is_none());
+        assert!(cfg.tunnel.relay_secret_bytes().is_none());
+    }
+
+    #[test]
+    fn tunnel_relay_secret_parses_and_decodes_hex() {
+        let toml_str = r#"
+[tunnel]
+relays = ["44.240.16.59:23095"]
+relay_secret = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103"
+"#;
+        let cfg: AgentConfig = toml::from_str(toml_str).unwrap();
+        let bytes = cfg.tunnel.relay_secret_bytes().expect("secret configured");
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(bytes[0], 0x06);
+    }
+
+    #[test]
+    fn tunnel_relay_secret_file_is_read_and_trimmed() {
+        let tmp = std::env::temp_dir().join(format!("ztlp-relay-secret-{}", std::process::id()));
+        std::fs::write(&tmp, "supersecretkey\n").unwrap();
+        let toml_str = format!(
+            "[tunnel]\nrelay_secret_file = \"{}\"\n",
+            tmp.display().to_string().replace('\\', "/")
+        );
+        let cfg: AgentConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg.tunnel.relay_secret_bytes().unwrap(), b"supersecretkey".to_vec());
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     #[test]
     fn test_default_config() {

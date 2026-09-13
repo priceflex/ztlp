@@ -3166,6 +3166,34 @@ pub const CLIENT_ROUTE_TYPE: u8 = 0x0B;
 /// prefix caps this well below 255, matched to the CLI's existing limit).
 pub const CLIENT_ROUTE_MAX_SVC_LEN: usize = 63;
 
+/// Decode a relay HMAC secret using the SAME rules as the Elixir relay's
+/// `ZtlpRelay.HmacSecrets.decode_secret/1`:
+///
+/// * `base64:<encoded>` -> decoded bytes (falls back to the raw string if
+///   the encoding is invalid, mirroring "skip malformed" leniently),
+/// * exactly 64 hex characters -> 32 raw bytes,
+/// * anything else -> the raw ASCII bytes verbatim.
+///
+/// Surrounding whitespace (e.g. a trailing newline from a secret file) is
+/// trimmed first. Used for `CLIENT_ROUTE` signing so a client configured
+/// with the relay's `ZTLP_RELAY_REGISTRATION_SECRET` /
+/// `ZTLP_HMAC_SECRET_<ZONE>` value produces a matching HMAC.
+pub fn decode_relay_secret(raw: &str) -> Vec<u8> {
+    let s = raw.trim();
+    if let Some(b64) = s.strip_prefix("base64:") {
+        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64) {
+            return bytes;
+        }
+        return s.as_bytes().to_vec();
+    }
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(bytes) = hex::decode(s) {
+            return bytes;
+        }
+    }
+    s.as_bytes().to_vec()
+}
+
 /// Build a CLIENT_ROUTE frame: `[magic(2) | type(1) | node_id(16) |
 /// svc_len(1) | service(N) | timestamp(8, i64 BE) | hmac(32)]`.
 ///
@@ -3331,6 +3359,50 @@ mod tests {
     // sends this frame whenever `--service` is set; this is the same
     // wire format, promoted from a private copy in ztlp-cli.rs to a
     // shared public function so daemon.rs can call it too.
+    // ── decode_relay_secret (2026-09-13) ──────────────────────────────
+    //
+    // The relay (`ZtlpRelay.HmacSecrets.decode_secret/1`) accepts a secret
+    // as 64 hex chars (-> 32 raw bytes), `base64:<...>`, or raw ASCII. The
+    // client MUST decode identically or the CLIENT_ROUTE HMAC never matches
+    // in prod mode. This pins the client-side decoder to the same rules.
+    #[test]
+    fn decode_relay_secret_matches_relay_rules() {
+        let hex = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103";
+        let decoded = decode_relay_secret(hex);
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(decoded[0], 0x06);
+        assert_eq!(decoded[31], 0x03);
+
+        // Uppercase hex is accepted too (relay uses case: :mixed).
+        assert_eq!(decode_relay_secret(&hex.to_uppercase()), decoded);
+
+        // base64: prefix
+        let b64 = format!("base64:{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"0123456789abcdef"));
+        assert_eq!(decode_relay_secret(&b64), b"0123456789abcdef".to_vec());
+
+        // Raw ASCII (not 64 hex chars) is used verbatim.
+        assert_eq!(decode_relay_secret("supersecretkey"), b"supersecretkey".to_vec());
+
+        // Surrounding whitespace/newline (from a secret file) is trimmed.
+        assert_eq!(decode_relay_secret(&format!("{}\n", hex)), decoded);
+    }
+
+    // The HMAC produced with a decoded hex secret must equal what the
+    // Elixir relay computes: HMAC-SHA256(raw32, signed_material).
+    #[test]
+    fn client_route_hmac_uses_decoded_secret_bytes() {
+        use hmac::{Hmac, Mac};
+        let hex = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103";
+        let key = decode_relay_secret(hex);
+        let node_id = [0x11u8; 16];
+        let pkt = build_client_route_packet(&node_id, "demo-dashboard", 1_800_000_000, Some(&key)).unwrap();
+        let signed = &pkt[2..pkt.len() - 32];
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(signed);
+        assert_eq!(&pkt[pkt.len() - 32..], mac.finalize().into_bytes().as_slice());
+        assert_ne!(&pkt[pkt.len() - 32..], &[0u8; 32]);
+    }
+
     #[test]
     fn build_client_route_packet_produces_correct_wire_layout() {
         let node_id = [0xAAu8; 16];

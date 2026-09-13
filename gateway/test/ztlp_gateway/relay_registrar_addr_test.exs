@@ -49,6 +49,45 @@ defmodule ZtlpGateway.RelayRegistrarAddrTest do
     assert hmac == :crypto.mac(:hmac, :sha256, "s3cret", signed)
   end
 
+  # The relay decodes ZTLP_RELAY_REGISTRATION_SECRET with
+  # `ZtlpRelay.HmacSecrets.decode_secret/1` (64 hex chars -> 32 raw bytes,
+  # `base64:` -> bytes, else raw). The gateway MUST sign with the SAME bytes
+  # or a hex secret (the documented `openssl rand -hex 32` form) yields
+  # `bad_hmac` on every 0x0D frame in prod mode.
+  test "legacy_secret/0 decodes a 64-hex ZTLP_RELAY_REGISTRATION_SECRET like the relay" do
+    hex = "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
+    System.put_env("ZTLP_RELAY_REGISTRATION_SECRET", hex)
+    on_exit(fn -> System.delete_env("ZTLP_RELAY_REGISTRATION_SECRET") end)
+
+    assert RelayRegistrar.legacy_secret() == Base.decode16!(hex, case: :lower)
+    assert byte_size(RelayRegistrar.legacy_secret()) == 32
+
+    System.put_env("ZTLP_RELAY_REGISTRATION_SECRET", "supersecretkey")
+    assert RelayRegistrar.legacy_secret() == "supersecretkey"
+
+    System.put_env("ZTLP_RELAY_REGISTRATION_SECRET", "base64:" <> Base.encode64("0123456789abcdef"))
+    assert RelayRegistrar.legacy_secret() == "0123456789abcdef"
+
+    System.delete_env("ZTLP_RELAY_REGISTRATION_SECRET")
+    assert RelayRegistrar.legacy_secret() == nil
+  end
+
+  test "0x0D frame signed with a hex secret verifies against the relay-decoded bytes",
+       %{relay_sock: relay_sock} do
+    hex = "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
+    System.put_env("ZTLP_RELAY_REGISTRATION_SECRET", hex)
+    System.put_env("ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR", ":23097")
+    on_exit(fn -> System.delete_env("ZTLP_RELAY_REGISTRATION_SECRET") end)
+
+    {:ok, pid} = GenServer.start_link(RelayRegistrar, [ttl: 10], name: :test_registrar_hex_secret)
+    assert_receive {:udp, ^relay_sock, {127, 0, 0, 1}, _src_port, packet}, 4_000
+    GenServer.stop(pid)
+
+    <<0x5A, 0x37, signed::binary-size(byte_size(packet) - 2 - 32), hmac::binary-size(32)>> = packet
+    assert hmac == :crypto.mac(:hmac, :sha256, Base.decode16!(hex, case: :lower), signed)
+    refute hmac == :crypto.mac(:hmac, :sha256, hex, signed)
+  end
+
   test "with ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR set, emits 0x0D from its own socket without a Listener",
        %{relay_sock: relay_sock} do
     System.put_env("ZTLP_GATEWAY_RELAY_ADVERTISE_ADDR", ":23097")

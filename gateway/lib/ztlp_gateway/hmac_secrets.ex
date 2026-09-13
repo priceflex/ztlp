@@ -98,6 +98,17 @@ defmodule ZtlpGateway.HmacSecrets do
     |> String.trim("_")
   end
 
+  @doc """
+  Decode a single secret entry with the relay's rules (`base64:` prefix,
+  64 hex chars -> 32 raw bytes, else raw bytes). Returns `nil` for
+  malformed/empty input. Public so the legacy relay-wide
+  `ZTLP_RELAY_REGISTRATION_SECRET` path can use the SAME decoding the
+  relay applies on verification — signing with the undecoded hex string
+  produced `bad_hmac` in prod HMAC mode (found 2026-09-13).
+  """
+  @spec decode_secret_entry(String.t()) :: secret() | nil
+  def decode_secret_entry(value) when is_binary(value), do: decode_secret(String.trim(value))
+
   # ── Internals ──────────────────────────────────────────────────
 
   defp read_zone_env(zone_id) do

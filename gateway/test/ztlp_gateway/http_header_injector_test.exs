@@ -120,6 +120,43 @@ defmodule ZtlpGateway.HttpHeaderInjectorTest do
     end
   end
 
+  describe "build_headers/1 with a plain ZTLP (Noise) identity string" do
+    # Noise sessions hand the injector the resolved NS record name (or
+    # "unknown:<hex>"). The zone is the name minus its first label.
+    test "resolved device name -> X-ZTLP-Zone is the parent zone" do
+      headers = Map.new(HttpHeaderInjector.build_headers("idfix-aws-1939.defcon.ztlp"))
+      assert headers["X-ZTLP-Node-Name"] == "idfix-aws-1939.defcon.ztlp"
+      assert headers["X-ZTLP-Zone"] == "defcon.ztlp"
+    end
+
+    test "trailing dot on the name is ignored for the zone" do
+      headers = Map.new(HttpHeaderInjector.build_headers("dev1.corp.example.ztlp."))
+      assert headers["X-ZTLP-Zone"] == "corp.example.ztlp"
+    end
+
+    test "unknown:<hex> identity -> empty zone" do
+      hex = String.duplicate("ab", 32)
+      headers = Map.new(HttpHeaderInjector.build_headers("unknown:" <> hex))
+      assert headers["X-ZTLP-Node-ID"] == hex
+      assert headers["X-ZTLP-Zone"] == ""
+    end
+
+    test "single-label name -> empty zone" do
+      headers = Map.new(HttpHeaderInjector.build_headers("standalone"))
+      assert headers["X-ZTLP-Zone"] == ""
+    end
+  end
+
+  describe "zone_of/1" do
+    test "derives zone from a fully-qualified device name" do
+      assert HttpHeaderInjector.zone_of("dev1.defcon.ztlp") == "defcon.ztlp"
+      assert HttpHeaderInjector.zone_of("dev1.defcon.ztlp.") == "defcon.ztlp"
+      assert HttpHeaderInjector.zone_of("dev1") == ""
+      assert HttpHeaderInjector.zone_of("unknown:" <> String.duplicate("00", 32)) == ""
+      assert HttpHeaderInjector.zone_of("") == ""
+    end
+  end
+
   describe "nonce generation" do
     test "generates 32-char hex nonce" do
       nonce = HttpHeaderInjector.generate_nonce()

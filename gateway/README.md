@@ -221,6 +221,14 @@ Relay side: `GATEWAY_REGISTER_ADDR` = `0x5A 0x37 0x0D` then
 `[1 addr_len][addr "ip:port" | ":port"][16 node_id][16 svc_padded][4 ttl][8 ts][32 hmac]`,
 HMAC over `0x0D||addr_len||addr||node_id||svc||ttl||ts`. `":port"` means
 relay-observed source IP + declared port (cannot redirect to a third party).
+The HMAC key is `ZTLP_RELAY_REGISTRATION_SECRET`, decoded with the relay's
+rules before signing (`RelayRegistrar.legacy_secret/0`: 64 hex chars -> 32
+raw bytes, `base64:` -> bytes, else raw). A relay in `ZTLP_RELAY_HMAC_MODE=prod`
+rejects unsigned frames; the same secret must be present on clients as
+`[tunnel] relay_secret` so their `CLIENT_ROUTE` frames verify too.
+
+Header injection: `X-ZTLP-Zone` is derived from the resolved device name
+(`<device>.<zone>` -> `<zone>`); unresolved `unknown:<hex>` identities get "".
 
 Log line per successful tunnel:
 `[Quic] handshake ok session=<24 hex> peer=<64 hex> service=<name> from=<relay>`.

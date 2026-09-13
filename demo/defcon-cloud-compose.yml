@@ -89,11 +89,19 @@ services:
       ZTLP_RELAY_PORT: "23095"
       ZTLP_RELAY_MAX_SESSIONS: "1000"
       ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
-      # Demo stack: relay defaults to PROD HMAC mode which requires a
-      # per-zone secret or it silently drops every client route
-      # ("CLIENT_ROUTE ... REJECTED: no secret configured for zone=...").
-      # Downgrading to staging mode is simplest for a throwaway demo.
-      ZTLP_RELAY_HMAC_MODE: "staging"
+      # PROD HMAC mode (fail-closed): every GATEWAY_REGISTER_ADDR (0x0D) and
+      # CLIENT_ROUTE (0x0B) control frame MUST carry a valid HMAC-SHA256 or
+      # it is dropped. This is what stops anyone who can reach UDP :23095
+      # from registering a rogue gateway for demo-dashboard (CWE-287).
+      # The relay-wide secret below is shared by the gateway
+      # (ZTLP_RELAY_REGISTRATION_SECRET) and every client
+      # (~/.ztlp/agent.toml [tunnel] relay_secret / `ztlp connect
+      # --relay-secret`). Demo-only value, safe to publish. Note the
+      # relay derives the "zone" for V1 frames from the SERVICE name
+      # ("demo-dashboard"), so a per-zone ZTLP_HMAC_SECRET_DEFCON_ZTLP would
+      # never match — the legacy relay-wide secret is the coherent choice.
+      ZTLP_RELAY_HMAC_MODE: "prod"
+      ZTLP_RELAY_REGISTRATION_SECRET: "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
 
@@ -111,7 +119,9 @@ services:
       ZTLP_RELAY_PORT: "23095"
       ZTLP_RELAY_MAX_SESSIONS: "1000"
       ZTLP_RELAY_SESSION_TIMEOUT_MS: "300000"
-      ZTLP_RELAY_HMAC_MODE: "staging"
+      # Same prod-mode + shared secret as relay1 (see comment there).
+      ZTLP_RELAY_HMAC_MODE: "prod"
+      ZTLP_RELAY_REGISTRATION_SECRET: "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_LOG_LEVEL: "info"
 
@@ -149,6 +159,9 @@ services:
       # this service to the gateway (without this, relay logs "no gateway
       # registered for service=<name>" and drops every client route).
       ZTLP_RELAY_SERVER: "172.42.90.20:23095"
+      # HMAC key for GATEWAY_REGISTER_ADDR frames — MUST equal the relays'
+      # ZTLP_RELAY_REGISTRATION_SECRET (relays run prod HMAC mode).
+      ZTLP_RELAY_REGISTRATION_SECRET: "03949c364265e5e2cf0eb0f90a27cf51b97e85c2564a9ece899d6daab2a70d7c"
       # Public address the gateway advertises to NS/relay for routing.
       ZTLP_GATEWAY_PUBLIC_ADDR: "172.42.90.30:23097"
       # ZTLP_GATEWAY_SERVICE_ZONE belongs HERE (ServiceRegistrar reads it),

@@ -121,7 +121,7 @@ defmodule ZtlpGateway.RelayRegistrar do
           ttl: ttl,
           node_id: node_id,
           services: Config.service_names(),
-          legacy_secret: Config.registration_secret(),
+          legacy_secret: legacy_secret(),
           use_v2: use_v2,
           test_socket: test_socket,
           advertise_addr: advertise_addr(),
@@ -268,6 +268,23 @@ defmodule ZtlpGateway.RelayRegistrar do
   def derive_zone_from_service(other) when is_binary(other), do: other
 
   # Internal
+
+
+  @doc """
+  Relay-wide legacy HMAC secret (`ZTLP_RELAY_REGISTRATION_SECRET` env, else
+  `:registration_secret` app env), DECODED with the same rules the relay's
+  `ZtlpRelay.HmacSecrets.decode_secret/1` uses for verification (64 hex
+  chars -> 32 raw bytes, `base64:` -> bytes, otherwise raw). `nil` when
+  unset. Signing with the raw hex string instead of the decoded bytes made
+  every GATEWAY_REGISTER frame fail verification on a prod-mode relay.
+  """
+  @spec legacy_secret() :: binary() | nil
+  def legacy_secret do
+    case Config.registration_secret() do
+      nil -> nil
+      raw when is_binary(raw) -> ZtlpGateway.HmacSecrets.decode_secret_entry(raw)
+    end
+  end
 
   @doc false
   @spec build_registration_packet_addr(String.t(), binary(), String.t(), non_neg_integer(), binary() | nil) ::

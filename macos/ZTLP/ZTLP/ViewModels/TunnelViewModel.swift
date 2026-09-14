@@ -49,6 +49,9 @@ final class TunnelViewModel: ObservableObject {
     @Published private(set) var testResult: String?
     @Published private(set) var isVPNConfigInstalled: Bool = false
     @Published private(set) var connectionMode: ConnectionMode = .directConnect
+    // Off by default. The simple, Windows-style path is Direct Connect (app-level
+    // encrypted session over the QUIC FFI, no system-VPN entitlement). VPN is an
+    // opt-in Advanced feature, not the default, and is never auto-preferred.
     @Published var preferVPN: Bool = false
     @Published var autoReconnectEnabled: Bool = true
     @Published private(set) var reconnectAttempt: Int = 0
@@ -191,13 +194,18 @@ final class TunnelViewModel: ObservableObject {
                 try bridge.createClient(identity: identity)
             }
 
-            // Build config
+            // Build config. The default FFI path is QUIC-over-relay; NAT-traversal
+            // assist is NOT enabled by default because it pulls in the legacy
+            // raw-UDP NAT path. Enable it only if the operator explicitly turns it
+            // on in Advanced Settings (configuration.natAssist).
             let config = ZTLPConfigHandle()
             let relay = configuration.relayAddress
             if !relay.isEmpty {
                 try config.setRelay(relay)
             }
-            try config.setNatAssist(configuration.natAssist)
+            if configuration.natAssist {
+                try config.setNatAssist(true)
+            }
             try config.setTimeoutMs(15000)
 
             // Set service name for gateway routing
@@ -313,12 +321,17 @@ final class TunnelViewModel: ObservableObject {
                 }) {
                     self.tunnelManager = existing
                     self.isVPNConfigInstalled = true
-                    self.preferVPN = true
-                    updateStatusFromConnection(existing.connection)
+                    // Detect an existing VPN config so it can be managed/removed,
+                    // but do NOT auto-prefer it. The default connection path is
+                    // Direct Connect; VPN is only used if the user explicitly opts
+                    // in (preferVPN) in Advanced Settings. Only mirror VPN status
+                    // into the UI when the user has actually opted into VPN.
+                    if self.preferVPN {
+                        updateStatusFromConnection(existing.connection)
+                    }
                 }
             } catch {
                 self.isVPNConfigInstalled = false
-                self.preferVPN = false
             }
         }
     }

@@ -47,8 +47,11 @@ struct HomeView: View {
                     }
             }
 
-            // Connection mode (subtle)
-            if viewModel.status.isActive {
+            // Connection mode (subtle) — only shown for the opt-in system-VPN
+            // path. The default Direct Connect path is the simple "just works"
+            // one, so it shows no mode chip (mirrors the Windows client, which
+            // is single-path and doesn't surface a transport mode).
+            if viewModel.status.isActive, viewModel.connectionMode == .vpnTunnel {
                 HStack(spacing: 5) {
                     Image(systemName: viewModel.connectionMode.icon)
                         .font(.caption2)

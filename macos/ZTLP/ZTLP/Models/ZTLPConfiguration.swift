@@ -111,7 +111,9 @@ final class ZTLPConfiguration: ObservableObject {
         self.tunnelAddress = store.string(forKey: Key.tunnelAddress) ?? "10.0.0.2"
         self.dnsServers = store.stringArray(forKey: Key.dnsServers) ?? ["1.1.1.1", "8.8.8.8"]
         self.mtu = store.integer(forKey: Key.mtu) == 0 ? 1400 : store.integer(forKey: Key.mtu)
-        self.natAssist = store.object(forKey: Key.natAssist) == nil ? true : store.bool(forKey: Key.natAssist)
+        // NAT assist defaults OFF. The simple/default path is QUIC-over-relay;
+        // NAT traversal is a legacy raw-UDP fallback for operators who need it.
+        self.natAssist = store.object(forKey: Key.natAssist) == nil ? false : store.bool(forKey: Key.natAssist)
         self.autoConnect = store.bool(forKey: Key.autoConnect)
         self.useSecureEnclave = store.object(forKey: Key.useSecureEnclave) == nil ? true : store.bool(forKey: Key.useSecureEnclave)
         self.hasCompletedOnboarding = store.bool(forKey: Key.hasCompletedOnboarding)
@@ -142,7 +144,7 @@ final class ZTLPConfiguration: ObservableObject {
         tunnelAddress = "10.0.0.2"
         dnsServers = ["1.1.1.1", "8.8.8.8"]
         mtu = 1400
-        natAssist = true
+        natAssist = false
         autoConnect = false
         useSecureEnclave = true
         hasCompletedOnboarding = false

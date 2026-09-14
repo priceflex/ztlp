@@ -62,12 +62,23 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         Section("General") {
-            Toggle(isOn: $configuration.autoConnect) {
-                Label("Connect on Launch", systemImage: "bolt.fill")
+            // The one thing you usually need to change to connect: which ZTLP
+            // service to reach. This is the NS service name (e.g. "beta" or
+            // "beta.techrockstars.ztlp"). Mirrors the Windows client's
+            // "connect to a service by name" model.
+            HStack {
+                Label("Service", systemImage: "network")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                TextField("beta", text: $configuration.serviceName)
+                    .multilineTextAlignment(.trailing)
+                    .font(.callout.monospaced())
+                    .textFieldStyle(.plain)
+                    .frame(maxWidth: 250)
             }
 
-            Toggle(isOn: $configuration.natAssist) {
-                Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
+            Toggle(isOn: $configuration.autoConnect) {
+                Label("Connect on Launch", systemImage: "bolt.fill")
             }
         }
     }
@@ -209,9 +220,14 @@ struct SettingsView: View {
     }
 
     // MARK: - Connection (Advanced)
+    //
+    // Only shown when "Advanced Settings" is expanded. For the common case you
+    // only need the "Service" field in General — the app NS-resolves it and
+    // connects. These raw fields are for operators wiring up a non-standard
+    // relay/peer directly.
 
     private var connectionSection: some View {
-        Section("Connection") {
+        Section("Connection (advanced)") {
             HStack {
                 Label("Relay Server", systemImage: "antenna.radiowaves.left.and.right")
                 Spacer()
@@ -222,15 +238,10 @@ struct SettingsView: View {
                     .frame(maxWidth: 250)
             }
 
-            HStack {
-                Label("STUN Server", systemImage: "network")
-                Spacer()
-                TextField("stun.l.google.com:19302", text: $configuration.stunServer)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
+            Toggle(isOn: $configuration.natAssist) {
+                Label("NAT Traversal (legacy)", systemImage: "arrow.triangle.branch")
             }
+            .help("Enables the legacy raw-UDP NAT-traversal path. Off by default — the normal path is QUIC over the relay.")
 
             HStack {
                 Label("Target Node ID", systemImage: "point.3.filled.connected.trianglepath.dotted")

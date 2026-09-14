@@ -489,6 +489,17 @@ impl StreamDispatcher {
     pub fn stream_count(&self) -> usize {
         self.streams.lock().map(|s| s.len()).unwrap_or(0)
     }
+
+    /// Drop every registered stream (all senders). Each connection's write
+    /// task observes `recv() == None` and tears its TCP side down. Used on
+    /// tunnel hot-swap: the old session's streams are meaningless on the new
+    /// session, but the dispatcher object itself must stay the same because
+    /// running listener tasks hold an `Arc` to it.
+    pub fn clear(&self) {
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.clear();
+        }
+    }
 }
 
 /// The VIP proxy manager. Holds the service registry and manages TCP listeners.
@@ -623,18 +634,26 @@ impl VipProxy {
             ));
         }
 
-        // If listeners are already running, just update the session (hot-swap)
+        // If listeners are already running, just update the session (hot-swap).
+        //
+        // The running `vip_listener_task`s captured `self.dispatcher` by Arc at
+        // spawn time. Replacing the Arc here (as this used to do) split the
+        // brain: new connections registered in the OLD dispatcher while the
+        // FFI recv_loop routed tunnel data via `proxy.dispatcher()` = the NEW,
+        // permanently empty one, so every post-reconnect connection was a
+        // download black hole. Keep the same dispatcher and clear it in place
+        // instead. Likewise never reset `next_stream_id`: a stale write task
+        // from the old session may still hold stream 1, and the gateway side
+        // may still have it mapped; reuse would hijack it.
         if !self.listener_handles.is_empty() {
             tracing::info!("VIP proxy: hot-swapping tunnel session (listeners stay up)");
-            // Fresh dispatcher for new session
-            self.dispatcher = Arc::new(StreamDispatcher::new());
-            self.next_stream_id.store(1, Ordering::SeqCst);
+            self.dispatcher.clear();
             return Ok((ack_tx, send_enqueue_tx));
         }
 
-        // First start — create listeners
-        self.dispatcher = Arc::new(StreamDispatcher::new());
-        self.next_stream_id.store(1, Ordering::SeqCst);
+        // First start — create listeners. Same dispatcher object for the whole
+        // proxy lifetime (see hot-swap note above); just make sure it is empty.
+        self.dispatcher.clear();
         self.stop_flag.store(false, Ordering::SeqCst);
 
         for service in self.services.values() {

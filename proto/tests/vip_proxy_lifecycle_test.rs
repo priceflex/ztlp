@@ -357,7 +357,7 @@ async fn stop_makes_listener_refuse_new_connections() {
     assert_eq!(proxy.services().len(), 1);
 }
 
-// BUG (found 2026-09-13, lib fix pending go-ahead): `VipProxy::start()` on an
+// Regression (found+fixed 2026-09-13): `VipProxy::start()` on an
 // already-started proxy ("hot-swap") replaces `self.dispatcher` with a fresh
 // `StreamDispatcher`, but the running `vip_listener_task`s captured an `Arc`
 // of the OLD dispatcher at spawn time. New TCP connections therefore register
@@ -367,10 +367,9 @@ async fn stop_makes_listener_refuse_new_connections() {
 // Worse: `next_stream_id` is reset to 1, so the first post-swap connection
 // re-registers stream_id 1 in the old dispatcher and hijacks the channel of
 // whichever pre-swap connection still holds that id.
-// Fix: share the dispatcher through `Arc<RwLock<Arc<StreamDispatcher>>>` (or
-// don't replace it; clear it instead) so listeners and recv_loop agree.
+// Fix: keep ONE dispatcher for the proxy's lifetime and clear it in place on
+// hot-swap; never reset next_stream_id.
 #[tokio::test]
-#[ignore = "exposes hot-swap dispatcher split-brain in VipProxy::start — see comment"]
 async fn second_start_hot_swaps_session_and_resets_dispatcher() {
     let vip = Ipv4Addr::new(127, 0, 77, 9);
     let port = free_port(vip).await;
@@ -388,7 +387,7 @@ async fn second_start_hot_swaps_session_and_resets_dispatcher() {
 
     let mut c2 = connect(vip, port).await;
     wait_streams(&d2, 1).await;
-    d2.dispatch(1, b"after-swap".to_vec()).unwrap();
+    d2.dispatch(2, b"after-swap".to_vec()).unwrap();
     let mut b = [0u8; 16];
     let n = tokio::time::timeout(Duration::from_secs(2), c2.read(&mut b)).await.unwrap().unwrap();
     assert_eq!(&b[..n], b"after-swap");
@@ -396,12 +395,12 @@ async fn second_start_hot_swaps_session_and_resets_dispatcher() {
 }
 
 #[tokio::test]
-async fn second_start_currently_orphans_new_connections_in_old_dispatcher() {
+async fn second_start_keeps_one_dispatcher_clears_old_streams_and_keeps_stream_ids_unique() {
     let vip = Ipv4Addr::new(127, 0, 77, 12);
     let port = free_port(vip).await;
     let (mut proxy, _, _) = started_proxy(vip, &[port]).await;
     let d1 = proxy.dispatcher();
-    let _c = connect(vip, port).await;
+    let mut c1 = connect(vip, port).await;
     wait_streams(&d1, 1).await;
 
     proxy
@@ -409,18 +408,32 @@ async fn second_start_currently_orphans_new_connections_in_old_dispatcher() {
         .await
         .expect("hot-swap start");
     let d2 = proxy.dispatcher();
-    assert!(!Arc::ptr_eq(&d1, &d2), "start() swapped in a fresh dispatcher");
-    assert_eq!(proxy.session_ref().read().await.as_ref().unwrap().session_id, SessionId([9u8; 12]));
+    assert!(Arc::ptr_eq(&d1, &d2), "listeners and recv_loop must share ONE dispatcher across hot-swap");
+    assert_eq!(d2.stream_count(), 0, "pre-swap streams are dropped (their session is gone)");
 
-    let _c2 = connect(vip, port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    // The listener still registers into d1 (captured at spawn), never d2 —
-    // AND next_stream_id was reset to 1, so the new connection re-registers
-    // stream_id 1 in d1, silently stealing the first connection's channel.
-    assert_eq!(d1.stream_count(), 1, "second connection collided onto stream_id 1 in the OLD dispatcher");
-    assert_eq!(d2.stream_count(), 0, "new dispatcher never sees the connection (pins the bug)");
-    assert!(d1.dispatch(1, vec![1]).is_ok());
-    assert!(matches!(d2.dispatch(1, vec![1]), Err(DispatchError::NoStream)));
+    // The old connection's channel is closed so no further tunnel data can
+    // reach it. Note: handle_mux_connection does NOT proactively close the
+    // TCP socket when the write task exits; the read loop lives until the
+    // client closes or CONNECTION_IDLE_TIMEOUT_SECS. So the client sees
+    // silence, not EOF. Pinned as-is (pre-existing, separate from the
+    // split-brain fix).
+    assert!(matches!(d2.dispatch(1, b"stale".to_vec()), Err(DispatchError::NoStream)));
+    let mut b = [0u8; 8];
+    let r = tokio::time::timeout(Duration::from_millis(500), c1.read(&mut b)).await;
+    assert!(
+        r.is_err() || matches!(r, Ok(Ok(0))),
+        "old conn must receive nothing after swap: {:?}",
+        r.map(|x| x.map(|n| b[..n].to_vec()))
+    );
+
+    // New connection gets a stream id that does NOT reuse 1.
+    let mut c2 = connect(vip, port).await;
+    wait_streams(&d2, 1).await;
+    assert!(matches!(d2.dispatch(1, vec![1]), Err(DispatchError::NoStream)), "stream_id 1 must not be reused");
+    d2.dispatch(2, b"post-swap".to_vec()).unwrap();
+    let mut b = [0u8; 16];
+    let n = tokio::time::timeout(Duration::from_secs(2), c2.read(&mut b)).await.unwrap().unwrap();
+    assert_eq!(&b[..n], b"post-swap");
     proxy.stop();
 }
 

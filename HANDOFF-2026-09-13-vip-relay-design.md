@@ -52,7 +52,7 @@ starts with a DESIGN conversation, not a bug fix.
 
 ## The two open bugs, precisely
 
-### Bug 7 — Rust `VipProxy::start()` hot-swap split-brain (iOS reconnect)
+### Bug 7 — Rust `VipProxy::start()` hot-swap split-brain (iOS reconnect) — FIXED
 `proto/src/vip.rs` ~625. On a second `start()` (tunnel reconnect: cell↔wifi,
 backgrounding) `self.dispatcher` is replaced with a fresh
 `StreamDispatcher`, but the already-running `vip_listener_task`s captured
@@ -170,7 +170,7 @@ the whole "75 failures" story.
 
 ## Not done / not pushed
 - Nothing pushed to origin. `git log 8e94d04..HEAD` = 3 commits.
-- Bug 7 fix: not started (mechanical, waiting only on go-ahead).
+- Bug 7: FIXED (commit after 64927f7). VipProxy keeps one StreamDispatcher for its lifetime, clears it in place on hot-swap, never resets next_stream_id. 22/22 lifecycle tests, proto 1,852/1,852.
 - Bug 6: PARKED behind ZTLP_RELAY_VIP_ENABLED (default off); blocked on the security design decision above.
 - Clippy: 38 pre-existing `-D warnings` errors in proto lib, none in files
   touched; not addressed.

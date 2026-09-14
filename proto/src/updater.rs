@@ -357,16 +357,20 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 }
 
 fn extract_asset_url(json: &str, pattern: &str) -> Option<String> {
-    // Look for browser_download_url containing the pattern
+    // Look for browser_download_url containing the pattern. Search for the
+    // QUOTED key so the slice handed to extract_json_string starts at the
+    // asset we actually found (searching for the bare word and then for the
+    // quoted key inside the slice skipped the first occurrence every time).
+    const KEY: &str = "\"browser_download_url\"";
     let mut search_from = 0;
-    while let Some(idx) = json[search_from..].find("browser_download_url") {
+    while let Some(idx) = json[search_from..].find(KEY) {
         let abs_idx = search_from + idx;
         if let Some(url) = extract_json_string(&json[abs_idx..], "browser_download_url") {
             if url.contains(pattern) {
                 return Some(url);
             }
         }
-        search_from = abs_idx + 20;
+        search_from = abs_idx + KEY.len();
     }
     None
 }

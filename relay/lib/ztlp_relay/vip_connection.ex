@@ -129,23 +129,7 @@ defmodule ZtlpRelay.VipConnection do
     else
       backend_bytes = byte_size(data)
 
-      resp_frame = VipFrame.encode(state.connection_id, :data, data)
-
-      case state.session_key do
-        session_key when is_binary(session_key) ->
-          encrypted = encrypt_for_client(resp_frame, session_key, state)
-          :gen_udp.send(state.udp_socket,
-            elem(state.client_addr, 0),
-            elem(state.client_addr, 1),
-            encrypted
-          )
-        _ ->
-          :gen_udp.send(state.udp_socket,
-            elem(state.client_addr, 0),
-            elem(state.client_addr, 1),
-            resp_frame
-          )
-      end
+      send_frame_to_client(VipFrame.encode(state.connection_id, :data, data), state)
 
       {:noreply, %{state | bytes_from_backend: state.bytes_from_backend + backend_bytes,
                      last_activity: System.monotonic_time(:millisecond)}}
@@ -302,13 +286,27 @@ defmodule ZtlpRelay.VipConnection do
   end
 
   defp connect_tls_backend({ip, port}, state) do
-    tls_opts =
-      [:binary, active: true, nodelay: true, send_timeout: @send_timeout_ms, exit_on_close: true] ++
-      TlsConfig.client_opts()
+    tcp_opts = [:binary, active: false, nodelay: true, send_timeout: @send_timeout_ms]
+    # Only ssl-level options go to :ssl.connect/3. gen_tcp-only options
+    # (:binary, exit_on_close, ...) are rejected by OTP ssl.
+    ssl_opts = [active: true] ++ TlsConfig.client_opts()
 
-    case :gen_tcp.connect(ip, port, tls_opts, @connect_timeout_ms) do
+    case :gen_tcp.connect(ip, port, tcp_opts, @connect_timeout_ms) do
       {:ok, tcp_socket} ->
-        case :ssl.connect(tcp_socket, tls_opts, @connect_timeout_ms) do
+        # :ssl.connect/3 can RAISE (not return {:error, _}) if the peer
+        # closes the TCP socket while ssl is still reading socket options
+        # ({:badmatch, {:error, :einval}} from ssl:emulated_options/4).
+        # Treat that exactly like a failed handshake.
+        result =
+          try do
+            :ssl.connect(tcp_socket, ssl_opts, @connect_timeout_ms)
+          rescue
+            e -> {:error, {:ssl_connect_raised, e}}
+          catch
+            kind, reason -> {:error, {:ssl_connect_raised, {kind, reason}}}
+          end
+
+        case result do
           {:ok, ssl_socket} ->
             Logger.info(
               "[VIP] Backend TLS connected conn=#{state.connection_id} svc=#{state.service_name}"
@@ -420,23 +418,7 @@ defmodule ZtlpRelay.VipConnection do
         "[VIP] Backend->Client conn=#{state.connection_id} svc=#{state.service_name} bytes=#{backend_bytes}"
       )
 
-      resp_frame = VipFrame.encode(state.connection_id, :data, data)
-
-      case state.session_key do
-        session_key when is_binary(session_key) ->
-          encrypted = encrypt_for_client(resp_frame, session_key, state)
-          :gen_udp.send(state.udp_socket,
-            elem(state.client_addr, 0),
-            elem(state.client_addr, 1),
-            encrypted
-          )
-        _ ->
-          :gen_udp.send(state.udp_socket,
-            elem(state.client_addr, 0),
-            elem(state.client_addr, 1),
-            resp_frame
-          )
-      end
+      send_frame_to_client(VipFrame.encode(state.connection_id, :data, data), state)
 
       {:noreply, %{
         state
@@ -447,25 +429,26 @@ defmodule ZtlpRelay.VipConnection do
   end
 
   defp send_fin_to_client(state) do
-    frame = VipFrame.encode(state.connection_id, :fin, <<>>)
-    encrypted = encrypt_for_client(frame, state.session_key, state)
-
-    :gen_udp.send(state.udp_socket,
-      elem(state.client_addr, 0),
-      elem(state.client_addr, 1),
-      encrypted
-    )
+    send_frame_to_client(VipFrame.encode(state.connection_id, :fin, <<>>), state)
   end
 
   defp send_rst_to_client(state) do
-    frame = VipFrame.encode(state.connection_id, :rst, <<>>)
-    encrypted = encrypt_for_client(frame, state.session_key, state)
+    send_frame_to_client(VipFrame.encode(state.connection_id, :rst, <<>>), state)
+  end
 
-    :gen_udp.send(state.udp_socket,
-      elem(state.client_addr, 0),
-      elem(state.client_addr, 1),
-      encrypted
-    )
+  # Single egress point for every VIP frame going back to the client.
+  # With a session key the frame is wrapped in a header-authenticated ZTLP
+  # data packet; without one (unauthenticated/test mode) it is sent bare.
+  # Previously FIN/RST bypassed the nil-key check and crashed with
+  # FunctionClauseError in Crypto.compute_header_auth_tag/3.
+  defp send_frame_to_client(frame, state) do
+    wire =
+      case state.session_key do
+        key when is_binary(key) -> encrypt_for_client(frame, key, state)
+        _ -> frame
+      end
+
+    :gen_udp.send(state.udp_socket, elem(state.client_addr, 0), elem(state.client_addr, 1), wire)
   end
 
   defp encrypt_for_client(frame, session_key, state) do

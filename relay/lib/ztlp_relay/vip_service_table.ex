@@ -114,11 +114,10 @@ defmodule ZtlpRelay.VipServiceTable do
   """
   @spec count() :: non_neg_integer()
   def count do
-    :ets.info(@table_name, :size)
-  rescue
-    _e in ArgumentError -> 0
-  catch
-    _, _ -> 0
+    case :ets.info(@table_name, :size) do
+      n when is_integer(n) -> n
+      _ -> 0
+    end
   end
 
   # GenServer callbacks

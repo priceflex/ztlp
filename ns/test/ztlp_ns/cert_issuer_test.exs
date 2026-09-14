@@ -52,10 +52,17 @@ defmodule ZtlpNs.CertIssuerTest do
     end
     
     on_exit(fn ->
+      # Clean up, then restore Mnesia + NS app so subsequent tests that share
+      # the Mnesia tables / ZtlpNs.Server don't hit 'no process' errors.
+      # (Previously this stopped both and restarted neither, which made every
+      # later Server/Store-dependent test in the run fail depending on seed
+      # order — e.g. PunchProtocolTest / StoreMnesiaTest under --seed 777.)
       Application.stop(:ztlp_ns)
       Application.stop(:mnesia)
       File.rm_rf!(test_dir)
       File.rm_rf!(mnesia_dir)
+      Application.ensure_all_started(:mnesia)
+      Application.ensure_all_started(:ztlp_ns)
     end)
 
     {:ok, ca_dir: test_dir}

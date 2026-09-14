@@ -4,14 +4,14 @@ Generated 2026-09-13 from live `cargo-llvm-cov` (Rust) and `mix test --cover`
 (Elixir) runs. Updated same day after the first test-writing pass (see
 "Session 1 results").
 
-## TL;DR current numbers (after Session 1)
+## TL;DR current numbers (after Session 2)
 
 | Component | Tool | Line coverage | Tests | Status |
 |---|---|---|---|---|
-| Rust `proto` (lib only, `src/bin/` excluded) | cargo-llvm-cov | **73.5%** (was 58-59% incl. bins) | 1,823 passing, 0 failing | green |
-| Elixir `ns` | mix test --cover | **60.9%** (see note) | **971/971 passing** (was 75 failing) | green |
-| Elixir `relay` | mix test --cover | **62.3%** (was 56.1%) | 750 passing, 3 skipped (pinned bugs) | green |
-| Elixir `gateway` | mix test --cover **in Docker** | **60.9%** | 972/972 passing | green, unblocked |
+| Rust `proto` (lib only, `src/bin/` excluded) | cargo-llvm-cov | **74.6%** (S1 73.5%, start 58-59% incl. bins) | 1,846 passing, 1 known-flaky (quic pin) | green |
+| Elixir `ns` | mix test --cover | **69.4%** (S1 60.9%) | **991/991** on seeds 777 + 424242 | green |
+| Elixir `relay` | mix test --cover | **62.2%** (start 56.1%) | 755 + 18 new, 1 skipped (pinned bug) | green |
+| Elixir `gateway` | mix test --cover **in Docker** | **64.1%** (S1 60.9%) | 1,092/1,092 | green |
 
 Note on ns %: the earlier 68.5% was measured with 75 red tests. 60.9% is the
 number from a fully green run with a different seed; the two are not directly
@@ -56,7 +56,64 @@ that flag so numbers stay comparable.
   an interactive shell masks the leak). The "75 failures" were seed-order
   dependent: `--seed 0` gave 1 failure, `--seed 12345` after fix gives 0.
 
-### Real bugs found — ALL 5 FIXED (TDD: pinned test red -> lib fix -> green)
+## Session 2 results (2026-09-13, same day)
+
+### Tests added
+- `proto/tests/vip_proxy_lifecycle_test.rs` (22) — vip.rs 41% -> **91.2%**.
+  Real loopback VIP listeners: accept, tunnel->TCP via StreamDispatcher,
+  FIN/CLOSE sentinels, client close unregisters, concurrent stream ids,
+  multi-port, bind failure, stop, update_session, no-session reject, TLS
+  acceptor with rcgen cert in isolated HOME (8443), no-cert fallback.
+- `relay/test/ztlp_relay/vip_tcp_terminator_e2e_test.exs` (18) — real
+  encrypted compact packets end-to-end through handle_vip_packet/4.
+- `gateway/test/ztlp_gateway/cbor_test.exs` (91) — Cbor 40.7% -> **100%**.
+  RFC 8949 Appendix A vectors, width boundaries, deterministic map order,
+  every decode error class, 200-case random round-trip.
+- `gateway/test/ztlp_gateway/cert_provisioner_test.exs` (29) —
+  CertProvisioner 10.6% -> **95.9%**. Fake NS UDP server speaking
+  0x14 0x01/02/03 (verifies the Ed25519 request signature), full
+  provisioning, dual-key storage, refresh/renew, chain-fail non-fatal,
+  per-service issuance error codes, backoff ladder 30s..1h, renewal-failure
+  keeps old certs, timeout, expiry classification, sweep + forced renew.
+- `ns/test/ztlp_ns/relay_seeder_test.exs` (20) — RelaySeeder 7% -> **100%**.
+
+### Test-only fix (applied)
+- `ns/test/ztlp_ns/cert_issuer_test.exs` on_exit stopped `:ztlp_ns` and
+  `:mnesia` and restarted neither. Any Server/Store-dependent test that ran
+  after it failed with "no process" (seed 777: 11-15 failures in
+  PunchProtocolTest/StoreMnesiaTest). Now restarts both, matching
+  admin_test/anti_entropy_test. Seeds 777 and 424242: 991/991.
+
+### New bugs found (NOT fixed, pinned)
+6. **relay `VipTcpTerminator` — VIP dispatch is dead code in prod.** Two
+   independent defects: (a) `extract_service_name/1` reads `dst_svc_id`,
+   which only handshake packets carry; UdpListener only routes
+   `:data_compact` packets here, so service_name is always "" and every
+   packet falls back to classic relay. (b) `route_connection/6` calls
+   `SessionSupervisor.start_session/1`, which starts a `ZtlpRelay.Session`
+   (needs `:peer_a`) not a `VipConnection`; `VipConnection.start_link` is
+   unreferenced in lib/. Pinned by two tests in
+   `vip_tcp_terminator_e2e_test.exs`; the intended-behaviour test is
+   `@tag :skip`. Needs a design decision (where does service identity come
+   from on the data path?) before fixing.
+7. **proto `VipProxy::start()` hot-swap dispatcher split-brain.** On a
+   second `start()`, `self.dispatcher` is replaced but running listener
+   tasks hold the OLD `Arc<StreamDispatcher>`; new connections register in
+   the old one while `proxy.dispatcher()` (used by the FFI recv_loop) is
+   the new, empty one -> every post-reconnect connection is a download
+   black hole. Also `next_stream_id` resets to 1 so the first new connection
+   hijacks stream 1's channel. `#[ignore]`d intended test + pinned test in
+   `vip_proxy_lifecycle_test.rs`. Fix: share via `Arc<RwLock<Arc<..>>>` or
+   clear-in-place instead of replace.
+
+### Documented quirks pinned by tests (not bugs, but surprising)
+- RelaySeeder re-seed of an existing name is `:stale_serial` (always
+  serial 1): editing ZTLP_NS_RELAY_RECORDS and restarting does NOT update
+  an existing record. The moduledoc example format (bare `ip:port` part
+  without `address=`) seeds 0 records.
+- Cbor.decode ignores trailing bytes after a complete item.
+
+### Real bugs found in Session 1 — ALL 5 FIXED (TDD: pinned test red -> lib fix -> green)
 Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_table}.ex`,
 `proto/src/updater.rs`. Relay 755/755, proto updater suites 67/67, compile
 `--warnings-as-errors` clean. Not yet committed.
@@ -129,7 +186,7 @@ Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_ta
 
 | File | Coverage | Notes |
 |---|---|---|
-| `vip.rs` | 41.0% | VIP/service routing — weakest major file. **Next.** |
+| `vip.rs` | 91.2% | done S2 |
 | `tunnel.rs` | 43.8% | Largest file (5k lines). |
 | `ffi.rs` | 44.0% | FFI boundary — high risk. Needs harness for C-ABI calls. |
 | `agent/proxy.rs` | ~50% | |
@@ -138,7 +195,7 @@ Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_ta
 | `transport.rs` | ~58% | |
 
 - [x] relay.rs 95.5%, updater.rs 97.7%, congestion/pacing/send_controller 100%
-- [ ] vip.rs raised (target: 70%+)
+- [x] vip.rs raised to 91.2%
 - [ ] ffi.rs raised (target: 70%+)
 - [ ] tunnel.rs raised (target: 65%+)
 - [ ] Re-run `cargo llvm-cov --ignore-filename-regex 'src/bin/' --summary-only` after each batch
@@ -151,12 +208,12 @@ Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_ta
 |---|---|---|
 | `StatsReporter` | 29.2% | |
 | `SessionSupervisor` | 33.3% | |
-| `VipTcpTerminator` | 34.5% | Dispatch into VipConnection — next VIP target |
+| `VipTcpTerminator` | ~60% (S2) | dispatch path is dead code in prod, see bug 6 |
 | `MeshManager` | 37.0% | |
 | `Config` / `UdpListener` | ~48% | Packet hot path |
 
 - [x] VipConnection 91.8%, VipServiceTable 92.3%, SignalHandler 91.7%
-- [ ] VipTcpTerminator (pairs naturally with the VipConnection harness)
+- [x] VipTcpTerminator e2e (blocked further by bug 6)
 - [ ] UdpListener / Config / MeshManager
 
 ---
@@ -166,11 +223,11 @@ Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_ta
 | Module | Coverage | Notes |
 |---|---|---|
 | `Bench` | 0% | Benchmark tool — exclude or smoke-test only |
-| `RelaySeeder` | ~7% | Almost entirely untested |
+| `RelaySeeder` | 100% (S2) | done |
 | `Cluster` | ~42% | |
 | `Server` | ~58% | Core NS server logic — priority |
 
-- [ ] Cover `RelaySeeder`
+- [x] Cover `RelaySeeder`
 - [ ] Raise `Cluster` and `Server`
 
 ---
@@ -181,15 +238,15 @@ Lib changes: `relay/lib/ztlp_relay/{signal_handler,vip_connection,vip_service_ta
 |---|---|---|
 | `TlsTerminator` | 0% | Untested entirely |
 | `Bench` | 0% | Benchmark tool — exclude |
-| `CertProvisioner` | 10.6% | Cert lifecycle — security-relevant |
+| `CertProvisioner` | 95.9% (S2) | done |
 | `Listener` | 14.6% | |
 | `Backend` | 35.9% | |
 | `Session` | 36.8% | |
 | `Federation` | 38.1% | |
-| `Cbor` | 40.7% | Codec — pure functions, easy wins |
+| `Cbor` | 100% (S2) | done |
 
-- [ ] `Cbor` (pure codec, quick)
-- [ ] `CertProvisioner` (security-relevant)
+- [x] `Cbor`
+- [x] `CertProvisioner`
 - [ ] `TlsTerminator`, `Listener`, `Session`
 
 ---

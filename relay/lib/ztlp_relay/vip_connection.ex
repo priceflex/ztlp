@@ -296,7 +296,21 @@ defmodule ZtlpRelay.VipConnection do
     tcp_opts = [:binary, active: false, nodelay: true, send_timeout: @send_timeout_ms]
     # Only ssl-level options go to :ssl.connect/3. gen_tcp-only options
     # (:binary, exit_on_close, ...) are rejected by OTP ssl.
-    ssl_opts = [active: true] ++ TlsConfig.client_opts()
+    #
+    # BUG (found 2026-09-14, fixed here): when the operator hasn't configured
+    # TlsConfig (the default — client_opts() returns []), no `verify` option
+    # was passed at all, leaving Erlang's own default in effect. On OTP 26
+    # that default requires validating the peer cert against a system CA
+    # store; when none is discoverable, `:ssl.connect/3` fails LOCALLY before
+    # ever writing a ClientHello ({:error, ...}, socket already closed) —
+    # this is not a handshake timeout, it never talks to the backend at all.
+    # That means this path would have failed against every real backend on
+    # OTP 26+, not just in tests. The backend's identity here is opportunistic
+    # encryption to an internal/customer service behind the relay; the actual
+    # tunnel identity assurance already happened at the ZTLP/Noise layer one
+    # level up, so `verify_none` is correct unless the operator has
+    # explicitly configured TlsConfig for stricter validation.
+    ssl_opts = [active: true] ++ TlsConfig.client_opts() ++ [verify: :verify_none]
 
     case :gen_tcp.connect(ip, port, tcp_opts, @connect_timeout_ms) do
       {:ok, tcp_socket} ->

@@ -53,7 +53,9 @@ fn addr(port: u16) -> SocketAddr {
 }
 
 async fn relay() -> SimulatedRelay {
-    SimulatedRelay::bind("127.0.0.1:0").await.expect("bind relay")
+    SimulatedRelay::bind("127.0.0.1:0")
+        .await
+        .expect("bind relay")
 }
 
 async fn peer() -> UdpSocket {
@@ -109,7 +111,10 @@ fn relay_connection_set_token_unexpired_is_valid() {
 fn relay_connection_expired_token_is_not_valid() {
     let mut conn = RelayConnection::new(addr(4000), sid(1));
     conn.set_token(token_expiring_at(now_secs() - 1));
-    assert!(conn.get_token().is_some(), "token is stored even if expired");
+    assert!(
+        conn.get_token().is_some(),
+        "token is stored even if expired"
+    );
     assert!(!conn.has_valid_token(), "expired token must report invalid");
 }
 
@@ -119,7 +124,10 @@ fn relay_connection_set_token_replaces_previous() {
     conn.set_token(token_expiring_at(now_secs() - 1));
     assert!(!conn.has_valid_token());
     conn.set_token(token_expiring_at(now_secs() + 60));
-    assert!(conn.has_valid_token(), "fresh token must replace expired one");
+    assert!(
+        conn.has_valid_token(),
+        "fresh token must replace expired one"
+    );
 }
 
 #[test]
@@ -197,7 +205,10 @@ async fn truncated_data_header_is_dropped() {
     assert!(!r2.process_one(&d, from).await.unwrap());
     b.send_to(&pkt[..18], r2.local_addr).await.unwrap();
     let (d, from) = recv_with_timeout(&r2.socket).await.unwrap();
-    assert!(r2.process_one(&d, from).await.unwrap(), "18-byte data header is routable");
+    assert!(
+        r2.process_one(&d, from).await.unwrap(),
+        "18-byte data header is routable"
+    );
     assert!(recv_with_timeout(&a).await.is_some());
 }
 
@@ -206,7 +217,10 @@ async fn truncated_handshake_header_is_dropped() {
     let r = relay().await;
     let pkt = handshake_packet(&sid(1));
     assert!(!r.process_one(&pkt[..22], addr(1)).await.unwrap());
-    assert!(!r.process_one(&pkt[..22], addr(2)).await.unwrap(), "nothing learned from truncated pkt");
+    assert!(
+        !r.process_one(&pkt[..22], addr(2)).await.unwrap(),
+        "nothing learned from truncated pkt"
+    );
 }
 
 // ─── SimulatedRelay: pairing + forwarding ──────────────────────────────────
@@ -218,7 +232,10 @@ async fn first_packet_learns_peer_and_is_not_forwarded() {
     let pkt = data_packet(&sid(0x11));
     let forwarded = r.process_one(&pkt, a.local_addr().unwrap()).await.unwrap();
     assert!(!forwarded);
-    assert!(recv_with_timeout(&a).await.is_none(), "must not echo to sole peer");
+    assert!(
+        recv_with_timeout(&a).await.is_none(),
+        "must not echo to sole peer"
+    );
 }
 
 #[tokio::test]
@@ -243,13 +260,27 @@ async fn second_peer_pairs_and_first_packet_is_forwarded_to_first_peer() {
     let mut pkt_b = data_packet(&s);
     pkt_b[46..50].copy_from_slice(b"FRMB");
 
-    assert!(!r.process_one(&pkt_a, a.local_addr().unwrap()).await.unwrap());
-    assert!(r.process_one(&pkt_b, b.local_addr().unwrap()).await.unwrap());
+    assert!(!r
+        .process_one(&pkt_a, a.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert!(r
+        .process_one(&pkt_b, b.local_addr().unwrap())
+        .await
+        .unwrap());
 
-    let (got, from) = recv_with_timeout(&a).await.expect("A must receive B's packet");
+    let (got, from) = recv_with_timeout(&a)
+        .await
+        .expect("A must receive B's packet");
     assert_eq!(got, pkt_b, "payload forwarded byte-for-byte");
-    assert_eq!(from, r.local_addr, "forwarded packet is sourced from the relay");
-    assert!(recv_with_timeout(&b).await.is_none(), "B must not get its own packet back");
+    assert_eq!(
+        from, r.local_addr,
+        "forwarded packet is sourced from the relay"
+    );
+    assert!(
+        recv_with_timeout(&b).await.is_none(),
+        "B must not get its own packet back"
+    );
 }
 
 #[tokio::test]
@@ -288,12 +319,22 @@ async fn third_party_on_paired_session_is_forwarded_to_addr_a() {
     let b = peer().await;
     let c = peer().await;
     let s = sid(0x44);
-    r.process_one(&data_packet(&s), a.local_addr().unwrap()).await.unwrap();
-    r.process_one(&data_packet(&s), b.local_addr().unwrap()).await.unwrap();
+    r.process_one(&data_packet(&s), a.local_addr().unwrap())
+        .await
+        .unwrap();
+    r.process_one(&data_packet(&s), b.local_addr().unwrap())
+        .await
+        .unwrap();
     recv_with_timeout(&a).await.unwrap();
 
-    assert!(r.process_one(&data_packet(&s), c.local_addr().unwrap()).await.unwrap());
-    assert!(recv_with_timeout(&a).await.is_some(), "unknown sender routed to addr_a");
+    assert!(r
+        .process_one(&data_packet(&s), c.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert!(
+        recv_with_timeout(&a).await.is_some(),
+        "unknown sender routed to addr_a"
+    );
     assert!(recv_with_timeout(&b).await.is_none());
 }
 
@@ -306,14 +347,25 @@ async fn sessions_are_isolated_by_session_id() {
     let s1 = sid(0x51);
     let s2 = sid(0x52);
 
-    r.process_one(&data_packet(&s1), a1.local_addr().unwrap()).await.unwrap();
+    r.process_one(&data_packet(&s1), a1.local_addr().unwrap())
+        .await
+        .unwrap();
     // Different session's first peer must NOT pair with s1's pending peer.
-    assert!(!r.process_one(&data_packet(&s2), a2.local_addr().unwrap()).await.unwrap());
+    assert!(!r
+        .process_one(&data_packet(&s2), a2.local_addr().unwrap())
+        .await
+        .unwrap());
     assert!(recv_with_timeout(&a1).await.is_none());
 
-    assert!(r.process_one(&data_packet(&s1), b1.local_addr().unwrap()).await.unwrap());
+    assert!(r
+        .process_one(&data_packet(&s1), b1.local_addr().unwrap())
+        .await
+        .unwrap());
     assert!(recv_with_timeout(&a1).await.is_some());
-    assert!(recv_with_timeout(&a2).await.is_none(), "s2 peer must not see s1 traffic");
+    assert!(
+        recv_with_timeout(&a2).await.is_none(),
+        "s2 peer must not see s1 traffic"
+    );
 }
 
 #[tokio::test]
@@ -324,9 +376,17 @@ async fn handshake_and_data_headers_route_to_the_same_session() {
     let a = peer().await;
     let b = peer().await;
     let s = sid(0x66);
-    assert!(!r.process_one(&handshake_packet(&s), a.local_addr().unwrap()).await.unwrap());
-    assert!(r.process_one(&data_packet(&s), b.local_addr().unwrap()).await.unwrap());
-    let (got, _) = recv_with_timeout(&a).await.expect("A paired via handshake, got B's data pkt");
+    assert!(!r
+        .process_one(&handshake_packet(&s), a.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert!(r
+        .process_one(&data_packet(&s), b.local_addr().unwrap())
+        .await
+        .unwrap());
+    let (got, _) = recv_with_timeout(&a)
+        .await
+        .expect("A paired via handshake, got B's data pkt");
     assert_eq!(got.len(), 50);
 }
 
@@ -391,7 +451,10 @@ async fn run_loop_forwards_between_two_real_sockets() {
     // Garbage must not kill the loop.
     a.send_to(b"garbage", relay_addr).await.unwrap();
     a.send_to(&from_a, relay_addr).await.unwrap();
-    assert!(recv_with_timeout(&b).await.is_some(), "loop still alive after garbage");
+    assert!(
+        recv_with_timeout(&b).await.is_some(),
+        "loop still alive after garbage"
+    );
 
     runner.abort();
 }
@@ -418,7 +481,11 @@ async fn rendezvous_same_peer_reregister_keeps_single_entry() {
     let pkt = encode_rv_register(&rid, addr(5555));
     assert!(!r.process_one(&pkt, a_addr).await.unwrap());
     assert!(!r.process_one(&pkt, a_addr).await.unwrap());
-    assert_eq!(r.rendezvous_count().await, 1, "re-register must not duplicate or drop");
+    assert_eq!(
+        r.rendezvous_count().await,
+        1,
+        "re-register must not duplicate or drop"
+    );
     assert!(recv_with_timeout(&a).await.is_none());
 }
 
@@ -431,14 +498,27 @@ async fn rendezvous_second_peer_exchanges_mapped_endpoints_and_clears_entry() {
     let a_mapped = addr(41000);
     let b_mapped = addr(42000);
 
-    assert!(!r.process_one(&encode_rv_register(&rid, a_mapped), a.local_addr().unwrap()).await.unwrap());
-    assert!(r.process_one(&encode_rv_register(&rid, b_mapped), b.local_addr().unwrap()).await.unwrap());
-    assert_eq!(r.rendezvous_count().await, 0, "completed rendezvous is removed");
+    assert!(!r
+        .process_one(&encode_rv_register(&rid, a_mapped), a.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert!(r
+        .process_one(&encode_rv_register(&rid, b_mapped), b.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert_eq!(
+        r.rendezvous_count().await,
+        0,
+        "completed rendezvous is removed"
+    );
 
     let (pkt_a, from_a) = recv_with_timeout(&a).await.expect("A gets PeerInfo");
     assert_eq!(from_a, r.local_addr);
     match decode_rv_message(&pkt_a).unwrap() {
-        RendezvousMessage::PeerInfo { rendezvous_id, peer_addr } => {
+        RendezvousMessage::PeerInfo {
+            rendezvous_id,
+            peer_addr,
+        } => {
             assert_eq!(rendezvous_id, rid);
             assert_eq!(peer_addr, b_mapped, "A learns B's mapped addr");
         }
@@ -460,8 +540,19 @@ async fn rendezvous_ids_are_independent() {
     let r = relay().await;
     let a = peer().await;
     let b = peer().await;
-    r.process_one(&encode_rv_register(&[1u8; 32], addr(1)), a.local_addr().unwrap()).await.unwrap();
-    assert!(!r.process_one(&encode_rv_register(&[2u8; 32], addr(2)), b.local_addr().unwrap()).await.unwrap());
+    r.process_one(
+        &encode_rv_register(&[1u8; 32], addr(1)),
+        a.local_addr().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(!r
+        .process_one(
+            &encode_rv_register(&[2u8; 32], addr(2)),
+            b.local_addr().unwrap()
+        )
+        .await
+        .unwrap());
     assert_eq!(r.rendezvous_count().await, 2);
     assert!(recv_with_timeout(&a).await.is_none());
     assert!(recv_with_timeout(&b).await.is_none());
@@ -481,9 +572,19 @@ async fn rendezvous_non_register_messages_are_ignored() {
     let r = relay().await;
     let a = peer().await;
     let rid = [0x0Fu8; 32];
-    assert!(!r.process_one(&encode_rv_peer_info(&rid, addr(9)), a.local_addr().unwrap()).await.unwrap());
-    assert!(!r.process_one(&encode_rv_not_found(&rid), a.local_addr().unwrap()).await.unwrap());
-    assert_eq!(r.rendezvous_count().await, 0, "PeerInfo/NotFound must not create entries");
+    assert!(!r
+        .process_one(&encode_rv_peer_info(&rid, addr(9)), a.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert!(!r
+        .process_one(&encode_rv_not_found(&rid), a.local_addr().unwrap())
+        .await
+        .unwrap());
+    assert_eq!(
+        r.rendezvous_count().await,
+        0,
+        "PeerInfo/NotFound must not create entries"
+    );
     assert!(recv_with_timeout(&a).await.is_none());
 }
 
@@ -495,9 +596,14 @@ async fn rendezvous_packet_takes_precedence_over_ztlp_parsing() {
     let a = peer().await;
     let b = peer().await;
     let rid = [0x77u8; 32];
-    r.process_one(&encode_rv_register(&rid, addr(1)), a.local_addr().unwrap()).await.unwrap();
+    r.process_one(&encode_rv_register(&rid, addr(1)), a.local_addr().unwrap())
+        .await
+        .unwrap();
     // A ZTLP data packet from B must start a fresh session, not pair with A's RV.
-    assert!(!r.process_one(&data_packet(&sid(0x77)), b.local_addr().unwrap()).await.unwrap());
+    assert!(!r
+        .process_one(&data_packet(&sid(0x77)), b.local_addr().unwrap())
+        .await
+        .unwrap());
     assert!(recv_with_timeout(&a).await.is_none());
 }
 
@@ -508,8 +614,13 @@ async fn rendezvous_register_ipv6_mapped_addr_roundtrips() {
     let b = peer().await;
     let rid = [0x6Bu8; 32];
     let a_mapped: SocketAddr = "[2001:db8::1]:4444".parse().unwrap();
-    r.process_one(&encode_rv_register(&rid, a_mapped), a.local_addr().unwrap()).await.unwrap();
-    assert!(r.process_one(&encode_rv_register(&rid, addr(1)), b.local_addr().unwrap()).await.unwrap());
+    r.process_one(&encode_rv_register(&rid, a_mapped), a.local_addr().unwrap())
+        .await
+        .unwrap();
+    assert!(r
+        .process_one(&encode_rv_register(&rid, addr(1)), b.local_addr().unwrap())
+        .await
+        .unwrap());
     let (pkt_b, _) = recv_with_timeout(&b).await.unwrap();
     match decode_rv_message(&pkt_b).unwrap() {
         RendezvousMessage::PeerInfo { peer_addr, .. } => assert_eq!(peer_addr, a_mapped),

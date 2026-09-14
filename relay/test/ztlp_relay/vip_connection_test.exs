@@ -464,7 +464,11 @@ defmodule ZtlpRelay.VipConnectionTest do
         pid = start_conn(udp, be.port, tls_enabled: true)
         ref = Process.monitor(pid)
         bsock = await_backend()
-        # A real TLS ClientHello must have been sent to the backend.
+        # A real TLS ClientHello must have been sent to the backend. This is
+        # the regression test for the bug below: without an explicit
+        # `verify: :verify_none` default, `:ssl.connect/3` on OTP 26 fails
+        # LOCALLY (no system CA store configured) before ever writing a
+        # ClientHello, and this assert saw `:closed` with zero bytes instead.
         assert {:ok, <<0x16, 0x03, _::binary>>} = recv_tcp(bsock, 2_000)
         assert_receive {:DOWN, ^ref, :process, ^pid, {:tls_error, :timeout}}, 8_000
       end)
@@ -473,6 +477,31 @@ defmodule ZtlpRelay.VipConnectionTest do
       assert {:ok, bin} = recv_udp(2_000)
       {_pkt, frame} = decode_client_packet(bin)
       assert frame.frame_type == :rst
+    end
+
+    test "operator-configured TlsConfig.client_opts() overrides the verify_none default" do
+      # BUG (found 2026-09-14, fixed): connect_tls_backend/2 originally built
+      # ssl_opts as `[active: true] ++ TlsConfig.client_opts()`, i.e. with no
+      # verify option at all when TLS is unconfigured (the default). OTP
+      # ssl's own default then required a system CA store; when unavailable
+      # (true of most containers), :ssl.connect/3 failed locally without
+      # ever sending a ClientHello. Fixed by appending `verify: :verify_none`
+      # as the LAST option — `:ssl`/`:proplists` take the FIRST matching key,
+      # so this only takes effect when TlsConfig hasn't already supplied one.
+      prev = Application.get_env(:ztlp_relay, :tls_enabled)
+      Application.put_env(:ztlp_relay, :tls_enabled, true)
+
+      # No real cert/key configured -> TlsConfig.client_opts() still returns
+      # `verify: :verify_peer` (the operator's stricter choice) alongside
+      # depth: 3, with no cert files added since none are configured.
+      opts = ZtlpRelay.TlsConfig.client_opts()
+      assert Keyword.fetch!(opts, :verify) == :verify_peer
+
+      merged = [active: true] ++ opts ++ [verify: :verify_none]
+      assert :proplists.get_value(:verify, merged) == :verify_peer,
+             "operator's :verify_peer must win over our fallback :verify_none"
+
+      if prev, do: Application.put_env(:ztlp_relay, :tls_enabled, prev), else: Application.delete_env(:ztlp_relay, :tls_enabled)
     end
 
     # Regression: the backend closing while :ssl.connect/3 was assembling

@@ -34,10 +34,15 @@ async fn send_controller_stub_drops_everything_and_never_sends() {
     sc.enqueue_priority(vec![4, 5, 6]);
     // The stub does not retain the ack receiver, so the channel is already
     // closed: ACKs from the tunnel go nowhere. Pin that.
-    assert!(ack_tx.send(1).is_err(), "stub drops the ack receiver on construction");
+    assert!(
+        ack_tx.send(1).is_err(),
+        "stub drops the ack receiver on construction"
+    );
     sc.process_acks();
     sc.flush().await.expect("flush is Ok(())");
-    sc.check_retransmit().await.expect("check_retransmit is Ok(())");
+    sc.check_retransmit()
+        .await
+        .expect("check_retransmit is Ok(())");
     sc.purge_stream(7);
 
     let mut buf = [0u8; 64];
@@ -76,7 +81,10 @@ fn acc_never_gates_sends() {
     assert_eq!(cc.cwnd, INITIAL_CWND, "cwnd never moves");
     assert_eq!(cc.srtt_ms(), 0.0);
     assert_eq!(cc.rto_ms(), 1000.0);
-    assert_eq!(cc.gap_threshold(), Duration::from_millis(NACK_MIN_THRESHOLD_MS));
+    assert_eq!(
+        cc.gap_threshold(),
+        Duration::from_millis(NACK_MIN_THRESHOLD_MS)
+    );
 }
 
 #[test]
@@ -111,7 +119,10 @@ fn rtt_estimator_stub_is_static() {
     r.update(5);
     assert_eq!(r.srtt_ms(), 0, "update is a no-op");
     assert_eq!(r.rto_ms(), 1000);
-    let r2 = RttEstimator { srtt_ms: 42, rttvar_ms: 3 };
+    let r2 = RttEstimator {
+        srtt_ms: 42,
+        rttvar_ms: 3,
+    };
     assert_eq!(r2.srtt_ms(), 42, "srtt_ms getter reads the field");
     assert_eq!(r2.rttvar_ms, 3);
 }
@@ -140,7 +151,10 @@ fn sack_range_and_phase_derive_traits() {
     assert_eq!((r.start, r.end), (0, 0));
     let r2 = r; // Copy
     assert!(format!("{r2:?}").contains("SackRange"));
-    assert_ne!(CongestionPhase::Recovery, CongestionPhase::CongestionAvoidance);
+    assert_ne!(
+        CongestionPhase::Recovery,
+        CongestionPhase::CongestionAvoidance
+    );
     assert!(format!("{:?}", CongestionPhase::Recovery).contains("Recovery"));
 }
 
@@ -150,7 +164,10 @@ fn sack_range_and_phase_derive_traits() {
 fn pacing_detect_system_returns_default_profile_without_probing() {
     let start = std::time::Instant::now();
     let p = pacing::detect_system(addr(), None, Duration::from_secs(30));
-    assert!(start.elapsed() < Duration::from_secs(1), "must not actually probe/sleep");
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "must not actually probe/sleep"
+    );
     assert_eq!(p.max_sub_batch, 64);
     let d = SystemProfile::default();
     assert_eq!(d.max_sub_batch, p.max_sub_batch);

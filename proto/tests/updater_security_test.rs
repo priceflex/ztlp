@@ -37,10 +37,16 @@ fn verify_signature_rejects_tampered_data() {
     let sig = sk.sign(data).to_bytes();
     let mut tampered = data.to_vec();
     tampered[0] ^= 0x01;
-    assert!(!verify_signature(&tampered, &sig, &pk_hex), "single-bit flip must fail");
+    assert!(
+        !verify_signature(&tampered, &sig, &pk_hex),
+        "single-bit flip must fail"
+    );
     let mut appended = data.to_vec();
     appended.push(0);
-    assert!(!verify_signature(&appended, &sig, &pk_hex), "appended byte must fail");
+    assert!(
+        !verify_signature(&appended, &sig, &pk_hex),
+        "appended byte must fail"
+    );
 }
 
 #[test]
@@ -151,7 +157,11 @@ fn expected_asset_pattern() -> String {
     } else {
         "unknown"
     };
-    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
     format!("ztlp-{os}-{arch}")
 }
 
@@ -214,7 +224,10 @@ fn parse_github_release_prerelease_tag_maps_to_beta_channel() {
 fn parse_github_release_requires_tag_name() {
     assert!(parse_github_release(r#"{"body": "x"}"#).is_none());
     assert!(parse_github_release("").is_none());
-    assert!(parse_github_release(r#"{"tag_name": 123}"#).is_none(), "non-string tag");
+    assert!(
+        parse_github_release(r#"{"tag_name": 123}"#).is_none(),
+        "non-string tag"
+    );
     assert!(parse_github_release(r#"{"tag_name": "not-a-version"}"#).is_none());
     assert!(parse_github_release(r#"{"tag_name": "v1.2"}"#).is_none());
 }
@@ -296,8 +309,13 @@ fn cfg(v: &str, ch: UpdateChannel) -> UpdateConfig {
 
 #[test]
 fn check_update_nightly_accepts_prerelease() {
-    match check_update(&cfg("1.0.0", UpdateChannel::Nightly), &rel("1.0.1-nightly.20260913")) {
-        UpdateStatus::Available(r) => assert_eq!(r.version.pre.as_deref(), Some("nightly.20260913")),
+    match check_update(
+        &cfg("1.0.0", UpdateChannel::Nightly),
+        &rel("1.0.1-nightly.20260913"),
+    ) {
+        UpdateStatus::Available(r) => {
+            assert_eq!(r.version.pre.as_deref(), Some("nightly.20260913"))
+        }
         other => panic!("expected Available, got {other:?}"),
     }
 }
@@ -351,15 +369,29 @@ fn update_config_builders_chain() {
 #[test]
 fn update_config_default_version_matches_crate_version() {
     let c = UpdateConfig::default();
-    assert_eq!(c.current_version, SemVer::parse(env!("CARGO_PKG_VERSION")).unwrap());
-    assert_ne!(c.current_version, SemVer::new(0, 0, 0), "fallback must not be hit");
+    assert_eq!(
+        c.current_version,
+        SemVer::parse(env!("CARGO_PKG_VERSION")).unwrap()
+    );
+    assert_ne!(
+        c.current_version,
+        SemVer::new(0, 0, 0),
+        "fallback must not be hit"
+    );
 }
 
 #[test]
 fn update_channel_name_roundtrips_through_parse() {
-    for ch in [UpdateChannel::Stable, UpdateChannel::Beta, UpdateChannel::Nightly] {
+    for ch in [
+        UpdateChannel::Stable,
+        UpdateChannel::Beta,
+        UpdateChannel::Nightly,
+    ] {
         assert_eq!(UpdateChannel::parse_channel(ch.name()), Some(ch));
-        assert_eq!(UpdateChannel::parse_channel(&ch.name().to_uppercase()), Some(ch));
+        assert_eq!(
+            UpdateChannel::parse_channel(&ch.name().to_uppercase()),
+            Some(ch)
+        );
     }
     assert_eq!(UpdateChannel::parse_channel(" stable"), None, "no trimming");
 }
@@ -393,7 +425,9 @@ fn semver_parse_rejects_negative_empty_and_overflow() {
     assert!(SemVer::parse("v").is_none());
     assert!(SemVer::parse("99999999999.0.0").is_none(), "u32 overflow");
     assert!(SemVer::parse("1.0.0.0").is_none());
-    assert!(SemVer::parse("1.0.0-").map(|v| v.pre == Some(String::new())).unwrap_or(false));
+    assert!(SemVer::parse("1.0.0-")
+        .map(|v| v.pre == Some(String::new()))
+        .unwrap_or(false));
 }
 
 #[test]

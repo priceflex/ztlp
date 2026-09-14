@@ -181,6 +181,48 @@ defmodule ZtlpRelay.VipTcpTerminatorE2eTest do
     end
   end
 
+  # ── handle_vip_packet: VIP disabled (the production default) ────────────
+
+  describe "handle_vip_packet/4 when VIP mode is disabled" do
+    # The relay-side VIP terminator is PARKED (see HANDOFF-2026-09-13). The
+    # production default is ZTLP_RELAY_VIP_ENABLED unset => disabled. In that
+    # state the terminator must never decrypt, spawn, or touch a session —
+    # even if a session key and a VIP service happen to be configured.
+    test "returns :not_vip_service without decrypting or dispatching, for every env spelling of off" do
+      port = start_backend()
+      VipServiceTable.register("svc", {{127, 0, 0, 1}, port})
+      udp = udp_pair()
+      {parsed, raw} = vip_packet(:syn, 0x3333, "hello", 21)
+      parsed = Map.put(parsed, :dst_svc_id, pad_svc("svc"))
+
+      for off <- [:unset, "false", "0", "no", ""] do
+        if off == :unset,
+          do: System.delete_env("ZTLP_RELAY_VIP_ENABLED"),
+          else: System.put_env("ZTLP_RELAY_VIP_ENABLED", off)
+
+        assert :not_vip_service =
+                 VipTcpTerminator.handle_vip_packet(parsed, raw, udp.sender, udp.relay),
+               "VIP_ENABLED=#{inspect(off)}"
+      end
+
+      assert :none = await_backend(300), "no backend connection may be attempted while disabled"
+      assert :ets.lookup(:ztlp_vip_connections, {@session_id, 0x3333}) == []
+    end
+
+    test "a registered connection does not receive frames while disabled" do
+      System.put_env("ZTLP_RELAY_VIP_ENABLED", "false")
+      VipServiceTable.register("svc", {{127, 0, 0, 1}, 1})
+      VipTcpTerminator.register_connection(@session_id, 0x4343, self(), "svc", {{127, 0, 0, 1}, 1})
+      udp = udp_pair()
+      {parsed, raw} = vip_packet(:data, 0x4343, "leak?", 22)
+      parsed = Map.put(parsed, :dst_svc_id, pad_svc("svc"))
+
+      assert :not_vip_service = VipTcpTerminator.handle_vip_packet(parsed, raw, udp.sender, udp.relay)
+      refute_receive {:client_data, _}, 200
+      VipTcpTerminator.unregister_connection(@session_id, 0x4343)
+    end
+  end
+
   # ── handle_vip_packet: negative paths ───────────────────────────────────
 
   describe "handle_vip_packet/4 rejects before spawning anything" do

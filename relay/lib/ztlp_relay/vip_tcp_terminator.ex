@@ -1,5 +1,12 @@
 defmodule ZtlpRelay.VipTcpTerminator do
   @moduledoc """
+  > **PARKED (2026-09-13).** Relay-side VIP TCP termination is disabled by
+  > default and not wired end-to-end (see `HANDOFF-2026-09-13-vip-relay-design.md`,
+  > bug 6). It requires the relay to hold session keys and see plaintext; the
+  > security model for that (per-identity private relays vs gateway-side
+  > termination) is undecided. Do not enable `ZTLP_RELAY_VIP_ENABLED` in
+  > production until that is settled.
+
   VIP TCP termination supervisor and dispatcher for the ZTLP relay.
 
   When the relay receives an iOS VIP-proxied ZTLP packet, this module:
@@ -117,10 +124,22 @@ defmodule ZtlpRelay.VipTcpTerminator do
   @spec handle_vip_packet(Packet.data_packet(), binary(), {tuple(), non_neg_integer()}, port()) ::
           handle_result()
   def handle_vip_packet(parsed, raw_data, sender, udp_socket) do
-    if not enabled?() do
+    # PARKED FEATURE (2026-09-13, see HANDOFF-2026-09-13-vip-relay-design.md).
+    # Relay-side VIP termination requires the relay to hold the session key
+    # and see plaintext, which makes every relay a trusted box. That security
+    # model (per-identity private relays, or gateway-side termination) is
+    # undecided, so this path stays hard-off unless ZTLP_RELAY_VIP_ENABLED is
+    # explicitly set. The previous `if not enabled?() do ... end` had no
+    # `else`, so its result was discarded and the guard never actually
+    # returned — disabled relays still decrypted and dispatched.
+    if enabled?() do
+      do_handle_vip_packet(parsed, raw_data, sender, udp_socket)
+    else
       :not_vip_service
     end
+  end
 
+  defp do_handle_vip_packet(parsed, raw_data, sender, udp_socket) do
     case get_session_key(parsed.session_id) do
       nil ->
         Logger.debug("[VIP] No session key for session, falling back to classic relay")

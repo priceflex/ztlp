@@ -1486,8 +1486,12 @@ defmodule ZtlpRelay.UdpListener do
 
     case SessionRegistry.lookup_session(session_id) do
       {:ok, {peer_a, peer_b, pid}} ->
-        # VIP intercept: try VIP TCP termination first for data packets from peer_a
-        if parsed.type == :data_compact and sender == peer_a do
+        # VIP intercept: try VIP TCP termination first for data packets from peer_a.
+        # PARKED: relay-side VIP termination is off by default (see
+        # VipTcpTerminator.handle_vip_packet/4 and HANDOFF-2026-09-13). The
+        # `vip_enabled?` check here keeps the packet hot path free of the
+        # terminator entirely unless an operator turns it on.
+        if parsed.type == :data_compact and sender == peer_a and ZtlpRelay.Config.vip_enabled?() do
           case VipTcpTerminator.handle_vip_packet(parsed, data, sender, state.socket) do
             :vip_handled ->
               Stats.increment(:vip_packets_processed)

@@ -1,5 +1,12 @@
 defmodule ZtlpRelay.VipFrame do
   @moduledoc """
+  > **PARKED (2026-09-13).** Relay-side VIP TCP termination is disabled by
+  > default and not wired end-to-end (see `HANDOFF-2026-09-13-vip-relay-design.md`,
+  > bug 6). It requires the relay to hold session keys and see plaintext; the
+  > security model for that (per-identity private relays vs gateway-side
+  > termination) is undecided. Do not enable `ZTLP_RELAY_VIP_ENABLED` in
+  > production until that is settled.
+
   VIP tunnel mux frame parsing and serialization.
 
   For iOS relay-side VIP mode, the relay decrypts tunnel payloads from the

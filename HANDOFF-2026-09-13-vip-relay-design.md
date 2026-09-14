@@ -90,6 +90,26 @@ a half-built feature, not a regression.
 
 ## The design question to settle FIRST (Steven: "maybe there is a better way")
 
+### Steven's reasoning (2026-09-13, verbatim intent)
+The iPhone doesn't have the horsepower to hold many connections in memory,
+so a relay should make all the connections and route results back. BUT the
+relay would then hold session keys and see plaintext, so relay security
+becomes the problem. He is considering **one private relay per identity**
+("maybe everyone gets a private relay for themselves"). Undecided. Decision
+taken for now: **park the relay-side VIP code (step 2 below), do not
+delete it**, come back when the security model is chosen.
+
+### Status after step 2 (done, committed)
+- `VipTcpTerminator.handle_vip_packet/4` now really returns
+  `:not_vip_service` when `ZTLP_RELAY_VIP_ENABLED` is off (the old guard was
+  an `if` without `else` and never returned — disabled relays still
+  decrypted/dispatched). Two tests pin it.
+- `UdpListener` only calls the terminator when `Config.vip_enabled?()`, so
+  the packet hot path never touches VIP code by default.
+- The four VIP modules carry a PARKED banner in their moduledoc.
+- Nothing deleted. Turning `ZTLP_RELAY_VIP_ENABLED=true` back on restores
+  the previous (half-wired, bug-6) behaviour.
+
 Goal (Steven's words, restated): iPhone connects to a relay; the relay
 routes all connections and does all the heavy network work so the phone
 only holds one UDP flow.
@@ -151,6 +171,6 @@ the whole "75 failures" story.
 ## Not done / not pushed
 - Nothing pushed to origin. `git log 8e94d04..HEAD` = 3 commits.
 - Bug 7 fix: not started (mechanical, waiting only on go-ahead).
-- Bug 6: blocked on the design decision above.
+- Bug 6: PARKED behind ZTLP_RELAY_VIP_ENABLED (default off); blocked on the security design decision above.
 - Clippy: 38 pre-existing `-D warnings` errors in proto lib, none in files
   touched; not addressed.

@@ -64,13 +64,24 @@ defmodule ZtlpNs.YamlConfigComponentAuthTest do
       """)
 
       prev_config_env = System.get_env("ZTLP_NS_CONFIG")
-      prev_enabled = Application.get_env(:ztlp_ns, :component_auth_enabled)
-      prev_keys = Application.get_env(:ztlp_ns, :component_auth_allowed_keys)
+
+      # `validate/1` fills defaults for EVERY key it knows about (e.g.
+      # `storage_mode: :disc_copies`, `mnesia_dir`, ...) and `apply_to_app_env`
+      # writes all of them into the :ztlp_ns app env. Restoring only the
+      # component_auth keys leaked `storage_mode: :disc_copies` over the
+      # test-env `:ram_copies` and made StoreMnesiaTest "storage mode" fail
+      # whenever this test happened to run first (seed-dependent). Snapshot
+      # and restore the whole app env instead.
+      prev_app_env = Application.get_all_env(:ztlp_ns)
 
       on_exit(fn ->
         if prev_config_env, do: System.put_env("ZTLP_NS_CONFIG", prev_config_env), else: System.delete_env("ZTLP_NS_CONFIG")
-        Application.put_env(:ztlp_ns, :component_auth_enabled, prev_enabled)
-        Application.put_env(:ztlp_ns, :component_auth_allowed_keys, prev_keys)
+
+        for {key, _} <- Application.get_all_env(:ztlp_ns), not Keyword.has_key?(prev_app_env, key) do
+          Application.delete_env(:ztlp_ns, key)
+        end
+
+        Application.put_all_env([{:ztlp_ns, prev_app_env}])
         File.rm_rf!(test_dir)
       end)
 

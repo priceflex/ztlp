@@ -10719,7 +10719,10 @@ async fn cmd_admin_ls(
                 println!(
                     "{{\"type\":\"{}\",\"zone\":{},\"records\":[],\"error\":{}}}",
                     type_str,
-                    match zone { Some(z) => format!("\"{}\"", z), None => "null".to_string() },
+                    match zone {
+                        Some(z) => format!("\"{}\"", z),
+                        None => "null".to_string(),
+                    },
                     serde_json::to_string(&err)?
                 );
             } else {
@@ -11139,82 +11142,83 @@ async fn cmd_admin_groups(
     let path = admin_api_path("/admin/records", &[("type", "group".to_string())]);
     match admin_api_get(&path).await {
         Ok(json_val) => {
-            {
-                if let Some(records) = json_val.get("records").and_then(|r| r.as_array()) {
-                    if json_output {
-                        let groups: Vec<serde_json::Value> = records
-                            .iter()
-                            .map(|r| {
-                                let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                                let members = r
-                                    .get("data")
-                                    .and_then(|d| d.get("members"))
-                                    .and_then(|m| m.as_array())
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let desc = r
-                                    .get("data")
-                                    .and_then(|d| d.get("description"))
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                serde_json::json!({
-                                    "name": name,
-                                    "description": desc,
-                                    "members": members,
-                                    "member_count": members.len()
-                                })
-                            })
-                            .collect();
-                        println!(
-                            "{}",
-                            serde_json::to_string(&serde_json::json!({"groups": groups}))?
-                        );
-                    } else if records.is_empty() {
-                        eprintln!("  {} No groups found", c_dim("(empty)"));
-                        eprintln!();
-                    } else {
-                        eprintln!("  Found {} group(s):", records.len());
-                        eprintln!();
-                        for record in records {
-                            let name = record.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                            let desc = record
+            if let Some(records) = json_val.get("records").and_then(|r| r.as_array()) {
+                if json_output {
+                    let groups: Vec<serde_json::Value> = records
+                        .iter()
+                        .map(|r| {
+                            let name = r.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            let members = r
+                                .get("data")
+                                .and_then(|d| d.get("members"))
+                                .and_then(|m| m.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            let desc = r
                                 .get("data")
                                 .and_then(|d| d.get("description"))
                                 .and_then(|d| d.as_str())
                                 .unwrap_or("");
-                            let member_count = record
-                                .get("data")
-                                .and_then(|d| d.get("members"))
-                                .and_then(|m| m.as_array())
-                                .map(|a| a.len())
-                                .unwrap_or(0);
-                            let desc_str = if desc.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" — {}", desc)
-                            };
-                            eprintln!(
-                                "  {} {} ({} member{}){}",
-                                c_dim("•"),
-                                c_yellow(name),
-                                member_count,
-                                if member_count == 1 { "" } else { "s" },
-                                desc_str
-                            );
-                        }
-                        eprintln!();
-                    }
-                } else if json_output {
-                    println!("{{\"groups\":[]}}");
-                } else {
+                            serde_json::json!({
+                                "name": name,
+                                "description": desc,
+                                "members": members,
+                                "member_count": members.len()
+                            })
+                        })
+                        .collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({"groups": groups}))?
+                    );
+                } else if records.is_empty() {
                     eprintln!("  {} No groups found", c_dim("(empty)"));
                     eprintln!();
+                } else {
+                    eprintln!("  Found {} group(s):", records.len());
+                    eprintln!();
+                    for record in records {
+                        let name = record.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                        let desc = record
+                            .get("data")
+                            .and_then(|d| d.get("description"))
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("");
+                        let member_count = record
+                            .get("data")
+                            .and_then(|d| d.get("members"))
+                            .and_then(|m| m.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        let desc_str = if desc.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {}", desc)
+                        };
+                        eprintln!(
+                            "  {} {} ({} member{}){}",
+                            c_dim("•"),
+                            c_yellow(name),
+                            member_count,
+                            if member_count == 1 { "" } else { "s" },
+                            desc_str
+                        );
+                    }
+                    eprintln!();
                 }
+            } else if json_output {
+                println!("{{\"groups\":[]}}");
+            } else {
+                eprintln!("  {} No groups found", c_dim("(empty)"));
+                eprintln!();
             }
         }
         Err(err) => {
             if json_output {
-                println!("{{\"groups\":[],\"error\":{}}}", serde_json::to_string(&err)?);
+                println!(
+                    "{{\"groups\":[],\"error\":{}}}",
+                    serde_json::to_string(&err)?
+                );
             } else {
                 eprintln!("  {} {}", c_yellow("⚠"), err);
                 eprintln!();

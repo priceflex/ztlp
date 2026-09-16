@@ -31,6 +31,9 @@ ZTLP_RFC_Draft_v0.5.docx
 # Mnesia data directories
 Mnesia.*
 
+# Rust builds
+/proto/fuzz/target
+
 # Root-level Elixir artifacts (should not exist — each project has its own)
 /_build/
 /deps/

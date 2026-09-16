@@ -10381,6 +10381,176 @@ async fn cmd_admin_link_device(
     Ok(())
 }
 
+// ── NS Admin HTTP API client ────────────────────────────────────────────
+//
+// v0.35.1 removed the unauthenticated UDP admin path (opcode 0x13) from
+// the NS server — it let anyone with line-of-sight to the NS UDP port
+// dump every record in the store. The replacement is a gated HTTP API
+// on the NS metrics port (default 9103): `GET /admin/records` and
+// `GET /admin/audit`, authenticated with an HMAC-SHA256 signature over
+// a canonical `METHOD\nPATH\nTIMESTAMP\nSHA256(body)` string.
+//
+// This mirrors `bootstrap/app/services/ztlp/ns_admin_client.rb` byte
+// for byte (canonical string, header names, secret decoding) so a
+// `ZTLP_NS_ADMIN_API_SECRET` provisioned for one caller works for both.
+// Base URL and secret come from env vars (`ZTLP_NS_ADMIN_BASE_URL`,
+// `ZTLP_NS_ADMIN_API_SECRET`) rather than `--ns-server`, since the admin
+// API lives on a different port with different auth than name
+// resolution/registration.
+
+/// Accept either 64-char hex (canonical `ZTLP_NS_ADMIN_API_SECRET` form)
+/// or already-raw 32 bytes. Anything else is a config error — fail loudly
+/// rather than silently signing with the wrong key.
+fn decode_admin_api_secret(secret: &str) -> Result<Vec<u8>, String> {
+    let trimmed = secret.trim();
+    if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+        hex::decode(trimmed).map_err(|e| format!("ZTLP_NS_ADMIN_API_SECRET is not valid hex: {e}"))
+    } else if trimmed.len() == 32 {
+        Ok(trimmed.as_bytes().to_vec())
+    } else {
+        Err(format!(
+            "ZTLP_NS_ADMIN_API_SECRET must be 32 raw bytes or 64-char hex (got {} bytes)",
+            trimmed.len()
+        ))
+    }
+}
+
+/// Percent-encode a query value. Zone/pattern strings are plain
+/// `label.label` glob-ish text in practice, but anything outside the
+/// unreserved set is escaped so an unexpected character can't corrupt
+/// the query string or the signed canonical path.
+fn percent_encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Build `{base_path}?{k=v}&{k=v}...` (no `?` at all when `params` is empty).
+fn admin_api_path(base_path: &str, params: &[(&str, String)]) -> String {
+    if params.is_empty() {
+        return base_path.to_string();
+    }
+    let qs = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base_path}?{qs}")
+}
+
+/// Signed `GET` against the NS admin HTTP API. `path_and_query` must be
+/// the exact string sent as the HTTP request-line path — it's also the
+/// literal string signed into the HMAC, so the two must never diverge.
+///
+/// Reads `ZTLP_NS_ADMIN_BASE_URL` (e.g. `http://ns:9103`) and
+/// `ZTLP_NS_ADMIN_API_SECRET` from the environment. Returns the parsed
+/// JSON body on success; any failure (misconfiguration, network,
+/// auth, non-200) comes back as a human-readable `Err` string so
+/// callers can show it directly instead of a generic "unreachable".
+async fn admin_api_get(path_and_query: &str) -> Result<serde_json::Value, String> {
+    let base_url = std::env::var("ZTLP_NS_ADMIN_BASE_URL").map_err(|_| {
+        "ZTLP_NS_ADMIN_BASE_URL not set (e.g. http://ns:9103) — the admin API replaced the old \
+         UDP admin path in v0.35.1"
+            .to_string()
+    })?;
+    let secret_env = std::env::var("ZTLP_NS_ADMIN_API_SECRET")
+        .map_err(|_| "ZTLP_NS_ADMIN_API_SECRET not set".to_string())?;
+    let secret = decode_admin_api_secret(&secret_env)?;
+
+    let without_scheme = base_url
+        .trim_end_matches('/')
+        .rsplit("://")
+        .next()
+        .unwrap_or(&base_url);
+    let (host, port_str) = without_scheme
+        .rsplit_once(':')
+        .ok_or_else(|| format!("ZTLP_NS_ADMIN_BASE_URL missing a port: {base_url}"))?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| format!("ZTLP_NS_ADMIN_BASE_URL has an invalid port: {base_url}"))?;
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+
+    let body_hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(b""))
+    };
+    let canonical = format!("GET\n{path_and_query}\n{ts}\n{body_hash}");
+    let signature = {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&secret)
+            .map_err(|_| "invalid ZTLP_NS_ADMIN_API_SECRET length for HMAC".to_string())?;
+        mac.update(canonical.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    };
+
+    let request = format!(
+        "GET {path_and_query} HTTP/1.1\r\n\
+         Host: {host}:{port}\r\n\
+         X-NS-Timestamp: {ts}\r\n\
+         X-NS-Signature: {signature}\r\n\
+         Connection: close\r\n\r\n"
+    );
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let connect = tokio::net::TcpStream::connect((host, port));
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(10), connect)
+        .await
+        .map_err(|_| format!("connection to NS admin API at {base_url} timed out"))?
+        .map_err(|e| format!("failed to connect to NS admin API at {base_url}: {e}"))?;
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("failed to send request to NS admin API: {e}"))?;
+
+    let mut raw = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_to_end(&mut raw),
+    )
+    .await
+    .map_err(|_| "NS admin API response timed out".to_string())?
+    .map_err(|e| format!("failed to read NS admin API response: {e}"))?;
+
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut resp = httparse::Response::new(&mut headers);
+    let header_len = match resp.parse(&raw) {
+        Ok(httparse::Status::Complete(n)) => n,
+        Ok(httparse::Status::Partial) => {
+            return Err("incomplete HTTP response from NS admin API".to_string())
+        }
+        Err(e) => return Err(format!("failed to parse NS admin API response: {e}")),
+    };
+    let status = resp.code.unwrap_or(0);
+    let body = &raw[header_len..];
+
+    match status {
+        200 => serde_json::from_slice(body)
+            .map_err(|e| format!("NS admin API returned invalid JSON: {e}")),
+        401 => Err(
+            "NS rejected admin signature (HTTP 401) — check ZTLP_NS_ADMIN_API_SECRET matches \
+             the NS server's"
+                .to_string(),
+        ),
+        403 => Err("NS admin API denied this request (HTTP 403) — peer IP or tenant zone scope rejected it".to_string()),
+        429 => Err("NS admin API rate-limited this request (HTTP 429)".to_string()),
+        500..=599 => Err(format!("NS admin API returned HTTP {status}")),
+        other => Err(format!("NS admin API returned unexpected HTTP {other}")),
+    }
+}
+
 /// `ztlp admin devices` — List devices owned by a user
 async fn cmd_admin_devices(
     user: &str,
@@ -10402,22 +10572,11 @@ async fn cmd_admin_devices(
         );
     }
 
-    // List all DEVICE records (type 0x10) and filter by owner
-    let addr: std::net::SocketAddr = ns_addr.parse()?;
-    let mut pkt = Vec::new();
-    pkt.push(0x13); // Admin query
-    pkt.push(0x01); // List records
-    pkt.push(0x10); // DEVICE type
-    pkt.extend_from_slice(&0u16.to_be_bytes()); // empty zone filter
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-    socket.send_to(&pkt, addr)?;
-
-    let mut buf = [0u8; 65535];
-    match socket.recv(&mut buf) {
-        Ok(n) if n > 1 && buf[0] == 0x13 => {
-            let cbor_data = &buf[1..n];
-            if let Some(json_val) = cbor_decode_to_json(cbor_data) {
+    // List all DEVICE records and filter by owner, via the NS admin HTTP API.
+    let path = admin_api_path("/admin/records", &[("type", "device".to_string())]);
+    match admin_api_get(&path).await {
+        Ok(json_val) => {
+            {
                 let devices: Vec<&serde_json::Value> = json_val
                     .get("records")
                     .and_then(|r| r.as_array())
@@ -10478,24 +10637,17 @@ async fn cmd_admin_devices(
                     }
                     eprintln!();
                 }
-            } else if json_output {
-                println!(
-                    "{{\"owner\":\"{}\",\"devices\":[],\"error\":\"failed to decode response\"}}",
-                    user
-                );
-            } else {
-                eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
-                eprintln!();
             }
         }
-        _ => {
+        Err(err) => {
             if json_output {
-                println!("{{\"owner\":\"{}\",\"devices\":[]}}", user);
-            } else {
-                eprintln!(
-                    "  {} No devices found (or NS server not reachable)",
-                    c_yellow("⚠")
+                println!(
+                    "{{\"owner\":\"{}\",\"devices\":[],\"error\":{}}}",
+                    user,
+                    serde_json::to_string(&err)?
                 );
+            } else {
+                eprintln!("  {} {}", c_yellow("⚠"), err);
                 eprintln!();
             }
         }
@@ -10508,12 +10660,9 @@ async fn cmd_admin_devices(
 async fn cmd_admin_ls(
     type_filter: Option<RecordTypeFilter>,
     zone: &Option<String>,
-    ns_server: &Option<String>,
+    _ns_server: &Option<String>,
     json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
-    let ns_addr = resolve_ns_server(ns_server, &config)?;
-
     let type_str = match type_filter {
         Some(RecordTypeFilter::Device) => "device",
         Some(RecordTypeFilter::User) => "user",
@@ -10522,93 +10671,38 @@ async fn cmd_admin_ls(
         None => "all",
     };
 
-    let type_byte: u8 = match type_filter {
-        Some(RecordTypeFilter::Device) => 0x10, // DEVICE
-        Some(RecordTypeFilter::User) => 0x11,   // USER
-        Some(RecordTypeFilter::Key) => 0x01,    // KEY
-        Some(RecordTypeFilter::Group) => 0x12,  // GROUP
-        None => 0x00,                           // All types
-    };
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if type_filter.is_some() {
+        params.push(("type", type_str.to_string()));
+    }
+    if let Some(z) = zone {
+        params.push(("zone", percent_encode_query_value(z)));
+    }
+    let path = admin_api_path("/admin/records", &params);
 
-    let zone_str = zone.as_deref().unwrap_or("");
-    let zone_bytes = zone_str.as_bytes();
-    let zone_len = zone_bytes.len() as u16;
-
-    // Build admin list query: <<0x13, 0x01, type_byte, zone_len::16, zone::binary>>
-    let mut pkt = Vec::new();
-    pkt.push(0x13);
-    pkt.push(0x01);
-    pkt.push(type_byte);
-    pkt.extend_from_slice(&zone_len.to_be_bytes());
-    pkt.extend_from_slice(zone_bytes);
-
-    let addr: std::net::SocketAddr = ns_addr.parse()?;
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-
-    socket.send_to(&pkt, addr)?;
-
-    let mut buf = [0u8; 65535];
-    match socket.recv(&mut buf) {
-        Ok(n) if n > 1 && buf[0] == 0x13 => {
-            let cbor_data = &buf[1..n];
-            match cbor_decode_to_json(cbor_data) {
-                Some(json_val) => {
-                    if json_output {
-                        let mut output = serde_json::Map::new();
-                        output.insert(
-                            "type".to_string(),
-                            serde_json::Value::String(type_str.to_string()),
-                        );
-                        output.insert(
-                            "zone".to_string(),
-                            match zone {
-                                Some(z) => serde_json::Value::String(z.clone()),
-                                None => serde_json::Value::Null,
-                            },
-                        );
-                        if let Some(records) = json_val.get("records") {
-                            output.insert("records".to_string(), records.clone());
-                        } else {
-                            output.insert("records".to_string(), serde_json::Value::Array(vec![]));
-                        }
-                        println!(
-                            "{}",
-                            serde_json::to_string(&serde_json::Value::Object(output))?
-                        );
-                    } else {
-                        eprintln!("{}", c_bold("ZTLP Records"));
-                        eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
-                        if let Some(ref z) = zone {
-                            eprintln!("  {} {}", c_cyan("Zone:"), z);
-                        }
-                        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
-                        eprintln!();
-                        print_record_list(&json_val);
-                    }
-                }
-                None => {
-                    if json_output {
-                        println!(
-                            "{{\"type\":\"{}\",\"zone\":{},\"records\":[],\"error\":\"failed to decode response\"}}",
-                            type_str,
-                            match zone { Some(z) => format!("\"{}\"", z), None => "null".to_string() }
-                        );
-                    } else {
-                        eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
-                    }
-                }
-            }
-        }
-        _ => {
+    match admin_api_get(&path).await {
+        Ok(json_val) => {
             if json_output {
-                println!(
-                    "{{\"type\":\"{}\",\"zone\":{},\"records\":[]}}",
-                    type_str,
+                let mut output = serde_json::Map::new();
+                output.insert(
+                    "type".to_string(),
+                    serde_json::Value::String(type_str.to_string()),
+                );
+                output.insert(
+                    "zone".to_string(),
                     match zone {
-                        Some(z) => format!("\"{}\"", z),
-                        None => "null".to_string(),
-                    }
+                        Some(z) => serde_json::Value::String(z.clone()),
+                        None => serde_json::Value::Null,
+                    },
+                );
+                if let Some(records) = json_val.get("records") {
+                    output.insert("records".to_string(), records.clone());
+                } else {
+                    output.insert("records".to_string(), serde_json::Value::Array(vec![]));
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::Value::Object(output))?
                 );
             } else {
                 eprintln!("{}", c_bold("ZTLP Records"));
@@ -10616,12 +10710,26 @@ async fn cmd_admin_ls(
                 if let Some(ref z) = zone {
                     eprintln!("  {} {}", c_cyan("Zone:"), z);
                 }
-                eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
                 eprintln!();
-                eprintln!(
-                    "  {} No records found (or NS server not reachable)",
-                    c_yellow("⚠")
+                print_record_list(&json_val);
+            }
+        }
+        Err(err) => {
+            if json_output {
+                println!(
+                    "{{\"type\":\"{}\",\"zone\":{},\"records\":[],\"error\":{}}}",
+                    type_str,
+                    match zone { Some(z) => format!("\"{}\"", z), None => "null".to_string() },
+                    serde_json::to_string(&err)?
                 );
+            } else {
+                eprintln!("{}", c_bold("ZTLP Records"));
+                eprintln!("  {} {}", c_cyan("Type filter:"), type_str);
+                if let Some(ref z) = zone {
+                    eprintln!("  {} {}", c_cyan("Zone:"), z);
+                }
+                eprintln!();
+                eprintln!("  {} {}", c_yellow("⚠"), err);
                 eprintln!();
             }
         }
@@ -11019,35 +11127,19 @@ async fn cmd_admin_group_check(
 
 /// `ztlp admin groups` — List all groups in the namespace
 async fn cmd_admin_groups(
-    ns_server: &Option<String>,
+    _ns_server: &Option<String>,
     json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
-    let ns_addr = resolve_ns_server(ns_server, &config)?;
-
     if !json_output {
         eprintln!("{}", c_bold("ZTLP Groups"));
-        eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
         eprintln!();
         eprintln!("  {} Querying NS for groups...", c_dim("→"));
     }
 
-    // List GROUP records (type 0x12) via admin query
-    let addr: std::net::SocketAddr = ns_addr.parse()?;
-    let mut pkt = Vec::new();
-    pkt.push(0x13); // Admin query
-    pkt.push(0x01); // List records
-    pkt.push(0x12); // GROUP type
-    pkt.extend_from_slice(&0u16.to_be_bytes()); // empty zone filter
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
-    socket.send_to(&pkt, addr)?;
-
-    let mut buf = [0u8; 65535];
-    match socket.recv(&mut buf) {
-        Ok(n) if n > 1 && buf[0] == 0x13 => {
-            let cbor_data = &buf[1..n];
-            if let Some(json_val) = cbor_decode_to_json(cbor_data) {
+    let path = admin_api_path("/admin/records", &[("type", "group".to_string())]);
+    match admin_api_get(&path).await {
+        Ok(json_val) => {
+            {
                 if let Some(records) = json_val.get("records").and_then(|r| r.as_array()) {
                     if json_output {
                         let groups: Vec<serde_json::Value> = records
@@ -11118,21 +11210,13 @@ async fn cmd_admin_groups(
                     eprintln!("  {} No groups found", c_dim("(empty)"));
                     eprintln!();
                 }
-            } else if json_output {
-                println!("{{\"groups\":[],\"error\":\"failed to decode response\"}}");
-            } else {
-                eprintln!("  {} Failed to decode NS response", c_yellow("⚠"));
-                eprintln!();
             }
         }
-        _ => {
+        Err(err) => {
             if json_output {
-                println!("{{\"groups\":[]}}");
+                println!("{{\"groups\":[],\"error\":{}}}", serde_json::to_string(&err)?);
             } else {
-                eprintln!(
-                    "  {} No groups found (or NS server not reachable)",
-                    c_yellow("⚠")
-                );
+                eprintln!("  {} {}", c_yellow("⚠"), err);
                 eprintln!();
             }
         }
@@ -11290,85 +11374,47 @@ fn build_revoke_cbor(name: &str, reason: &str) -> Vec<u8> {
 async fn cmd_admin_audit(
     since_str: &str,
     name_pattern: &Option<String>,
-    ns_server: &Option<String>,
+    _ns_server: &Option<String>,
     json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
-    let ns_addr = resolve_ns_server(ns_server, &config)?;
     let since_secs = parse_duration_seconds(since_str)?;
     let since_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs()
         .saturating_sub(since_secs);
 
-    let addr: std::net::SocketAddr = ns_addr.parse()?;
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    let mut params: Vec<(&str, String)> = vec![("since", since_ts.to_string())];
+    if let Some(pattern) = name_pattern {
+        params.push(("pattern", percent_encode_query_value(pattern)));
+    }
+    let path = admin_api_path("/admin/audit", &params);
 
-    // Build admin query packet
-    let pkt = match name_pattern {
-        Some(pattern) => {
-            // Audit filter: <<0x13, 0x03, since_ts::64, pattern_len::16, pattern::binary>>
-            let pat_bytes = pattern.as_bytes();
-            let pat_len = pat_bytes.len() as u16;
-            let mut p = Vec::new();
-            p.push(0x13);
-            p.push(0x03);
-            p.extend_from_slice(&since_ts.to_be_bytes());
-            p.extend_from_slice(&pat_len.to_be_bytes());
-            p.extend_from_slice(pat_bytes);
-            p
-        }
-        None => {
-            // Audit since: <<0x13, 0x02, since_ts::64>>
-            let mut p = Vec::new();
-            p.push(0x13);
-            p.push(0x02);
-            p.extend_from_slice(&since_ts.to_be_bytes());
-            p
-        }
-    };
-
-    socket.send_to(&pkt, addr)?;
-
-    let mut buf = [0u8; 65535];
-    match socket.recv(&mut buf) {
-        Ok(n) if n > 1 && buf[0] == 0x13 => {
-            // Decode CBOR response
-            let cbor_data = &buf[1..n];
-            match cbor_decode_to_json(cbor_data) {
-                Some(json_val) => {
-                    if json_output {
-                        if let Ok(s) = serde_json::to_string(&json_val) {
-                            println!("{}", s);
-                        } else {
-                            println!("{}", json_val);
-                        }
-                    } else {
-                        print_audit_entries(&json_val);
-                    }
+    match admin_api_get(&path).await {
+        Ok(json_val) => {
+            if json_output {
+                if let Ok(s) = serde_json::to_string(&json_val) {
+                    println!("{}", s);
+                } else {
+                    println!("{}", json_val);
                 }
-                None => {
-                    if json_output {
-                        println!("{{\"entries\":[],\"error\":\"failed to decode response\"}}");
-                    } else {
-                        eprintln!("  {} Failed to decode audit response", c_yellow("⚠"));
-                    }
-                }
+            } else {
+                print_audit_entries(&json_val);
             }
         }
-        _ => {
+        Err(err) => {
             if json_output {
-                println!("{{\"entries\":[],\"error\":\"ns server unreachable\"}}");
+                println!(
+                    "{{\"entries\":[],\"error\":{}}}",
+                    serde_json::to_string(&err)?
+                );
             } else {
                 eprintln!("{}", c_bold("ZTLP Audit Log"));
                 eprintln!("  {} Since: {} ago", c_cyan("Filter:"), since_str);
                 if let Some(ref pat) = name_pattern {
                     eprintln!("  {} {}", c_cyan("Pattern:"), pat);
                 }
-                eprintln!("  {} {}", c_cyan("NS Server:"), ns_addr);
                 eprintln!();
-                eprintln!("  {} NS server did not respond", c_yellow("⚠"));
+                eprintln!("  {} {}", c_yellow("⚠"), err);
                 eprintln!();
             }
         }

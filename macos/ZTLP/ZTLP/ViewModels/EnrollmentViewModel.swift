@@ -262,7 +262,7 @@ final class EnrollmentViewModel: ObservableObject {
         let expires: Date = Date(timeIntervalSince1970: ts)
 
         // Reject obviously invalid expiry: in the past or > 30 days out
-        let maxAge = 30 * 24 * 3600  // 30 days
+        let maxAge: TimeInterval = 30 * 24 * 3600  // 30 days
         guard ts > 0,
               expires > Date().addingTimeInterval(-60),    // within 60 s of now
               expires < Date().addingTimeInterval(maxAge) else { return nil }

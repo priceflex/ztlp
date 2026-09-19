@@ -19,7 +19,6 @@ struct ZTLPApp: App {
     @State private var servicesViewModel: ServicesViewModel?
     @State private var settingsViewModel: SettingsViewModel?
     @State private var enrollmentViewModel: EnrollmentViewModel?
-    @StateObject private var certManager = CertificateManager()
 
     init() {
         let config = ZTLPConfiguration()
@@ -49,8 +48,7 @@ struct ZTLPApp: App {
                 servicesViewModel: servicesVM,
                 settingsViewModel: settingsVM,
                 enrollmentViewModel: enrollmentVM,
-                configuration: configuration,
-                certManager: certManager
+                configuration: configuration
             )
             .environmentObject(configuration)
             .environmentObject(networkMonitor)
@@ -62,8 +60,7 @@ struct ZTLPApp: App {
             SettingsView(
                 viewModel: settingsVM,
                 enrollmentViewModel: enrollmentVM,
-                configuration: configuration,
-                certManager: certManager
+                configuration: configuration
             )
         }
     }

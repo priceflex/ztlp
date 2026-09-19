@@ -11,21 +11,15 @@
 // background item" system prompt (the UAC equivalent Steven asked for) the
 // FIRST time `register()` is called, and needs no Terminal at all.
 //
-// Requires (NOT done by this file — Xcode project changes, GUI-only):
-//   1. Bundle the `ztlp` binary into the app at Contents/MacOS/ztlp (or a
-//      dedicated Contents/Helpers/ subdir) via an Xcode "Copy Files" build
-//      phase, destination "Executables" (or "Wrapper" + custom subpath).
-//   2. Add Contents/Library/LaunchDaemons/org.ztlp.agent.plist to the app
-//      bundle via a second "Copy Files" phase, destination
-//      "Wrapper", subpath "Contents/Library/LaunchDaemons". Its
-//      ProgramArguments[0] must be an ABSOLUTE path inside the running
-//      app's bundle (Bundle.main.bundlePath + "/Contents/MacOS/ztlp") —
-//      SMAppService validates this at register() time and fails otherwise.
-//   3. Both must be checked into macos/ZTLP/Libraries/ or a new
-//      macos/ZTLP/LaunchDaemons/ dir so `git status` on MACLLM4 shows them,
-//      matching how libztlp_proto.a is already committed there.
-// Steven: this is Xcode-GUI work (pbxproj build phases); flagged rather
-// than blind-edited from Linux to avoid corrupting the .pbxproj.
+// Bundle layout (Xcode Copy Files phases, added session 5 via the
+// xcodeproj gem; fixed session 6):
+//   - Contents/Helpers/ztlp  — the `ztlp` CLI/agent binary (tracked at
+//     macos/ZTLP/Libraries/ztlp). NOT Contents/MacOS/ztlp: on
+//     case-insensitive APFS that is the same path as the app executable
+//     Contents/MacOS/ZTLP and the CLI silently clobbered the GUI.
+//   - Contents/Library/LaunchDaemons/org.ztlp.agent.plist — BundleProgram =
+//     Contents/Helpers/ztlp (bundle-relative, macOS 13+), so the daemon
+//     follows the .app wherever it is moved.
 
 import Foundation
 import ServiceManagement

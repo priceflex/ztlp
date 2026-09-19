@@ -96,6 +96,14 @@ final class TunnelViewModel: ObservableObject {
         self.zoneName = configuration.zoneName
         setupObservers()
         startPolling()
+        // "Connect on Launch" (Settings > General). Mirrors the Windows
+        // client's auto_connect: if the daemon isn't already up, start it.
+        if configuration.autoConnect {
+            Task { [weak self] in
+                guard let self else { return }
+                if await !Self.daemonReachable() { self.connect() }
+            }
+        }
     }
 
     deinit {

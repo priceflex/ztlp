@@ -584,6 +584,37 @@ mod tests {
         assert!(unit.contains("/opt/ztlp/bin/ztlp"));
     }
 
+    // `ztlp agent install` on macOS must produce a ROOT LaunchDaemon, not the
+    // legacy per-user LaunchAgent (which cannot bind :443, write
+    // /etc/resolver, alias lo0 or touch the System keychain). Linux target
+    // stays byte-identical to the systemd path.
+    #[test]
+    fn test_service_install_target_macos_is_root_launchdaemon() {
+        let t = service_install_target(true, "/Applications/ZTLP.app/Contents/MacOS/ztlp");
+        assert_eq!(
+            t.path,
+            PathBuf::from("/Library/LaunchDaemons/org.ztlp.agent.plist")
+        );
+        assert!(t
+            .content
+            .contains("<key>UserName</key>\n    <string>root</string>"));
+        assert!(t
+            .content
+            .contains("/Applications/ZTLP.app/Contents/MacOS/ztlp"));
+        assert!(!t.content.contains("LaunchAgents"));
+        assert!(t.instructions.contains(
+            "sudo launchctl bootstrap system /Library/LaunchDaemons/org.ztlp.agent.plist"
+        ));
+    }
+
+    #[test]
+    fn test_service_install_target_linux_unchanged() {
+        let t = service_install_target(false, "/usr/local/bin/ztlp");
+        assert_eq!(t.path, PathBuf::from(SYSTEMD_UNIT_PATH));
+        assert_eq!(t.content, generate_systemd_unit("/usr/local/bin/ztlp"));
+        assert!(t.instructions.contains("sudo systemctl enable ztlp-agent"));
+    }
+
     // Regression tests: resolved.conf DNS= line must use ':' for the port,
     // never '#' (which systemd-resolved parses as a DoT SNI server name,
     // not a port separator). A '#'-separated port is silently mis-parsed:

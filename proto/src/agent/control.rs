@@ -40,10 +40,10 @@ use super::dns::DnsResolverState;
 // ─── Command/Response types ─────────────────────────────────────────────────
 
 /// A control command from the CLI.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ControlCommand {
     pub cmd: String,
-    /// Optional name parameter (for connect/disconnect).
+    /// Optional name parameter (for connect/disconnect/enroll's device name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Bearer token authenticating this caller.
@@ -54,6 +54,18 @@ pub struct ControlCommand {
     /// (configured via `~/.ztlp/agent.token` — D1.T3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Task 6a: `ztlp://enroll/...` URI (or raw base64url token), used only
+    /// by the `"enroll"` command. NOT the bearer auth token above — kept as
+    /// a separate field to avoid any ambiguity between "who is calling us"
+    /// and "what enrollment token should the daemon consume".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_uri: Option<String>,
+    /// Task 6a / plan §4a option A-or-B: optional relay CLIENT_ROUTE HMAC
+    /// secret to write into the daemon's own `agent.toml [tunnel]
+    /// relay_secret`, used only by the `"enroll"` command. Mirrors
+    /// `ztlp setup --relay-secret`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_secret: Option<String>,
 }
 
 /// A control response to the CLI.
@@ -337,6 +349,7 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
         "flush_dns" => cmd_flush_dns(state).await,
         "shutdown" => cmd_shutdown(state).await,
         "setup_status" => cmd_setup_status(state).await,
+        "enroll" => cmd_enroll(&cmd).await,
         other => ControlResponse::err(format!("unknown command: {}", other)),
     }
 }
@@ -420,6 +433,117 @@ async fn cmd_shutdown(state: &AgentState) -> ControlResponse {
     info!("shutdown requested via control socket");
     let _ = state.shutdown_tx.send(());
     ControlResponse::ok_empty()
+}
+
+// ─── Task 6a: daemon-owned enrollment ───────────────────────────────────────
+//
+// "Where the daemon's config dir should be AND how the enrollment written
+// by the user-level GUI (`ztlp setup`) lands in the root-owned dir. Likely
+// answer: the GUI sends the token to the daemon over the control API and
+// the DAEMON runs the enrollment." — ZTLP-MAC-PLAN-2026-09-19.md §3
+// UNCERTAIN. This is that answer: the daemon re-execs its OWN binary
+// (`std::env::current_exe()`) through the exact same `ztlp setup --token
+// ... --yes` path that session 2 already live-proved end-to-end (§5.7) —
+// no enrollment logic is duplicated here, we just trigger the proven CLI
+// path from inside the process that owns the root-level HOME (`/Library/
+// Application Support/ZTLP` on macOS via the LaunchDaemon's
+// EnvironmentVariables), so identity.json/config.toml/agent.toml land in
+// the daemon's own directory instead of a human's ~/.ztlp.
+
+/// Pure builder: what `cmd_enroll` will exec, given a parsed command.
+///
+/// Separated from the actual `tokio::process::Command` so the argument
+/// construction (including the plan §4a relay-secret plumbing) is
+/// unit-testable without spawning a real subprocess.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EnrollExecPlan {
+    pub args: Vec<String>,
+}
+
+/// Build the `ztlp setup ...` argv for a daemon-driven enroll request.
+///
+/// Returns `Err` with a user-facing message if the command is missing its
+/// required `enrollment_uri` field — enroll can't proceed without one.
+pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, String> {
+    let uri = cmd
+        .enrollment_uri
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "enroll requires \"enrollment_uri\"".to_string())?;
+
+    let mut args = vec![
+        "setup".to_string(),
+        "--token".to_string(),
+        uri.to_string(),
+        "--yes".to_string(),
+    ];
+
+    if let Some(name) = cmd.name.as_deref().filter(|s| !s.trim().is_empty()) {
+        args.push("--name".to_string());
+        args.push(name.to_string());
+    }
+
+    if let Some(secret) = cmd.relay_secret.as_deref().filter(|s| !s.trim().is_empty()) {
+        args.push("--relay-secret".to_string());
+        args.push(secret.to_string());
+    }
+
+    Ok(EnrollExecPlan { args })
+}
+
+/// `"enroll"` control command: have the daemon enroll ITSELF (its own
+/// identity, under its own HOME) by re-execing `ztlp setup --token ...
+/// --yes` via its own already-running binary.
+///
+/// This intentionally does NOT touch `AgentState` — it shells out to a
+/// fresh subprocess rather than reimplementing `setup_join()`'s logic
+/// in-process, so the daemon always enrolls through the exact same code
+/// path a human running `ztlp setup` from a terminal would use (already
+/// live-proven, plan §5.7). The subprocess inherits the daemon's own
+/// environment (including `HOME`), so `~/.ztlp` resolves to the daemon's
+/// own config dir, not a human user's.
+async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
+    let plan = match build_enroll_exec_plan(cmd) {
+        Ok(p) => p,
+        Err(e) => return ControlResponse::err(e),
+    };
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return ControlResponse::err(format!("cannot resolve own binary path: {}", e)),
+    };
+
+    info!(
+        "enroll requested via control socket: {} {:?}",
+        exe.display(),
+        plan.args
+    );
+
+    let output = tokio::process::Command::new(&exe)
+        .args(&plan.args)
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            ControlResponse::ok(serde_json::json!({ "output": stdout }))
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            ControlResponse::err(format!(
+                "enrollment failed (exit {}): {}",
+                out.status.code().unwrap_or(-1),
+                if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                }
+            ))
+        }
+        Err(e) => ControlResponse::err(format!("failed to spawn ztlp setup: {}", e)),
+    }
 }
 
 /// Read the enrolled zone name from whichever ZTLP config file exists on
@@ -887,5 +1011,126 @@ mod tests {
     #[test]
     fn test_tasklist_output_contains_pid_empty_output() {
         assert!(!tasklist_output_contains_pid("", 12345));
+    }
+
+    // ── Task 6a: daemon-owned enroll (build_enroll_exec_plan) ────────────
+    //
+    // Pure argv-builder tests — no subprocess spawned. Mirrors `ztlp setup`'s
+    // real flag names exactly so a human debugging a failed enroll can copy
+    // the logged argv straight into a terminal.
+
+    fn cmd(
+        enrollment_uri: Option<&str>,
+        name: Option<&str>,
+        relay_secret: Option<&str>,
+    ) -> ControlCommand {
+        ControlCommand {
+            cmd: "enroll".to_string(),
+            name: name.map(String::from),
+            token: None,
+            enrollment_uri: enrollment_uri.map(String::from),
+            relay_secret: relay_secret.map(String::from),
+        }
+    }
+
+    #[test]
+    fn enroll_plan_requires_enrollment_uri() {
+        let err = build_enroll_exec_plan(&cmd(None, None, None)).unwrap_err();
+        assert!(err.contains("enrollment_uri"));
+    }
+
+    #[test]
+    fn enroll_plan_rejects_blank_enrollment_uri() {
+        let err = build_enroll_exec_plan(&cmd(Some("   "), None, None)).unwrap_err();
+        assert!(err.contains("enrollment_uri"));
+    }
+
+    #[test]
+    fn enroll_plan_minimal_uri_only() {
+        let plan = build_enroll_exec_plan(&cmd(Some("ztlp://enroll/abc123"), None, None)).unwrap();
+        assert_eq!(
+            plan.args,
+            vec!["setup", "--token", "ztlp://enroll/abc123", "--yes"]
+        );
+    }
+
+    #[test]
+    fn enroll_plan_includes_name_when_present() {
+        let plan =
+            build_enroll_exec_plan(&cmd(Some("ztlp://enroll/abc123"), Some("mac-llm4"), None))
+                .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "setup",
+                "--token",
+                "ztlp://enroll/abc123",
+                "--yes",
+                "--name",
+                "mac-llm4"
+            ]
+        );
+    }
+
+    #[test]
+    fn enroll_plan_includes_relay_secret_when_present() {
+        let plan =
+            build_enroll_exec_plan(&cmd(Some("ztlp://enroll/abc123"), None, Some("deadbeef")))
+                .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "setup",
+                "--token",
+                "ztlp://enroll/abc123",
+                "--yes",
+                "--relay-secret",
+                "deadbeef"
+            ]
+        );
+    }
+
+    #[test]
+    fn enroll_plan_includes_name_and_relay_secret_together() {
+        let plan = build_enroll_exec_plan(&cmd(
+            Some("ztlp://enroll/abc123"),
+            Some("mac-llm4"),
+            Some("deadbeef"),
+        ))
+        .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "setup",
+                "--token",
+                "ztlp://enroll/abc123",
+                "--yes",
+                "--name",
+                "mac-llm4",
+                "--relay-secret",
+                "deadbeef"
+            ]
+        );
+    }
+
+    #[test]
+    fn enroll_plan_ignores_blank_name_and_relay_secret() {
+        let plan = build_enroll_exec_plan(&cmd(Some("ztlp://enroll/abc123"), Some("  "), Some("")))
+            .unwrap();
+        assert_eq!(
+            plan.args,
+            vec!["setup", "--token", "ztlp://enroll/abc123", "--yes"]
+        );
+    }
+
+    #[test]
+    fn enroll_command_deserializes_full_shape() {
+        let json = r#"{"cmd":"enroll","enrollment_uri":"ztlp://enroll/abc","name":"mac-llm4","relay_secret":"deadbeef","token":"bearer-xyz"}"#;
+        let cmd: ControlCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.cmd, "enroll");
+        assert_eq!(cmd.enrollment_uri.as_deref(), Some("ztlp://enroll/abc"));
+        assert_eq!(cmd.name.as_deref(), Some("mac-llm4"));
+        assert_eq!(cmd.relay_secret.as_deref(), Some("deadbeef"));
+        assert_eq!(cmd.token.as_deref(), Some("bearer-xyz"));
     }
 }

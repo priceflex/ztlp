@@ -33,6 +33,11 @@ pub mod dns_setup_windows;
 pub mod domain_map;
 pub mod hardware_key;
 pub mod local_tls;
+// macOS root-LaunchDaemon planning (pure) + executor. Compiles on every
+// platform so the plan/plist tests run in Linux CI; only invoked from
+// daemon.rs behind cfg!(target_os = "macos").
+#[cfg(unix)]
+pub mod macos_daemon;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;

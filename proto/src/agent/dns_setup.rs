@@ -470,36 +470,39 @@ pub fn generate_launchagent_plist(ztlp_binary: &str) -> String {
     )
 }
 
-/// Install the ZTLP agent as a system service.
-///
-/// Returns the path to the installed service file and any instructions.
-pub fn install_service(ztlp_binary: &str) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
-    if cfg!(target_os = "macos") {
-        let plist_dir = dirs::home_dir()
-            .map(|h| h.join("Library/LaunchAgents"))
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let plist_path = plist_dir.join("org.ztlp.agent.plist");
+/// What `install_service` will write, computed without touching the
+/// filesystem (unit-testable on every platform).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceInstallTarget {
+    pub path: PathBuf,
+    pub content: String,
+    pub instructions: String,
+}
 
-        fs::create_dir_all(&plist_dir)?;
-        let content = generate_launchagent_plist(ztlp_binary);
-        fs::write(&plist_path, &content)?;
-
+/// Pure planner behind [`install_service`]. `macos == true` selects the ROOT
+/// LaunchDaemon (`/Library/LaunchDaemons/org.ztlp.agent.plist`); anything
+/// else is the unchanged systemd unit.
+pub fn service_install_target(macos: bool, ztlp_binary: &str) -> ServiceInstallTarget {
+    if macos {
+        use crate::agent::macos_daemon as md;
+        let path = PathBuf::from(md::MACOS_LAUNCHDAEMON_PLIST_PATH);
         let instructions = format!(
-            "LaunchAgent installed: {}\n\n\
-             Load now:\n  launchctl load {}\n\n\
-             Unload:\n  launchctl unload {}",
-            plist_path.display(),
-            plist_path.display(),
-            plist_path.display()
+            "LaunchDaemon installed: {p}\n\
+             Config dir (HOME for the daemon): {home}\n\n\
+             Start now (and at every boot):\n  sudo launchctl bootstrap system {p}\n\n\
+             Status:\n  sudo launchctl print system/{label} | head -20\n\n\
+             Stop + remove:\n  sudo launchctl bootout system/{label}\n  sudo rm {p}",
+            p = path.display(),
+            home = md::MACOS_SYSTEM_CONFIG_DIR,
+            label = md::MACOS_LAUNCHDAEMON_LABEL,
         );
-
-        Ok((plist_path, instructions))
+        ServiceInstallTarget {
+            path,
+            content: md::generate_launchdaemon_plist(ztlp_binary),
+            instructions,
+        }
     } else {
-        // Linux systemd
         let unit_path = PathBuf::from(SYSTEMD_UNIT_PATH);
-        let content = generate_systemd_unit(ztlp_binary);
-        fs::write(&unit_path, &content)?;
-
         let instructions = format!(
             "Systemd unit installed: {}\n\n\
              Enable and start:\n  \
@@ -512,9 +515,33 @@ pub fn install_service(ztlp_binary: &str) -> Result<(PathBuf, String), Box<dyn s
              journalctl -u ztlp-agent -f",
             unit_path.display()
         );
-
-        Ok((unit_path, instructions))
+        ServiceInstallTarget {
+            path: unit_path,
+            content: generate_systemd_unit(ztlp_binary),
+            instructions,
+        }
     }
+}
+
+/// Install the ZTLP agent as a system service (root LaunchDaemon on macOS,
+/// systemd unit on Linux). Requires root on both.
+///
+/// Returns the path to the installed service file and any instructions.
+pub fn install_service(ztlp_binary: &str) -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
+    let target = service_install_target(cfg!(target_os = "macos"), ztlp_binary);
+    if cfg!(target_os = "macos") {
+        // Daemon HOME + log dir must exist before launchd starts it.
+        fs::create_dir_all(crate::agent::macos_daemon::macos_system_ztlp_dir())?;
+        fs::create_dir_all("/Library/Logs/ZTLP")?;
+    }
+    fs::write(&target.path, &target.content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // launchd refuses group/world-writable plists; systemd is fine with 0644 too.
+        fs::set_permissions(&target.path, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok((target.path, target.instructions))
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -877,7 +877,7 @@ enum AgentCommands {
     #[command(after_help = "EXAMPLES:\n  sudo ztlp agent dns-teardown")]
     DnsTeardown,
 
-    /// Install the agent as a system service (systemd/LaunchAgent)
+    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon)
     #[command(after_help = "EXAMPLES:\n  \
             sudo ztlp agent install\n  \
             sudo ztlp agent install --binary /usr/local/bin/ztlp")]

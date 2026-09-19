@@ -28,6 +28,7 @@
 		833F18963326856FAF4AF7A0 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75867312BD712CE5153370DF /* main.swift */; };
 		85AD116F993661084DAE78B2 /* ZTLPBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */; };
 		A9B39F2D1DC497E8E0ED32DD /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */; };
+		AE1EA558968AD12BA2CD8396 /* AgentControlClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C342F985ECC98E1EACD11B75 /* AgentControlClient.swift */; };
 		AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */; };
 		B0E54781F41B69FC340C419C /* CertificateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1934078C4E1D7848FA49280D /* CertificateManager.swift */; };
 		B9D88DADB4E22192735094F1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF7E6453D407953E6432F115 /* Assets.xcassets */; };
@@ -125,6 +126,7 @@
 		AB8947C5959711900EDC01C5 /* ZTLP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZTLP.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B3F0695B2755F6FFB3C3FA21 /* TunnelConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfiguration.swift; sourceTree = "<group>"; };
 		B5496B79502CD3FFD335AC6C /* ZTLPApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPApp.swift; sourceTree = "<group>"; };
+		C342F985ECC98E1EACD11B75 /* AgentControlClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentControlClient.swift; sourceTree = "<group>"; };
 		CD821F8690E1C2AE8E13038F /* ZTLPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPTests.swift; sourceTree = "<group>"; };
 		D5AF8045644C273E351706D4 /* ConnectionStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatus.swift; sourceTree = "<group>"; };
 		DF7E6453D407953E6432F115 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -241,6 +243,7 @@
 				6CC8B59C79DCD09DB315C397 /* SystemExtensionManager.swift */,
 				EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */,
 				9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */,
+				C342F985ECC98E1EACD11B75 /* AgentControlClient.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -433,6 +436,7 @@
 				3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */,
 				FE5E753515A12847AF6EFA6C /* ZTLPService.swift in Sources */,
 				5FD2DDD5E86D3BFA28EB21DF /* AgentServiceInstaller.swift in Sources */,
+				AE1EA558968AD12BA2CD8396 /* AgentControlClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

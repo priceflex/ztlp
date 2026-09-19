@@ -129,6 +129,19 @@ struct EnrollmentView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             .frame(maxWidth: 450)
 
+            // Task 6a / plan §4a option B: relay CLIENT_ROUTE HMAC secret.
+            // Only needed against a relay running ZTLP_RELAY_HMAC_MODE=prod
+            // — optional, so leave it blank if your admin didn't give you one.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Relay secret (optional, from your admin)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                SecureField("Only needed for some networks", text: $viewModel.relaySecret)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.callout.monospaced())
+            }
+            .frame(maxWidth: 450)
+
             Spacer()
 
             HStack(spacing: 12) {
@@ -181,6 +194,16 @@ struct EnrollmentView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 350)
+
+            if let warning = viewModel.daemonEnrollWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(Color.ztlpOrange)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: 400)
+                    .padding(10)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
 
             Spacer()
 

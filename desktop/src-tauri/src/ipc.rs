@@ -54,6 +54,7 @@ pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Res
         cmd: cmd.to_string(),
         name,
         token: load_agent_token(),
+        ..Default::default()
     };
 
     let mut req_bytes =

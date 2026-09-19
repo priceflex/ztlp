@@ -5,12 +5,18 @@
 // Clean, professional layout. Advanced fields hidden by default.
 
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
     @ObservedObject var certManager: CertificateManager
+
+    // Task 5.5: root LaunchDaemon control (SMAppService). Shared singleton —
+    // observing it here keeps the row in sync with anything else in the app
+    // (e.g. an onboarding flow) that also calls register()/refreshState().
+    @ObservedObject private var serviceInstaller = AgentServiceInstaller.shared
 
     @State private var showAdvanced = false
     @State private var showRegenConfirm = false
@@ -21,6 +27,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             generalSection
+            serviceSection
             identitySection
             enrollmentSection
             CertificateTrustView(certManager: certManager)
@@ -38,6 +45,14 @@ struct SettingsView: View {
         .sheet(isPresented: $showEnrollmentSheet) {
             EnrollmentView(viewModel: enrollmentViewModel)
                 .frame(width: 500, height: 450)
+        }
+        .onAppear {
+            serviceInstaller.refreshState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Task 5.5: pick up a user's approve/revoke in System Settings >
+            // General > Login Items & Extensions without requiring a restart.
+            serviceInstaller.refreshState()
         }
         .toolbar {
             ToolbarItem(placement: .status) {
@@ -80,6 +95,98 @@ struct SettingsView: View {
             Toggle(isOn: $configuration.autoConnect) {
                 Label("Connect on Launch", systemImage: "bolt.fill")
             }
+        }
+    }
+
+    // MARK: - Service (Task 5.5: root LaunchDaemon via SMAppService)
+    //
+    // "have the sudo commands done by the service that runs at a high
+    // privilege so the user doesn't have to sudo the dns thing and the ca
+    // thing... the user must be able to control this." — Steven, §0.1.
+    // This row is that control surface: register()/unregister() call
+    // SMAppService, which shows macOS's own one-time "Allow in Background"
+    // system prompt — no sudo, no Terminal.
+
+    private var serviceSection: some View {
+        Section("Service") {
+            HStack {
+                Label("Root Agent Service", systemImage: "gearshape.2")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                serviceStatusBadge
+            }
+
+            if case .requiresApproval = serviceInstaller.state {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("macOS needs your approval to run the background service.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Open Login Items & Extensions…") {
+                        serviceInstaller.openLoginItemsSettings()
+                    }
+                    .font(.callout)
+                }
+                .padding(.vertical, 2)
+            }
+
+            if let error = serviceInstaller.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                switch serviceInstaller.state {
+                case .notRegistered, .notFound, .failed:
+                    Button("Install Service") {
+                        serviceInstaller.register()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .controlSize(.small)
+                case .requiresApproval, .running:
+                    Button("Uninstall Service", role: .destructive) {
+                        serviceInstaller.unregister()
+                    }
+                    .controlSize(.small)
+                }
+
+                Spacer()
+
+                Button {
+                    serviceInstaller.refreshState()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh service status")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var serviceStatusBadge: some View {
+        switch serviceInstaller.state {
+        case .running:
+            Label("Running", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Color.ztlpGreen)
+                .font(.callout)
+        case .requiresApproval:
+            Label("Needs Approval", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.ztlpOrange)
+                .font(.callout)
+        case .notRegistered:
+            Label("Not Installed", systemImage: "xmark.circle")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        case .notFound:
+            Label("Not Found", systemImage: "questionmark.circle")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        case .failed:
+            Label("Failed", systemImage: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.callout)
         }
     }
 

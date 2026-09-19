@@ -55,6 +55,20 @@ final class EnrollmentViewModel: ObservableObject {
 
     @Published private(set) var state: EnrollmentState = .idle
 
+    /// Task 6a / plan §4a: optional relay CLIENT_ROUTE HMAC secret ("group
+    /// password" the prod relay checks). Option B (fallback, zero protocol
+    /// change) — a second field the user pastes from their admin, sent to
+    /// the daemon's "enroll" control command and written into the
+    /// daemon's own agent.toml exactly as `ztlp setup --relay-secret`
+    /// would. NOT part of the enrollment token itself (see §4a option A,
+    /// not implemented — Task 5.9 was cancelled by Steven 2026-09-19).
+    @Published var relaySecret: String = ""
+
+    /// Task 6a: non-fatal warning surfaced when the app's own (server-
+    /// confirmed) enrollment succeeds but the root daemon's enrollment
+    /// fails or the daemon isn't reachable at all. `nil` = no warning.
+    @Published private(set) var daemonEnrollWarning: String?
+
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
@@ -198,6 +212,15 @@ final class EnrollmentViewModel: ObservableObject {
                 configuration.isEnrolled = true
                 configuration.hasCompletedOnboarding = true
 
+                // Task 6a: the app's own identity above is separate from the
+                // root daemon's identity (F2/session-2) — the daemon is what
+                // actually does DNS/VIP/TLS, so it needs its OWN enrollment
+                // too. Best-effort: a daemon enroll failure does not fail
+                // the (already server-confirmed) app enrollment above — the
+                // user sees a distinct warning instead, and Settings > Service
+                // still shows the daemon as not enrolled so it's discoverable.
+                await enrollDaemon(tokenInfo)
+
                 state = .success(zoneName: tokenInfo.zone)
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
 
@@ -210,6 +233,41 @@ final class EnrollmentViewModel: ObservableObject {
 
     func reset() {
         state = .idle
+        daemonEnrollWarning = nil
+    }
+
+    /// Task 6a: ask the root daemon to enroll ITSELF via its "enroll"
+    /// control command (proto/src/agent/control.rs cmd_enroll), which
+    /// re-execs the daemon's own binary through the exact
+    /// `ztlp setup --token ... --yes` path already live-proven on
+    /// MACLLM4 (plan §5.7) — so identity.json/config.toml/agent.toml land
+    /// under the daemon's own HOME, not this app's.
+    ///
+    /// Best-effort: failures here are surfaced as a warning, not a fatal
+    /// enrollment error — the app's own identity (verified via the
+    /// server callback above) is still valid either way.
+    private func enrollDaemon(_ tokenInfo: EnrollmentTokenInfo) async {
+        do {
+            let response = try await AgentControlClient.send(
+                cmd: "enroll",
+                name: hostNameForEnrollment(),
+                enrollmentURI: tokenInfo.rawURI,
+                relaySecret: relaySecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? nil
+                    : relaySecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            if !response.ok {
+                daemonEnrollWarning = "Root service enrollment failed: \(response.error ?? "unknown error"). " +
+                    "The app is enrolled, but DNS/HTTPS routing needs the service enrolled too — " +
+                    "try Settings > Service."
+            }
+        } catch {
+            // Daemon not running / not installed yet is expected before
+            // Task 5.5's SMAppService install is complete — not an error
+            // worth alarming the user about mid-enrollment.
+            daemonEnrollWarning = "Could not reach the root service to finish DNS/HTTPS setup " +
+                "(\(error.localizedDescription)). Install it from Settings > Service, then re-enroll."
+        }
     }
 
     // MARK: - Token Parsing
@@ -262,7 +320,7 @@ final class EnrollmentViewModel: ObservableObject {
         let expires: Date = Date(timeIntervalSince1970: ts)
 
         // Reject obviously invalid expiry: in the past or > 30 days out
-        let maxAge = 30 * 24 * 3600  // 30 days
+        let maxAge: TimeInterval = 30 * 24 * 3600  // 30 days
         guard ts > 0,
               expires > Date().addingTimeInterval(-60),    // within 60 s of now
               expires < Date().addingTimeInterval(maxAge) else { return nil }

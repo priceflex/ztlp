@@ -1,37 +1,55 @@
 // TunnelViewModel.swift
 // ZTLP macOS
 //
-// Manages the tunnel lifecycle with two connection modes:
-//   1. VPN Tunnel (System Extension) — routes all system traffic, needs Apple entitlement
-//   2. Direct Connect (userspace) — app-level encrypted session, no entitlement needed
+// Task 6b (Option A, thin shell): the GUI no longer owns a data plane.
+// The root `ztlp agent` LaunchDaemon (installed via SMAppService, see
+// AgentServiceInstaller) does DNS, VIP allocation, TLS minting, CA trust and
+// the QUIC tunnels. This view model only:
 //
-// Automatically falls back to Direct Connect if VPN setup fails with permission error.
+//   1. asks the daemon "are you there / what's your state" over its JSON
+//      control socket (AgentControlClient -> 127.100.255.1:4433), mirroring
+//      desktop/src-tauri/src/tunnel.rs (agent_is_reachable_at +
+//      wait_for_agent_ready) on the Windows side, and
+//   2. maps the Home "Connect"/"Disconnect" toggle onto the ONLY privileged
+//      lever the non-root GUI has: SMAppService register()/unregister() of
+//      the root daemon. Steven's call (session 6): Disconnect really stops
+//      the service; Connect really starts it. No sudo, no Terminal.
+//
+// Because the daemon plist is KeepAlive=true, a control-socket "shutdown"
+// would just be respawned by launchd — so unregister() is the correct
+// "stop", not "shutdown".
 
 import Foundation
 import AppKit
-import NetworkExtension
 import Combine
 import SwiftUI
 
-/// Connection mode used by the tunnel.
-enum ConnectionMode: String, Equatable {
-    case vpnTunnel = "VPN Tunnel"
-    case directConnect = "Direct Connect"
+/// What the daemon last told us about itself (control "status" +
+/// "setup_status" + "tunnels"). Nil until the first successful poll.
+struct DaemonSnapshot: Equatable {
+    var version: String = ""
+    var dnsListen: String = ""
+    var nsServer: String = ""
+    var vipAllocated: Int = 0
+    var uptimeSecs: Int = 0
+    var zone: String = ""
+    var identityEnrolled: Bool = false
+    var caInstalled: Bool = false
+    var dnsConfigured: Bool = false
+    var activeTunnels: Int = 0
+    var bytesSent: UInt64 = 0
+    var bytesReceived: UInt64 = 0
 
-    var icon: String {
-        switch self {
-        case .vpnTunnel: return "lock.shield"
-        case .directConnect: return "bolt.shield"
+    /// One-line human summary for the Home screen (6d: "one status line").
+    var statusLine: String {
+        if !identityEnrolled { return "Service running — not enrolled yet" }
+        var parts: [String] = []
+        parts.append(caInstalled ? "HTTPS trusted" : "HTTPS trust missing")
+        parts.append(dnsConfigured ? "DNS routed" : "DNS not routed")
+        if activeTunnels > 0 {
+            parts.append("\(activeTunnels) active tunnel\(activeTunnels == 1 ? "" : "s")")
         }
-    }
-
-    var description: String {
-        switch self {
-        case .vpnTunnel:
-            return "Full VPN — all traffic routed through ZTLP"
-        case .directConnect:
-            return "App-level encrypted session (no VPN entitlement needed)"
-        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -44,36 +62,32 @@ final class TunnelViewModel: ObservableObject {
     @Published private(set) var status: ConnectionStatus = .disconnected
     @Published private(set) var stats = TrafficStats()
     @Published private(set) var zoneName: String = ""
-    @Published private(set) var peerAddress: String = ""
     @Published private(set) var lastError: String?
     @Published private(set) var testResult: String?
-    @Published private(set) var isVPNConfigInstalled: Bool = false
-    @Published private(set) var connectionMode: ConnectionMode = .directConnect
-    @Published var preferVPN: Bool = false
-    @Published var autoReconnectEnabled: Bool = true
-    @Published private(set) var reconnectAttempt: Int = 0
+    @Published private(set) var daemon: DaemonSnapshot?
+    /// Mirrors AgentServiceInstaller.state so Home can say "Needs approval"
+    /// (System Settings > Login Items) instead of a generic "Disconnected".
+    @Published private(set) var serviceState: AgentServiceState = .notRegistered
 
-    // MARK: - Auto-Reconnect
+    // MARK: - Tunables (mirror desktop/src-tauri/src/tunnel.rs)
 
-    private var reconnectTask: Task<Void, Never>?
-    private let maxReconnectDelay: TimeInterval = 30
-    private let baseReconnectDelay: TimeInterval = 1
-    /// Set to true when we're intentionally tearing down for reconnect — suppresses the
-    /// disconnect event handler from cancelling the pending reconnect.
-    private var isReconnecting = false
+    /// Poll cadence while the app is open (Windows UI polls ~2s).
+    static let pollInterval: TimeInterval = 2
+    /// How long Connect waits for the freshly registered daemon to answer.
+    static let readyTimeout: TimeInterval = 15
+    /// How long Disconnect waits for the daemon to actually go away.
+    static let stopTimeout: TimeInterval = 8
+    static let readyPollInterval: TimeInterval = 0.25
 
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
-    private let networkMonitor = NetworkMonitor.shared
-    private let sysExtManager = SystemExtensionManager.shared
-    private let bridge = ZTLPBridge.shared
+    private let installer = AgentServiceInstaller.shared
     private var cancellables = Set<AnyCancellable>()
-    private var tunnelManager: NETunnelProviderManager?
-    private var statsTimer: Timer?
-    private var directIdentity: ZTLPIdentityHandle?
-
-    private let sharedDefaults = UserDefaults(suiteName: "group.com.ztlp.shared.macos")
+    private var pollTask: Task<Void, Never>?
+    /// Set while a user-initiated connect/disconnect is in flight so the
+    /// background poller doesn't flip `status` under it.
+    private var transitionInFlight = false
 
     // MARK: - Init
 
@@ -81,7 +95,19 @@ final class TunnelViewModel: ObservableObject {
         self.configuration = configuration
         self.zoneName = configuration.zoneName
         setupObservers()
-        checkVPNAvailability()
+        startPolling()
+        // "Connect on Launch" (Settings > General). Mirrors the Windows
+        // client's auto_connect: if the daemon isn't already up, start it.
+        if configuration.autoConnect {
+            Task { [weak self] in
+                guard let self else { return }
+                if await !Self.daemonReachable() { self.connect() }
+            }
+        }
+    }
+
+    deinit {
+        pollTask?.cancel()
     }
 
     // MARK: - Actions
@@ -97,546 +123,318 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
+    /// Connect = make sure the root daemon is installed and answering.
+    ///
+    /// Mirrors `start_tunnel` on Windows: if the agent already answers its
+    /// control socket, we're done; otherwise start it (here: SMAppService
+    /// register, which is what launches the LaunchDaemon) and poll until it
+    /// answers or we time out.
     func connect() {
-        guard status.canConnect else { return }
-
+        guard status.canConnect, !transitionInFlight else { return }
         lastError = nil
         status = .connecting
-
+        transitionInFlight = true
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
         Task {
-            if preferVPN {
-                // Try VPN first, fall back to direct
-                do {
-                    try await connectVPN()
-                    connectionMode = .vpnTunnel
-                } catch {
-                    let errMsg = error.localizedDescription
-                    if errMsg.contains("permission") || errMsg.contains("entitlement")
-                        || errMsg.contains("configuration is invalid") || errMsg.contains("NEVPNError") {
-                        // VPN not available — fall back to direct connect
-                        lastError = nil
-                        await connectDirect()
-                    } else {
-                        status = .disconnected
-                        lastError = errMsg
-                        NSSound.beep()
-                    }
-                }
-            } else {
-                await connectDirect()
-            }
-        }
-    }
+            defer { transitionInFlight = false }
 
-    func disconnect() {
-        guard status.canDisconnect else { return }
-
-        // Cancel any pending auto-reconnect
-        reconnectTask?.cancel()
-        reconnectAttempt = 0
-        isReconnecting = false
-
-        status = .disconnecting
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
-
-        switch connectionMode {
-        case .vpnTunnel:
-            tunnelManager?.connection.stopVPNTunnel()
-        case .directConnect:
-            teardownAll()  // Full teardown including networking on explicit disconnect
-            bridge.disconnect()
-        }
-
-        stopStatsPolling()
-        status = .disconnected
-        stats = TrafficStats()
-        peerAddress = ""
-    }
-
-    // MARK: - Direct Connect (Userspace)
-
-    private func connectDirect() async {
-        connectionMode = .directConnect
-
-        do {
-            // On reconnect, the client already exists — skip init/identity/create
-            if !bridge.hasClient {
-                try bridge.initialize()
-
-                // Load or create identity
-                let identity: ZTLPIdentityHandle
-                let identityPath = defaultIdentityPath()
-
-                if let path = identityPath,
-                   FileManager.default.fileExists(atPath: path) {
-                    identity = try bridge.loadIdentity(from: path)
-                } else {
-                    identity = try bridge.generateIdentity()
-                    if let path = identityPath {
-                        try identity.save(to: path)
-                    }
-                }
-
-                self.directIdentity = identity
-
-                guard identity.nodeId != nil else {
-                    status = .disconnected
-                    lastError = "Failed to get node ID from identity"
-                    return
-                }
-
-                // Create client
-                try bridge.createClient(identity: identity)
-            }
-
-            // Build config
-            let config = ZTLPConfigHandle()
-            let relay = configuration.relayAddress
-            if !relay.isEmpty {
-                try config.setRelay(relay)
-            }
-            try config.setNatAssist(configuration.natAssist)
-            try config.setTimeoutMs(15000)
-
-            // Set service name for gateway routing
-            let svcName = configuration.serviceName
-            if !svcName.isEmpty {
-                try config.setService(svcName)
-            }
-
-            // Resolve gateway address via NS if we have a service name and NS server
-            var target = relay
-            let nsServer = configuration.targetNodeId  // NS server address
-            if !svcName.isEmpty && !nsServer.isEmpty {
-                let nsName = svcName.contains(".") ? svcName : "\(svcName).techrockstars.ztlp"
-                do {
-                    // Run blocking NS resolve off the main thread to avoid priority inversion
-                    let bridgeRef = bridge
-                    let resolved = try await Task.detached(priority: .userInitiated) {
-                        try bridgeRef.nsResolve(
-                            serviceName: nsName,
-                            nsServer: nsServer,
-                            timeoutMs: 5000
-                        )
-                    }.value
-                    print("[ZTLP] NS resolved \(nsName) -> \(resolved)")
-                    target = resolved
-                } catch {
-                    print("[ZTLP] NS resolution failed: \(error), falling back to relay/direct")
-                    // Fall back to relay address or NS server
-                    if target.isEmpty {
-                        target = nsServer
-                    }
-                }
-            }
-
-            // Fall back to relay or NS address if NS resolution didn't set a target
-            if target.isEmpty {
-                target = nsServer
-            }
-            guard !target.isEmpty else {
-                status = .disconnected
-                lastError = "No relay or target address configured. Enroll first."
+            if await Self.daemonReachable() {
+                await refresh()
+                status = .connected
                 return
             }
 
-            try await bridge.connect(target: target, config: config)
+            installer.register()
+            serviceState = installer.state
 
-            // Connected! Start VIP proxy + DNS
-            status = .connected
-            stats.connectedSince = Date()
-            stats.lastActivity = Date()
-            peerAddress = target
-            startDirectStatsPolling()
-            await startVipProxy()
+            switch installer.state {
+            case .requiresApproval:
+                // macOS wants a human click in System Settings. That IS the
+                // one system prompt Steven accepted (UAC equivalent); we
+                // can't approve programmatically, so send them there.
+                installer.openLoginItemsSettings()
+                status = .disconnected
+                lastError = "Approve “ZTLP” under System Settings › General › Login Items & Extensions, then press Connect again."
+                return
+            case .failed(let msg):
+                status = .disconnected
+                lastError = "Could not start the ZTLP service: \(msg)"
+                NSSound.beep()
+                return
+            case .notFound:
+                status = .disconnected
+                lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
+                NSSound.beep()
+                return
+            case .notRegistered:
+                if let err = installer.lastError {
+                    status = .disconnected
+                    lastError = "Could not start the ZTLP service: \(err)"
+                    NSSound.beep()
+                    return
+                }
+            case .running:
+                break
+            }
 
-            // Give gateway time to set up session before marking fully connected
-            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
-
-            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
-
-        } catch {
-            status = .disconnected
-            lastError = error.localizedDescription
-            NSSound.beep()
+            if await Self.waitForDaemon(reachable: true, timeout: Self.readyTimeout) {
+                await refresh()
+                status = .connected
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+            } else {
+                status = .disconnected
+                lastError = "The ZTLP service was installed but did not answer within \(Int(Self.readyTimeout))s."
+                NSSound.beep()
+            }
         }
     }
 
-    // MARK: - VPN Tunnel (System Extension)
+    /// Disconnect = stop the root daemon by unregistering it (KeepAlive
+    /// means a plain "shutdown" would respawn — see header comment).
+    func disconnect() {
+        guard status.canDisconnect, !transitionInFlight else { return }
+        lastError = nil
+        status = .disconnecting
+        transitionInFlight = true
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
-    private func connectVPN() async throws {
-        let manager = try await loadOrCreateTunnelManager()
-        self.tunnelManager = manager
-
-        let proto = (manager.protocolConfiguration as? NETunnelProviderProtocol)
-            ?? NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = "com.ztlp.app.macos.system-extension"
-        proto.serverAddress = configuration.relayAddress.isEmpty
-            ? configuration.targetNodeId
-            : configuration.relayAddress
-
-        var providerConfig: [String: Any] = [
-            "targetNodeId": configuration.targetNodeId,
-            "relayAddress": configuration.relayAddress,
-            "stunServer": configuration.stunServer,
-            "tunnelAddress": configuration.tunnelAddress,
-            "mtu": configuration.mtu,
-        ]
-        providerConfig["dnsServers"] = configuration.dnsServers
-
-        proto.providerConfiguration = providerConfig
-
-        manager.protocolConfiguration = proto
-        manager.localizedDescription = "ZTLP VPN"
-        manager.isEnabled = true
-
-        try await manager.saveToPreferences()
-        try await manager.loadFromPreferences()
-
-        let session = manager.connection as! NETunnelProviderSession
-        try session.startVPNTunnel()
-
-        startStatsPolling()
-    }
-
-    // MARK: - VPN Availability
-
-    private func checkVPNAvailability() {
         Task {
-            do {
-                let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-                if let existing = managers.first(where: {
-                    guard let proto = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
-                    return proto.providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
-                }) {
-                    self.tunnelManager = existing
-                    self.isVPNConfigInstalled = true
-                    self.preferVPN = true
-                    updateStatusFromConnection(existing.connection)
+            defer { transitionInFlight = false }
+
+            installer.unregister()
+            serviceState = installer.state
+            if case .failed(let msg) = installer.state {
+                lastError = "Could not stop the ZTLP service: \(msg)"
+            } else if let err = installer.lastError {
+                lastError = "Could not stop the ZTLP service: \(err)"
+            }
+
+            _ = await Self.waitForDaemon(reachable: false, timeout: Self.stopTimeout)
+            let stillUp = await Self.daemonReachable()
+            if stillUp {
+                // launchd hasn't torn it down yet (or unregister failed).
+                // Report honestly rather than showing a fake "Disconnected".
+                status = .connected
+                if lastError == nil {
+                    lastError = "The ZTLP service is still running. Try again in a moment."
                 }
-            } catch {
-                self.isVPNConfigInstalled = false
-                self.preferVPN = false
+            } else {
+                status = .disconnected
+                stats = TrafficStats()
+                daemon = nil
             }
         }
     }
 
-    func sendMessageToExtension(_ message: Data) async -> Data? {
-        guard let session = tunnelManager?.connection as? NETunnelProviderSession else {
-            return nil
+    // MARK: - Daemon polling (the "IPC" half of tunnel.rs)
+
+    private func startPolling() {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollOnce()
+                try? await Task.sleep(nanoseconds: UInt64(Self.pollInterval * 1_000_000_000))
+            }
         }
-        return await withCheckedContinuation { continuation in
-            do {
-                try session.sendProviderMessage(message) { response in
-                    continuation.resume(returning: response)
+    }
+
+    private func pollOnce() async {
+        serviceState = installer.state
+        installer.refreshState()
+        serviceState = installer.state
+
+        guard !transitionInFlight else { return }
+
+        if await Self.daemonReachable() {
+            missedPolls = 0
+            await refresh()
+            if status != .connected {
+                status = .connected
+                if stats.connectedSince == nil { stats.connectedSince = Date() }
+            }
+        } else if status == .connected || status == .reconnecting {
+            // We were up and the daemon vanished (crash, manual unload).
+            // KeepAlive normally brings it straight back, so show
+            // "Reconnecting" for a few polls before a hard Disconnected.
+            missedPolls += 1
+            if missedPolls >= Self.missedPollsBeforeDisconnected {
+                status = .disconnected
+                daemon = nil
+                stats = TrafficStats()
+                missedPolls = 0
+            } else {
+                status = .reconnecting
+            }
+        }
+    }
+
+    /// Consecutive failed polls while we believed we were connected.
+    private var missedPolls = 0
+    /// ~3 polls x 2s = 6s grace for launchd KeepAlive to respawn the daemon.
+    static let missedPollsBeforeDisconnected = 3
+
+    /// Pull status + setup_status + tunnels from the daemon and fold them
+    /// into `daemon`, `zoneName`, `stats`.
+    func refresh() async {
+        var snap = daemon ?? DaemonSnapshot()
+
+        if let st = try? await AgentControlClient.send(cmd: "status", timeout: 3),
+           st.ok, case .object(let o)? = st.data {
+            snap.version = o["version"]?.stringValue ?? snap.version
+            snap.dnsListen = o["dns_listen"]?.stringValue ?? snap.dnsListen
+            snap.nsServer = o["ns_server"]?.stringValue ?? snap.nsServer
+            snap.vipAllocated = o["vip_allocated"]?.intValue ?? snap.vipAllocated
+            snap.uptimeSecs = o["uptime_secs"]?.intValue ?? snap.uptimeSecs
+        }
+
+        if let ss = try? await AgentControlClient.send(cmd: "setup_status", timeout: 3),
+           ss.ok, case .object(let o)? = ss.data {
+            snap.zone = o["zone"]?.stringValue ?? ""
+            snap.identityEnrolled = o["identity_enrolled"]?.boolValue ?? false
+            snap.caInstalled = o["ca_installed_system_trust"]?.boolValue ?? false
+            snap.dnsConfigured = o["dns_configured"]?.boolValue ?? false
+        }
+
+        if let tn = try? await AgentControlClient.send(cmd: "tunnels", timeout: 3),
+           tn.ok, case .object(let o)? = tn.data {
+            snap.activeTunnels = o["active"]?.intValue ?? 0
+            var tx: UInt64 = 0
+            var rx: UInt64 = 0
+            if case .array(let list)? = o["tunnels"] {
+                for case .object(let t) in list {
+                    tx += UInt64(t["bytes_sent"]?.intValue ?? 0)
+                    rx += UInt64(t["bytes_recv"]?.intValue ?? 0)
                 }
-            } catch {
-                continuation.resume(returning: nil)
             }
-        }
-    }
-
-    // MARK: - Private
-
-    private func loadOrCreateTunnelManager() async throws -> NETunnelProviderManager {
-        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-
-        if let existing = managers.first(where: {
-            guard let proto = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
-            return proto.providerBundleIdentifier == "com.ztlp.app.macos.system-extension"
-        }) {
-            return existing
+            snap.bytesSent = tx
+            snap.bytesReceived = rx
         }
 
-        return NETunnelProviderManager()
-    }
+        daemon = snap
 
-    private func setupObservers() {
-        // VPN status changes
-        NotificationCenter.default.publisher(for: .NEVPNStatusDidChange)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] notification in
-                guard let self = self,
-                      self.connectionMode == .vpnTunnel,
-                      let connection = notification.object as? NEVPNConnection else { return }
-                self.updateStatusFromConnection(connection)
-            }
-            .store(in: &cancellables)
+        // Zone: the daemon's own enrollment is the truth for what DNS/TLS
+        // will serve; fall back to the app's stored zone before enrollment.
+        let effectiveZone = snap.zone.isEmpty ? configuration.zoneName : snap.zone
+        if effectiveZone != zoneName { zoneName = effectiveZone }
 
-        // Direct connect events
-        bridge.eventSubject
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] event in
-                guard let self = self, self.connectionMode == .directConnect else { return }
-                switch event {
-                case .connected(let addr):
-                    self.peerAddress = addr
-                    if self.status != .connected {
-                        self.status = .connected
-                        self.stats.connectedSince = Date()
-                    }
-                case .disconnected(let reason):
-                    if self.isReconnecting {
-                        // Intentional teardown for reconnect — don't cancel the pending reconnect
-                        break
-                    } else if reason == 100 && self.autoReconnectEnabled && self.status == .connected {
-                        // Keepalive timeout — schedule auto-reconnect
-                        // Don't stop VIP proxy — listeners stay alive for seamless reconnect
-                        self.stopStatsPolling()
-                        self.isReconnecting = true
-                        self.scheduleReconnect()
-                    } else {
-                        self.status = .disconnected
-                        self.reconnectAttempt = 0
-                        self.reconnectTask?.cancel()
-                        self.stats = TrafficStats()
-                        self.stopStatsPolling()
-                    }
-                case .error(let error):
-                    self.lastError = error.localizedDescription
-                default:
-                    break
-                }
-            }
-            .store(in: &cancellables)
-
-        // Network changes — reconnect when interface switches
-        // IMPORTANT: NWPathMonitor fires spuriously on macOS (Ethernet renegotiation,
-        // Wi-Fi↔Ethernet priority shifts, power management). Don't tear down a working
-        // tunnel just because the interface type changed. Instead, debounce and verify
-        // connectivity is actually lost before reconnecting.
-        networkMonitor.interfaceChangePublisher
-            .receive(on: DispatchQueue.main)
-            .debounce(for: .seconds(2), scheduler: DispatchQueue.main)
-            .sink { [weak self] newInterface in
-                guard let self = self else { return }
-                // Only reconnect if we were connected or already reconnecting
-                guard self.status == .connected || self.status == .reconnecting else { return }
-                // Don't reconnect if network dropped entirely — wait for it to come back
-                guard newInterface != .none else {
-                    self.status = .reconnecting
-                    return
-                }
-                // If we're still connected, check if the tunnel is actually broken
-                // before tearing down. The keepalive watchdog (45s) handles real failures.
-                // Only force reconnect if the interface type genuinely changed AND we
-                // haven't received tunnel data recently (stats still updating = tunnel alive).
-                let secondsSinceData = Date().timeIntervalSince(self.stats.lastActivity ?? Date.distantPast)
-                if secondsSinceData < 30 {
-                    // Got tunnel data within the last 30s — tunnel is alive, skip reconnect
-                    print("[ZTLP] Interface changed to \(newInterface) but tunnel is alive (last data \(Int(secondsSinceData))s ago), skipping reconnect")
-                    return
-                }
-                print("[ZTLP] Interface changed to \(newInterface), last data \(Int(secondsSinceData))s ago — reconnecting")
-                // Disconnect transport only — keep VIP proxy listeners alive
-                self.isReconnecting = true
-                self.stopStatsPolling()
-                self.bridge.disconnectTransport()
-                self.scheduleReconnect()
-            }
-            .store(in: &cancellables)
-
-        // Zone name binding
-        configuration.$zoneName
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$zoneName)
-    }
-
-    private func updateStatusFromConnection(_ connection: NEVPNConnection) {
-        switch connection.status {
-        case .invalid, .disconnected:
-            status = .disconnected
-            stats.connectedSince = nil
-            stopStatsPolling()
-        case .connecting:
-            status = .connecting
-        case .connected:
-            status = .connected
-            stats.connectedSince = connection.connectedDate
-            startStatsPolling()
-            NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
-        case .reasserting:
-            status = .reconnecting
-        case .disconnecting:
-            status = .disconnecting
-        @unknown default:
-            break
+        // Stats: uptime-derived connectedSince keeps the duration counter
+        // honest across app relaunches (the daemon may have been up for days).
+        if snap.uptimeSecs > 0 {
+            stats.connectedSince = Date(timeIntervalSinceNow: -TimeInterval(snap.uptimeSecs))
+        } else if stats.connectedSince == nil {
+            stats.connectedSince = Date()
         }
-    }
-
-    // MARK: - Stats Polling
-
-    private func startStatsPolling() {
-        stopStatsPolling()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshVPNStats()
-            }
-        }
-    }
-
-    private func startDirectStatsPolling() {
-        stopStatsPolling()
-        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshDirectStats()
-            }
-        }
-    }
-
-    private func stopStatsPolling() {
-        statsTimer?.invalidate()
-        statsTimer = nil
-    }
-
-    private func refreshVPNStats() {
-        guard let defaults = sharedDefaults else { return }
-        stats.bytesSent = UInt64(defaults.integer(forKey: "ztlp_bytes_sent"))
-        stats.bytesReceived = UInt64(defaults.integer(forKey: "ztlp_bytes_received"))
-        if let since = defaults.object(forKey: "ztlp_connected_since") as? TimeInterval, since > 0 {
-            stats.connectedSince = Date(timeIntervalSince1970: since)
-        }
-        peerAddress = defaults.string(forKey: "ztlp_peer_address") ?? ""
-    }
-
-    private func refreshDirectStats() {
-        let prevRx = stats.bytesReceived
-        let prevTx = stats.bytesSent
-        stats.bytesSent = bridge.bytesSent
-        stats.bytesReceived = bridge.bytesReceived
-        // Track last time traffic counters changed (tunnel data is flowing)
-        if stats.bytesReceived != prevRx || stats.bytesSent != prevTx {
+        if snap.bytesSent != stats.bytesSent || snap.bytesReceived != stats.bytesReceived {
             stats.lastActivity = Date()
         }
+        stats.bytesSent = snap.bytesSent
+        stats.bytesReceived = snap.bytesReceived
     }
 
+    // MARK: - Reachability helpers (agent_is_reachable_at / wait_for_agent_ready)
+
+    /// One "status" round trip on the control socket. Reachable = the
+    /// daemon answered *anything* well-formed (an auth error still proves
+    /// it's alive; the token problem surfaces via lastError elsewhere).
+    static func daemonReachable() async -> Bool {
+        do {
+            _ = try await AgentControlClient.send(cmd: "status", timeout: 2)
+            return true
+        } catch AgentControlError.daemonError {
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Poll until `daemonReachable() == reachable` or timeout. Returns true
+    /// if the desired state was reached.
+    static func waitForDaemon(reachable want: Bool, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if await daemonReachable() == want { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: UInt64(readyPollInterval * 1_000_000_000))
+        }
+    }
 
     // MARK: - Service Test
 
-    /// Send an HTTP GET through the ZTLP tunnel and display the response.
+    /// The real user test from §0.1: fetch the zone service over HTTPS the
+    /// way Safari would (system resolver -> /etc/resolver -> agent DNS ->
+    /// VIP -> local TLS with the trusted ZTLP CA). No `-k`, no custom
+    /// resolver — if this returns 200 the browser will too.
     func testService() async {
         guard status == .connected else {
             testResult = "Not connected"
             return
         }
-        testResult = "Testing..."
-        
-        let httpRequest = "GET / HTTP/1.1\r\nHost: beta.local\r\nConnection: close\r\n\r\n"
-        guard let requestData = httpRequest.data(using: .utf8) else {
-            testResult = "Failed to encode request"
+        let zone = zoneName
+        let svc = configuration.serviceName
+        guard !zone.isEmpty, !svc.isEmpty else {
+            testResult = "Set a service name and enroll first"
             return
         }
-        
+        let host = svc.contains(".") ? svc : "\(svc).\(zone)"
+        guard let url = URL(string: "https://\(host)/") else {
+            testResult = "Bad service host: \(host)"
+            return
+        }
+        testResult = "Testing https://\(host)/ …"
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        req.cachePolicy = .reloadIgnoringLocalCacheData
         do {
-            try bridge.send(data: requestData)
-            await MainActor.run {
-                testResult = "Sent \(requestData.count) bytes through tunnel. Check gateway logs for response."
-            }
-            // Wait a moment for response via recv callback
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await MainActor.run {
-                let rx = bridge.bytesReceived
-                if rx > 0 {
-                    testResult = "✅ Sent \(requestData.count)B, Received \(rx)B"
-                } else {
-                    testResult = "⚠️ Sent \(requestData.count)B, Received 0B (gateway may not be forwarding yet)"
-                }
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            let hmac = body.contains("hmac_verified\": true") || body.contains("hmac_verified\":true")
+            if (200..<400).contains(code) {
+                testResult = "✅ HTTPS \(code) from \(host) (\(data.count)B)\(hmac ? ", identity verified by gateway" : "")"
+            } else {
+                testResult = "⚠️ HTTPS \(code) from \(host)"
             }
         } catch {
-            await MainActor.run {
-                testResult = "Error: \(error.localizedDescription)"
-            }
+            testResult = "Error: \(error.localizedDescription)"
         }
     }
 
+    // MARK: - Observers
 
-    // MARK: - VIP Proxy + DNS
-
-    @Published private(set) var vipStatus: String?
-    private var networkingConfigured = false
-
-    private func startVipProxy() async {
-        do {
-            // Register services with VIP addresses (high ports — pf redirects 80->8080, 443->8443)
-            // Safe to call again on reconnect — add_service is idempotent
-            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8080)
-            try bridge.vipAddService(name: "beta", vip: "127.0.55.1", port: 8443)
-
-            // Vaultwarden — vault service on its own VIP
-            try bridge.vipAddService(name: "vault", vip: "127.0.55.2", port: 8080)
-            try bridge.vipAddService(name: "vault", vip: "127.0.55.2", port: 8443)
-
-            // Set up loopback aliases + pf redirect + DNS resolver (prompts for admin password once)
-            // Skip on reconnect — networking config persists across tunnel sessions
-            if !networkingConfigured {
-                try bridge.setupNetworking(vips: ["127.0.55.1", "127.0.55.2", "127.0.55.53"])
-                networkingConfigured = true
+    private func setupObservers() {
+        configuration.$zoneName
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] z in
+                guard let self else { return }
+                if self.daemon?.zone.isEmpty ?? true { self.zoneName = z }
             }
+            .store(in: &cancellables)
 
-            // Start TCP proxy listeners on high ports OR hot-swap session if already running.
-            // On first connect: binds TCP listeners. On reconnect: updates the tunnel session
-            // inside existing listeners (no rebind, no port downtime).
-            try bridge.vipStart()
+        installer.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] s in self?.serviceState = s }
+            .store(in: &cancellables)
 
-            // Start DNS resolver (safe to call again — re-binds on new port)
-            try bridge.dnsStart(listenAddr: "127.0.55.53:5354")
-
-            // Auto-generate TLS certs for registered services (if mkcert available)
-            let certMgr = CertificateManager()
-            certMgr.generateServiceCert(hostname: "beta.techrockstars.ztlp")
-            certMgr.generateServiceCert(hostname: "vault.techrockstars.ztlp")
-
-            await MainActor.run {
-                vipStatus = "VIP proxy active — beta + vault services"
-            }
-        } catch {
-            await MainActor.run {
-                vipStatus = "VIP proxy failed: \(error.localizedDescription)"
-            }
-        }
+        // Re-poll immediately when the user comes back (e.g. after approving
+        // the daemon in System Settings) instead of waiting a full tick.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in Task { await self?.pollOnce() } }
+            .store(in: &cancellables)
     }
+}
 
-    /// Stop VIP proxy listeners and DNS. Does NOT tear down networking (loopback/pf/DNS resolver)
-    /// — those persist across reconnects to avoid repeated admin password prompts.
-    private func stopVipProxy() {
-        bridge.vipStop()
-        bridge.dnsStop()
-        vipStatus = nil
+// MARK: - JSONValue conveniences used above
+
+extension JSONValue {
+    var intValue: Int? {
+        if case .number(let d) = self { return Int(d) }
+        return nil
     }
-
-    /// Full teardown including networking — only called on explicit user disconnect.
-    private func teardownAll() {
-        stopVipProxy()
-        bridge.teardownNetworking(vips: ["127.0.55.1", "127.0.55.2", "127.0.55.53"])
-        networkingConfigured = false
-    }
-
-    // MARK: - Auto-Reconnect
-
-    private func scheduleReconnect() {
-        reconnectTask?.cancel()
-        reconnectTask = Task {
-            let delay = min(baseReconnectDelay * pow(2, Double(reconnectAttempt)), maxReconnectDelay)
-            reconnectAttempt += 1
-            status = .reconnecting
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            if !Task.isCancelled {
-                isReconnecting = false
-                connect()
-            }
-        }
-    }
-
-    // MARK: - Identity Path
-
-    private func defaultIdentityPath() -> String? {
-        let appSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask
-        ).first
-        guard let dir = appSupport?.appendingPathComponent("ZTLP") else { return nil }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("identity.json").path
+    var boolValue: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
     }
 }

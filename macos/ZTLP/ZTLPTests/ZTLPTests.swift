@@ -51,59 +51,87 @@ final class ZTLPTests: XCTestCase {
 
     func testConfigurationDefaults() {
         let config = ZTLPConfiguration(suiteName: "test.ztlp.\(UUID().uuidString)")
-        XCTAssertEqual(config.stunServer, "stun.l.google.com:19302")
-        XCTAssertEqual(config.tunnelAddress, "10.0.0.2")
-        XCTAssertEqual(config.mtu, 1400)
-        XCTAssertTrue(config.natAssist)
+        XCTAssertEqual(config.serviceName, "beta")
         XCTAssertFalse(config.autoConnect)
+        XCTAssertFalse(config.isEnrolled)
+        XCTAssertTrue(config.useSecureEnclave)
     }
 
     func testConfigurationReset() {
         let suiteName = "test.ztlp.\(UUID().uuidString)"
         let config = ZTLPConfiguration(suiteName: suiteName)
         config.relayAddress = "test.relay:4433"
-        config.mtu = 1500
+        config.zoneName = "corp.ztlp"
+        config.isEnrolled = true
         config.autoConnect = true
 
         config.reset()
 
         XCTAssertEqual(config.relayAddress, "")
-        XCTAssertEqual(config.mtu, 1400)
+        XCTAssertEqual(config.zoneName, "")
+        XCTAssertFalse(config.isEnrolled)
         XCTAssertFalse(config.autoConnect)
     }
 
-    func testConfigurationToTunnelConfiguration() {
-        let suiteName = "test.ztlp.\(UUID().uuidString)"
-        let config = ZTLPConfiguration(suiteName: suiteName)
-        config.targetNodeId = "abcd1234"
-        config.relayAddress = "relay.test:4433"
+    // MARK: - DaemonSnapshot (Task 6b/6d Home status line)
 
-        let tunnel = config.toTunnelConfiguration()
-        XCTAssertEqual(tunnel.targetNodeId, "abcd1234")
-        XCTAssertEqual(tunnel.relayAddress, "relay.test:4433")
+    func testDaemonSnapshotStatusLineNotEnrolled() {
+        var snap = DaemonSnapshot()
+        snap.identityEnrolled = false
+        snap.caInstalled = true
+        snap.dnsConfigured = true
+        XCTAssertEqual(snap.statusLine, "Service running — not enrolled yet")
     }
 
-    // MARK: - TunnelConfiguration Tests
+    func testDaemonSnapshotStatusLineHealthy() {
+        var snap = DaemonSnapshot()
+        snap.identityEnrolled = true
+        snap.caInstalled = true
+        snap.dnsConfigured = true
+        snap.activeTunnels = 0
+        XCTAssertEqual(snap.statusLine, "HTTPS trusted · DNS routed")
+    }
 
-    func testTunnelConfigSerialization() {
-        let config = TunnelConfiguration(
-            targetNodeId: "abc123",
-            relayAddress: "relay:4433",
-            stunServer: "stun:19302",
-            tunnelAddress: "10.0.0.2",
-            tunnelNetmask: "255.255.255.0",
-            dnsServers: ["1.1.1.1"],
-            mtu: 1400,
-            identityPath: nil
-        )
+    func testDaemonSnapshotStatusLineDegradedAndTunnels() {
+        var snap = DaemonSnapshot()
+        snap.identityEnrolled = true
+        snap.caInstalled = false
+        snap.dnsConfigured = true
+        snap.activeTunnels = 1
+        XCTAssertEqual(snap.statusLine, "HTTPS trust missing · DNS routed · 1 active tunnel")
+        snap.activeTunnels = 3
+        snap.dnsConfigured = false
+        XCTAssertEqual(snap.statusLine, "HTTPS trust missing · DNS not routed · 3 active tunnels")
+    }
 
-        let dict = config.toDictionary()
-        XCTAssertEqual(dict["targetNodeId"] as? String, "abc123")
-        XCTAssertEqual(dict["relayAddress"] as? String, "relay:4433")
+    // MARK: - JSONValue (control-socket response decoding)
 
-        let restored = TunnelConfiguration.from(dictionary: dict)
-        XCTAssertNotNil(restored)
-        XCTAssertEqual(restored?.targetNodeId, "abc123")
+    func testJSONValueDecodesDaemonStatusShape() throws {
+        // Real shape from a live 0.35.10 daemon on MACLLM4 (2026-09-19).
+        let raw = #"{"ok":true,"data":{"dns_listen":"127.0.0.55:15353","domain_mappings":0,"ns_server":"44.240.16.59:23096","pid":12940,"uptime_secs":779,"version":"0.35.10","vip_allocated":1,"vip_capacity":65534}}"#
+        let resp = try JSONDecoder().decode(AgentControlResponse.self, from: Data(raw.utf8))
+        XCTAssertTrue(resp.ok)
+        guard case .object(let o)? = resp.data else { return XCTFail("data not an object") }
+        XCTAssertEqual(o["version"]?.stringValue, "0.35.10")
+        XCTAssertEqual(o["uptime_secs"]?.intValue, 779)
+        XCTAssertEqual(o["vip_allocated"]?.intValue, 1)
+    }
+
+    func testJSONValueDecodesSetupStatusBools() throws {
+        let raw = #"{"ok":true,"data":{"ca_installed_system_trust":true,"dns_configured":false,"identity_enrolled":true,"zone":"defcon.ztlp"}}"#
+        let resp = try JSONDecoder().decode(AgentControlResponse.self, from: Data(raw.utf8))
+        guard case .object(let o)? = resp.data else { return XCTFail("data not an object") }
+        XCTAssertEqual(o["ca_installed_system_trust"]?.boolValue, true)
+        XCTAssertEqual(o["dns_configured"]?.boolValue, false)
+        XCTAssertEqual(o["zone"]?.stringValue, "defcon.ztlp")
+    }
+
+    func testJSONValueDecodesDaemonError() throws {
+        let raw = #"{"ok":false,"error":"unauthorized"}"#
+        let resp = try JSONDecoder().decode(AgentControlResponse.self, from: Data(raw.utf8))
+        XCTAssertFalse(resp.ok)
+        XCTAssertEqual(resp.error, "unauthorized")
+        XCTAssertNil(resp.data)
     }
 
     // MARK: - ZTLPIdentityInfo Tests

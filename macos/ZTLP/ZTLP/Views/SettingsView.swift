@@ -1,18 +1,24 @@
 // SettingsView.swift
 // ZTLP macOS
 //
-// Unified settings: General, Identity, Enrollment, Advanced (collapsed), About, Danger Zone.
-// Clean, professional layout. Advanced fields hidden by default.
+// Unified settings: General, Service, Identity, Enrollment, About, Danger Zone.
+// Task 6c: HTTPS trust + DNS routing are handled by the root agent daemon
+// (see the Home status line), so the old CertificateTrustView, VPN/tunnel
+// fields and raw relay/node-id fields are gone. Windows-simple.
 
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
-    @ObservedObject var certManager: CertificateManager
 
-    @State private var showAdvanced = false
+    // Task 5.5: root LaunchDaemon control (SMAppService). Shared singleton —
+    // observing it here keeps the row in sync with anything else in the app
+    // (e.g. an onboarding flow) that also calls register()/refreshState().
+    @ObservedObject private var serviceInstaller = AgentServiceInstaller.shared
+
     @State private var showRegenConfirm = false
     @State private var showResetConfirm = false
     @State private var showEnrollmentSheet = false
@@ -21,16 +27,9 @@ struct SettingsView: View {
     var body: some View {
         Form {
             generalSection
+            serviceSection
             identitySection
             enrollmentSection
-            CertificateTrustView(certManager: certManager)
-
-            if showAdvanced {
-                connectionSection
-                tunnelSection
-            }
-
-            advancedToggle
             aboutSection
             dangerZoneSection
         }
@@ -38,6 +37,14 @@ struct SettingsView: View {
         .sheet(isPresented: $showEnrollmentSheet) {
             EnrollmentView(viewModel: enrollmentViewModel)
                 .frame(width: 500, height: 450)
+        }
+        .onAppear {
+            serviceInstaller.refreshState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Task 5.5: pick up a user's approve/revoke in System Settings >
+            // General > Login Items & Extensions without requiring a restart.
+            serviceInstaller.refreshState()
         }
         .toolbar {
             ToolbarItem(placement: .status) {
@@ -54,7 +61,6 @@ struct SettingsView: View {
                 copiedToast(field)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showAdvanced)
         .animation(.easeInOut, value: viewModel.statusMessage)
     }
 
@@ -62,13 +68,116 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         Section("General") {
+            // The one thing you usually need to change to connect: which ZTLP
+            // service to reach. This is the NS service name (e.g. "beta" or
+            // "beta.techrockstars.ztlp"). Mirrors the Windows client's
+            // "connect to a service by name" model.
+            HStack {
+                Label("Service", systemImage: "network")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                TextField("beta", text: $configuration.serviceName)
+                    .multilineTextAlignment(.trailing)
+                    .font(.callout.monospaced())
+                    .textFieldStyle(.plain)
+                    .frame(maxWidth: 250)
+            }
+
             Toggle(isOn: $configuration.autoConnect) {
                 Label("Connect on Launch", systemImage: "bolt.fill")
             }
+        }
+    }
 
-            Toggle(isOn: $configuration.natAssist) {
-                Label("NAT Traversal Assist", systemImage: "arrow.triangle.branch")
+    // MARK: - Service (Task 5.5: root LaunchDaemon via SMAppService)
+    //
+    // "have the sudo commands done by the service that runs at a high
+    // privilege so the user doesn't have to sudo the dns thing and the ca
+    // thing... the user must be able to control this." — Steven, §0.1.
+    // This row is that control surface: register()/unregister() call
+    // SMAppService, which shows macOS's own one-time "Allow in Background"
+    // system prompt — no sudo, no Terminal.
+
+    private var serviceSection: some View {
+        Section("Service") {
+            HStack {
+                Label("Root Agent Service", systemImage: "gearshape.2")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                serviceStatusBadge
             }
+
+            if case .requiresApproval = serviceInstaller.state {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("macOS needs your approval to run the background service.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Open Login Items & Extensions…") {
+                        serviceInstaller.openLoginItemsSettings()
+                    }
+                    .font(.callout)
+                }
+                .padding(.vertical, 2)
+            }
+
+            if let error = serviceInstaller.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                switch serviceInstaller.state {
+                case .notRegistered, .notFound, .failed:
+                    Button("Install Service") {
+                        serviceInstaller.register()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .controlSize(.small)
+                case .requiresApproval, .running:
+                    Button("Uninstall Service", role: .destructive) {
+                        serviceInstaller.unregister()
+                    }
+                    .controlSize(.small)
+                }
+
+                Spacer()
+
+                Button {
+                    serviceInstaller.refreshState()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh service status")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var serviceStatusBadge: some View {
+        switch serviceInstaller.state {
+        case .running:
+            Label("Running", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(Color.ztlpGreen)
+                .font(.callout)
+        case .requiresApproval:
+            Label("Needs Approval", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.ztlpOrange)
+                .font(.callout)
+        case .notRegistered:
+            Label("Not Installed", systemImage: "xmark.circle")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        case .notFound:
+            Label("Not Found", systemImage: "questionmark.circle")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        case .failed:
+            Label("Failed", systemImage: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.callout)
         }
     }
 
@@ -185,98 +294,6 @@ struct SettingsView: View {
                     systemImage: "ticket"
                 )
                 .font(.callout)
-            }
-        }
-    }
-
-    // MARK: - Advanced Toggle
-
-    private var advancedToggle: some View {
-        Section {
-            Button {
-                showAdvanced.toggle()
-            } label: {
-                HStack {
-                    Label("Advanced Settings", systemImage: "slider.horizontal.3")
-                    Spacer()
-                    Image(systemName: showAdvanced ? "chevron.up" : "chevron.down")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    // MARK: - Connection (Advanced)
-
-    private var connectionSection: some View {
-        Section("Connection") {
-            HStack {
-                Label("Relay Server", systemImage: "antenna.radiowaves.left.and.right")
-                Spacer()
-                TextField("relay.ztlp.net:4433", text: $configuration.relayAddress)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
-            }
-
-            HStack {
-                Label("STUN Server", systemImage: "network")
-                Spacer()
-                TextField("stun.l.google.com:19302", text: $configuration.stunServer)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
-            }
-
-            HStack {
-                Label("Target Node ID", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                Spacer()
-                TextField("Peer node ID (hex)", text: $configuration.targetNodeId)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
-            }
-        }
-    }
-
-    // MARK: - Tunnel (Advanced)
-
-    private var tunnelSection: some View {
-        Section("Tunnel") {
-            HStack {
-                Label("Tunnel Address", systemImage: "network.badge.shield.half.filled")
-                Spacer()
-                TextField("10.0.0.2", text: $configuration.tunnelAddress)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
-            }
-
-            HStack {
-                Label("DNS Servers", systemImage: "server.rack")
-                Spacer()
-                TextField("1.1.1.1, 8.8.8.8", text: Binding(
-                    get: { configuration.dnsServers.joined(separator: ", ") },
-                    set: { newValue in
-                        configuration.dnsServers = newValue
-                            .split(separator: ",")
-                            .map { $0.trimmingCharacters(in: .whitespaces) }
-                    }
-                ))
-                .multilineTextAlignment(.trailing)
-                .font(.callout.monospaced())
-                .textFieldStyle(.plain)
-                .frame(maxWidth: 250)
-            }
-
-            Stepper(value: $configuration.mtu, in: 1200...1500, step: 50) {
-                Label("MTU: \(configuration.mtu)", systemImage: "arrow.left.and.right")
             }
         }
     }
@@ -457,13 +474,6 @@ struct SettingsView: View {
     private var dangerZoneSection: some View {
         Section {
             Button(role: .destructive) {
-                Task { await viewModel.removeVPNConfiguration() }
-            } label: {
-                Label("Remove VPN Configuration", systemImage: "xmark.shield")
-                    .font(.callout)
-            }
-
-            Button(role: .destructive) {
                 showResetConfirm = true
             } label: {
                 Label("Factory Reset", systemImage: "trash")
@@ -478,7 +488,7 @@ struct SettingsView: View {
                     Task { await viewModel.factoryReset() }
                 }
             } message: {
-                Text("This will delete your identity, enrollment, VPN configuration, and all settings. This cannot be undone.")
+                Text("This will uninstall the ZTLP service and delete this app's identity, enrollment and settings. This cannot be undone.")
             }
         } header: {
             Text("Danger Zone")

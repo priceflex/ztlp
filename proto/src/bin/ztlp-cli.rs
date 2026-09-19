@@ -877,7 +877,7 @@ enum AgentCommands {
     #[command(after_help = "EXAMPLES:\n  sudo ztlp agent dns-teardown")]
     DnsTeardown,
 
-    /// Install the agent as a system service (systemd/LaunchAgent)
+    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon)
     #[command(after_help = "EXAMPLES:\n  \
             sudo ztlp agent install\n  \
             sudo ztlp agent install --binary /usr/local/bin/ztlp")]
@@ -12843,6 +12843,7 @@ async fn cmd_agent_stop() -> Result<(), Box<dyn std::error::Error>> {
         cmd: "shutdown".to_string(),
         name: None,
         token: ztlp_proto::agent::config::load_agent_token(),
+        ..Default::default()
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -12878,6 +12879,7 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
         cmd: "status".to_string(),
         name: None,
         token: ztlp_proto::agent::config::load_agent_token(),
+        ..Default::default()
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -12986,6 +12988,7 @@ async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
         cmd: "dns_cache".to_string(),
         name: None,
         token: ztlp_proto::agent::config::load_agent_token(),
+        ..Default::default()
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -13056,6 +13059,7 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
         cmd: "flush_dns".to_string(),
         name: None,
         token: ztlp_proto::agent::config::load_agent_token(),
+        ..Default::default()
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -13092,6 +13096,7 @@ async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
         cmd: "tunnels".to_string(),
         name: None,
         token: ztlp_proto::agent::config::load_agent_token(),
+        ..Default::default()
     };
 
     match control::send_command(&ipc_addr, &cmd).await {
@@ -13318,6 +13323,7 @@ async fn cmd_agent_dns_setup_windows(
             cmd: "status".to_string(),
             name: None,
             token: ztlp_proto::agent::config::load_agent_token(),
+            ..Default::default()
         };
         match control::send_command(&ipc_addr, &cmd).await {
             Ok(resp) if resp.ok => resp

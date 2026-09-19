@@ -421,6 +421,25 @@ pub async fn run_daemon(
     // at where the resolver ACTUALLY is. Binding here, before constructing
     // `agent_state`, means `dns_listen` is always accurate — no separate
     // "what port did the fallback actually pick" plumbing needed later.
+    // ── macOS root startup, phase 1 (lo0 aliases) ─────────────────────────
+    //
+    // macOS lo0 only carries 127.0.0.1; binding the resolver on 127.0.0.55
+    // or the control API on 127.100.255.1 fails with "Can't assign requested
+    // address (os error 49)" until an alias exists. Root only; no-op
+    // otherwise. Windows (NRPT block below) and Linux are untouched.
+    #[cfg(unix)]
+    let macos_inputs = if cfg!(target_os = "macos") {
+        let i = crate::agent::macos_daemon::MacosStartupInputs::from_config(
+            config,
+            crate::agent::macos_daemon::is_root(),
+            &config.dns.listen,
+        );
+        crate::agent::macos_daemon::run_startup_pre_bind(&i);
+        Some(i)
+    } else {
+        None
+    };
+
     let dns_socket_and_addr = if config.dns.enabled {
         match dns::bind_dns_socket_with_fallback(&config.dns.listen).await {
             Ok((socket, addr)) => Some((socket, addr)),
@@ -512,6 +531,14 @@ pub async fn run_daemon(
         .as_ref()
         .map(|(_, addr)| addr.to_string())
         .unwrap_or_else(|| config.dns.listen.clone());
+
+    // ── macOS root startup, phase 2 (resolver files, CA trust, token) ─────
+    // Needs the EFFECTIVE bound DNS port, hence after the bind.
+    #[cfg(unix)]
+    if let Some(mut i) = macos_inputs {
+        i.dns_listen = effective_dns_listen.clone();
+        crate::agent::macos_daemon::run_startup_post_bind(&i);
+    }
 
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
@@ -953,6 +980,14 @@ async fn run_tcp_proxy(
             {
                 let mut listeners = active_listeners.lock().await;
                 listeners.insert(vip);
+            }
+
+            // macOS: the VIP pool hands out 127.100.0.N lazily and lo0 has no
+            // alias for it yet -> every TcpListener::bind below would fail
+            // with os error 49. Alias first (root only; no-op elsewhere).
+            #[cfg(unix)]
+            if cfg!(target_os = "macos") && crate::agent::macos_daemon::is_root() {
+                crate::agent::macos_daemon::ensure_vip_alias(vip);
             }
 
             for &port in &common_ports {

@@ -3,11 +3,13 @@
 //
 // Manages app settings, identity display, and about information.
 // Adapted from iOS — no UIKit, uses AppKit equivalents.
+//
+// Task 6c: the System-VPN (NetworkExtension) path is gone; "factory reset"
+// now also uninstalls the root agent service via SMAppService.
 
 import Foundation
 import AppKit
 import Combine
-import NetworkExtension
 
 /// ViewModel for the Settings screen.
 @MainActor
@@ -17,7 +19,6 @@ final class SettingsViewModel: ObservableObject {
 
     @Published private(set) var identity: ZTLPIdentityInfo?
     @Published private(set) var libraryVersion: String = "unknown"
-    @Published private(set) var vpnConfigInstalled: Bool = false
     @Published private(set) var statusMessage: String?
 
     // MARK: - Dependencies
@@ -42,7 +43,12 @@ final class SettingsViewModel: ObservableObject {
     private func loadIdentity() {
         do {
             try bridge.initialize()
-            let handle = try bridge.generateIdentity()
+            let handle: ZTLPIdentityHandle
+            if let path = defaultIdentityPath(), FileManager.default.fileExists(atPath: path) {
+                handle = try bridge.loadIdentity(from: path)
+            } else {
+                handle = try bridge.generateIdentity()
+            }
             identity = ZTLPIdentityInfo.from(
                 handle: handle,
                 providerType: configuration.useSecureEnclave ? "secure_enclave" : "software"
@@ -81,22 +87,16 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
-    func removeVPNConfiguration() async {
-        do {
-            let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-            for manager in managers {
-                try await manager.removeFromPreferences()
-            }
-            vpnConfigInstalled = false
-            statusMessage = "VPN configuration removed"
-        } catch {
-            statusMessage = "Failed to remove: \(error.localizedDescription)"
-        }
-    }
-
+    /// Factory reset: uninstall the root agent service, forget the app's
+    /// identity + settings. Does NOT delete the daemon's config dir under
+    /// /Library/Application Support/ZTLP (root-owned; see
+    /// AgentServiceInstaller.unregister for why that stays a separate step).
     func factoryReset() async {
-        await removeVPNConfiguration()
+        AgentServiceInstaller.shared.unregister()
         try? KeychainService.shared.deleteIdentity()
+        if let path = defaultIdentityPath() {
+            try? FileManager.default.removeItem(atPath: path)
+        }
         configuration.reset()
         identity = nil
         statusMessage = "All data cleared"

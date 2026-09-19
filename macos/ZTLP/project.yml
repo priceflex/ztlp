@@ -1,4 +1,8 @@
 name: ZTLP
+# NOTE: the checked-in ZTLP.xcodeproj is the source of truth (Copy Files
+# phases for Contents/Helpers/ztlp + Contents/Library/LaunchDaemons were added
+# with the xcodeproj gem, not xcodegen). This spec is kept roughly in sync;
+# Task 6c (2026-09-19) dropped the ZTLPSystemExtension target.
 options:
   bundleIdPrefix: com.ztlp
   deploymentTarget:
@@ -34,41 +38,9 @@ targets:
         DEVELOPMENT_TEAM: 5527A7TH5P
         CODE_SIGN_ENTITLEMENTS: ZTLP/ZTLP.entitlements
         MACOSX_DEPLOYMENT_TARGET: "13.0"
-    dependencies:
-      - target: ZTLPSystemExtension
-        embed: true
     scheme:
       testTargets:
         - ZTLPTests
-
-  ZTLPSystemExtension:
-    type: system-extension
-    platform: macOS
-    sources:
-      - path: ZTLPSystemExtension
-        excludes:
-          - "**/*.plist"
-    settings:
-      base:
-        INFOPLIST_FILE: ZTLPSystemExtension/Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: com.ztlp.app.macos.system-extension
-        SWIFT_OBJC_BRIDGING_HEADER: ZTLPSystemExtension/ZTLPSystemExtension-Bridging-Header.h
-        SWIFT_VERSION: "5.9"
-        LIBRARY_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/Libraries"
-        HEADER_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PROJECT_DIR)/Libraries"
-        OTHER_LDFLAGS:
-          - "$(inherited)"
-          - "-lztlp_proto"
-          - "-lresolv"
-          - "-lz"
-        CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: 5527A7TH5P
-        SKIP_INSTALL: true
-        MACOSX_DEPLOYMENT_TARGET: "13.0"
 
   ZTLPTests:
     type: bundle.unit-test
@@ -79,5 +51,9 @@ targets:
       base:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "13.0"
+        # @testable import ZTLP pulls in the bridging header -> needs ztlp.h
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/Libraries"
     dependencies:
       - target: ZTLP

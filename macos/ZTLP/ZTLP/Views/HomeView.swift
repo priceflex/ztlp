@@ -47,15 +47,21 @@ struct HomeView: View {
                     }
             }
 
-            // Connection mode (subtle)
-            if viewModel.status.isActive {
-                HStack(spacing: 5) {
-                    Image(systemName: viewModel.connectionMode.icon)
-                        .font(.caption2)
-                    Text(viewModel.connectionMode.rawValue)
-                        .font(.caption2.weight(.medium))
+            // 6d: one honest status line from the daemon (HTTPS trust / DNS /
+            // tunnels), replacing the old transport-mode chip. Single-path
+            // now, like the Windows client.
+            if viewModel.status.isActive, let d = viewModel.daemon {
+                Text(d.statusLine)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.quaternary)
+                    .padding(.top, 8)
+            } else if viewModel.status == .disconnected,
+                      viewModel.serviceState == .requiresApproval {
+                Button("Approve ZTLP in Login Items & Extensions…") {
+                    AgentServiceInstaller.shared.openLoginItemsSettings()
                 }
-                .foregroundStyle(.quaternary)
+                .buttonStyle(.link)
+                .font(.caption)
                 .padding(.top, 8)
             }
 

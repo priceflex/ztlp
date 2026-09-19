@@ -18,6 +18,9 @@ fn control_command_serializes_with_token() {
         cmd: "status".into(),
         name: None,
         token: Some("abc123".into()),
+
+        enrollment_uri: None,
+        relay_secret: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     assert!(
@@ -32,6 +35,9 @@ fn control_command_omits_token_when_none() {
         cmd: "status".into(),
         name: None,
         token: None,
+
+        enrollment_uri: None,
+        relay_secret: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     assert!(
@@ -46,6 +52,9 @@ fn control_command_round_trips_with_token() {
         cmd: "tunnels".into(),
         name: Some("vault.techrockstars.ztlp".into()),
         token: Some("deadbeefcafef00d".into()),
+
+        enrollment_uri: None,
+        relay_secret: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     let back: ControlCommand = serde_json::from_str(&json).expect("deserialize");
@@ -76,6 +85,9 @@ fn make_cmd_json(cmd: &str, token: Option<&str>) -> String {
         cmd: cmd.into(),
         name: None,
         token: token.map(String::from),
+
+        enrollment_uri: None,
+        relay_secret: None,
     };
     serde_json::to_string(&c).unwrap()
 }

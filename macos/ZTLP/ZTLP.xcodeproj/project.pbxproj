@@ -7,16 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0B80A5FB021726A0CFAB7ABB /* org.ztlp.agent.plist in Bundle LaunchDaemon Plist */ = {isa = PBXBuildFile; fileRef = 79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */; };
 		1FF175986BBFBA71175B2119 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */; };
 		36E4621982918E5519BE8E9E /* ZTLPConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */; };
 		39E8291BC07E74BD444149FC /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F0695B2755F6FFB3C3FA21 /* TunnelConfiguration.swift */; };
 		3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD5C9716977DF801F33DA27 /* ZTLPIdentity.swift */; };
+		3E53F9DB00A270FDACCE5472 /* ztlp in Bundle ztlp Binary */ = {isa = PBXBuildFile; fileRef = 1101BB8FE029CD4D5E894920 /* ztlp */; };
 		50FC93D7B6DF71D4B4141FB7 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A6088FAAE6467A12BF10B72 /* KeychainService.swift */; };
 		52C50BC59DA61F6278EB8405 /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99D5B6DEC61F7610D170572A /* SettingsViewModel.swift */; };
 		533292D2F1D74DBB8CF9E31A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A98A6B9F9DF87D848B72322 /* SettingsView.swift */; };
 		558BD7E087DDF26E6529FB82 /* ZTLPSystemExtension.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 7280650979C37CF7E638CF91 /* ZTLPSystemExtension.systemextension */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		587746EDD9CB2F24306791AB /* EnrollmentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB39AED62EE8F69A116903FC /* EnrollmentViewModel.swift */; };
 		5B311BE765F5409E06135146 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */; };
+		5FD2DDD5E86D3BFA28EB21DF /* AgentServiceInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */; };
 		647DCE564F86D5381FB8147F /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95679B026D6887C171A14A2A /* MenuBarView.swift */; };
 		7105614BAC2BE48DC291A8B0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89C24BDC82DF690F24190B2D /* HomeView.swift */; };
 		76B1BFA372D65AFC479EBACB /* ConnectionStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5AF8045644C273E351706D4 /* ConnectionStatus.swift */; };
@@ -57,6 +60,17 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		219F9EC7A99D9316E6DB9B7F /* Bundle LaunchDaemon Plist */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Library/LaunchDaemons;
+			dstSubfolderSpec = 1;
+			files = (
+				0B80A5FB021726A0CFAB7ABB /* org.ztlp.agent.plist in Bundle LaunchDaemon Plist */,
+			);
+			name = "Bundle LaunchDaemon Plist";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		434459D3A2C6CC0B79323717 /* Embed System Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -68,11 +82,23 @@
 			name = "Embed System Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		90CE9862332F7079545D6310 /* Bundle ztlp Binary */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				3E53F9DB00A270FDACCE5472 /* ztlp in Bundle ztlp Binary */,
+			);
+			name = "Bundle ztlp Binary";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		01F23606D96D8A079F7E3FB9 /* ServicesViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServicesViewModel.swift; sourceTree = "<group>"; };
 		055094F68CE6B50F27979FD7 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		1101BB8FE029CD4D5E894920 /* ztlp */ = {isa = PBXFileReference; includeInIndex = 1; path = ztlp; sourceTree = "<group>"; };
 		1934078C4E1D7848FA49280D /* CertificateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CertificateManager.swift; sourceTree = "<group>"; };
 		20C97C4B77AA52A20831FA3F /* ZTLPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPService.swift; sourceTree = "<group>"; };
 		2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
@@ -85,9 +111,11 @@
 		6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentView.swift; sourceTree = "<group>"; };
 		7280650979C37CF7E638CF91 /* ZTLPSystemExtension.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = ZTLPSystemExtension.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
 		75867312BD712CE5153370DF /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.ztlp.agent.plist; sourceTree = "<group>"; };
 		7A6088FAAE6467A12BF10B72 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		89C24BDC82DF690F24190B2D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentServiceInstaller.swift; sourceTree = "<group>"; };
 		95679B026D6887C171A14A2A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		99D5B6DEC61F7610D170572A /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
 		9AD5C9716977DF801F33DA27 /* ZTLPIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPIdentity.swift; sourceTree = "<group>"; };
@@ -145,6 +173,15 @@
 			path = Resources;
 			sourceTree = "<group>";
 		};
+		5D57C3D82CBAD45CFA8721F0 /* Libraries */ = {
+			isa = PBXGroup;
+			children = (
+				1101BB8FE029CD4D5E894920 /* ztlp */,
+			);
+			name = Libraries;
+			path = Libraries;
+			sourceTree = "<group>";
+		};
 		6A1F5A804AA9B4F484435CFF = {
 			isa = PBXGroup;
 			children = (
@@ -152,6 +189,7 @@
 				2BF8DACFCFA038204FFCA0B3 /* ZTLPSystemExtension */,
 				3DB177FF1C5385C84A8ABBAD /* ZTLPTests */,
 				CD497DEB1075A9338B81653F /* Products */,
+				5D57C3D82CBAD45CFA8721F0 /* Libraries */,
 			);
 			sourceTree = "<group>";
 		};
@@ -202,6 +240,7 @@
 				89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */,
 				6CC8B59C79DCD09DB315C397 /* SystemExtensionManager.swift */,
 				EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */,
+				9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -218,6 +257,7 @@
 				BF2D617A5D430681B31FD666 /* Services */,
 				B88E916D9B29C330F84B3239 /* ViewModels */,
 				8A6DDBEB8E0D55F62738A81A /* Views */,
+				79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */,
 			);
 			path = ZTLP;
 			sourceTree = "<group>";
@@ -254,8 +294,6 @@
 			dependencies = (
 			);
 			name = ZTLPSystemExtension;
-			packageProductDependencies = (
-			);
 			productName = ZTLPSystemExtension;
 			productReference = 7280650979C37CF7E638CF91 /* ZTLPSystemExtension.systemextension */;
 			productType = "com.apple.product-type.system-extension";
@@ -272,8 +310,6 @@
 				3433B54D40A90FAA2976AEBD /* PBXTargetDependency */,
 			);
 			name = ZTLPTests;
-			packageProductDependencies = (
-			);
 			productName = ZTLPTests;
 			productReference = ED182AF9379C3B47E706235A /* ZTLPTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -285,6 +321,8 @@
 				FD593BFB034B976B51E5A003 /* Sources */,
 				2AEB8E367D90BE56D5810FD8 /* Resources */,
 				434459D3A2C6CC0B79323717 /* Embed System Extensions */,
+				90CE9862332F7079545D6310 /* Bundle ztlp Binary */,
+				219F9EC7A99D9316E6DB9B7F /* Bundle LaunchDaemon Plist */,
 			);
 			buildRules = (
 			);
@@ -292,8 +330,6 @@
 				4A5CD4938CA7CEE485FC7D81 /* PBXTargetDependency */,
 			);
 			name = ZTLP;
-			packageProductDependencies = (
-			);
 			productName = ZTLP;
 			productReference = AB8947C5959711900EDC01C5 /* ZTLP.app */;
 			productType = "com.apple.product-type.application";
@@ -396,6 +432,7 @@
 				36E4621982918E5519BE8E9E /* ZTLPConfiguration.swift in Sources */,
 				3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */,
 				FE5E753515A12847AF6EFA6C /* ZTLPService.swift in Sources */,
+				5FD2DDD5E86D3BFA28EB21DF /* AgentServiceInstaller.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

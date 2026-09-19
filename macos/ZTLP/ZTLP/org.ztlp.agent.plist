@@ -8,6 +8,7 @@
     <string>Contents/Helpers/ztlp</string>
     <key>ProgramArguments</key>
     <array>
+        <string>ztlp</string>
         <string>agent</string>
         <string>start</string>
         <string>--foreground</string>

@@ -150,7 +150,13 @@ pub enum MacosAction {
     WriteResolver { listen: String, zones: Vec<String> },
     /// `security add-trusted-cert` via `ca_trust::install_ca_cert` (existing).
     InstallCaCert(PathBuf),
-    /// `chgrp staff` + `chmod 0640` so the non-root GUI can read the token.
+    /// Restrict `agent.token` to the current GUI (console) user only, so an
+    /// arbitrary local account can't read the daemon's bearer token and
+    /// call privileged control commands (e.g. `enroll`) as if it were the
+    /// GUI. Resolved via `scutil` at execute time (`console_user_name`);
+    /// falls back to `chgrp staff`/`0640` ONLY if no console user can be
+    /// determined (e.g. nobody is logged in at the console yet) so the
+    /// daemon doesn't leave the token unreadable by anyone at all.
     TokenGuiReadable(PathBuf),
 }
 
@@ -219,15 +225,14 @@ impl MacosAction {
     }
 
     /// All shell commands this action runs, in order.
+    ///
+    /// `TokenGuiReadable` here renders the FALLBACK form (`chgrp staff` +
+    /// `chmod 0640`, used only when no console user can be resolved at
+    /// runtime) purely for unit testing; `execute()` resolves the real
+    /// console user first and calls [`token_owner_commands`] directly.
     pub fn commands(&self) -> Vec<Vec<String>> {
         match self {
-            MacosAction::TokenGuiReadable(p) => {
-                let p = p.to_string_lossy().to_string();
-                vec![
-                    vec!["chgrp".into(), "staff".into(), p.clone()],
-                    vec!["chmod".into(), "0640".into(), p],
-                ]
-            }
+            MacosAction::TokenGuiReadable(p) => token_owner_commands(None, p),
             other => other.command().into_iter().collect(),
         }
     }
@@ -247,6 +252,21 @@ impl MacosAction {
                 Ok(()) => info!("macOS: ZTLP root CA trusted in System keychain"),
                 Err(e) => warn!("macOS: CA trust install failed (continuing): {e}"),
             },
+            MacosAction::TokenGuiReadable(p) => {
+                let user = console_user_name();
+                match &user {
+                    Some(u) => info!("macOS: restricting agent.token to console user `{u}` only"),
+                    None => warn!(
+                        "macOS: no console user resolved — falling back to chgrp staff/0640 \
+                         for agent.token (CWE-732: broader than intended, but still root-only \
+                         to write and not world-readable)"
+                    ),
+                }
+                for cmd in token_owner_commands(user.as_deref(), p) {
+                    let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
+                    run_cmd(&argv);
+                }
+            }
             other => {
                 for cmd in other.commands() {
                     let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
@@ -255,6 +275,70 @@ impl MacosAction {
             }
         }
     }
+}
+
+/// Commands to make `agent.token` readable by exactly one local user.
+///
+/// Preferred (`user = Some(name)`): `chown <name>:staff` + `chmod 0600` — only
+/// that user (the one logged in at the console, i.e. the GUI) can read it.
+/// `staff` as the GROUP is harmless here since group permission bits are 0
+/// (`0600`); it only matters for the OWNER bit, which is the named user.
+///
+/// Fallback (`user = None`, no console user resolvable — e.g. daemon started
+/// before anyone logs in): `chgrp staff` + `chmod 0640`, same as before this
+/// fix. This is broader (any `staff`-group local account can read the token,
+/// CWE-732) but keeps the control API usable rather than locking everyone
+/// out; `execute()` logs a warning whenever this path is taken so it's
+/// visible in `agent.stderr.log`, not a silent security regression.
+fn token_owner_commands(user: Option<&str>, path: &Path) -> Vec<Vec<String>> {
+    let p = path.to_string_lossy().to_string();
+    match user {
+        Some(u) => vec![
+            vec!["chown".into(), format!("{u}:staff"), p.clone()],
+            vec!["chmod".into(), "0600".into(), p],
+        ],
+        None => vec![
+            vec!["chgrp".into(), "staff".into(), p.clone()],
+            vec!["chmod".into(), "0640".into(), p],
+        ],
+    }
+}
+
+/// Resolve the current console (GUI-logged-in) user via `scutil`, the same
+/// mechanism macOS itself uses to answer "who is at the screen right now".
+/// Returns `None` if nobody is logged in at the console, or on any parse
+/// failure — callers must treat that as "fall back", not "error".
+fn console_user_name() -> Option<String> {
+    let output = Command::new("scutil")
+        .arg("show")
+        .arg("State:/Users/ConsoleUser")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_console_user(&text)
+}
+
+/// Pure parser for `scutil show State:/Users/ConsoleUser` output, e.g.:
+/// ```text
+/// <dictionary> {
+///   GID : 20
+///   Name : steven
+///   UID : 501
+/// }
+/// ```
+/// `loginwindow` / `_windowserver` (root's own placeholder session) and
+/// empty names mean "no real console user" — both map to `None`.
+fn parse_console_user(text: &str) -> Option<String> {
+    let name = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Name : ").map(str::trim))?;
+    if name.is_empty() || name == "loginwindow" || name.starts_with('_') {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 fn run_cmd(argv: &[&str]) {
@@ -536,7 +620,10 @@ mod tests {
     }
 
     #[test]
-    fn token_gui_readable_renders_chgrp_staff_and_chmod_0640() {
+    fn token_gui_readable_fallback_commands_render_chgrp_staff_and_chmod_0640() {
+        // commands() is the pure/testable FALLBACK form (no console user
+        // resolvable). execute() calls token_owner_commands(Some(user), ..)
+        // directly when a console user IS found — see the tests below.
         let a = MacosAction::TokenGuiReadable(PathBuf::from("/x/agent.token"));
         assert_eq!(
             a.commands(),
@@ -553,6 +640,68 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn token_owner_commands_with_console_user_chowns_to_that_user_only() {
+        // CWE-732 fix: when we know WHO is at the console, restrict the
+        // token to them (0600, owner-only) instead of the whole staff group.
+        let cmds = token_owner_commands(Some("steven"), &PathBuf::from("/x/agent.token"));
+        assert_eq!(
+            cmds,
+            vec![
+                vec![
+                    "chown".to_string(),
+                    "steven:staff".to_string(),
+                    "/x/agent.token".to_string()
+                ],
+                vec![
+                    "chmod".to_string(),
+                    "0600".to_string(),
+                    "/x/agent.token".to_string()
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn token_owner_commands_without_console_user_falls_back_to_staff_group() {
+        let cmds = token_owner_commands(None, &PathBuf::from("/x/agent.token"));
+        assert_eq!(
+            cmds,
+            vec![
+                vec![
+                    "chgrp".to_string(),
+                    "staff".to_string(),
+                    "/x/agent.token".to_string()
+                ],
+                vec![
+                    "chmod".to_string(),
+                    "0640".to_string(),
+                    "/x/agent.token".to_string()
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_console_user_extracts_name_from_scutil_output() {
+        let text = "<dictionary> {\n  GID : 20\n  Name : steven\n  UID : 501\n}\n";
+        assert_eq!(parse_console_user(text), Some("steven".to_string()));
+    }
+
+    #[test]
+    fn parse_console_user_treats_loginwindow_and_underscore_users_as_no_console_user() {
+        assert_eq!(
+            parse_console_user("<dictionary> {\n  Name : loginwindow\n}\n"),
+            None
+        );
+        assert_eq!(
+            parse_console_user("<dictionary> {\n  Name : _windowserver\n}\n"),
+            None
+        );
+        assert_eq!(parse_console_user("no Name line here"), None);
+        assert_eq!(parse_console_user("  Name : \n"), None);
     }
 
     #[test]

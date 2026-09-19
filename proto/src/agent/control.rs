@@ -514,9 +514,9 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
     };
 
     info!(
-        "enroll requested via control socket: {} {:?}",
+        "enroll requested via control socket: {} (name={:?})",
         exe.display(),
-        plan.args
+        cmd.name
     );
 
     let output = tokio::process::Command::new(&exe)

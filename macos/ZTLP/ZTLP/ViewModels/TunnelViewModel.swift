@@ -565,7 +565,7 @@ final class TunnelViewModel: ObservableObject {
     }
 
     /// Pure backoff step, unit-tested: doubles, capped at 2s.
-    static func nextBackoffDelay(_ current: TimeInterval) -> TimeInterval {
+    nonisolated static func nextBackoffDelay(_ current: TimeInterval) -> TimeInterval {
         min(current * 2, 2.0)
     }
 

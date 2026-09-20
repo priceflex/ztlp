@@ -26,12 +26,19 @@ defmodule ZtlpNs.EnrollmentTest do
     ns_addr = Keyword.get(opts, :ns_addr, @test_ns_addr)
     relay_addrs = Keyword.get(opts, :relay_addrs, [@test_relay])
     gateway_addr = Keyword.get(opts, :gateway_addr, nil)
+    callback_url = Keyword.get(opts, :callback_url, nil)
     max_uses = Keyword.get(opts, :max_uses, 0)
     expires_at = Keyword.get(opts, :expires_at, System.system_time(:second) + 3600)
 
     nonce = :crypto.strong_rand_bytes(16)
 
-    flags = if gateway_addr, do: 0x01, else: 0x00
+    # Mirrors proto/src/enrollment.rs: FLAG_HAS_GATEWAY = 0x01,
+    # FLAG_HAS_CALLBACK = 0x02 (callback is MAC-covered, crf-mpxh CWE-918).
+    flags =
+      Bitwise.bor(
+        if(gateway_addr, do: 0x01, else: 0x00),
+        if(callback_url, do: 0x02, else: 0x00)
+      )
 
     data =
       <<0x01, flags::8>> <>
@@ -39,6 +46,7 @@ defmodule ZtlpNs.EnrollmentTest do
         <<length(relay_addrs)::8>> <>
         Enum.reduce(relay_addrs, <<>>, fn a, acc -> acc <> enc(a) end) <>
         if(gateway_addr, do: enc(gateway_addr), else: <<>>) <>
+        if(callback_url, do: enc(callback_url), else: <<>>) <>
         <<max_uses::16, expires_at::64>> <> nonce
 
     mac = Enrollment.hmac_blake2s(secret, data)
@@ -103,6 +111,54 @@ defmodule ZtlpNs.EnrollmentTest do
     assert gw_count == 1
     <<glen::16, gw_addr::binary-size(glen), _::binary>> = rest3
     assert gw_addr == gw
+  end
+
+  # ── FLAG_HAS_CALLBACK (0x02) wire-format regression tests ──────────
+  # Before the parser fix, any token carrying a callback URL (which the
+  # Rust CLI / macOS app always mint since crf-mpxh) misparsed max_uses/
+  # expires_at/nonce/mac at the wrong offset and was rejected with
+  # :invalid_format (0x08 0x06). These pin the fix.
+
+  test "token with callback URL (flag 0x02) enrolls successfully", %{secret: s, pfx: p} do
+    token = create_token(s, callback_url: "http://203.0.113.5:8765/api/enrollment/confirm")
+    name = dev_name(p, "cb")
+
+    result = Enrollment.process_enroll(
+      enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+    )
+    assert <<0x08, 0x00, _::binary>> = result
+    assert {:ok, _} = Store.lookup(name, :key)
+  end
+
+  test "token with gateway AND callback (flags 0x03) parses and returns gateway", %{secret: s, pfx: p} do
+    gw = "10.0.0.5:23097"
+    token = create_token(s, gateway_addr: gw, callback_url: "https://launch.example/confirm")
+    name = dev_name(p, "gwcb")
+
+    <<0x08, 0x00, config::binary>> = Enrollment.process_enroll(
+      enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+    )
+
+    <<1::8, rlen::16, _relay::binary-size(rlen), gw_count::8, glen::16, gw_addr::binary-size(glen), _::binary>> = config
+    assert gw_count == 1
+    assert gw_addr == gw
+  end
+
+  test "callback token: MAC still covers the callback bytes (tamper is rejected)", %{secret: s, pfx: p} do
+    token = create_token(s, callback_url: "http://good.example/confirm")
+    # Flip one byte inside the callback URL, leave the MAC untouched.
+    # Offsets: version(1) flags(1) zone(2+len) ns(2+len) relay_count(1) relay(2+len) cb_len(2) ...
+    cb_off = 2 + 2 + byte_size(@test_zone) + 2 + byte_size(@test_ns_addr) + 1 + 2 + byte_size(@test_relay) + 2
+    <<head::binary-size(cb_off), b, tail::binary>> = token
+    tampered = <<head::binary, Bitwise.bxor(b, 0x01), tail::binary>>
+    name = dev_name(p, "cbtamper")
+
+    result = Enrollment.process_enroll(
+      enroll_req(tampered, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+    )
+    assert <<0x08, code, _::binary>> = result
+    assert code != 0x00
+    assert Store.lookup(name, :key) == :not_found
   end
 
   test "expired token is rejected", %{secret: s, pfx: p} do

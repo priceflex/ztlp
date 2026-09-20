@@ -265,6 +265,14 @@ pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
     cfg!(target_os = "macos") && !identity_path.exists()
 }
 
+/// Pure hand-over predicate for the standby loop: identity.json exists AND
+/// no `enroll` command is still running. `ztlp setup` writes identity.json
+/// before the same enroll command runs ca-init (tls=true), so identity
+/// alone is too early — the full daemon would load `[tls] enabled = false`.
+pub fn standby_may_hand_over(identity_path: &Path, enroll_in_flight: usize) -> bool {
+    identity_path.exists() && enroll_in_flight == 0
+}
+
 /// B4: serve ONLY the control socket until `identity_path` appears.
 ///
 /// Materialises `agent.token` (so the GUI can authenticate exactly as it
@@ -308,11 +316,13 @@ pub async fn run_unenrolled_standby(
     );
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // Non-zero while an `enroll` command is still running (setup + ca-init).
+    let enroll_in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut ticker = tokio::time::interval(poll);
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if identity_path.exists() {
+                if standby_may_hand_over(identity_path, enroll_in_flight.load(std::sync::atomic::Ordering::SeqCst)) {
                     info!("identity appeared at {} — leaving standby, starting full daemon", identity_path.display());
                     drop(listener);
                     return Ok(true);
@@ -330,13 +340,14 @@ pub async fn run_unenrolled_standby(
                 };
                 let token = token.clone();
                 let shutdown_tx = shutdown_tx.clone();
+                let in_flight = enroll_in_flight.clone();
                 tokio::spawn(async move {
                     let (reader, mut writer) = stream.into_split();
                     let mut line = String::new();
                     if tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(reader), &mut line).await.unwrap_or(0) == 0 {
                         return;
                     }
-                    let (json, shutdown) = control::handle_standby_request_line(&token, &line).await;
+                    let (json, shutdown) = control::handle_standby_request_line_tracked(&token, &line, Some(&in_flight)).await;
                     let _ = writer.write_all(json.as_bytes()).await;
                     let _ = writer.write_all(b"\n").await;
                     if shutdown { let _ = shutdown_tx.try_send(()); }
@@ -2908,6 +2919,19 @@ mod unenrolled_standby_tests {
         // real error the operator must see, not something to wait out.
         std::fs::write(&missing, "not json").unwrap();
         assert!(!should_enter_unenrolled_standby(&missing));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn standby_waits_for_enroll_to_finish_not_just_identity_json() {
+        let home = tmp_home("handover");
+        let idp = home.join(".ztlp").join("identity.json");
+        assert!(!standby_may_hand_over(&idp, 0), "no identity -> stay");
+        std::fs::write(&idp, "{}").unwrap();
+        // identity.json written by `ztlp setup`, but the enroll command is
+        // still running ca-init -> MUST NOT hand over yet.
+        assert!(!standby_may_hand_over(&idp, 1), "enroll in flight -> stay");
+        assert!(standby_may_hand_over(&idp, 0), "identity + enroll done -> go");
         let _ = std::fs::remove_dir_all(&home);
     }
 

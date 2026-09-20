@@ -360,6 +360,20 @@ pub async fn handle_standby_request_line(
     expected_token: &str,
     line: &str,
 ) -> (String, bool) {
+    handle_standby_request_line_tracked(expected_token, line, None).await
+}
+
+/// Like [`handle_standby_request_line`] but bumps `enroll_in_flight` for
+/// the whole duration of an `enroll` command. The standby loop must not
+/// hand over to the full daemon while this is non-zero: `ztlp setup`
+/// writes identity.json FIRST and the follow-up ca-init (which flips
+/// `[tls] enabled = true`) lands seconds later — leaving on identity.json
+/// alone started the full daemon with TLS disabled (live, 2026-09-20).
+pub async fn handle_standby_request_line_tracked(
+    expected_token: &str,
+    line: &str,
+    enroll_in_flight: Option<&std::sync::atomic::AtomicUsize>,
+) -> (String, bool) {
     let cmd: ControlCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(e) => {
@@ -393,7 +407,17 @@ pub async fn handle_standby_request_line(
             })),
             false,
         ),
-        "enroll" => (cmd_enroll(&cmd).await, false),
+        "enroll" => {
+            use std::sync::atomic::Ordering;
+            if let Some(c) = enroll_in_flight {
+                c.fetch_add(1, Ordering::SeqCst);
+            }
+            let r = cmd_enroll(&cmd).await;
+            if let Some(c) = enroll_in_flight {
+                c.fetch_sub(1, Ordering::SeqCst);
+            }
+            (r, false)
+        }
         "shutdown" => (ControlResponse::ok_empty(), true),
         other => (
             ControlResponse::err(format!(

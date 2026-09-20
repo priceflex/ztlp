@@ -24,5 +24,24 @@
     <true/>
     <key>NSSystemExtensionUsageDescription</key>
     <string>ZTLP needs to install a system extension to create a VPN tunnel.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- DEMO-ONLY scoped exception: the AWS defcon.ztlp test zone's
+             enrollment-confirm callback stub runs plain HTTP on a raw IP
+             (no DNS name, no cert). Scoped to this exact IP only -- does
+             NOT relax ATS for any other host. Remove once the demo zone
+             has a real Bootstrap/Launch HTTPS callback endpoint, or once
+             this moves off the raw-IP stub. -->
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>44.240.16.59</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <false/>
+            </dict>
+        </dict>
+    </dict>
 </dict>
 </plist>

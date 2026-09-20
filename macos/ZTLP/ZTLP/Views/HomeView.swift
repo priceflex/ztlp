@@ -164,6 +164,21 @@ struct HomeView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Color.ztlpBlue)
                     .accessibilityIdentifier("home.action.enroll")
+            case .trustHTTPS:
+                Button {
+                    viewModel.trustHTTPS()
+                } label: {
+                    if viewModel.trustInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Trust HTTPS")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color.ztlpBlue)
+                .disabled(viewModel.trustInFlight)
+                .help("Installs this Mac's ZTLP certificate authority (limited to .ztlp names) into the System keychain. macOS asks for your password once.")
+                .accessibilityIdentifier("home.action.trust-https")
             case .none:
                 EmptyView()
             }

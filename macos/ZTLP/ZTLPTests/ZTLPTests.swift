@@ -108,10 +108,13 @@ final class ZTLPTests: XCTestCase {
 
     // MARK: - HomeReadiness (Task 8 single-page checklist) — pure, every branch
 
-    private func snap(enrolled: Bool, ca: Bool, dns: Bool, zone: String = "defcon.ztlp") -> DaemonSnapshot {
+    private func snap(enrolled: Bool, ca: Bool, dns: Bool, zone: String = "defcon.ztlp", caInit: Bool? = nil) -> DaemonSnapshot {
         var s = DaemonSnapshot()
         s.identityEnrolled = enrolled
         s.caInstalled = ca
+        // Default: CA is initialized whenever it is installed (legacy tests).
+        s.caInitialized = caInit ?? ca
+        s.caRootPemPath = "/Library/Application Support/ZTLP/.ztlp/ca/root.pem"
         s.dnsConfigured = dns
         s.zone = zone
         return s
@@ -159,9 +162,42 @@ final class ZTLPTests: XCTestCase {
             daemon: snap(enrolled: true, ca: false, dns: true)
         )
         XCTAssertEqual(r.identity.state, .ready("Enrolled in defcon.ztlp"))
-        XCTAssertEqual(r.network.state, .waiting("Setting up HTTPS trust…"))
+        XCTAssertEqual(r.network.state, .waiting("Setting up HTTPS certificate…"))
         XCTAssertFalse(r.allReady)
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Almost there"))
+    }
+
+    // Option B (2026-09-20): the daemon makes the CA; the GUI does the ONE
+    // human trust step with the standard admin prompt.
+    func testReadinessCaMadeButUntrustedOffersTrustHTTPS() {
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: false, dns: true, caInit: true)
+        )
+        XCTAssertEqual(r.network.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
+        XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Step 3"), r.guidance(zone: "defcon.ztlp"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testReadinessTrustStepNotOfferedBeforeEnrollment() {
+        // Never ask for a password before there is anything to trust for.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: false, ca: false, dns: false, zone: "", caInit: true)
+        )
+        XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
+        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+    }
+
+    func testTrustShellCommandTargetsSystemKeychainAndQuotesPath() {
+        let cmd = TunnelViewModel.trustShellCommand(pemPath: "/Library/Application Support/ZTLP/.ztlp/ca/root.pem")
+        XCTAssertEqual(
+            cmd,
+            "/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '/Library/Application Support/ZTLP/.ztlp/ca/root.pem'"
+        )
+        // A hostile path cannot break out of the single quotes.
+        let evil = TunnelViewModel.trustShellCommand(pemPath: "/tmp/x'; rm -rf / #")
+        XCTAssertTrue(evil.hasSuffix("'/tmp/x'\\''; rm -rf / #'"), evil)
     }
 
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {

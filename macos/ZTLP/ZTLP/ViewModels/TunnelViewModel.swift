@@ -35,6 +35,10 @@ struct DaemonSnapshot: Equatable {
     var zone: String = ""
     var identityEnrolled: Bool = false
     var caInstalled: Bool = false
+    /// The daemon has generated its device-local CA (ca/root.pem exists).
+    var caInitialized: Bool = false
+    /// Absolute path of the daemon's root.pem — what "Trust HTTPS" installs.
+    var caRootPemPath: String = ""
     var dnsConfigured: Bool = false
     var activeTunnels: Int = 0
     var bytesSent: UInt64 = 0
@@ -77,6 +81,10 @@ enum ReadinessAction: Equatable {
     case installService
     case openLoginItems
     case enroll
+    /// Row 3: install the daemon's device-local root CA into the System
+    /// keychain via the standard macOS admin prompt (Option B). The root
+    /// LaunchDaemon is not allowed to write trust settings unattended.
+    case trustHTTPS
     case none
 }
 
@@ -110,6 +118,9 @@ struct HomeReadiness: Equatable {
         }
         if !service.state.isReady { return "Step 1: install the ZTLP background service." }
         if !identity.state.isReady { return "Step 2: enroll this Mac with the enrollment link from your administrator." }
+        if case .needsAction(_, .trustHTTPS) = network.state {
+            return "Step 3: press Trust HTTPS once. macOS will ask for your password so Safari trusts this Mac's ZTLP certificates for every .ztlp site."
+        }
         return "Almost there — the service is finishing HTTPS and DNS setup."
     }
 
@@ -192,9 +203,19 @@ struct HomeReadiness: Equatable {
                     systemImage: "network",
                     state: .ready("HTTPS trusted · DNS routed")
                 )
+            } else if d.caInitialized && !d.caInstalled {
+                // The daemon made the CA; only the human trust step remains.
+                network = ReadinessRow(
+                    title: "Network ready",
+                    systemImage: "network",
+                    state: .needsAction(
+                        d.dnsConfigured ? "HTTPS not trusted yet" : "HTTPS not trusted yet · DNS routing pending",
+                        action: .trustHTTPS
+                    )
+                )
             } else {
                 var missing: [String] = []
-                if !d.caInstalled { missing.append("HTTPS trust") }
+                if !d.caInitialized { missing.append("HTTPS certificate") }
                 if !d.dnsConfigured { missing.append("DNS routing") }
                 network = ReadinessRow(
                     title: "Network ready",
@@ -393,6 +414,60 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
+    /// Row 3 action (Option B): trust the daemon's device-local root CA in
+    /// the System keychain. Runs `security add-trusted-cert` under the
+    /// standard macOS administrator prompt (osascript "with administrator
+    /// privileges") — the one system dialog a user expects, once per Mac.
+    /// The certificate is name-constrained to .ztlp, so this trust can never
+    /// validate a public site.
+    @Published private(set) var trustInFlight = false
+
+    func trustHTTPS() {
+        guard !trustInFlight, let pem = daemon?.caRootPemPath, !pem.isEmpty else { return }
+        trustInFlight = true
+        lastError = nil
+        Task.detached { [weak self] in
+            let result = Self.runTrustCommand(pemPath: pem)
+            await MainActor.run {
+                guard let self else { return }
+                self.trustInFlight = false
+                if let err = result {
+                    self.lastError = err
+                    NSSound.beep()
+                }
+                Task { await self.pollOnce() }
+            }
+        }
+    }
+
+    /// Pure builder, unit-tested: the exact shell the admin prompt runs.
+    nonisolated static func trustShellCommand(pemPath: String) -> String {
+        // Single-quote the path for /bin/sh; escape any embedded quote.
+        let q = "'" + pemPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \(q)"
+    }
+
+    /// Runs the trust command via AppleScript's administrator prompt.
+    /// Returns nil on success, or a user-facing error string.
+    nonisolated private static func runTrustCommand(pemPath: String) -> String? {
+        let shell = trustShellCommand(pemPath: pemPath)
+        // AppleScript string literal: escape backslashes and double quotes.
+        let esc = shell
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let source = "do shell script \"\(esc)\" with administrator privileges with prompt \"ZTLP wants to trust this Mac's HTTPS certificates for .ztlp sites.\""
+        var errorInfo: NSDictionary?
+        guard let script = NSAppleScript(source: source) else { return "Could not build the trust command." }
+        script.executeAndReturnError(&errorInfo)
+        if let info = errorInfo {
+            let code = (info[NSAppleScript.errorNumber] as? Int) ?? 0
+            if code == -128 { return nil } // user cancelled — not an error worth beeping about
+            let msg = (info[NSAppleScript.errorMessage] as? String) ?? "unknown error"
+            return "Could not trust the ZTLP certificate: \(msg)"
+        }
+        return nil
+    }
+
     /// Row 2 action is handled by EnrollmentView (sheet). After the sheet
     /// closes we poll immediately so the Identity row flips without
     /// waiting for the 2s tick.
@@ -484,6 +559,8 @@ final class TunnelViewModel: ObservableObject {
             snap.zone = o["zone"]?.stringValue ?? ""
             snap.identityEnrolled = o["identity_enrolled"]?.boolValue ?? false
             snap.caInstalled = o["ca_installed_system_trust"]?.boolValue ?? false
+            snap.caInitialized = o["ca_initialized"]?.boolValue ?? false
+            snap.caRootPemPath = o["ca_root_pem_path"]?.stringValue ?? ""
             snap.dnsConfigured = o["dns_configured"]?.boolValue ?? false
         }
 

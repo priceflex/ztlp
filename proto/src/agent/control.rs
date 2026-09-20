@@ -674,6 +674,19 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
 /// Pure (no I/O beyond `exists()` checks) so it is unit-testable; zone is
 /// read from the config `ztlp setup` just wrote via [`read_zone_from_config`].
 pub fn build_post_enroll_tls_plan(home: &std::path::Path) -> Result<Vec<Vec<String>>, String> {
+    // macOS: a root LaunchDaemon with no GUI session is REFUSED by
+    // SecTrustSettingsSetTrustSettings ("no user interaction was possible" —
+    // live, 2026-09-20). The GUI app performs the one trust step with the
+    // standard admin prompt (Home row 3 "Trust HTTPS"), so the daemon must
+    // not attempt (and fail) it here.
+    build_post_enroll_tls_plan_with(home, cfg!(target_os = "macos"))
+}
+
+/// `gui_owns_trust` = skip the `install-ca-cert` step (macOS).
+pub fn build_post_enroll_tls_plan_with(
+    home: &std::path::Path,
+    gui_owns_trust: bool,
+) -> Result<Vec<Vec<String>>, String> {
     let zone = read_zone_from_config(home)
         .ok_or_else(|| "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string())?;
     let ca_dir = home.join(".ztlp").join("ca");
@@ -687,12 +700,14 @@ pub fn build_post_enroll_tls_plan(home: &std::path::Path) -> Result<Vec<Vec<Stri
             zone,
         ]);
     }
-    steps.push(vec![
-        "agent".to_string(),
-        "install-ca-cert".to_string(),
-        "--cert".to_string(),
-        root_pem.to_string_lossy().into_owned(),
-    ]);
+    if !gui_owns_trust {
+        steps.push(vec![
+            "agent".to_string(),
+            "install-ca-cert".to_string(),
+            "--cert".to_string(),
+            root_pem.to_string_lossy().into_owned(),
+        ]);
+    }
     Ok(steps)
 }
 
@@ -1303,7 +1318,7 @@ mod tests {
     fn post_enroll_tls_plan_fresh_home_runs_ca_init_then_install() {
         let home = tmp_home("fresh");
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
-        let plan = build_post_enroll_tls_plan(&home).unwrap();
+        let plan = build_post_enroll_tls_plan_with(&home, false).unwrap();
         let root_pem = home.join(".ztlp/ca/root.pem").to_string_lossy().into_owned();
         assert_eq!(
             plan,
@@ -1322,9 +1337,28 @@ mod tests {
         std::fs::create_dir_all(home.join(".ztlp/ca")).unwrap();
         std::fs::write(home.join(".ztlp/ca/root.key"), "k").unwrap();
         std::fs::write(home.join(".ztlp/ca/root.pem"), "p").unwrap();
-        let plan = build_post_enroll_tls_plan(&home).unwrap();
+        let plan = build_post_enroll_tls_plan_with(&home, false).unwrap();
         assert_eq!(plan.len(), 1, "{plan:?}");
         assert_eq!(plan[0][1], "install-ca-cert");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn post_enroll_tls_plan_macos_leaves_trust_to_the_gui() {
+        // Option B: the daemon inits the CA but never calls install-ca-cert
+        // on macOS (it cannot write trust settings unattended).
+        let home = tmp_home("macgui");
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
+        let plan = build_post_enroll_tls_plan_with(&home, true).unwrap();
+        assert_eq!(plan.len(), 1, "{plan:?}");
+        assert_eq!(plan[0][1], "ca-init");
+        // and with an existing CA there is nothing at all left to run
+        std::fs::create_dir_all(home.join(".ztlp/ca")).unwrap();
+        std::fs::write(home.join(".ztlp/ca/root.key"), "k").unwrap();
+        assert!(build_post_enroll_tls_plan_with(&home, true).unwrap().is_empty());
+        // the cfg-dispatching wrapper agrees with the current OS
+        let via_wrapper = build_post_enroll_tls_plan(&home).unwrap();
+        assert_eq!(via_wrapper.is_empty(), cfg!(target_os = "macos"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -196,17 +196,31 @@ fn remove_macos(cert_path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn check_macos_installed(_cert_path: &Path) -> bool {
-    // Check if ZTLP Root CA is in the system keychain
+fn check_macos_installed(cert_path: &Path) -> bool {
+    // Presence in a keychain is NOT trust. Live case (2026-09-20): the root
+    // daemon's `security add-trusted-cert` added the cert but macOS refused
+    // the trust-settings write ("no user interaction was possible"), leaving
+    // the cert present with 0 trust settings — Safari still warned. So ask
+    // the trust evaluator directly: `security verify-cert -c <root.pem>`
+    // succeeds only if the chain (here: the root itself) is trusted.
+    let verified = Command::new("security")
+        .args(["verify-cert", "-c"])
+        .arg(cert_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if verified {
+        return true;
+    }
+    // Fallback (no cert file to verify against): presence-only, legacy.
+    if cert_path.exists() {
+        return false;
+    }
     let output = Command::new("security")
         .args(["find-certificate", "-c", "ZTLP Root CA", "-a"])
         .output();
-
     match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains("ZTLP Root CA")
-        }
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("ZTLP Root CA"),
         Err(_) => false,
     }
 }

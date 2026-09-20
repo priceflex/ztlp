@@ -11672,18 +11672,36 @@ fn unix_now() -> u64 {
 /// validity (operators rotate via `ztlp admin ca-rotate-intermediate`).
 ///
 /// CN convention:
-///   Root:         `CN=ZTLP Root CA - <zone>`
-///   Intermediate: `CN=ZTLP Intermediate CA - <zone>`
+///   Root:         `CN=ZTLP Root CA (this device)` (device-local, nameConstraints .ztlp)
+///   Intermediate: `CN=ZTLP Intermediate CA (this device)`
 ///
 /// Pulled into `bin/ztlp-cli.rs` rather than `agent/cert_mint.rs` because
 /// this is the *one-shot setup* operation. Once the chain exists on disk
 /// the mint path doesn't need to regenerate it.
+/// CN of the device-local root. Deliberately NOT zone-specific (Option B,
+/// 2026-09-20): one root per device, trusted once, valid for every `.ztlp`
+/// name this device's daemon terminates — across zones. The zone passed to
+/// `ca-init` is recorded in `ca/meta.json` only.
+const ZTLP_LOCAL_ROOT_CN: &str = "ZTLP Root CA (this device)";
+const ZTLP_LOCAL_INTERMEDIATE_CN: &str = "ZTLP Intermediate CA (this device)";
+/// The ONLY DNS subtree the local chain may sign. Enforced by X.509
+/// nameConstraints on both root and intermediate so a leaked device key can
+/// never mint a browser-trusted cert for a public name.
+const ZTLP_LOCAL_CA_PERMITTED_SUBTREE: &str = ".ztlp";
+
 fn generate_real_ca_chain(
-    zone: &str,
+    _zone: &str,
 ) -> Result<(String, String, String, String), Box<dyn std::error::Error>> {
     use rcgen::{
-        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-        KeyUsagePurpose,
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, GeneralSubtree, IsCa,
+        KeyPair, KeyUsagePurpose, NameConstraints,
+    };
+
+    let ztlp_only = || NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName(
+            ZTLP_LOCAL_CA_PERMITTED_SUBTREE.to_string(),
+        )],
+        excluded_subtrees: Vec::new(),
     };
 
     let now = time::OffsetDateTime::now_utc();
@@ -11694,8 +11712,9 @@ fn generate_real_ca_chain(
     let mut root_params = CertificateParams::new(Vec::<String>::new())?;
     root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    root_params.name_constraints = Some(ztlp_only());
     let mut root_dn = DistinguishedName::new();
-    root_dn.push(DnType::CommonName, format!("ZTLP Root CA - {}", zone));
+    root_dn.push(DnType::CommonName, ZTLP_LOCAL_ROOT_CN);
     root_dn.push(DnType::OrganizationName, "ZTLP");
     root_params.distinguished_name = root_dn;
     root_params.not_before = now;
@@ -11711,11 +11730,9 @@ fn generate_real_ca_chain(
     // further intermediates. Defense in depth.
     int_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     int_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    int_params.name_constraints = Some(ztlp_only());
     let mut int_dn = DistinguishedName::new();
-    int_dn.push(
-        DnType::CommonName,
-        format!("ZTLP Intermediate CA - {}", zone),
-    );
+    int_dn.push(DnType::CommonName, ZTLP_LOCAL_INTERMEDIATE_CN);
     int_dn.push(DnType::OrganizationName, "ZTLP");
     int_params.distinguished_name = int_dn;
     int_params.not_before = now;
@@ -11792,11 +11809,11 @@ fn cmd_admin_ca_init(
     // Now records cert subject DNs instead of the bogus ed25519 hex keys
     // the stub recorded.
     let meta = format!(
-        "{{\"zone\":\"{}\",\"created\":\"{}\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\",\"algorithm\":\"ECDSA P-256\"}}",
+        "{{\"zone\":\"{}\",\"created\":\"{}\",\"root_cn\":\"{}\",\"intermediate_cn\":\"{}\",\"algorithm\":\"ECDSA P-256\"}}",
         zone,
         utc_timestamp_iso(),
-        zone,
-        zone,
+        ZTLP_LOCAL_ROOT_CN,
+        ZTLP_LOCAL_INTERMEDIATE_CN,
     );
     std::fs::write(ca_dir.join("ca.json"), &meta)?;
 
@@ -11816,11 +11833,11 @@ fn cmd_admin_ca_init(
 
     if json_output {
         println!(
-            "{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"algorithm\":\"ECDSA P-256\",\"root_cn\":\"ZTLP Root CA - {}\",\"intermediate_cn\":\"ZTLP Intermediate CA - {}\",\"agent_tls_enabled\":{}}}",
+            "{{\"status\":\"ok\",\"zone\":\"{}\",\"ca_dir\":\"{}\",\"algorithm\":\"ECDSA P-256\",\"root_cn\":\"{}\",\"intermediate_cn\":\"{}\",\"agent_tls_enabled\":{}}}",
             zone,
             ca_dir.display(),
-            zone,
-            zone,
+            ZTLP_LOCAL_ROOT_CN,
+            ZTLP_LOCAL_INTERMEDIATE_CN,
             tls_flipped,
         );
     } else {
@@ -11838,7 +11855,7 @@ fn cmd_admin_ca_init(
         eprintln!(
             "  {} {}",
             c_cyan("Root CN:     "),
-            format!("ZTLP Root CA - {}", zone)
+            ZTLP_LOCAL_ROOT_CN
         );
         eprintln!(
             "  {} {}",
@@ -14294,6 +14311,67 @@ async fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ── Option B (2026-09-20): one device-local root, trust once, any .ztlp ──
+    //
+    // The root is generated per DEVICE (private key never leaves the box) and
+    // reused for every zone/hostname the local daemon terminates. Two
+    // properties the user relies on when they click "Trust HTTPS" once:
+    //  1. the CN is device-generic, not "- <zone>", so a second zone needs no
+    //     second trust prompt and the keychain entry is honest about scope;
+    //  2. an X.509 nameConstraints extension permits ONLY `.ztlp` DNS names,
+    //     so even a leaked key cannot mint a trusted cert for google.com.
+
+    #[test]
+    fn ca_root_is_device_generic_and_name_constrained_to_ztlp() {
+        let (root_pem, _rk, int_pem, _ik) = generate_real_ca_chain("defcon.ztlp").unwrap();
+        let root = rcgen::CertificateParams::from_ca_cert_pem(&root_pem).unwrap();
+        let cn = root
+            .distinguished_name
+            .get(&rcgen::DnType::CommonName)
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_default();
+        assert!(cn.contains(ZTLP_LOCAL_ROOT_CN), "root CN was {cn}");
+        assert!(!cn.contains("defcon"), "root CN must not be zone-specific: {cn}");
+
+        let nc = root.name_constraints.expect("root must carry nameConstraints");
+        assert_eq!(
+            nc.permitted_subtrees,
+            vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())],
+            "root may only sign .ztlp names"
+        );
+        assert!(nc.excluded_subtrees.is_empty());
+
+        // Intermediate is also zone-generic (it is what actually signs leaves)
+        // and inherits the constraint via the chain, but we pin it too.
+        let inter = rcgen::CertificateParams::from_ca_cert_pem(&int_pem).unwrap();
+        let icn = inter
+            .distinguished_name
+            .get(&rcgen::DnType::CommonName)
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_default();
+        assert!(!icn.contains("defcon"), "intermediate CN must not be zone-specific: {icn}");
+        let inc = inter.name_constraints.expect("intermediate must carry nameConstraints");
+        assert_eq!(inc.permitted_subtrees, vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]);
+    }
+
+    #[test]
+    fn ca_chain_still_issues_a_leaf_for_a_ztlp_name() {
+        // Regression guard: adding nameConstraints must not break the normal
+        // issue path for in-scope names (rcgen validates at sign time).
+        let tmp = std::env::temp_dir().join(format!("ztlp-nc-{}", std::process::id()));
+        let ca_dir = tmp.join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+        let (root_pem, root_key, int_pem, int_key) = generate_real_ca_chain("test.ztlp").unwrap();
+        fs::write(ca_dir.join("root.pem"), &root_pem).unwrap();
+        fs::write(ca_dir.join("root.key"), &root_key).unwrap();
+        fs::write(ca_dir.join("intermediate.pem"), &int_pem).unwrap();
+        fs::write(ca_dir.join("intermediate.key"), &int_key).unwrap();
+        cmd_admin_cert_issue("web.test.ztlp", 30, &Some(ca_dir.clone()), &None, true)
+            .expect("leaf for a .ztlp name must still issue");
+        assert!(ca_dir.join("certs").join("web_test_ztlp.pem").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ── `ztlp connect`/`proxy`/`listen` must pick up ~/.ztlp/identity.json
     //    when --key is omitted (2026-09-13) ─────────────────────────────────

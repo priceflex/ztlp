@@ -238,7 +238,7 @@ defmodule ZtlpNs.Enrollment do
       <<relay_count::8, rest4::binary>> = rest3
       {relay_addrs, rest5} = parse_relay_addrs(rest4, relay_count, [])
 
-      # Gateway addr (if flag set)
+      # Gateway addr (if flag set — FLAG_HAS_GATEWAY = 0x01)
       {gateway_addr, rest6} =
         if Bitwise.band(flags, 0x01) != 0 do
           <<gw_len::16, gw::binary-size(gw_len), r::binary>> = rest5
@@ -247,8 +247,26 @@ defmodule ZtlpNs.Enrollment do
           {nil, rest5}
         end
 
+      # Callback URL (if flag set — FLAG_HAS_CALLBACK = 0x02). Added on the
+      # Rust CLI side (proto/src/enrollment.rs) for the Bootstrap-callback
+      # enrollment-confirmation feature; this Elixir parser previously had
+      # no knowledge of the flag bit at all, so any token with a callback
+      # URL baked into its signed binary form silently misparsed max_uses/
+      # expires_at/nonce/mac as garbage and was rejected as :invalid_format
+      # (wire response 0x08 0x06). We don't need the callback value here —
+      # NS never calls back anyone, only the CLI/app does after a
+      # successful enrollment — we just need to skip over the right number
+      # of bytes so nonce/mac land in the correct position.
+      rest7 =
+        if Bitwise.band(flags, 0x02) != 0 do
+          <<cb_len::16, _cb::binary-size(cb_len), r::binary>> = rest6
+          r
+        else
+          rest6
+        end
+
       # max_uses, expires_at, nonce, mac
-      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest6
+      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest7
 
       {:ok,
        %{

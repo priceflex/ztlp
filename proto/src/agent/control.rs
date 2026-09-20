@@ -340,6 +340,76 @@ pub async fn handle_request_line(state: &AgentState, line: &str) -> String {
         .unwrap_or_else(|_| r#"{"ok":false,"error":"response serialization failed"}"#.to_string())
 }
 
+/// B4 (HANDOFF-2026-09-20): request handler for the UNENROLLED STANDBY
+/// mode — the daemon has no identity.json yet, so there is no
+/// `AgentState` (no VIP pool, no DNS, no tunnels). Only the bearer-token
+/// gate and a tiny command surface exist:
+///
+/// * `status` / `setup_status` → `{ok:true, data:{standby:true,
+///   enrolled:false, identity_enrolled:false, ...}}` so the GUI's
+///   readiness checklist can show "Service: Running / Identity: Not
+///   enrolled" instead of a connect timeout.
+/// * `enroll` → the real [`cmd_enroll`] (re-exec `ztlp setup --token …`
+///   under the daemon's own HOME). Once identity.json lands, the standby
+///   loop in `daemon.rs` notices and hands over to the full daemon.
+/// * `shutdown` → honoured (returns `Some(())` to the caller).
+/// * anything else → a clear `not enrolled yet` error.
+///
+/// Returns `(response_json, shutdown_requested)`.
+pub async fn handle_standby_request_line(
+    expected_token: &str,
+    line: &str,
+) -> (String, bool) {
+    let cmd: ControlCommand = match serde_json::from_str(line) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                serde_json::to_string(&ControlResponse::err(format!("invalid command: {}", e)))
+                    .unwrap_or_else(|_| r#"{"ok":false,"error":"invalid command"}"#.to_string()),
+                false,
+            );
+        }
+    };
+
+    let provided = cmd.token.as_deref().unwrap_or("");
+    if !constant_time_eq(expected_token.as_bytes(), provided.as_bytes()) {
+        return (
+            serde_json::to_string(&ControlResponse::err("unauthorized"))
+                .unwrap_or_else(|_| r#"{"ok":false,"error":"unauthorized"}"#.to_string()),
+            false,
+        );
+    }
+
+    let (resp, shutdown) = match cmd.cmd.as_str() {
+        "status" | "setup_status" => (
+            ControlResponse::ok(serde_json::json!({
+                "standby": true,
+                "enrolled": false,
+                "identity_enrolled": false,
+                "daemon_running": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "pid": std::process::id(),
+                "message": "service running, not enrolled yet — send \"enroll\"",
+            })),
+            false,
+        ),
+        "enroll" => (cmd_enroll(&cmd).await, false),
+        "shutdown" => (ControlResponse::ok_empty(), true),
+        other => (
+            ControlResponse::err(format!(
+                "not enrolled yet: \"{}\" is unavailable until the daemon has an identity (send \"enroll\")",
+                other
+            )),
+            false,
+        ),
+    };
+    (
+        serde_json::to_string(&resp)
+            .unwrap_or_else(|_| r#"{"ok":false,"error":"response serialization failed"}"#.to_string()),
+        shutdown,
+    )
+}
+
 /// Handle a control command.
 async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlResponse {
     match cmd.cmd.as_str() {
@@ -526,8 +596,52 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
 
     match output {
         Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            ControlResponse::ok(serde_json::json!({ "output": stdout }))
+            let mut stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            // B4(b): `ztlp setup` never runs ca-init, so a daemon enrolled
+            // this way came up with TLS disabled (Safari cert warning).
+            // Provision the local CA + system trust right here, in the same
+            // root process that owns HOME. Best-effort: enrollment itself
+            // already succeeded, so a TLS-provisioning failure is reported
+            // in `tls_warning` rather than failing the whole command.
+            let mut tls_warning: Option<String> = None;
+            match dirs::home_dir() {
+                Some(home) => match build_post_enroll_tls_plan(&home) {
+                    Ok(steps) => {
+                        for args in steps {
+                            info!("post-enroll TLS provisioning: {} {}", exe.display(), args.join(" "));
+                            match tokio::process::Command::new(&exe).args(&args).output().await {
+                                Ok(o) if o.status.success() => {
+                                    stdout.push_str(&String::from_utf8_lossy(&o.stdout));
+                                }
+                                Ok(o) => {
+                                    let msg = format!(
+                                        "{} failed (exit {}): {}",
+                                        args.join(" "),
+                                        o.status.code().unwrap_or(-1),
+                                        String::from_utf8_lossy(&o.stderr).trim()
+                                    );
+                                    warn!("post-enroll TLS provisioning: {msg}");
+                                    tls_warning = Some(msg);
+                                    break;
+                                }
+                                Err(e) => {
+                                    let msg = format!("failed to spawn {}: {e}", args.join(" "));
+                                    warn!("post-enroll TLS provisioning: {msg}");
+                                    tls_warning = Some(msg);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => tls_warning = Some(e),
+                },
+                None => tls_warning = Some("cannot resolve home directory".to_string()),
+            }
+            let mut data = serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
+            if let Some(w) = tls_warning {
+                data["tls_warning"] = serde_json::Value::String(w);
+            }
+            ControlResponse::ok(data)
         }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -544,6 +658,42 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
         }
         Err(e) => ControlResponse::err(format!("failed to spawn ztlp setup: {}", e)),
     }
+}
+
+/// B4(b): the argv list (each a `ztlp` subcommand) the daemon runs right
+/// after a successful daemon-side enrollment so HTTPS works without any
+/// human `sudo`:
+///
+/// 1. `admin ca-init --zone <zone>` — only when `~/.ztlp/ca/root.key` does
+///    not exist yet (ca-init refuses to overwrite an existing CA, so we skip
+///    it rather than fail). ca-init also flips `[tls] enabled = true` in
+///    agent.toml (see `enable_tls_in_agent_config` in the CLI).
+/// 2. `agent install-ca-cert --cert ~/.ztlp/ca/root.pem` — trusts the root
+///    in the System keychain / OS store. `--cert` is HOME-independent.
+///
+/// Pure (no I/O beyond `exists()` checks) so it is unit-testable; zone is
+/// read from the config `ztlp setup` just wrote via [`read_zone_from_config`].
+pub fn build_post_enroll_tls_plan(home: &std::path::Path) -> Result<Vec<Vec<String>>, String> {
+    let zone = read_zone_from_config(home)
+        .ok_or_else(|| "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string())?;
+    let ca_dir = home.join(".ztlp").join("ca");
+    let root_pem = ca_dir.join("root.pem");
+    let mut steps = Vec::new();
+    if !ca_dir.join("root.key").exists() {
+        steps.push(vec![
+            "admin".to_string(),
+            "ca-init".to_string(),
+            "--zone".to_string(),
+            zone,
+        ]);
+    }
+    steps.push(vec![
+        "agent".to_string(),
+        "install-ca-cert".to_string(),
+        "--cert".to_string(),
+        root_pem.to_string_lossy().into_owned(),
+    ]);
+    Ok(steps)
 }
 
 /// Read the enrolled zone name from whichever ZTLP config file exists on
@@ -1132,5 +1282,57 @@ mod tests {
         assert_eq!(cmd.name.as_deref(), Some("mac-llm4"));
         assert_eq!(cmd.relay_secret.as_deref(), Some("deadbeef"));
         assert_eq!(cmd.token.as_deref(), Some("bearer-xyz"));
+    }
+
+    // ── B4(b): post-enroll TLS provisioning plan ─────────────────────────
+    //
+    // HANDOFF-2026-09-20 B4 second gap: `ztlp setup` does not run ca-init,
+    // so a daemon enrolled via the control command came up with "TLS:
+    // disabled" and Safari warned. The daemon must follow a successful
+    // enroll with `admin ca-init --zone <zone>` (idempotent: skipped when
+    // ca/root.key exists) and `agent install-ca-cert --cert <root.pem>`.
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ztlp-tlsplan-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".ztlp")).unwrap();
+        d
+    }
+
+    #[test]
+    fn post_enroll_tls_plan_fresh_home_runs_ca_init_then_install() {
+        let home = tmp_home("fresh");
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
+        let plan = build_post_enroll_tls_plan(&home).unwrap();
+        let root_pem = home.join(".ztlp/ca/root.pem").to_string_lossy().into_owned();
+        assert_eq!(
+            plan,
+            vec![
+                vec!["admin".to_string(), "ca-init".into(), "--zone".into(), "defcon.ztlp".into()],
+                vec!["agent".to_string(), "install-ca-cert".into(), "--cert".into(), root_pem],
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn post_enroll_tls_plan_skips_ca_init_when_ca_exists() {
+        let home = tmp_home("existing");
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
+        std::fs::create_dir_all(home.join(".ztlp/ca")).unwrap();
+        std::fs::write(home.join(".ztlp/ca/root.key"), "k").unwrap();
+        std::fs::write(home.join(".ztlp/ca/root.pem"), "p").unwrap();
+        let plan = build_post_enroll_tls_plan(&home).unwrap();
+        assert_eq!(plan.len(), 1, "{plan:?}");
+        assert_eq!(plan[0][1], "install-ca-cert");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn post_enroll_tls_plan_errors_without_zone() {
+        let home = tmp_home("nozone");
+        let err = build_post_enroll_tls_plan(&home).unwrap_err();
+        assert!(err.contains("zone"), "{err}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

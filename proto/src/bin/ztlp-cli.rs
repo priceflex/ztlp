@@ -12802,6 +12802,32 @@ async fn cmd_agent_start(
         return Ok(());
     }
 
+    // B4 (macOS, HANDOFF-2026-09-20): a fresh root LaunchDaemon has no
+    // identity yet. Instead of exiting 1 (launchd KeepAlive crash-loop, GUI
+    // can never reach the control socket to deliver `enroll`), wait in
+    // UNENROLLED STANDBY serving status/enroll on the control socket. Done
+    // HERE, before the config load below, so the agent.toml/config.toml
+    // that `ztlp setup` + ca-init just wrote (zone, NS, relay secret,
+    // tls=true) are picked up by the very same process — no restart.
+    if config_path.is_none() {
+        let pre = AgentConfig::load();
+        let identity_path = pre.identity_path();
+        if daemon::should_enter_unenrolled_standby(&identity_path) {
+            let proceed = daemon::run_unenrolled_standby(
+                &pre.ipc.listen,
+                &identity_path,
+                &ztlp_proto::agent::config::default_token_path(),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            if !proceed {
+                return Ok(());
+            }
+            eprintln!("{} Enrollment detected — starting full agent", c_green("✓"));
+        }
+    }
+
     let config = if let Some(path) = config_path {
         AgentConfig::load_from_path(path)
     } else {

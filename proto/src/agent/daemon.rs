@@ -251,6 +251,101 @@ pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
     }
 }
 
+/// B4 (HANDOFF-2026-09-20): should a daemon with no identity file wait in
+/// UNENROLLED STANDBY instead of exiting 1?
+///
+/// * Only on macOS — the SMAppService root LaunchDaemon is started the
+///   instant the GUI registers it (RunAtLoad), before any enrollment has
+///   happened, and the GUI then needs the control socket UP to deliver the
+///   `enroll` command. Windows/Linux keep the historical "exit 1, run
+///   `ztlp setup`" behaviour.
+/// * Only when the file is ABSENT. A present-but-unparseable identity is
+///   a real error and must still fail loudly.
+pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
+    cfg!(target_os = "macos") && !identity_path.exists()
+}
+
+/// B4: serve ONLY the control socket until `identity_path` appears.
+///
+/// Materialises `agent.token` (so the GUI can authenticate exactly as it
+/// does against the full daemon), binds `ipc_addr`, answers
+/// `status`/`setup_status`/`enroll`/`shutdown` via
+/// [`control::handle_standby_request_line`], and polls `identity_path`
+/// every `poll` interval. Returns `Ok(true)` when the identity has
+/// appeared (caller should proceed to the full daemon), `Ok(false)` when a
+/// `shutdown` command was received. The listener is dropped before
+/// returning so the full daemon can rebind the same address.
+pub async fn run_unenrolled_standby(
+    ipc_addr: &str,
+    identity_path: &Path,
+    token_path: &Path,
+    poll: Duration,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let token = Arc::new(ensure_token_file(token_path).map_err(|e| format!("token file: {e}"))?);
+    // macOS root: the control IP (127.100.255.1) is unbindable until lo0
+    // is aliased, and the GUI must be able to READ agent.token to talk to
+    // us — the same two startup actions the full daemon performs.
+    #[cfg(target_os = "macos")]
+    if crate::agent::macos_daemon::is_root() {
+        use crate::agent::macos_daemon::MacosAction;
+        if let Some(ip) = ipc_addr
+            .rsplit_once(':')
+            .and_then(|(h, _)| h.parse::<std::net::Ipv4Addr>().ok())
+            .filter(|ip| crate::agent::macos_daemon::vip_needs_loopback_alias(*ip))
+        {
+            MacosAction::LoopbackAlias(ip).execute();
+        }
+        MacosAction::TokenGuiReadable(token_path.to_path_buf()).execute();
+    }
+    let listener = TcpListener::bind(ipc_addr)
+        .await
+        .map_err(|e| format!("failed to bind control socket {} (standby): {}", ipc_addr, e))?;
+    warn!(
+        "no identity at {} — entering UNENROLLED STANDBY: control socket on {} answers \
+         status/enroll only; waiting for enrollment",
+        identity_path.display(),
+        ipc_addr
+    );
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut ticker = tokio::time::interval(poll);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if identity_path.exists() {
+                    info!("identity appeared at {} — leaving standby, starting full daemon", identity_path.display());
+                    drop(listener);
+                    return Ok(true);
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("shutdown requested during standby");
+                drop(listener);
+                return Ok(false);
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(r) => r,
+                    Err(e) => { warn!("standby control socket accept error: {}", e); continue; }
+                };
+                let token = token.clone();
+                let shutdown_tx = shutdown_tx.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = stream.into_split();
+                    let mut line = String::new();
+                    if tokio::io::AsyncBufReadExt::read_line(&mut tokio::io::BufReader::new(reader), &mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let (json, shutdown) = control::handle_standby_request_line(&token, &line).await;
+                    let _ = writer.write_all(json.as_bytes()).await;
+                    let _ = writer.write_all(b"\n").await;
+                    if shutdown { let _ = shutdown_tx.try_send(()); }
+                });
+            }
+        }
+    }
+}
+
 /// Run the agent daemon.
 ///
 /// This is the main entry point called by `ztlp agent start`.
@@ -263,6 +358,25 @@ pub async fn run_daemon(
 
     // Load identity
     let identity_path = config.identity_path();
+    // B4 note: the unenrolled-standby wait happens in the CLI's
+    // `cmd_agent_start` BEFORE the config is loaded (see
+    // `ztlp-cli.rs`), so by the time we get here on a fresh Mac the
+    // freshly-written agent.toml/config.toml (zone, NS, relay secret,
+    // tls=true) have been read. `should_enter_unenrolled_standby` is
+    // still checked here for callers that bypass the CLI.
+    if should_enter_unenrolled_standby(&identity_path) {
+        let proceed = run_unenrolled_standby(
+            &config.ipc.listen,
+            &identity_path,
+            &config::default_token_path(),
+            Duration::from_secs(1),
+        )
+        .await?;
+        if !proceed {
+            return Ok(());
+        }
+        return Err("enrolled during standby: restart the daemon to load the new configuration".into());
+    }
     let identity = NodeIdentity::load(&identity_path).map_err(|e| {
         format!(
             "failed to load identity from {}: {}\n\
@@ -2757,5 +2871,106 @@ mod local_tls_termination_tests {
         assert_eq!(tls_mode_for_port(3306), TlsMode::Detect);
         assert_eq!(tls_mode_for_port(3389), TlsMode::Detect);
         assert_eq!(tls_mode_for_port(5432), TlsMode::Detect);
+    }
+}
+
+// ─── B4: unenrolled standby (fresh-Mac chicken-and-egg) ─────────────────────
+//
+// HANDOFF-2026-09-20 B4: SMAppService starts the root daemon immediately
+// (RunAtLoad) but the daemon exited 1 when identity.json was missing, so
+// the GUI's "enroll the daemon" control command never found a listener.
+// Fix (a): on macOS, a missing identity is NOT fatal — the daemon binds
+// ONLY its control socket, answers `status`/`setup_status`/`enroll`, and
+// promotes itself to the full daemon once identity.json appears.
+#[cfg(test)]
+mod unenrolled_standby_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ztlp-standby-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".ztlp")).unwrap();
+        d
+    }
+
+    #[test]
+    fn missing_identity_is_standby_only_on_macos_and_only_when_absent() {
+        let home = tmp_home("decide");
+        let missing = home.join(".ztlp").join("identity.json");
+        // Absent file: standby iff macOS.
+        assert_eq!(
+            should_enter_unenrolled_standby(&missing),
+            cfg!(target_os = "macos"),
+            "absent identity -> standby decision must follow the macOS cfg gate"
+        );
+        // Corrupt (present but unparseable) file: NEVER standby — that is a
+        // real error the operator must see, not something to wait out.
+        std::fs::write(&missing, "not json").unwrap();
+        assert!(!should_enter_unenrolled_standby(&missing));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn standby_serves_control_socket_and_exits_when_identity_appears() {
+        let home = tmp_home("serve");
+        let identity_path = home.join(".ztlp").join("identity.json");
+        let token_path = home.join(".ztlp").join("agent.token");
+        // Ephemeral loopback port for the control socket.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ipc_addr = probe.local_addr().unwrap().to_string();
+        drop(probe);
+
+        let ip = ipc_addr.clone();
+        let idp = identity_path.clone();
+        let tp = token_path.clone();
+        let standby = tokio::spawn(async move {
+            run_unenrolled_standby(&ip, &idp, &tp, Duration::from_millis(50)).await
+        });
+
+        // Wait for the socket to come up.
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = TcpStream::connect(&ipc_addr).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut stream = stream.expect("standby control socket must come up");
+        let token = std::fs::read_to_string(&token_path).unwrap().trim().to_string();
+        assert_eq!(token.len(), 64, "standby must materialize agent.token");
+
+        // `status` answers, and says enrolled:false + standby:true.
+        let req = format!(r#"{{"cmd":"status","token":"{}"}}"#, token);
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["ok"], true, "status must succeed in standby: {line}");
+        assert_eq!(v["data"]["standby"], true);
+        assert_eq!(v["data"]["enrolled"], false);
+
+        // Wrong token is still rejected in standby (no auth regression).
+        let mut s2 = TcpStream::connect(&ipc_addr).await.unwrap();
+        s2.write_all(br#"{"cmd":"status","token":"nope"}"#).await.unwrap();
+        s2.write_all(b"\n").await.unwrap();
+        let mut l2 = String::new();
+        BufReader::new(&mut s2).read_line(&mut l2).await.unwrap();
+        assert!(l2.contains("unauthorized"), "{l2}");
+
+        // Identity appears -> standby returns Ok and releases the port.
+        assert!(!standby.is_finished());
+        std::fs::write(&identity_path, "{}").unwrap();
+        let res = tokio::time::timeout(Duration::from_secs(3), standby)
+            .await
+            .expect("standby must exit once identity.json exists")
+            .unwrap();
+        assert!(res.is_ok(), "{res:?}");
+        // Port must be free again for the full daemon to bind.
+        let rebind = TcpListener::bind(&ipc_addr).await;
+        assert!(rebind.is_ok(), "control port must be released after standby");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

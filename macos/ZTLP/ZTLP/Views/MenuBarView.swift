@@ -1,7 +1,8 @@
 // MenuBarView.swift
 // ZTLP macOS
 //
-// Menu bar dropdown. Lightweight: status, toggle, zone info, and window launcher.
+// Menu bar dropdown. Task 8: no on/off switch (there is no session to
+// switch), just the three readiness rows in miniature + window launcher.
 
 import SwiftUI
 
@@ -13,64 +14,50 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Status header
-            VStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(tunnelViewModel.status.color)
-                        .frame(width: 10, height: 10)
-
-                    Text(tunnelViewModel.status.label)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: tunnelViewModel.readiness.allReady ? "shield.checkered" : "shield")
+                        .foregroundStyle(tunnelViewModel.readiness.allReady ? Color.ztlpGreen : Color.ztlpBlue)
+                    Text(tunnelViewModel.readiness.allReady ? "Ready" : "Setup needed")
                         .font(.headline)
-
                     Spacer()
-
-                    Toggle("", isOn: Binding(
-                        get: { tunnelViewModel.status == .connected },
-                        set: { _ in tunnelViewModel.toggleConnection() }
-                    ))
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                    .disabled(!tunnelViewModel.status.canConnect && !tunnelViewModel.status.canDisconnect)
-                    .controlSize(.small)
                 }
 
-                // Zone info
-                if !configuration.zoneName.isEmpty {
+                ForEach(Array(tunnelViewModel.readiness.rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 6) {
+                        miniBadge(row.state)
+                        Text(row.title)
+                            .font(.caption)
+                        Spacer()
+                        Text(detail(row.state))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+
+                if !tunnelViewModel.zoneName.isEmpty {
                     HStack(spacing: 4) {
                         Image(systemName: "globe")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Text(configuration.zoneName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                }
-
-                // Traffic when connected
-                if tunnelViewModel.status.isActive {
-                    HStack(spacing: 16) {
-                        Label(tunnelViewModel.stats.formattedBytesSent, systemImage: "arrow.up")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                        Label(tunnelViewModel.stats.formattedBytesReceived, systemImage: "arrow.down")
+                        Text(tunnelViewModel.zoneName)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
                 }
 
-                // Error
                 if let error = tunnelViewModel.lastError {
-                    HStack(spacing: 4) {
+                    HStack(alignment: .top, spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.yellow)
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(3)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -79,7 +66,6 @@ struct MenuBarView: View {
 
             Divider()
 
-            // Actions
             VStack(spacing: 0) {
                 menuButton(icon: "macwindow", title: "Open ZTLP…", shortcut: "⌘O") {
                     openWindow(id: "main")
@@ -93,10 +79,31 @@ struct MenuBarView: View {
                 }
             }
         }
-        .frame(width: 280)
+        .frame(width: 300)
     }
 
     // MARK: - Helpers
+
+    @ViewBuilder
+    private func miniBadge(_ state: ReadinessState) -> some View {
+        switch state {
+        case .ready:
+            Image(systemName: "checkmark.circle.fill").font(.caption).foregroundStyle(Color.ztlpGreen)
+        case .needsAction:
+            Image(systemName: "circle").font(.caption).foregroundStyle(Color.ztlpOrange)
+        case .waiting:
+            Image(systemName: "ellipsis.circle").font(.caption).foregroundStyle(.secondary)
+        case .failed:
+            Image(systemName: "xmark.circle.fill").font(.caption).foregroundStyle(.red)
+        }
+    }
+
+    private func detail(_ state: ReadinessState) -> String {
+        switch state {
+        case .ready(let s), .waiting(let s), .failed(let s): return s
+        case .needsAction(let s, _): return s
+        }
+    }
 
     private func menuButton(icon: String, title: String, shortcut: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {

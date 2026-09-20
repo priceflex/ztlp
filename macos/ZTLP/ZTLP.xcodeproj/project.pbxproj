@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		0B80A5FB021726A0CFAB7ABB /* org.ztlp.agent.plist in Bundle LaunchDaemon Plist */ = {isa = PBXBuildFile; fileRef = 79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */; };
-		1FF175986BBFBA71175B2119 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */; };
 		36E4621982918E5519BE8E9E /* ZTLPConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */; };
 		3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD5C9716977DF801F33DA27 /* ZTLPIdentity.swift */; };
 		3E53F9DB00A270FDACCE5472 /* ztlp in Bundle ztlp Binary */ = {isa = PBXBuildFile; fileRef = 1101BB8FE029CD4D5E894920 /* ztlp */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -28,8 +27,6 @@
 		AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */; };
 		B9D88DADB4E22192735094F1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF7E6453D407953E6432F115 /* Assets.xcassets */; };
 		C0FF6405C1784BC467FBF124 /* ZTLPTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD821F8690E1C2AE8E13038F /* ZTLPTests.swift */; };
-		D41D036BC41CFEBD9B0FD0CA /* IdentityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A7EB8A3208E156EA025CA71 /* IdentityView.swift */; };
-		E51EDC26405FAEE991E4076D /* ServicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */; };
 		F28EA49224957442AE65E4A7 /* ServicesViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01F23606D96D8A079F7E3FB9 /* ServicesViewModel.swift */; };
 		F3B7163D933E8D9B98CA4DAD /* ZTLPApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5496B79502CD3FFD335AC6C /* ZTLPApp.swift */; };
 		FC891134E2BF86C546E246C7 /* MainWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */; };
@@ -77,7 +74,6 @@
 		20C97C4B77AA52A20831FA3F /* ZTLPService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPService.swift; sourceTree = "<group>"; };
 		2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindow.swift; sourceTree = "<group>"; };
 		411B1DD85CF6221E04B3A45E /* ZTLP.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZTLP.entitlements; sourceTree = "<group>"; };
-		4A7EB8A3208E156EA025CA71 /* IdentityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityView.swift; sourceTree = "<group>"; };
 		68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPConfiguration.swift; sourceTree = "<group>"; };
 		6A98A6B9F9DF87D848B72322 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentView.swift; sourceTree = "<group>"; };
@@ -89,8 +85,6 @@
 		95679B026D6887C171A14A2A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		99D5B6DEC61F7610D170572A /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
 		9AD5C9716977DF801F33DA27 /* ZTLPIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPIdentity.swift; sourceTree = "<group>"; };
-		9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServicesView.swift; sourceTree = "<group>"; };
-		9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		AA9B8795185D5093D8F95631 /* Color+ZTLP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Color+ZTLP.swift"; sourceTree = "<group>"; };
 		AB8947C5959711900EDC01C5 /* ZTLP.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZTLP.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B5496B79502CD3FFD335AC6C /* ZTLPApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZTLPApp.swift; sourceTree = "<group>"; };
@@ -165,11 +159,8 @@
 			children = (
 				6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */,
 				89C24BDC82DF690F24190B2D /* HomeView.swift */,
-				4A7EB8A3208E156EA025CA71 /* IdentityView.swift */,
 				2DEB2BC8C1A3B9CBC09CE7A1 /* MainWindow.swift */,
 				95679B026D6887C171A14A2A /* MenuBarView.swift */,
-				9E91DAF7240B1AB0ABD38A8D /* OnboardingView.swift */,
-				9B4AC78AB2D670E57DD98F3D /* ServicesView.swift */,
 				6A98A6B9F9DF87D848B72322 /* SettingsView.swift */,
 			);
 			path = Views;
@@ -337,13 +328,10 @@
 				AEE6C10C37E0E12AD8B7308E /* EnrollmentView.swift in Sources */,
 				587746EDD9CB2F24306791AB /* EnrollmentViewModel.swift in Sources */,
 				7105614BAC2BE48DC291A8B0 /* HomeView.swift in Sources */,
-				D41D036BC41CFEBD9B0FD0CA /* IdentityView.swift in Sources */,
 				50FC93D7B6DF71D4B4141FB7 /* KeychainService.swift in Sources */,
 				FC891134E2BF86C546E246C7 /* MainWindow.swift in Sources */,
 				647DCE564F86D5381FB8147F /* MenuBarView.swift in Sources */,
 				5B311BE765F5409E06135146 /* NetworkMonitor.swift in Sources */,
-				1FF175986BBFBA71175B2119 /* OnboardingView.swift in Sources */,
-				E51EDC26405FAEE991E4076D /* ServicesView.swift in Sources */,
 				F28EA49224957442AE65E4A7 /* ServicesViewModel.swift in Sources */,
 				533292D2F1D74DBB8CF9E31A /* SettingsView.swift in Sources */,
 				52C50BC59DA61F6278EB8405 /* SettingsViewModel.swift in Sources */,

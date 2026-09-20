@@ -92,15 +92,14 @@ struct ZTLPApp: App {
     /// Connected: filled shield (solid). Disconnected: slashed shield.
     /// Transitioning: half-filled shield.
     private var menuBarIconName: String {
+        // Task 8: icon reflects readiness (all three rows green), not a
+        // connect session.
+        if tunnelVM.readiness.allReady { return "shield.checkered" }
         switch tunnelVM.status {
-        case .connected:
-            return "shield.checkered"
-        case .connecting, .reconnecting:
+        case .connecting, .reconnecting, .disconnecting:
             return "shield.lefthalf.filled"
-        case .disconnecting:
-            return "shield.lefthalf.filled"
-        case .disconnected:
-            return "shield.slash"
+        default:
+            return "shield"
         }
     }
 }

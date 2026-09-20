@@ -1,230 +1,189 @@
 // HomeView.swift
 // ZTLP macOS
 //
-// Clean connection screen. Big connect button as the hero CTA.
-// When disconnected: inviting call to action.
-// When connected: status ring + traffic stats.
+// Task 8 (HANDOFF-2026-09-20): the single page. A READINESS CHECKLIST, not
+// a connect screen. Three rows, each with a state badge and at most one
+// action, then one line of guidance. No Connect button, no traffic bar, no
+// duration timer — there is no "session". ZTLP is an identity network: the
+// daemon connects on demand when DNS sees a zone hostname.
 
 import SwiftUI
 
 struct HomeView: View {
     @ObservedObject var viewModel: TunnelViewModel
+    @ObservedObject var enrollmentViewModel: EnrollmentViewModel
 
-    @State private var isPulsing = false
-    @State private var durationTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-    @State private var currentDuration: String = "--:--:--"
+    @State private var showEnrollment = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            // Zone badge
-            if !viewModel.zoneName.isEmpty {
-                Text(viewModel.zoneName)
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 16)
-            }
-
-            // Hero connect button
-            connectButton
+        VStack(alignment: .leading, spacing: 0) {
+            header
                 .padding(.bottom, 20)
 
-            // Status label
-            Text(statusText)
-                .font(.title3.weight(.medium))
-                .foregroundStyle(viewModel.status.color)
-                .animation(.easeInOut(duration: 0.3), value: viewModel.status)
-
-            // Duration
-            if viewModel.status == .connected {
-                Text(currentDuration)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(.quaternary)
-                    .padding(.top, 4)
-                    .onReceive(durationTimer) { _ in
-                        currentDuration = viewModel.stats.formattedDuration
-                    }
+            VStack(spacing: 10) {
+                ForEach(Array(viewModel.readiness.rows.enumerated()), id: \.offset) { idx, row in
+                    checklistRow(number: idx + 1, row: row)
+                }
             }
 
-            // 6d: one honest status line from the daemon (HTTPS trust / DNS /
-            // tunnels), replacing the old transport-mode chip. Single-path
-            // now, like the Windows client.
-            if viewModel.status.isActive, let d = viewModel.daemon {
-                Text(d.statusLine)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.quaternary)
-                    .padding(.top, 8)
-            } else if viewModel.status == .disconnected,
-                      viewModel.serviceState == .requiresApproval {
-                Button("Approve ZTLP in Login Items & Extensions…") {
-                    AgentServiceInstaller.shared.openLoginItemsSettings()
+            Text(viewModel.readiness.guidance(zone: viewModel.zoneName))
+                .font(.callout)
+                .foregroundStyle(viewModel.readiness.allReady ? Color.primary : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 18)
+                .accessibilityIdentifier("home.guidance")
+
+            if viewModel.readiness.allReady, let d = viewModel.daemon, d.activeTunnels > 0 {
+                Text("\(d.activeTunnels) active tunnel\(d.activeTunnels == 1 ? "" : "s") right now")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
+
+            if let error = viewModel.lastError {
+                errorBanner(error)
+                    .padding(.top, 14)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .animation(.easeInOut(duration: 0.25), value: viewModel.readiness)
+        .sheet(isPresented: $showEnrollment, onDismiss: { viewModel.enrollmentDidFinish() }) {
+            EnrollmentView(viewModel: enrollmentViewModel)
+                .frame(minWidth: 520, minHeight: 440)
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: viewModel.readiness.allReady ? "shield.checkered" : "shield")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(viewModel.readiness.allReady ? Color.ztlpGreen : Color.ztlpBlue)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(viewModel.readiness.allReady ? "Ready" : "Set up ZTLP")
+                    .font(.title2.weight(.semibold))
+                if !viewModel.zoneName.isEmpty {
+                    Text(viewModel.zoneName)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.link)
-                .font(.caption)
-                .padding(.top, 8)
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: - Rows
+
+    private func checklistRow(number: Int, row: ReadinessRow) -> some View {
+        HStack(spacing: 14) {
+            badge(row.state)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("\(number).")
+                        .foregroundStyle(.tertiary)
+                    Text(row.title)
+                        .fontWeight(.medium)
+                }
+                .font(.body)
+                Text(detail(row.state))
+                    .font(.caption)
+                    .foregroundStyle(detailColor(row.state))
+                    .lineLimit(2)
             }
 
             Spacer()
 
-            // Traffic stats (connected only)
-            if viewModel.status.isActive {
-                trafficBar
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .padding(.bottom, 20)
-            }
-
-            // Error
-            if let error = viewModel.lastError {
-                errorBanner(error)
-                    .padding(.bottom, 16)
-            }
+            actionButton(row.state)
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(backgroundGradient)
-        .animation(.spring(response: 0.4), value: viewModel.status)
-    }
-
-    // MARK: - Status Text
-
-    private var statusText: String {
-        switch viewModel.status {
-        case .disconnected:
-            return "Tap to connect"
-        default:
-            return viewModel.status.label
-        }
-    }
-
-    // MARK: - Connect Button
-
-    private var connectButton: some View {
-        Button {
-            viewModel.toggleConnection()
-        } label: {
-            ZStack {
-                // Pulsing outer ring (connected)
-                if viewModel.status == .connected {
-                    Circle()
-                        .stroke(Color.ztlpGreen.opacity(0.25), lineWidth: 2.5)
-                        .frame(width: 140, height: 140)
-                        .scaleEffect(isPulsing ? 1.2 : 1.0)
-                        .opacity(isPulsing ? 0.0 : 0.5)
-                        .animation(
-                            .easeOut(duration: 2.5).repeatForever(autoreverses: false),
-                            value: isPulsing
-                        )
-                }
-
-                // Main ring
-                Circle()
-                    .stroke(
-                        viewModel.status == .disconnected
-                            ? Color.ztlpBlue.opacity(0.4)
-                            : viewModel.status.color,
-                        lineWidth: 4
-                    )
-                    .frame(width: 120, height: 120)
-
-                // Spinning arc (transitions)
-                if viewModel.status.isTransitioning {
-                    Circle()
-                        .trim(from: 0, to: 0.25)
-                        .stroke(
-                            viewModel.status.color,
-                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
-                        )
-                        .frame(width: 120, height: 120)
-                        .rotationEffect(.degrees(isPulsing ? 360 : 0))
-                        .animation(
-                            .linear(duration: 1.0).repeatForever(autoreverses: false),
-                            value: isPulsing
-                        )
-                }
-
-                // Center content
-                VStack(spacing: 6) {
-                    Image(systemName: viewModel.status.systemImage)
-                        .font(.system(size: 32, weight: .light))
-                        .foregroundStyle(
-                            viewModel.status == .disconnected
-                                ? Color.ztlpBlue
-                                : viewModel.status.color
-                        )
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(!viewModel.status.canConnect && !viewModel.status.canDisconnect)
-        .onAppear { isPulsing = true }
-        .contentShape(Circle())
-    }
-
-    // MARK: - Traffic Bar
-
-    private var trafficBar: some View {
-        HStack(spacing: 28) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.up")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(viewModel.stats.formattedBytesSent)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-
-            Rectangle()
-                .fill(.quaternary)
-                .frame(width: 1, height: 16)
-
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(viewModel.stats.formattedBytesReceived)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("home.row.\(row.title.lowercased().replacingOccurrences(of: " ", with: "-"))")
+    }
+
+    @ViewBuilder
+    private func badge(_ state: ReadinessState) -> some View {
+        switch state {
+        case .ready:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(Color.ztlpGreen)
+        case .needsAction:
+            Image(systemName: "circle")
+                .font(.title3)
+                .foregroundStyle(Color.ztlpOrange)
+        case .waiting:
+            ProgressView()
+                .controlSize(.small)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.red)
+        }
+    }
+
+    private func detail(_ state: ReadinessState) -> String {
+        switch state {
+        case .ready(let s), .waiting(let s), .failed(let s): return s
+        case .needsAction(let s, _): return s
+        }
+    }
+
+    private func detailColor(_ state: ReadinessState) -> Color {
+        switch state {
+        case .ready: return .secondary
+        case .needsAction: return Color.ztlpOrange
+        case .waiting: return .secondary
+        case .failed: return .red
+        }
+    }
+
+    @ViewBuilder
+    private func actionButton(_ state: ReadinessState) -> some View {
+        if case .needsAction(_, let action) = state {
+            switch action {
+            case .installService:
+                Button("Install") { viewModel.installService() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .accessibilityIdentifier("home.action.install")
+            case .openLoginItems:
+                Button("Open Login Items") { AgentServiceInstaller.shared.openLoginItemsSettings() }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("home.action.login-items")
+            case .enroll:
+                Button("Enroll") { showEnrollment = true }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .accessibilityIdentifier("home.action.enroll")
+            case .none:
+                EmptyView()
+            }
+        }
     }
 
     // MARK: - Error Banner
 
     private func errorBanner(_ message: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.yellow)
             Text(message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .frame(maxWidth: 400)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-
-    // MARK: - Background
-
-    private var backgroundGradient: some View {
-        LinearGradient(
-            colors: [
-                viewModel.status == .connected
-                    ? Color.ztlpGreen.opacity(0.04)
-                    : viewModel.status == .disconnected
-                        ? Color.ztlpBlue.opacity(0.02)
-                        : Color.clear,
-                Color(nsColor: .windowBackgroundColor)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
     }
 }

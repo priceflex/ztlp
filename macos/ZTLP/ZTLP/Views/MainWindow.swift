@@ -1,7 +1,17 @@
 // MainWindow.swift
 // ZTLP macOS
 //
-// Main window with simplified 3-tab sidebar: Home, Services, Settings.
+// Task 8 (HANDOFF-2026-09-20, Steven's direction): ONE page.
+//
+//   "I want just one page. Move identity, service, and enrollment all onto
+//    the Home page so the user knows what is required before connecting.
+//    And it should just connect — this is not a VPN, this is an identity
+//    network. There is no connection required until the user goes to a
+//    website and DNS triggers the connection."
+//
+// So: no sidebar, no tabs. Home IS the window. Settings (Factory Reset,
+// Uninstall Service, identity details, licenses) is reachable only through
+// the gear button in the toolbar / Cmd+, — advanced and rare, not primary.
 
 import SwiftUI
 
@@ -12,50 +22,44 @@ struct MainWindow: View {
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
 
-    @State private var selectedTab: SidebarTab = .home
-
-    enum SidebarTab: String, CaseIterable, Identifiable {
-        case home = "Home"
-        case services = "Services"
-        case settings = "Settings"
-
-        var id: String { rawValue }
-
-        var systemImage: String {
-            switch self {
-            case .home:     return "shield.checkered"
-            case .services: return "server.rack"
-            case .settings: return "gearshape"
-            }
-        }
-    }
+    @State private var showSettings = false
 
     var body: some View {
-        NavigationSplitView {
-            List(SidebarTab.allCases, selection: $selectedTab) { tab in
-                Label(tab.rawValue, systemImage: tab.systemImage)
-                    .tag(tab)
+        HomeView(
+            viewModel: tunnelViewModel,
+            enrollmentViewModel: enrollmentViewModel
+        )
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .help("Advanced settings (service, identity, reset)")
+                .keyboardShortcut(",", modifiers: .command)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 140, ideal: 160)
-        } detail: {
-            switch selectedTab {
-            case .home:
-                HomeView(viewModel: tunnelViewModel)
-            case .services:
-                ServicesView(
-                    viewModel: servicesViewModel,
-                    tunnelViewModel: tunnelViewModel
-                )
-            case .settings:
+        }
+        .sheet(isPresented: $showSettings) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Advanced")
+                        .font(.headline)
+                    Spacer()
+                    Button("Done") { showSettings = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(12)
+                Divider()
                 SettingsView(
                     viewModel: settingsViewModel,
                     enrollmentViewModel: enrollmentViewModel,
                     configuration: configuration
                 )
             }
+            .frame(minWidth: 520, minHeight: 480)
         }
         .navigationTitle("ZTLP")
-        .frame(minWidth: 580, minHeight: 420)
+        .frame(minWidth: 520, minHeight: 420)
     }
 }

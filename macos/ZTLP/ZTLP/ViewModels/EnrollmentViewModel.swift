@@ -259,14 +259,21 @@ final class EnrollmentViewModel: ObservableObject {
             if !response.ok {
                 daemonEnrollWarning = "Root service enrollment failed: \(response.error ?? "unknown error"). " +
                     "The app is enrolled, but DNS/HTTPS routing needs the service enrolled too — " +
-                    "try Settings > Service."
+                    "the Home checklist will show Identity as not enrolled; press Enroll again."
+            } else if case .object(let o)? = response.data,
+                      case .bool(false)? = o["tls_provisioned"] {
+                // B4(b): the daemon enrolled but could not finish ca-init /
+                // CA trust. HTTPS will warn in Safari until this is fixed.
+                let why = o["tls_warning"]?.stringValue ?? "unknown"
+                daemonEnrollWarning = "Enrolled, but HTTPS trust could not be set up automatically (\(why)). " +
+                    "The Home checklist will keep showing Network as not ready."
             }
         } catch {
-            // Daemon not running / not installed yet is expected before
-            // Task 5.5's SMAppService install is complete — not an error
-            // worth alarming the user about mid-enrollment.
+            // B4: the daemon now waits in unenrolled standby, so this should
+            // only happen if the service really isn't installed/approved —
+            // which the Home checklist gates before Enroll is offered.
             daemonEnrollWarning = "Could not reach the root service to finish DNS/HTTPS setup " +
-                "(\(error.localizedDescription)). Install it from Settings > Service, then re-enroll."
+                "(\(error.localizedDescription)). Check the Service row on the Home page, then press Enroll again."
         }
     }
 

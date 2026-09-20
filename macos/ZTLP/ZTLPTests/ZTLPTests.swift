@@ -106,6 +106,104 @@ final class ZTLPTests: XCTestCase {
 
     // MARK: - JSONValue (control-socket response decoding)
 
+    // MARK: - HomeReadiness (Task 8 single-page checklist) — pure, every branch
+
+    private func snap(enrolled: Bool, ca: Bool, dns: Bool, zone: String = "defcon.ztlp") -> DaemonSnapshot {
+        var s = DaemonSnapshot()
+        s.identityEnrolled = enrolled
+        s.caInstalled = ca
+        s.dnsConfigured = dns
+        s.zone = zone
+        return s
+    }
+
+    func testReadinessFreshMacServiceNotInstalledGatesEverything() {
+        let r = HomeReadiness.compute(serviceState: .notRegistered, daemonReachable: false, daemon: nil)
+        XCTAssertEqual(r.service.state, .needsAction("Not installed", action: .installService))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.network.state, .waiting("Waiting for service"))
+        XCTAssertFalse(r.allReady)
+        XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 1"))
+    }
+
+    func testReadinessRequiresApprovalOffersLoginItems() {
+        let r = HomeReadiness.compute(serviceState: .requiresApproval, daemonReachable: false, daemon: nil)
+        XCTAssertEqual(r.service.state, .needsAction("Needs your approval in System Settings", action: .openLoginItems))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+    }
+
+    func testReadinessRegisteredButNotAnsweringIsWaitingNotEnroll() {
+        // B4 user-facing half: the daemon is registered but has not answered
+        // yet -> Identity must NOT offer Enroll (that was the old timeout path).
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: false, daemon: nil)
+        XCTAssertEqual(r.service.state, .waiting("Starting…"))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testReadinessStandbyDaemonOffersEnroll() {
+        // Daemon up in unenrolled standby: Service green, Identity = Enroll.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: false, ca: false, dns: false, zone: "")
+        )
+        XCTAssertEqual(r.service.state, .ready("Running"))
+        XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
+        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+        XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 2"))
+    }
+
+    func testReadinessEnrolledButTlsPendingIsWaiting() {
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: false, dns: true)
+        )
+        XCTAssertEqual(r.identity.state, .ready("Enrolled in defcon.ztlp"))
+        XCTAssertEqual(r.network.state, .waiting("Setting up HTTPS trust…"))
+        XCTAssertFalse(r.allReady)
+        XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Almost there"))
+    }
+
+    func testReadinessAllGreenGuidanceHasNoConnectVerb() {
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: true, dns: true)
+        )
+        XCTAssertTrue(r.allReady)
+        XCTAssertEqual(r.network.state, .ready("HTTPS trusted · DNS routed"))
+        let g = r.guidance(zone: "defcon.ztlp")
+        XCTAssertTrue(g.contains("https://<name>.defcon.ztlp"), g)
+        XCTAssertTrue(g.contains("on demand"), g)
+        // Steven: "There is no connection required until the user goes to a
+        // website" — the UI must never ask the user to press Connect.
+        XCTAssertFalse(g.lowercased().contains("press connect"), g)
+    }
+
+    func testReadinessServiceFailedIsRed() {
+        let r = HomeReadiness.compute(serviceState: .failed("boom"), daemonReachable: false, daemon: nil)
+        XCTAssertEqual(r.service.state, .failed("boom"))
+        let r2 = HomeReadiness.compute(serviceState: .notFound, daemonReachable: false, daemon: nil)
+        if case .failed(let m) = r2.service.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.service.state)") }
+    }
+
+    func testBackoffDoublesAndCapsAtTwoSeconds() {
+        XCTAssertEqual(TunnelViewModel.nextBackoffDelay(0.25), 0.5)
+        XCTAssertEqual(TunnelViewModel.nextBackoffDelay(0.5), 1.0)
+        XCTAssertEqual(TunnelViewModel.nextBackoffDelay(1.0), 2.0)
+        XCTAssertEqual(TunnelViewModel.nextBackoffDelay(2.0), 2.0)
+        XCTAssertEqual(TunnelViewModel.nextBackoffDelay(5.0), 2.0)
+    }
+
+    func testJSONValueDecodesStandbyStatusShape() throws {
+        // What the B4 unenrolled-standby daemon answers to "status".
+        let json = #"{"ok":true,"data":{"standby":true,"enrolled":false,"identity_enrolled":false,"daemon_running":true,"version":"0.35.11","pid":42}}"#
+        let resp = try JSONDecoder().decode(AgentControlResponse.self, from: Data(json.utf8))
+        XCTAssertTrue(resp.ok)
+        guard case .object(let o)? = resp.data else { return XCTFail("no object") }
+        XCTAssertEqual(o["standby"]?.boolValue, true)
+        XCTAssertEqual(o["identity_enrolled"]?.boolValue, false)
+    }
+
     func testJSONValueDecodesDaemonStatusShape() throws {
         // Real shape from a live 0.35.10 daemon on MACLLM4 (2026-09-19).
         let raw = #"{"ok":true,"data":{"dns_listen":"127.0.0.55:15353","domain_mappings":0,"ns_server":"44.240.16.59:23096","pid":12940,"uptime_secs":779,"version":"0.35.10","vip_allocated":1,"vip_capacity":65534}}"#

@@ -53,6 +53,167 @@ struct DaemonSnapshot: Equatable {
     }
 }
 
+// MARK: - Task 8: readiness checklist (single-page Home)
+
+/// State of one row on the Home readiness checklist.
+enum ReadinessState: Equatable {
+    /// Green check — nothing to do.
+    case ready(String)
+    /// Grey/orange — something the user must do; `action` is the one button.
+    case needsAction(String, action: ReadinessAction)
+    /// Spinner — waiting on a previous row / the daemon.
+    case waiting(String)
+    /// Red — something failed; message is shown verbatim.
+    case failed(String)
+
+    var isReady: Bool {
+        if case .ready = self { return true }
+        return false
+    }
+}
+
+/// The single action a checklist row can offer.
+enum ReadinessAction: Equatable {
+    case installService
+    case openLoginItems
+    case enroll
+    case none
+}
+
+/// One row of the checklist.
+struct ReadinessRow: Equatable {
+    let title: String
+    let systemImage: String
+    let state: ReadinessState
+}
+
+/// The whole Home page, derived purely from (service state, daemon
+/// snapshot, daemon reachable). Pure so XCTest can pin every branch
+/// without SMAppService or a live daemon.
+///
+/// Order of operations is enforced by the rows themselves — this is the
+/// user-facing half of the B4 fix: you cannot enroll before the service is
+/// Running, and the UI says so instead of timing out.
+struct HomeReadiness: Equatable {
+    let service: ReadinessRow
+    let identity: ReadinessRow
+    let network: ReadinessRow
+
+    var rows: [ReadinessRow] { [service, identity, network] }
+    var allReady: Bool { rows.allSatisfy { $0.state.isReady } }
+
+    /// The one line of guidance under the checklist.
+    func guidance(zone: String) -> String {
+        if allReady {
+            let z = zone.isEmpty ? "<zone>" : zone
+            return "Open any https://<name>.\(z) site in your browser. ZTLP connects on demand — there is nothing to switch on."
+        }
+        if !service.state.isReady { return "Step 1: install the ZTLP background service." }
+        if !identity.state.isReady { return "Step 2: enroll this Mac with the enrollment link from your administrator." }
+        return "Almost there — the service is finishing HTTPS and DNS setup."
+    }
+
+    static func compute(
+        serviceState: AgentServiceState,
+        daemonReachable: Bool,
+        daemon: DaemonSnapshot?
+    ) -> HomeReadiness {
+        // Row 1 — Service (SMAppService registration + daemon answering)
+        let service: ReadinessRow
+        switch serviceState {
+        case .running:
+            service = ReadinessRow(
+                title: "Service",
+                systemImage: "gearshape.2",
+                state: daemonReachable
+                    ? .ready("Running")
+                    : .waiting("Starting…")
+            )
+        case .requiresApproval:
+            service = ReadinessRow(
+                title: "Service",
+                systemImage: "gearshape.2",
+                state: .needsAction("Needs your approval in System Settings", action: .openLoginItems)
+            )
+        case .notRegistered:
+            service = ReadinessRow(
+                title: "Service",
+                systemImage: "gearshape.2",
+                state: .needsAction("Not installed", action: .installService)
+            )
+        case .notFound:
+            service = ReadinessRow(
+                title: "Service",
+                systemImage: "gearshape.2",
+                state: .failed("Service missing from this app bundle — reinstall ZTLP")
+            )
+        case .failed(let msg):
+            service = ReadinessRow(
+                title: "Service",
+                systemImage: "gearshape.2",
+                state: .failed(msg)
+            )
+        }
+
+        // Row 2 — Identity (the ROOT daemon's enrollment; that is what DNS/TLS use)
+        let identity: ReadinessRow
+        if !service.state.isReady {
+            identity = ReadinessRow(
+                title: "Identity",
+                systemImage: "person.badge.key",
+                state: .waiting("Waiting for service")
+            )
+        } else if let d = daemon, d.identityEnrolled {
+            identity = ReadinessRow(
+                title: "Identity",
+                systemImage: "person.badge.key",
+                state: .ready(d.zone.isEmpty ? "Enrolled" : "Enrolled in \(d.zone)")
+            )
+        } else {
+            identity = ReadinessRow(
+                title: "Identity",
+                systemImage: "person.badge.key",
+                state: .needsAction("Not enrolled", action: .enroll)
+            )
+        }
+
+        // Row 3 — Network ready (HTTPS trusted + DNS routed, from the daemon)
+        let network: ReadinessRow
+        if !identity.state.isReady {
+            network = ReadinessRow(
+                title: "Network ready",
+                systemImage: "network",
+                state: .waiting(service.state.isReady ? "Waiting for enrollment" : "Waiting for service")
+            )
+        } else if let d = daemon {
+            if d.caInstalled && d.dnsConfigured {
+                network = ReadinessRow(
+                    title: "Network ready",
+                    systemImage: "network",
+                    state: .ready("HTTPS trusted · DNS routed")
+                )
+            } else {
+                var missing: [String] = []
+                if !d.caInstalled { missing.append("HTTPS trust") }
+                if !d.dnsConfigured { missing.append("DNS routing") }
+                network = ReadinessRow(
+                    title: "Network ready",
+                    systemImage: "network",
+                    state: .waiting("Setting up \(missing.joined(separator: " and "))…")
+                )
+            }
+        } else {
+            network = ReadinessRow(
+                title: "Network ready",
+                systemImage: "network",
+                state: .waiting("Waiting for service")
+            )
+        }
+
+        return HomeReadiness(service: service, identity: identity, network: network)
+    }
+}
+
 /// ViewModel for the main connect/disconnect UI.
 @MainActor
 final class TunnelViewModel: ObservableObject {
@@ -74,7 +235,7 @@ final class TunnelViewModel: ObservableObject {
     /// Poll cadence while the app is open (Windows UI polls ~2s).
     static let pollInterval: TimeInterval = 2
     /// How long Connect waits for the freshly registered daemon to answer.
-    static let readyTimeout: TimeInterval = 15
+    static let readyTimeout: TimeInterval = 30
     /// How long Disconnect waits for the daemon to actually go away.
     static let stopTimeout: TimeInterval = 8
     static let readyPollInterval: TimeInterval = 0.25
@@ -101,7 +262,7 @@ final class TunnelViewModel: ObservableObject {
         if configuration.autoConnect {
             Task { [weak self] in
                 guard let self else { return }
-                if await !Self.daemonReachable() { self.connect() }
+                if await !Self.daemonReachable() { self.installService() }
             }
         }
     }
@@ -110,38 +271,37 @@ final class TunnelViewModel: ObservableObject {
         pollTask?.cancel()
     }
 
-    // MARK: - Actions
+    // MARK: - Actions (Task 8: no Connect button — identity network, not a VPN)
 
+    /// Latest readiness checklist for the single-page Home. Recomputed on
+    /// every poll from (service state, daemon reachable, daemon snapshot).
+    @Published private(set) var readiness: HomeReadiness = HomeReadiness.compute(
+        serviceState: .notRegistered, daemonReachable: false, daemon: nil
+    )
+    @Published private(set) var daemonIsReachable: Bool = false
+
+    /// Legacy entry point kept for the menu bar toggle: with no session to
+    /// toggle, "on" = make sure the service is installed; "off" = uninstall
+    /// it (Settings > Service is the primary place for that).
     func toggleConnection() {
-        switch status {
-        case .disconnected:
-            connect()
-        case .connected, .reconnecting:
-            disconnect()
-        default:
-            break
-        }
+        if daemonIsReachable { disconnect() } else { installService() }
     }
 
-    /// Connect = make sure the root daemon is installed and answering.
-    ///
-    /// Mirrors `start_tunnel` on Windows: if the agent already answers its
-    /// control socket, we're done; otherwise start it (here: SMAppService
-    /// register, which is what launches the LaunchDaemon) and poll until it
-    /// answers or we time out.
-    func connect() {
-        guard status.canConnect, !transitionInFlight else { return }
+    /// Row 1 action: install (SMAppService register) the root service.
+    /// There is no "connect" — once the service is Running, DNS connects
+    /// on demand when the user opens a zone hostname.
+    func installService() {
+        guard !transitionInFlight else { return }
         lastError = nil
-        status = .connecting
         transitionInFlight = true
+        status = .connecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
         Task {
             defer { transitionInFlight = false }
 
             if await Self.daemonReachable() {
-                await refresh()
-                status = .connected
+                await pollOnceUnlocked()
                 return
             }
 
@@ -150,16 +310,15 @@ final class TunnelViewModel: ObservableObject {
 
             switch installer.state {
             case .requiresApproval:
-                // macOS wants a human click in System Settings. That IS the
-                // one system prompt Steven accepted (UAC equivalent); we
-                // can't approve programmatically, so send them there.
+                // macOS wants a human click in System Settings — the one
+                // system prompt Steven accepted (UAC equivalent).
                 installer.openLoginItemsSettings()
                 status = .disconnected
-                lastError = "Approve “ZTLP” under System Settings › General › Login Items & Extensions, then press Connect again."
+                lastError = "Approve “ZTLP” under System Settings › General › Login Items & Extensions. This page updates by itself."
                 return
             case .failed(let msg):
                 status = .disconnected
-                lastError = "Could not start the ZTLP service: \(msg)"
+                lastError = "Could not install the ZTLP service: \(msg)"
                 NSSound.beep()
                 return
             case .notFound:
@@ -170,7 +329,7 @@ final class TunnelViewModel: ObservableObject {
             case .notRegistered:
                 if let err = installer.lastError {
                     status = .disconnected
-                    lastError = "Could not start the ZTLP service: \(err)"
+                    lastError = "Could not install the ZTLP service: \(err)"
                     NSSound.beep()
                     return
                 }
@@ -178,22 +337,29 @@ final class TunnelViewModel: ObservableObject {
                 break
             }
 
-            if await Self.waitForDaemon(reachable: true, timeout: Self.readyTimeout) {
-                await refresh()
-                status = .connected
+            // B4(c): retry with backoff instead of one 15s window. A fresh
+            // daemon now comes up in unenrolled standby within ~1s, but a
+            // slow first launchd spawn (notarization check, first run) can
+            // take longer.
+            if await Self.waitForDaemonWithBackoff(timeout: Self.readyTimeout) {
+                await pollOnceUnlocked()
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
             } else {
                 status = .disconnected
-                lastError = "The ZTLP service was installed but did not answer within \(Int(Self.readyTimeout))s."
+                lastError = "The ZTLP service was installed but did not answer within \(Int(Self.readyTimeout))s. It may still be starting — this page keeps checking."
                 NSSound.beep()
             }
         }
     }
 
-    /// Disconnect = stop the root daemon by unregistering it (KeepAlive
-    /// means a plain "shutdown" would respawn — see header comment).
+    /// Backwards-compatible name used by older callers.
+    func connect() { installService() }
+
+    /// Uninstall the root daemon (SMAppService unregister). Lives in
+    /// Settings as "Uninstall Service"; KeepAlive means a plain "shutdown"
+    /// would respawn — see header comment.
     func disconnect() {
-        guard status.canDisconnect, !transitionInFlight else { return }
+        guard !transitionInFlight else { return }
         lastError = nil
         status = .disconnecting
         transitionInFlight = true
@@ -213,18 +379,34 @@ final class TunnelViewModel: ObservableObject {
             _ = await Self.waitForDaemon(reachable: false, timeout: Self.stopTimeout)
             let stillUp = await Self.daemonReachable()
             if stillUp {
-                // launchd hasn't torn it down yet (or unregister failed).
-                // Report honestly rather than showing a fake "Disconnected".
                 status = .connected
                 if lastError == nil {
                     lastError = "The ZTLP service is still running. Try again in a moment."
                 }
             } else {
                 status = .disconnected
+                daemonIsReachable = false
                 stats = TrafficStats()
                 daemon = nil
+                recomputeReadiness()
             }
         }
+    }
+
+    /// Row 2 action is handled by EnrollmentView (sheet). After the sheet
+    /// closes we poll immediately so the Identity row flips without
+    /// waiting for the 2s tick.
+    func enrollmentDidFinish() {
+        Task { await pollOnce() }
+    }
+
+    private func recomputeReadiness() {
+        let r = HomeReadiness.compute(
+            serviceState: serviceState,
+            daemonReachable: daemonIsReachable,
+            daemon: daemon
+        )
+        if r != readiness { readiness = r }
     }
 
     // MARK: - Daemon polling (the "IPC" half of tunnel.rs)
@@ -240,14 +422,19 @@ final class TunnelViewModel: ObservableObject {
     }
 
     private func pollOnce() async {
-        serviceState = installer.state
+        guard !transitionInFlight else { return }
+        await pollOnceUnlocked()
+    }
+
+    /// The poll body without the in-flight guard (used by installService
+    /// right after the daemon answers).
+    private func pollOnceUnlocked() async {
         installer.refreshState()
         serviceState = installer.state
 
-        guard !transitionInFlight else { return }
-
         if await Self.daemonReachable() {
             missedPolls = 0
+            daemonIsReachable = true
             await refresh()
             if status != .connected {
                 status = .connected
@@ -260,13 +447,17 @@ final class TunnelViewModel: ObservableObject {
             missedPolls += 1
             if missedPolls >= Self.missedPollsBeforeDisconnected {
                 status = .disconnected
+                daemonIsReachable = false
                 daemon = nil
                 stats = TrafficStats()
                 missedPolls = 0
             } else {
                 status = .reconnecting
             }
+        } else {
+            daemonIsReachable = false
         }
+        recomputeReadiness()
     }
 
     /// Consecutive failed polls while we believed we were connected.
@@ -357,6 +548,25 @@ final class TunnelViewModel: ObservableObject {
             if Date() >= deadline { return false }
             try? await Task.sleep(nanoseconds: UInt64(readyPollInterval * 1_000_000_000))
         }
+    }
+
+    /// B4(c): like `waitForDaemon(reachable: true)` but with exponential
+    /// backoff (0.25s → 2s cap) so a slow first spawn isn't hammered and a
+    /// fast one is caught quickly.
+    static func waitForDaemonWithBackoff(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var delay: TimeInterval = readyPollInterval
+        while true {
+            if await daemonReachable() { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            delay = nextBackoffDelay(delay)
+        }
+    }
+
+    /// Pure backoff step, unit-tested: doubles, capped at 2s.
+    static func nextBackoffDelay(_ current: TimeInterval) -> TimeInterval {
+        min(current * 2, 2.0)
     }
 
     // MARK: - Service Test

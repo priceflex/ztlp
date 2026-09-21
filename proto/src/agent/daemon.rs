@@ -299,12 +299,20 @@ pub fn enrollment_is_complete(identity_path: &Path) -> bool {
     if !identity_path.exists() {
         return false;
     }
-    let Some(dir) = identity_path.parent() else { return false };
-    let Ok(cfg) = std::fs::read_to_string(dir.join("config.toml")) else { return false };
+    let Some(dir) = identity_path.parent() else {
+        return false;
+    };
+    let Ok(cfg) = std::fs::read_to_string(dir.join("config.toml")) else {
+        return false;
+    };
     cfg.lines().any(|l| {
         let l = l.trim();
-        if !l.starts_with("zone") { return false; }
-        let Some((_, v)) = l.split_once('=') else { return false };
+        if !l.starts_with("zone") {
+            return false;
+        }
+        let Some((_, v)) = l.split_once('=') else {
+            return false;
+        };
         let v = v.trim().trim_matches('"').trim_matches('\'');
         !v.is_empty()
     })
@@ -317,7 +325,10 @@ pub fn enrollment_is_complete(identity_path: &Path) -> bool {
 pub fn remove_orphan_identity(identity_path: &Path) -> bool {
     if identity_path.exists() && !enrollment_is_complete(identity_path) {
         if std::fs::remove_file(identity_path).is_ok() {
-            warn!("removed orphan {} left by a failed enrollment", identity_path.display());
+            warn!(
+                "removed orphan {} left by a failed enrollment",
+                identity_path.display()
+            );
             return true;
         }
     }
@@ -369,9 +380,12 @@ pub async fn run_unenrolled_standby(
         }
         MacosAction::TokenGuiReadable(token_path.to_path_buf()).execute();
     }
-    let listener = TcpListener::bind(ipc_addr)
-        .await
-        .map_err(|e| format!("failed to bind control socket {} (standby): {}", ipc_addr, e))?;
+    let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
+        format!(
+            "failed to bind control socket {} (standby): {}",
+            ipc_addr, e
+        )
+    })?;
     warn!(
         "no identity at {} — entering UNENROLLED STANDBY: control socket on {} answers \
          status/enroll only; waiting for enrollment",
@@ -450,7 +464,9 @@ pub async fn run_daemon(
         if !proceed {
             return Ok(());
         }
-        return Err("enrolled during standby: restart the daemon to load the new configuration".into());
+        return Err(
+            "enrolled during standby: restart the daemon to load the new configuration".into(),
+        );
     }
     let identity = NodeIdentity::load(&identity_path).map_err(|e| {
         format!(
@@ -2985,7 +3001,10 @@ mod unenrolled_standby_tests {
         std::fs::write(&missing, "not json").unwrap();
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
         assert!(!should_enter_unenrolled_standby(&missing));
-        assert!(missing.exists(), "complete enrollment must never be deleted");
+        assert!(
+            missing.exists(),
+            "complete enrollment must never be deleted"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -3012,12 +3031,18 @@ mod unenrolled_standby_tests {
         std::fs::write(&idp, "{}").unwrap();
         // identity.json written by `ztlp setup`, but nothing else yet ->
         // orphan; MUST NOT hand over (this is the live wedge of 2026-09-20).
-        assert!(!standby_may_hand_over(&idp, 0), "identity without config -> stay");
+        assert!(
+            !standby_may_hand_over(&idp, 0),
+            "identity without config -> stay"
+        );
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
         // complete on disk, but the enroll command is still running ca-init
         // -> MUST NOT hand over yet.
         assert!(!standby_may_hand_over(&idp, 1), "enroll in flight -> stay");
-        assert!(standby_may_hand_over(&idp, 0), "identity + config + enroll done -> go");
+        assert!(
+            standby_may_hand_over(&idp, 0),
+            "identity + config + enroll done -> go"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -3026,7 +3051,11 @@ mod unenrolled_standby_tests {
         let home = tmp_home("complete");
         let idp = home.join(".ztlp").join("identity.json");
         std::fs::write(&idp, "{}").unwrap();
-        std::fs::write(home.join(".ztlp/config.toml"), "# no zone\nns_server = \"x\"\n").unwrap();
+        std::fs::write(
+            home.join(".ztlp/config.toml"),
+            "# no zone\nns_server = \"x\"\n",
+        )
+        .unwrap();
         assert!(!enrollment_is_complete(&idp));
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"\"\n").unwrap();
         assert!(!enrollment_is_complete(&idp));
@@ -3045,7 +3074,10 @@ mod unenrolled_standby_tests {
         assert!(!idp.exists());
         std::fs::write(&idp, "{}").unwrap();
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
-        assert!(!remove_orphan_identity(&idp), "complete enrollment must never be touched");
+        assert!(
+            !remove_orphan_identity(&idp),
+            "complete enrollment must never be touched"
+        );
         assert!(idp.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3077,7 +3109,10 @@ mod unenrolled_standby_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let mut stream = stream.expect("standby control socket must come up");
-        let token = std::fs::read_to_string(&token_path).unwrap().trim().to_string();
+        let token = std::fs::read_to_string(&token_path)
+            .unwrap()
+            .trim()
+            .to_string();
         assert_eq!(token.len(), 64, "standby must materialize agent.token");
 
         // `status` answers, and says enrolled:false + standby:true.
@@ -3085,7 +3120,10 @@ mod unenrolled_standby_tests {
         stream.write_all(req.as_bytes()).await.unwrap();
         stream.write_all(b"\n").await.unwrap();
         let mut line = String::new();
-        BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
+        BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["ok"], true, "status must succeed in standby: {line}");
         assert_eq!(v["data"]["standby"], true);
@@ -3093,7 +3131,9 @@ mod unenrolled_standby_tests {
 
         // Wrong token is still rejected in standby (no auth regression).
         let mut s2 = TcpStream::connect(&ipc_addr).await.unwrap();
-        s2.write_all(br#"{"cmd":"status","token":"nope"}"#).await.unwrap();
+        s2.write_all(br#"{"cmd":"status","token":"nope"}"#)
+            .await
+            .unwrap();
         s2.write_all(b"\n").await.unwrap();
         let mut l2 = String::new();
         BufReader::new(&mut s2).read_line(&mut l2).await.unwrap();
@@ -3103,7 +3143,10 @@ mod unenrolled_standby_tests {
         assert!(!standby.is_finished());
         std::fs::write(&identity_path, "{}").unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(!standby.is_finished(), "identity.json without config.toml must not end standby");
+        assert!(
+            !standby.is_finished(),
+            "identity.json without config.toml must not end standby"
+        );
 
         // Complete enrollment (config.toml with a zone) -> standby returns Ok
         // and releases the port.
@@ -3119,7 +3162,10 @@ mod unenrolled_standby_tests {
         assert!(res.is_ok(), "{res:?}");
         // Port must be free again for the full daemon to bind.
         let rebind = TcpListener::bind(&ipc_addr).await;
-        assert!(rebind.is_ok(), "control port must be released after standby");
+        assert!(
+            rebind.is_ok(),
+            "control port must be released after standby"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 }

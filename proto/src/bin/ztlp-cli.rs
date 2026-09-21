@@ -9673,7 +9673,11 @@ fn parse_enroll_config(
 /// taken" — the real enroll attempt is still the source of truth; this
 /// only avoids burning a single-use token on a name we can already see is
 /// claimed by someone else.
-async fn ns_name_is_taken_by_other_key(ns_server: &str, full_name: &str, our_pubkey: &[u8]) -> bool {
+async fn ns_name_is_taken_by_other_key(
+    ns_server: &str,
+    full_name: &str,
+    our_pubkey: &[u8],
+) -> bool {
     // KEY record (type 1) carries the owning identity's public_key.
     let Ok(Some(result)) = ns_query_raw(full_name, ns_server, 1).await else {
         return false;
@@ -11902,11 +11906,7 @@ fn cmd_admin_ca_init(
         eprintln!("{}", c_bold(&format!("ZTLP CA Initialized for {}", zone)));
         eprintln!();
         eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
-        eprintln!(
-            "  {} {}",
-            c_cyan("Root CN:     "),
-            ZTLP_LOCAL_ROOT_CN
-        );
+        eprintln!("  {} {}", c_cyan("Root CN:     "), ZTLP_LOCAL_ROOT_CN);
         eprintln!(
             "  {} {}",
             c_cyan("Intermediate:"),
@@ -13359,7 +13359,11 @@ async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
             windows_service_uninstall, WINDOWS_SERVICE_NAME,
         };
         match windows_service_uninstall(WINDOWS_SERVICE_NAME) {
-            Ok(()) => eprintln!("{} Service uninstalled: {}", c_green("✓"), WINDOWS_SERVICE_NAME),
+            Ok(()) => eprintln!(
+                "{} Service uninstalled: {}",
+                c_green("✓"),
+                WINDOWS_SERVICE_NAME
+            ),
             Err(e) => {
                 eprintln!("{} Uninstall failed: {}", c_red("✗"), e);
                 eprintln!();
@@ -14431,9 +14435,14 @@ mod tests {
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
         assert!(cn.contains(ZTLP_LOCAL_ROOT_CN), "root CN was {cn}");
-        assert!(!cn.contains("defcon"), "root CN must not be zone-specific: {cn}");
+        assert!(
+            !cn.contains("defcon"),
+            "root CN must not be zone-specific: {cn}"
+        );
 
-        let nc = root.name_constraints.expect("root must carry nameConstraints");
+        let nc = root
+            .name_constraints
+            .expect("root must carry nameConstraints");
         assert_eq!(
             nc.permitted_subtrees,
             vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())],
@@ -14449,18 +14458,30 @@ mod tests {
             .get(&rcgen::DnType::CommonName)
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
-        assert!(!icn.contains("defcon"), "intermediate CN must not be zone-specific: {icn}");
-        let inc = inter.name_constraints.expect("intermediate must carry nameConstraints");
-        assert_eq!(inc.permitted_subtrees, vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]);
+        assert!(
+            !icn.contains("defcon"),
+            "intermediate CN must not be zone-specific: {icn}"
+        );
+        let inc = inter
+            .name_constraints
+            .expect("intermediate must carry nameConstraints");
+        assert_eq!(
+            inc.permitted_subtrees,
+            vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]
+        );
     }
 
     #[test]
     fn name_taken_retry_uses_short_stable_node_suffix() {
-        let n = disambiguated_device_name("stevens-macbook-pro-2", "4c4469d10e426bb73e30c933b96c75f2");
+        let n =
+            disambiguated_device_name("stevens-macbook-pro-2", "4c4469d10e426bb73e30c933b96c75f2");
         assert_eq!(n, "stevens-macbook-pro-2-4c44");
         // idempotent for the same identity; no double dash on a trailing '-'
         assert_eq!(disambiguated_device_name("mac-", "abcd0000"), "mac-abcd");
-        assert_eq!(disambiguated_device_name("mac", "abcd0000"), disambiguated_device_name("mac", "abcd0000"));
+        assert_eq!(
+            disambiguated_device_name("mac", "abcd0000"),
+            disambiguated_device_name("mac", "abcd0000")
+        );
     }
 
     #[test]

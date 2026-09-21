@@ -29,12 +29,13 @@
 mod svc {
     use std::ffi::OsString;
     use windows_service::{
-        define_windows_service, service_dispatcher,
+        define_windows_service,
         service::{
             ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
             ServiceType,
         },
         service_control_handler::{self, ServiceControlHandlerResult},
+        service_dispatcher,
     };
 
     /// Must match the service name Task B2's `ztlp.exe agent install`

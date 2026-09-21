@@ -139,7 +139,10 @@ mod tests {
         let def = windows_service_definition(Path::new("C:/Program Files/ZTLP/ztlp-winsvc.exe"));
         assert_eq!(def.service_name, "ZtlpAgent");
         assert_eq!(def.display_name, "ZTLP Agent");
-        assert!(def.start_on_boot, "must survive reboot with no GUI ever run");
+        assert!(
+            def.start_on_boot,
+            "must survive reboot with no GUI ever run"
+        );
         assert!(def.dependencies.is_empty());
         assert_eq!(
             def.binary_path,

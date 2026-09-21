@@ -356,10 +356,7 @@ pub async fn handle_request_line(state: &AgentState, line: &str) -> String {
 /// * anything else → a clear `not enrolled yet` error.
 ///
 /// Returns `(response_json, shutdown_requested)`.
-pub async fn handle_standby_request_line(
-    expected_token: &str,
-    line: &str,
-) -> (String, bool) {
+pub async fn handle_standby_request_line(expected_token: &str, line: &str) -> (String, bool) {
     handle_standby_request_line_tracked(expected_token, line, None).await
 }
 
@@ -428,8 +425,9 @@ pub async fn handle_standby_request_line_tracked(
         ),
     };
     (
-        serde_json::to_string(&resp)
-            .unwrap_or_else(|_| r#"{"ok":false,"error":"response serialization failed"}"#.to_string()),
+        serde_json::to_string(&resp).unwrap_or_else(|_| {
+            r#"{"ok":false,"error":"response serialization failed"}"#.to_string()
+        }),
         shutdown,
     )
 }
@@ -632,8 +630,16 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
                 Some(home) => match build_post_enroll_tls_plan(&home) {
                     Ok(steps) => {
                         for args in steps {
-                            info!("post-enroll TLS provisioning: {} {}", exe.display(), args.join(" "));
-                            match tokio::process::Command::new(&exe).args(&args).output().await {
+                            info!(
+                                "post-enroll TLS provisioning: {} {}",
+                                exe.display(),
+                                args.join(" ")
+                            );
+                            match tokio::process::Command::new(&exe)
+                                .args(&args)
+                                .output()
+                                .await
+                            {
                                 Ok(o) if o.status.success() => {
                                     stdout.push_str(&String::from_utf8_lossy(&o.stdout));
                                 }
@@ -661,7 +667,8 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
                 },
                 None => tls_warning = Some("cannot resolve home directory".to_string()),
             }
-            let mut data = serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
+            let mut data =
+                serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
             if let Some(w) = tls_warning {
                 data["tls_warning"] = serde_json::Value::String(w);
             }
@@ -670,7 +677,11 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let full = if stderr.trim().is_empty() { stdout } else { stderr };
+            let full = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
             // A failed setup may have written identity.json before NS said
             // no. Leave it and the next Enroll is refused with "already
             // enrolled" (live wedge 2026-09-20). Remove the orphan; a
@@ -780,8 +791,9 @@ pub fn build_post_enroll_tls_plan_with(
     home: &std::path::Path,
     gui_owns_trust: bool,
 ) -> Result<Vec<Vec<String>>, String> {
-    let zone = read_zone_from_config(home)
-        .ok_or_else(|| "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string())?;
+    let zone = read_zone_from_config(home).ok_or_else(|| {
+        "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string()
+    })?;
     let ca_dir = home.join(".ztlp").join("ca");
     let root_pem = ca_dir.join("root.pem");
     let mut steps = Vec::new();
@@ -1412,12 +1424,25 @@ mod tests {
         let home = tmp_home("fresh");
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
         let plan = build_post_enroll_tls_plan_with(&home, false).unwrap();
-        let root_pem = home.join(".ztlp/ca/root.pem").to_string_lossy().into_owned();
+        let root_pem = home
+            .join(".ztlp/ca/root.pem")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             plan,
             vec![
-                vec!["admin".to_string(), "ca-init".into(), "--zone".into(), "defcon.ztlp".into()],
-                vec!["agent".to_string(), "install-ca-cert".into(), "--cert".into(), root_pem],
+                vec![
+                    "admin".to_string(),
+                    "ca-init".into(),
+                    "--zone".into(),
+                    "defcon.ztlp".into()
+                ],
+                vec![
+                    "agent".to_string(),
+                    "install-ca-cert".into(),
+                    "--cert".into(),
+                    root_pem
+                ],
             ]
         );
         let _ = std::fs::remove_dir_all(&home);
@@ -1448,7 +1473,9 @@ mod tests {
         // and with an existing CA there is nothing at all left to run
         std::fs::create_dir_all(home.join(".ztlp/ca")).unwrap();
         std::fs::write(home.join(".ztlp/ca/root.key"), "k").unwrap();
-        assert!(build_post_enroll_tls_plan_with(&home, true).unwrap().is_empty());
+        assert!(build_post_enroll_tls_plan_with(&home, true)
+            .unwrap()
+            .is_empty());
         // the cfg-dispatching wrapper agrees with the current OS
         let via_wrapper = build_post_enroll_tls_plan(&home).unwrap();
         assert_eq!(via_wrapper.is_empty(), cfg!(target_os = "macos"));

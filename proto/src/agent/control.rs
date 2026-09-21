@@ -671,6 +671,14 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             let full = if stderr.trim().is_empty() { stdout } else { stderr };
+            // A failed setup may have written identity.json before NS said
+            // no. Leave it and the next Enroll is refused with "already
+            // enrolled" (live wedge 2026-09-20). Remove the orphan; a
+            // complete enrollment is never touched.
+            if let Some(home) = dirs::home_dir() {
+                let idp = home.join(".ztlp").join("identity.json");
+                crate::agent::daemon::remove_orphan_identity(&idp);
+            }
             ControlResponse::err(format!(
                 "enrollment failed (exit {}): {}",
                 out.status.code().unwrap_or(-1),

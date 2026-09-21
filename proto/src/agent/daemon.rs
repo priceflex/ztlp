@@ -259,10 +259,23 @@ pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
 ///   happened, and the GUI then needs the control socket UP to deliver the
 ///   `enroll` command. Windows/Linux keep the historical "exit 1, run
 ///   `ztlp setup`" behaviour.
-/// * Only when the file is ABSENT. A present-but-unparseable identity is
-///   a real error and must still fail loudly.
+/// * Only when the file is ABSENT, or when it is an ORPHAN of a failed
+///   `ztlp setup` (identity.json without a config.toml zone — see
+///   [`enrollment_is_complete`]); the orphan is removed so the next Enroll
+///   is not refused as "already enrolled". A present, COMPLETE but
+///   unparseable identity is a real error and must still fail loudly.
 pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
-    cfg!(target_os = "macos") && !identity_path.exists()
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    if !identity_path.exists() {
+        return true;
+    }
+    if !enrollment_is_complete(identity_path) {
+        remove_orphan_identity(identity_path);
+        return true;
+    }
+    false
 }
 
 /// Pure hand-over predicate for the standby loop: identity.json exists AND
@@ -270,7 +283,43 @@ pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
 /// before the same enroll command runs ca-init (tls=true), so identity
 /// alone is too early — the full daemon would load `[tls] enabled = false`.
 pub fn standby_may_hand_over(identity_path: &Path, enroll_in_flight: usize) -> bool {
-    identity_path.exists() && enroll_in_flight == 0
+    enroll_in_flight == 0 && enrollment_is_complete(identity_path)
+}
+
+/// A COMPLETE enrollment = identity.json AND a sibling config.toml carrying a
+/// non-empty `zone`. `ztlp setup` writes identity.json first and config.toml
+/// only after NS accepted the enrollment; a failed setup (used-up token,
+/// NS down) leaves identity.json alone. Live (2026-09-20): standby handed
+/// over on that orphan, the full daemon ran with AgentConfig::default()
+/// (NS 127.0.0.1, zone ""), Home said "Not enrolled" and Enroll then failed
+/// with "already enrolled" — wedged until a manual wipe.
+pub fn enrollment_is_complete(identity_path: &Path) -> bool {
+    if !identity_path.exists() {
+        return false;
+    }
+    let Some(dir) = identity_path.parent() else { return false };
+    let Ok(cfg) = std::fs::read_to_string(dir.join("config.toml")) else { return false };
+    cfg.lines().any(|l| {
+        let l = l.trim();
+        if !l.starts_with("zone") { return false; }
+        let Some((_, v)) = l.split_once('=') else { return false };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        !v.is_empty()
+    })
+}
+
+/// Undo a FAILED `ztlp setup` that already wrote identity.json but never got
+/// to config.toml, so the next Enroll from the GUI is not refused with
+/// "this machine is already enrolled". Only removes the orphan when the
+/// enrollment is provably incomplete. Returns true when a file was removed.
+pub fn remove_orphan_identity(identity_path: &Path) -> bool {
+    if identity_path.exists() && !enrollment_is_complete(identity_path) {
+        if std::fs::remove_file(identity_path).is_ok() {
+            warn!("removed orphan {} left by a failed enrollment", identity_path.display());
+            return true;
+        }
+    }
+    false
 }
 
 /// B4: serve ONLY the control socket until `identity_path` appears.
@@ -2915,10 +2964,14 @@ mod unenrolled_standby_tests {
             cfg!(target_os = "macos"),
             "absent identity -> standby decision must follow the macOS cfg gate"
         );
-        // Corrupt (present but unparseable) file: NEVER standby — that is a
-        // real error the operator must see, not something to wait out.
+        // Corrupt (present but unparseable) file WITH a complete config: NEVER
+        // standby — that is a real error the operator must see. (Without a
+        // config it is an orphan of a failed setup and IS cleared, see
+        // orphan_identity_is_removed_but_complete_one_is_kept.)
         std::fs::write(&missing, "not json").unwrap();
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
         assert!(!should_enter_unenrolled_standby(&missing));
+        assert!(missing.exists(), "complete enrollment must never be deleted");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2928,10 +2981,43 @@ mod unenrolled_standby_tests {
         let idp = home.join(".ztlp").join("identity.json");
         assert!(!standby_may_hand_over(&idp, 0), "no identity -> stay");
         std::fs::write(&idp, "{}").unwrap();
-        // identity.json written by `ztlp setup`, but the enroll command is
-        // still running ca-init -> MUST NOT hand over yet.
+        // identity.json written by `ztlp setup`, but nothing else yet ->
+        // orphan; MUST NOT hand over (this is the live wedge of 2026-09-20).
+        assert!(!standby_may_hand_over(&idp, 0), "identity without config -> stay");
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
+        // complete on disk, but the enroll command is still running ca-init
+        // -> MUST NOT hand over yet.
         assert!(!standby_may_hand_over(&idp, 1), "enroll in flight -> stay");
-        assert!(standby_may_hand_over(&idp, 0), "identity + enroll done -> go");
+        assert!(standby_may_hand_over(&idp, 0), "identity + config + enroll done -> go");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn enrollment_complete_requires_nonempty_zone() {
+        let home = tmp_home("complete");
+        let idp = home.join(".ztlp").join("identity.json");
+        std::fs::write(&idp, "{}").unwrap();
+        std::fs::write(home.join(".ztlp/config.toml"), "# no zone\nns_server = \"x\"\n").unwrap();
+        assert!(!enrollment_is_complete(&idp));
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"\"\n").unwrap();
+        assert!(!enrollment_is_complete(&idp));
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
+        assert!(enrollment_is_complete(&idp));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn orphan_identity_is_removed_but_complete_one_is_kept() {
+        let home = tmp_home("orphan");
+        let idp = home.join(".ztlp").join("identity.json");
+        assert!(!remove_orphan_identity(&idp), "nothing to remove");
+        std::fs::write(&idp, "{}").unwrap();
+        assert!(remove_orphan_identity(&idp));
+        assert!(!idp.exists());
+        std::fs::write(&idp, "{}").unwrap();
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
+        assert!(!remove_orphan_identity(&idp), "complete enrollment must never be touched");
+        assert!(idp.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2984,12 +3070,22 @@ mod unenrolled_standby_tests {
         BufReader::new(&mut s2).read_line(&mut l2).await.unwrap();
         assert!(l2.contains("unauthorized"), "{l2}");
 
-        // Identity appears -> standby returns Ok and releases the port.
+        // identity.json ALONE must NOT end standby (orphan of a failed setup).
         assert!(!standby.is_finished());
         std::fs::write(&identity_path, "{}").unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!standby.is_finished(), "identity.json without config.toml must not end standby");
+
+        // Complete enrollment (config.toml with a zone) -> standby returns Ok
+        // and releases the port.
+        std::fs::write(
+            identity_path.parent().unwrap().join("config.toml"),
+            "zone = \"test.ztlp\"\n",
+        )
+        .unwrap();
         let res = tokio::time::timeout(Duration::from_secs(3), standby)
             .await
-            .expect("standby must exit once identity.json exists")
+            .expect("standby must exit once the enrollment is complete")
             .unwrap();
         assert!(res.is_ok(), "{res:?}");
         // Port must be free again for the full daemon to bind.

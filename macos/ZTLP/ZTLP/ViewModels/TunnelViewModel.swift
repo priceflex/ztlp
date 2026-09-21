@@ -119,7 +119,7 @@ struct HomeReadiness: Equatable {
         if !service.state.isReady { return "Step 1: install the ZTLP background service." }
         if !identity.state.isReady { return "Step 2: enroll this Mac with the enrollment link from your administrator." }
         if case .needsAction(_, .trustHTTPS) = network.state {
-            return "Step 3: press Trust HTTPS once. macOS will ask for your password so Safari trusts this Mac's ZTLP certificates for every .ztlp site."
+            return "Step 3: press Trust HTTPS once so Safari trusts this Mac's ZTLP certificates for every .ztlp site. No password needed."
         }
         return "Almost there — the service is finishing HTTPS and DNS setup."
     }
@@ -414,12 +414,16 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
-    /// Row 3 action (Option B): trust the daemon's device-local root CA in
-    /// the System keychain. Runs `security add-trusted-cert` under the
-    /// standard macOS administrator prompt (osascript "with administrator
-    /// privileges") — the one system dialog a user expects, once per Mac.
-    /// The certificate is name-constrained to .ztlp, so this trust can never
-    /// validate a public site.
+    /// Row 3 action (Option B): trust the daemon's device-local root CA for
+    /// THIS USER. Probe on macOS 26.5 (2026-09-20, MACLLM4):
+    ///   - `security add-trusted-cert -d ... System.keychain` via AppleScript
+    ///     "with administrator privileges": REFUSED (SecTrustSettingsSetTrustSettings
+    ///     "no user interaction was possible") — the helper has no Aqua session.
+    ///   - `security add-trusted-cert -r trustRoot -k <login keychain>` as the
+    ///     logged-in user, NO admin: TRUSTED. Safari runs as the same user.
+    /// So: no password prompt at all. Per-user trust; another account on the
+    /// Mac presses the same button once. The root.pem is world-readable and
+    /// name-constrained to .ztlp, so this can never validate a public site.
     @Published private(set) var trustInFlight = false
 
     func trustHTTPS() {
@@ -440,32 +444,43 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
-    /// Pure builder, unit-tested: the exact shell the admin prompt runs.
-    nonisolated static func trustShellCommand(pemPath: String) -> String {
-        // Single-quote the path for /bin/sh; escape any embedded quote.
-        let q = "'" + pemPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        return "/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \(q)"
+    /// Pure builder, unit-tested: argv for the user-domain trust write.
+    nonisolated static func trustCommandArgs(pemPath: String, loginKeychain: String) -> [String] {
+        ["add-trusted-cert", "-r", "trustRoot", "-k", loginKeychain, pemPath]
     }
 
-    /// Runs the trust command via AppleScript's administrator prompt.
-    /// Returns nil on success, or a user-facing error string.
+    nonisolated static func loginKeychainPath() -> String {
+        (NSHomeDirectory() as NSString).appendingPathComponent("Library/Keychains/login.keychain-db")
+    }
+
+    /// Runs /usr/bin/security as the current user. nil on success.
     nonisolated private static func runTrustCommand(pemPath: String) -> String? {
-        let shell = trustShellCommand(pemPath: pemPath)
-        // AppleScript string literal: escape backslashes and double quotes.
-        let esc = shell
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        let source = "do shell script \"\(esc)\" with administrator privileges with prompt \"ZTLP wants to trust this Mac's HTTPS certificates for .ztlp sites.\""
-        var errorInfo: NSDictionary?
-        guard let script = NSAppleScript(source: source) else { return "Could not build the trust command." }
-        script.executeAndReturnError(&errorInfo)
-        if let info = errorInfo {
-            let code = (info[NSAppleScript.errorNumber] as? Int) ?? 0
-            if code == -128 { return nil } // user cancelled — not an error worth beeping about
-            let msg = (info[NSAppleScript.errorMessage] as? String) ?? "unknown error"
-            return "Could not trust the ZTLP certificate: \(msg)"
-        }
-        return nil
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = trustCommandArgs(pemPath: pemPath, loginKeychain: loginKeychainPath())
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        p.standardOutput = Pipe()
+        do { try p.run() } catch { return "Could not run the trust command: \(error.localizedDescription)" }
+        p.waitUntilExit()
+        if p.terminationStatus == 0 { return nil }
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "Could not trust the ZTLP certificate (exit \(p.terminationStatus)): \(err)"
+    }
+
+    /// `security verify-cert -c <root.pem>` as the current user: succeeds
+    /// only when the root is trusted in a domain this user's session sees
+    /// (user, admin or system).
+    nonisolated static func rootIsTrustedForThisUser(pemPath: String) -> Bool {
+        guard !pemPath.isEmpty, FileManager.default.fileExists(atPath: pemPath) else { return false }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["verify-cert", "-c", pemPath]
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        do { try p.run() } catch { return false }
+        p.waitUntilExit()
+        return p.terminationStatus == 0
     }
 
     /// Row 2 action is handled by EnrollmentView (sheet). After the sheet
@@ -558,9 +573,13 @@ final class TunnelViewModel: ObservableObject {
            ss.ok, case .object(let o)? = ss.data {
             snap.zone = o["zone"]?.stringValue ?? ""
             snap.identityEnrolled = o["identity_enrolled"]?.boolValue ?? false
-            snap.caInstalled = o["ca_installed_system_trust"]?.boolValue ?? false
             snap.caInitialized = o["ca_initialized"]?.boolValue ?? false
             snap.caRootPemPath = o["ca_root_pem_path"]?.stringValue ?? ""
+            // Trust is evaluated HERE, in the user's session — the root daemon
+            // cannot see user-domain trust settings (probe 2026-09-20: the
+            // user-domain write is the one that works without admin).
+            let daemonView = o["ca_installed_system_trust"]?.boolValue ?? false
+            snap.caInstalled = daemonView || (snap.caInitialized && Self.rootIsTrustedForThisUser(pemPath: snap.caRootPemPath))
             snap.dnsConfigured = o["dns_configured"]?.boolValue ?? false
         }
 

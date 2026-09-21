@@ -177,7 +177,7 @@ struct HomeView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.ztlpBlue)
                 .disabled(viewModel.trustInFlight)
-                .help("Installs this Mac's ZTLP certificate authority (limited to .ztlp names) into the System keychain. macOS asks for your password once.")
+                .help("Trusts this Mac's ZTLP certificate authority (limited to .ztlp names) for your account. No password needed.")
                 .accessibilityIdentifier("home.action.trust-https")
             case .none:
                 EmptyView()

@@ -207,15 +207,24 @@ final class ZTLPTests: XCTestCase {
         XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "Café Ünïcode"), "cafe-unicode")
     }
 
-    func testTrustShellCommandTargetsSystemKeychainAndQuotesPath() {
-        let cmd = TunnelViewModel.trustShellCommand(pemPath: "/Library/Application Support/ZTLP/.ztlp/ca/root.pem")
-        XCTAssertEqual(
-            cmd,
-            "/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '/Library/Application Support/ZTLP/.ztlp/ca/root.pem'"
+    func testTrustCommandIsUserDomainNoAdmin() {
+        // Probe 2026-09-20 (macOS 26.5): admin-domain write via AppleScript is
+        // refused; user-domain write to the login keychain works with no
+        // password. Pin exactly that: no "-d", login keychain target.
+        let args = TunnelViewModel.trustCommandArgs(
+            pemPath: "/Library/Application Support/ZTLP/.ztlp/ca/root.pem",
+            loginKeychain: "/Users/x/Library/Keychains/login.keychain-db"
         )
-        // A hostile path cannot break out of the single quotes.
-        let evil = TunnelViewModel.trustShellCommand(pemPath: "/tmp/x'; rm -rf / #")
-        XCTAssertTrue(evil.hasSuffix("'/tmp/x'\\''; rm -rf / #'"), evil)
+        XCTAssertEqual(args, ["add-trusted-cert", "-r", "trustRoot", "-k",
+                              "/Users/x/Library/Keychains/login.keychain-db",
+                              "/Library/Application Support/ZTLP/.ztlp/ca/root.pem"])
+        XCTAssertFalse(args.contains("-d"), "must not target the admin trust domain")
+        XCTAssertTrue(TunnelViewModel.loginKeychainPath().hasSuffix("/Library/Keychains/login.keychain-db"))
+    }
+
+    func testRootTrustedCheckIsFalseForMissingFile() {
+        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: ""))
+        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: "/nonexistent/root.pem"))
     }
 
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {

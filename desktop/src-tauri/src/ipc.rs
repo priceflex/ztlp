@@ -2,8 +2,39 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use ztlp_proto::agent::config::load_agent_token;
 use ztlp_proto::agent::control::{ControlCommand, ControlResponse};
+
+/// Locate the daemon's control-API bearer token from the GUI's (interactive
+/// user's) point of view.
+///
+/// On Windows the ZtlpAgent service writes its token under
+/// `C:\ProgramData\ZTLP\.ztlp\agent.token` (Phase D, D1), but this GUI
+/// process has no `ZTLP_HOME` set so `load_agent_token()`'s own resolution
+/// lands in `%USERPROFILE%\.ztlp\` — a file the service never writes. Try
+/// the service's fixed path first, then fall back to the user path (covers
+/// a foreground `ztlp.exe agent start` dev install). Mirrors the macOS
+/// `AgentControlClient.swift` lookup of the LaunchDaemon's fixed token path.
+///
+/// Other platforms: unchanged `load_agent_token()` behavior.
+pub fn load_gui_agent_token() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let own = ztlp_proto::agent::config::default_token_path();
+        for p in ztlp_proto::agent::windows_daemon::gui_token_candidates(own) {
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ztlp_proto::agent::config::load_agent_token()
+    }
+}
 
 /// Maximum time to wait for the agent control socket to accept a connection.
 ///
@@ -33,7 +64,7 @@ pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Res
     let req = ControlCommand {
         cmd: cmd.to_string(),
         name,
-        token: load_agent_token(),
+        token: load_gui_agent_token(),
         ..Default::default()
     };
     ipc_send(addr, req)
@@ -52,7 +83,7 @@ pub fn ipc_enroll_at(
     let req = ControlCommand {
         cmd: "enroll".to_string(),
         name,
-        token: load_agent_token(),
+        token: load_gui_agent_token(),
         enrollment_uri: Some(enrollment_uri.to_string()),
         relay_secret,
     };

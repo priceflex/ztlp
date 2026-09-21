@@ -518,6 +518,12 @@ to have to `runas` itself to do, in a single deterministic plan
 3. **Token ACL** — restrict `agent.token` to `Administrators` + the
    interactive console user via `icacls`, so the GUI app (running as the
    logged-in user, not `LocalSystem`) can read the control-plane token.
+   The desktop app reads the service's fixed token path first
+   (`desktop/src-tauri/src/ipc.rs` `load_gui_agent_token`), falling back
+   to `%USERPROFILE%\.ztlp\agent.token` for foreground/dev installs —
+   the same lookup the macOS app does against the LaunchDaemon's path.
+   `setup_status.token_shared_with_gui` reports whether the ACL actually
+   grants that user read access (parsed from a live `icacls` read).
 
 All three are best-effort, log-and-continue (a failure surfaces via the
 `setup_status` checklist instead of crashing the daemon), and are gated

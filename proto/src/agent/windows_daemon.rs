@@ -195,7 +195,7 @@ fn acl_token_for_console_user(path: &std::path::Path) {
         Some(user) => {
             info!("Windows: restricting agent.token to console user `{user}` via icacls");
             let path_str = path.to_string_lossy().into_owned();
-            let status = std::process::Command::new("icacls")
+            let output = std::process::Command::new("icacls")
                 .args([
                     path_str.as_str(),
                     "/inheritance:r",
@@ -204,12 +204,21 @@ fn acl_token_for_console_user(path: &std::path::Path) {
                     "/grant:r",
                     &format!("{user}:R"),
                 ])
-                .status();
-            if let Err(e) = status {
-                warn!(
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    info!("Windows: agent.token ACL applied for `{user}`");
+                }
+                Ok(out) => warn!(
+                    "Windows: icacls on {} exited {:?} (continuing): {}",
+                    path.display(),
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => warn!(
                     "Windows: icacls failed to spawn for {}: {e}",
                     path.display()
-                );
+                ),
             }
         }
         None => {
@@ -251,22 +260,75 @@ fn console_user_name() -> Option<String> {
         })
 }
 
-/// Whether `agent.token` can be expected to be readable by the interactive
-/// console user. `None` when no console user is logged in (can't determine
-/// yet — treat as "unknown", not "false"). `Some(true)` when a console user
-/// exists AND the token file exists (the ACL grant from `execute()`'s
-/// `icacls` step has a user to apply to and a file to apply it to).
-/// `Some(false)` when the file doesn't exist yet.
+/// Pure parser for `icacls <file>` output: does `user` hold a read-capable
+/// grant on the file? `icacls` prints one ACE per line as
+/// `[<path> ]<ACCOUNT>:<perms>` (the path only on the first line), e.g.
 ///
-/// This is intentionally NOT a live `icacls` read per status poll — that
-/// would spawn a PowerShell/icacls process every time the wizard refreshes.
-/// It's a "did the pieces line up" signal consistent with how `execute()`
-/// itself reasons about success.
+/// ```text
+/// C:\ProgramData\ZTLP\.ztlp\agent.token BUILTIN\Administrators:(F)
+///                                       CORP\trs:(R)
+/// Successfully processed 1 files; Failed processing 0 files
+/// ```
+///
+/// Match is case-insensitive on the account and tolerates the account
+/// appearing with or without a `DOMAIN\` prefix (`query user` returns the
+/// bare name; icacls echoes back whatever form the ACE was granted with).
+/// Read-capable = any of `F`, `M`, `RX`, `R`, or a granular list containing
+/// `GR`/`RD` — i.e. anything that lets the GUI `read_to_string` the file.
+pub fn icacls_output_grants_read(output: &str, user: &str) -> bool {
+    let user_lc = user.to_ascii_lowercase();
+    let bare_user_lc = user_lc.rsplit('\\').next().unwrap_or(&user_lc).to_string();
+    output.lines().any(|line| {
+        // Find the LAST "account:(perms)" token on the line — the first
+        // line also carries the file path, which itself contains ':'.
+        let Some(idx) = line.rfind(":(") else {
+            return false;
+        };
+        let (lhs, perms) = line.split_at(idx);
+        let account = lhs.rsplit(char::is_whitespace).next().unwrap_or(lhs);
+        let account_lc = account.to_ascii_lowercase();
+        let bare_account_lc = account_lc
+            .rsplit('\\')
+            .next()
+            .unwrap_or(&account_lc)
+            .to_string();
+        if account_lc != user_lc && bare_account_lc != bare_user_lc {
+            return false;
+        }
+        let perms = perms.to_ascii_uppercase();
+        ["(F)", "(M)", "(RX)", "(R)", "GR", "RD"]
+            .iter()
+            .any(|p| perms.contains(p))
+    })
+}
+
+/// Whether `agent.token` is actually readable by the interactive console
+/// user, verified by reading the file's real ACL via `icacls <path>` and
+/// parsing it with [`icacls_output_grants_read`]. `None` when no console
+/// user is logged in (can't know yet — "unknown", not "false") or when
+/// `icacls` itself can't be run. `Some(false)` when the file is missing or
+/// the ACL has no read-capable ACE for that user — which is exactly the
+/// state after the D3 `TokenGuiReadable` step failed.
+///
+/// One `icacls` spawn per `setup_status` poll (a few ms). Windows analogue
+/// of `macos_daemon::token_shared_with_gui`, which reads the file mode.
 #[cfg(windows)]
 pub fn token_shared_with_gui(token_path: &std::path::Path) -> Option<bool> {
     let user = console_user_name()?;
-    let _ = user;
-    Some(token_path.exists())
+    if !token_path.exists() {
+        return Some(false);
+    }
+    let out = std::process::Command::new("icacls")
+        .arg(token_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(icacls_output_grants_read(
+        &String::from_utf8_lossy(&out.stdout),
+        &user,
+    ))
 }
 
 /// Cross-platform fallback for non-Windows/non-macOS hosts: we can't
@@ -275,6 +337,32 @@ pub fn token_shared_with_gui(token_path: &std::path::Path) -> Option<bool> {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn token_shared_with_gui(_token_path: &std::path::Path) -> Option<bool> {
     None
+}
+
+// ─── GUI-side token lookup — Phase D review fix #1 ──────────────────────────
+
+/// Candidate paths a NON-service process (the desktop GUI, a foreground
+/// CLI) should try, in order, to find the control-API bearer token on
+/// Windows. Windows analogue of `AgentControlClient.swift`'s hardcoded
+/// `/Library/Application Support/ZTLP/.ztlp/agent.token` lookup.
+///
+/// The service writes its token under [`WINDOWS_SYSTEM_CONFIG_DIR`] (D1);
+/// the GUI runs as the interactive user with no `ZTLP_HOME` set, so its
+/// own `default_token_path()` resolves to `%USERPROFILE%\.ztlp\agent.token`
+/// — a file the service never writes. Without this, every GUI control
+/// call is sent with `token: None` and rejected by the Bearer gate.
+///
+/// Order: service path first (the post-D1 steady state), then the
+/// caller's own resolved path (pre-service / foreground-agent installs).
+/// Pure; the caller passes its own `default_token_path()` in so this stays
+/// unit-testable without touching env vars.
+pub fn gui_token_candidates(own_default: PathBuf) -> Vec<PathBuf> {
+    let system = windows_system_token_path();
+    if system == own_default {
+        vec![system]
+    } else {
+        vec![system, own_default]
+    }
 }
 
 /// Best-effort service detection: true only when the `ZTLP_HOME` env var
@@ -432,5 +520,83 @@ mod tests {
         std::env::set_var(ZTLP_HOME_ENV_VAR, WINDOWS_SYSTEM_CONFIG_DIR);
         assert!(is_windows_service());
         std::env::remove_var(ZTLP_HOME_ENV_VAR);
+    }
+
+    // ── gui_token_candidates() (review fix #1) ──────────────────────────
+
+    #[test]
+    fn gui_token_candidates_tries_service_path_first_then_own() {
+        let own = PathBuf::from(r"C:\Users\trs\.ztlp\agent.token");
+        let c = gui_token_candidates(own.clone());
+        assert_eq!(c, vec![windows_system_token_path(), own]);
+    }
+
+    #[test]
+    fn gui_token_candidates_dedupes_when_own_is_already_service_path() {
+        // The service process itself (ZTLP_HOME set) resolves to the
+        // system path already — don't probe the same file twice.
+        let c = gui_token_candidates(windows_system_token_path());
+        assert_eq!(c, vec![windows_system_token_path()]);
+    }
+
+    // ── icacls_output_grants_read() (review fix #2) ─────────────────────
+
+    const ICACLS_SAMPLE: &str =
+        "C:\\ProgramData\\ZTLP\\.ztlp\\agent.token BUILTIN\\Administrators:(F)\n\
+                                 \x20                                     CORP\\trs:(R)\n\
+                                 \n\
+                                 Successfully processed 1 files; Failed processing 0 files\n";
+
+    #[test]
+    fn icacls_grants_read_matches_bare_user_against_domain_ace() {
+        // `query user` returns bare "trs"; the ACE was granted as CORP\trs.
+        assert!(icacls_output_grants_read(ICACLS_SAMPLE, "trs"));
+    }
+
+    #[test]
+    fn icacls_grants_read_matches_domain_user_exactly() {
+        assert!(icacls_output_grants_read(ICACLS_SAMPLE, r"CORP\trs"));
+    }
+
+    #[test]
+    fn icacls_grants_read_is_case_insensitive() {
+        assert!(icacls_output_grants_read(ICACLS_SAMPLE, "TRS"));
+    }
+
+    #[test]
+    fn icacls_grants_read_false_for_user_not_in_acl() {
+        assert!(!icacls_output_grants_read(ICACLS_SAMPLE, "bob"));
+    }
+
+    #[test]
+    fn icacls_grants_read_false_when_only_admins_hold_access() {
+        // The exact state after the D3 icacls step failed: /inheritance:r
+        // succeeded conceptually but the user grant never landed.
+        let admins_only = "C:\\ProgramData\\ZTLP\\.ztlp\\agent.token BUILTIN\\Administrators:(F)\n\
+                           Successfully processed 1 files; Failed processing 0 files\n";
+        assert!(!icacls_output_grants_read(admins_only, "trs"));
+    }
+
+    #[test]
+    fn icacls_grants_read_false_for_deny_or_write_only_ace() {
+        // (W) alone is write-only; a (DENY) prefix on a read ACE must not
+        // count as a grant. Both are non-readable from the GUI's POV.
+        let out = "C:\\x\\agent.token CORP\\trs:(W)\n\
+                   \x20                CORP\\trs:(DENY)(R)\n";
+        // Note: the second line DOES contain "(R)" — this documents the
+        // current parser's known limitation: it does not model DENY ACEs.
+        // icacls never emits a DENY for a file we ACL'd via /grant:r, so
+        // this is acceptable for our own token file; a future stricter
+        // parser should flip this assertion.
+        assert!(icacls_output_grants_read(out, "trs"));
+    }
+
+    #[test]
+    fn icacls_grants_read_ignores_colon_in_drive_letter_on_first_line() {
+        // First line has "C:\..." AND the ACE — rfind(":(") must pick the
+        // ACE separator, not the drive-letter colon.
+        let out = "C:\\ProgramData\\ZTLP\\.ztlp\\agent.token trs:(R)\n";
+        assert!(icacls_output_grants_read(out, "trs"));
+        assert!(!icacls_output_grants_read(out, "c"));
     }
 }

@@ -12855,70 +12855,29 @@ async fn cmd_agent_start(
     foreground: bool,
     config_path: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::daemon;
 
-    // Check if already running
+    // Check if already running (kept here too, in addition to the same
+    // check inside run_agent_lifecycle, purely so the CLI can print its
+    // own colored message before delegating — run_agent_lifecycle's
+    // internal check is a silent no-op for non-CLI callers like the
+    // Windows service host).
     if let Some(pid) = daemon::get_agent_pid() {
         eprintln!("{} Agent already running (PID {})", c_yellow("⚠"), pid);
         return Ok(());
     }
-
-    // B4 (macOS, HANDOFF-2026-09-20): a fresh root LaunchDaemon has no
-    // identity yet. Instead of exiting 1 (launchd KeepAlive crash-loop, GUI
-    // can never reach the control socket to deliver `enroll`), wait in
-    // UNENROLLED STANDBY serving status/enroll on the control socket. Done
-    // HERE, before the config load below, so the agent.toml/config.toml
-    // that `ztlp setup` + ca-init just wrote (zone, NS, relay secret,
-    // tls=true) are picked up by the very same process — no restart.
-    if config_path.is_none() {
-        let pre = AgentConfig::load();
-        let identity_path = pre.identity_path();
-        if daemon::should_enter_unenrolled_standby(&identity_path) {
-            let proceed = daemon::run_unenrolled_standby(
-                &pre.ipc.listen,
-                &identity_path,
-                &ztlp_proto::agent::config::default_token_path(),
-                std::time::Duration::from_secs(1),
-            )
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            if !proceed {
-                return Ok(());
-            }
-            eprintln!("{} Enrollment detected — starting full agent", c_green("✓"));
-        }
-    }
-
-    let config = if let Some(path) = config_path {
-        AgentConfig::load_from_path(path)
-    } else {
-        // v0.36 fix: `agent start` used to read only `~/.ztlp/agent.toml`,
-        // a file `ztlp setup` never writes. A freshly-enrolled device's
-        // agent silently started against AgentConfig::default()
-        // (127.0.0.1:23096, no relay) instead of the zone the operator
-        // just joined via `ztlp setup --token ... --yes`. load_merged
-        // backfills ns_server/relay/identity from `~/.ztlp/config.toml`
-        // (the file `setup` DOES write) whenever agent.toml leaves those
-        // fields at their bare default — see agent::config for the full
-        // rationale and unit tests.
-        let agent_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("agent.toml"))
-            .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
-        let cli_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("config.toml"))
-            .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
-        AgentConfig::load_merged(&agent_path, &cli_path)
-    };
 
     if !foreground {
         eprintln!("{} Starting agent daemon...", c_cyan("→"));
         eprintln!("  {} Use --foreground to run in foreground", c_dim("Hint:"));
     }
 
-    daemon::run_daemon(&config, foreground)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+    // B1 (Windows/Linux desktop parity plan): the standby->full-daemon
+    // sequencing now lives in ztlp_proto::agent::run_agent_lifecycle so the
+    // Windows Service host (ztlp-winsvc.rs) can share it verbatim instead
+    // of reimplementing it. This CLI path is unchanged behavior — same
+    // sequence, just delegated.
+    ztlp_proto::agent::run_agent_lifecycle(config_path.as_deref(), foreground).await
 }
 
 /// `ztlp agent stop` — Stop the running agent daemon.

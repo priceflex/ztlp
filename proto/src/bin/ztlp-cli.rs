@@ -9034,19 +9034,40 @@ async fn setup_join(
     // Determine address to register (optional)
     let addr_str = ""; // Empty = no address for now (device may be behind NAT)
 
-    let enroll_body = build_enroll_packet(
-        &token_bin,
-        pubkey_bytes,
-        node_id_bytes,
-        &full_name,
-        addr_str,
-    );
-
-    let packet = [&[0x07u8][..], &enroll_body].concat();
-    sock.send_to(&packet, ns_addr).await?;
-
+    let mut full_name = full_name;
+    let mut renamed_once = false;
     let mut buf = vec![0u8; 65535];
-    match timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await {
+    let recv = loop {
+        let enroll_body = build_enroll_packet(
+            &token_bin,
+            pubkey_bytes,
+            node_id_bytes,
+            &full_name,
+            addr_str,
+        );
+        let packet = [&[0x07u8][..], &enroll_body].concat();
+        sock.send_to(&packet, ns_addr).await?;
+
+        let r = timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await;
+        if let Ok(Ok((len, _))) = &r {
+            if !renamed_once && buf[..*len] == [0x08, 0x05] {
+                // Name owned by another key (typically this same machine
+                // before a wipe). Retry once with a per-identity suffix.
+                let node_hex = hex::encode(identity.node_id.as_bytes());
+                let new_device = disambiguated_device_name(&device_name, &node_hex);
+                full_name = format!("{}.{}", new_device, token.zone);
+                renamed_once = true;
+                eprintln!(
+                    "  {} name already taken by another device — retrying as {}",
+                    c_yellow("⚠"),
+                    c_bold(&full_name)
+                );
+                continue;
+            }
+        }
+        break r;
+    };
+    match recv {
         Ok(Ok((len, _))) => {
             let resp = &buf[..len];
             match resp {
@@ -9643,6 +9664,17 @@ fn parse_enroll_config(
     }
 
     Ok((relays, gateways))
+}
+
+/// On NS `0x08 0x05` (name taken by a DIFFERENT key — e.g. this very Mac
+/// was wiped and re-enrolled, so the old key still owns the hostname) retry
+/// once with a short, stable, per-identity suffix instead of failing:
+/// `stevens-macbook-pro-2` -> `stevens-macbook-pro-2-4c44`. Stable because
+/// it derives from the node id, so a second retry on the same identity is
+/// idempotent (same pubkey re-enroll is allowed by NS).
+fn disambiguated_device_name(device_name: &str, node_id_hex: &str) -> String {
+    let suffix: String = node_id_hex.chars().take(4).collect();
+    format!("{}-{}", device_name.trim_end_matches('-'), suffix)
 }
 
 /// Write a config.toml file with the enrollment results.
@@ -14353,6 +14385,15 @@ mod tests {
         assert!(!icn.contains("defcon"), "intermediate CN must not be zone-specific: {icn}");
         let inc = inter.name_constraints.expect("intermediate must carry nameConstraints");
         assert_eq!(inc.permitted_subtrees, vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]);
+    }
+
+    #[test]
+    fn name_taken_retry_uses_short_stable_node_suffix() {
+        let n = disambiguated_device_name("stevens-macbook-pro-2", "4c4469d10e426bb73e30c933b96c75f2");
+        assert_eq!(n, "stevens-macbook-pro-2-4c44");
+        // idempotent for the same identity; no double dash on a trailing '-'
+        assert_eq!(disambiguated_device_name("mac-", "abcd0000"), "mac-abcd");
+        assert_eq!(disambiguated_device_name("mac", "abcd0000"), disambiguated_device_name("mac", "abcd0000"));
     }
 
     #[test]

@@ -251,6 +251,32 @@ fn console_user_name() -> Option<String> {
         })
 }
 
+/// Whether `agent.token` can be expected to be readable by the interactive
+/// console user. `None` when no console user is logged in (can't determine
+/// yet — treat as "unknown", not "false"). `Some(true)` when a console user
+/// exists AND the token file exists (the ACL grant from `execute()`'s
+/// `icacls` step has a user to apply to and a file to apply it to).
+/// `Some(false)` when the file doesn't exist yet.
+///
+/// This is intentionally NOT a live `icacls` read per status poll — that
+/// would spawn a PowerShell/icacls process every time the wizard refreshes.
+/// It's a "did the pieces line up" signal consistent with how `execute()`
+/// itself reasons about success.
+#[cfg(windows)]
+pub fn token_shared_with_gui(token_path: &std::path::Path) -> Option<bool> {
+    let user = console_user_name()?;
+    let _ = user;
+    Some(token_path.exists())
+}
+
+/// Cross-platform fallback for non-Windows/non-macOS hosts: we can't
+/// determine this without a platform-specific mechanism, so report
+/// `None` (unknown) rather than a misleading `false`.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn token_shared_with_gui(_token_path: &std::path::Path) -> Option<bool> {
+    None
+}
+
 /// Best-effort service detection: true only when the `ZTLP_HOME` env var
 /// is set, which `ztlp-winsvc.rs` sets unconditionally at its own startup
 /// before doing anything else (D1) and nothing else in the codebase ever

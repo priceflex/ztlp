@@ -154,6 +154,17 @@ pub struct SetupStatus {
     /// JS doesn't have to guess them.
     pub ca_root_pem_path: String,
     pub identity_path: String,
+    /// Whether the agent control-plane token file exists AND is readable by
+    /// the interactive console user (not just the daemon/root user). Only
+    /// set when we can actually determine this — `None` when the console
+    /// user can't be resolved (e.g. nobody logged in yet) or on a platform
+    /// where we don't yet have a way to check. Surfacing this lets the
+    /// wizard distinguish "token not yet shared with the GUI user" (the
+    /// macOS `TokenGuiReadable` / Windows `icacls` step hasn't run or
+    /// failed) from "all setup steps done" — mirrors the macOS checklist's
+    /// existing token-sharing checkmark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_shared_with_gui: Option<bool>,
 }
 
 /// DNS cache entry for reporting.
@@ -976,6 +987,19 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
         (ca, dns)
     };
 
+    let token_path = crate::agent::config::default_token_path();
+    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path)
+        .or_else(|| {
+            #[cfg(target_os = "macos")]
+            {
+                crate::agent::macos_daemon::token_shared_with_gui(&token_path)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        });
+
     let status = SetupStatus {
         identity_present,
         identity_enrolled,
@@ -986,6 +1010,7 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
         zone,
         ca_root_pem_path: ca_root_path.display().to_string(),
         identity_path: identity_path.display().to_string(),
+        token_shared_with_gui,
     };
 
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())

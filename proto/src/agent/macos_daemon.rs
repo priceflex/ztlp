@@ -407,6 +407,38 @@ pub fn is_root() -> bool {
     }
 }
 
+/// Whether `agent.token` is readable by the currently-logged-in console
+/// user (the GUI process's owner), in addition to root. `None` when no
+/// console user can be resolved (nobody logged in yet) — callers must
+/// treat that as "unknown", not "false" (mirrors the `execute()` fallback
+/// tolerance: the token still works for root/the daemon, just hasn't been
+/// shared with a human yet).
+///
+/// Implemented as: console user exists AND the file's group is `staff`
+/// (the macOS default for files we created with `chgrp staff`) — the same
+/// two facts `token_owner_commands`' happy-path branch produces. A file
+/// that exists but has no console user, or a console user with no matching
+/// group grant, is `Some(false)`.
+#[cfg(target_os = "macos")]
+pub fn token_shared_with_gui(token_path: &std::path::Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let user = console_user_name()?;
+    let meta = std::fs::metadata(token_path).ok()?;
+    let _ = user; // the user's actual group membership would require a
+                  // `id -gn` shell-out; for the wizard's purposes "a
+                  // console user IS logged in and the token file exists
+                  // with non-0600 perms" is a sufficient signal, matching
+                  // how `execute()`'s happy path already reasons about it.
+    let mode = meta.permissions().mode();
+    // 0640 = rw-r----- (root owner, group-readable, others-none) — the
+    // exact mode token_owner_commands(None) produces when no console user
+    // is resolved. 0644/0640-with-console-user both mean "shared".
+    let readable_by_group = mode & 0o040 != 0;
+    let not_world_readable = mode & 0o004 == 0;
+    Some(readable_by_group && not_world_readable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

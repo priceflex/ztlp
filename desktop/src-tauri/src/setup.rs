@@ -135,6 +135,33 @@ pub fn setup_run_ca_init(zone: String) -> Result<String, String> {
     }
 }
 
+/// Install the agent as a Windows Service (Task B3 of the Windows/Linux
+/// desktop parity plan) — one UAC prompt, once, exactly like macOS's
+/// `AgentServiceInstaller.register()` / Linux's pkexec systemctl call.
+///
+/// Reuses the existing `runas_ztlp` helper (already used by
+/// `setup_install_ca`/`setup_install_dns` above) rather than writing a new
+/// elevation mechanism: runs `ztlp.exe agent install` elevated, which
+/// registers the real SCM service (Task B2) hosting `ztlp-winsvc.exe`.
+///
+/// On non-Windows platforms this is a no-op returning an explanatory
+/// message — Linux/macOS use `ztlp agent install` directly under sudo
+/// (systemd unit / LaunchDaemon), which the wizard's advanced/Settings
+/// panel already exposes without needing a Tauri-side elevation helper.
+#[tauri::command]
+pub fn setup_install_service() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        runas_ztlp(&["agent", "install"])
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("setup_install_service is Windows-only; on Linux/macOS run \
+             'sudo ztlp agent install' directly (systemd unit / LaunchDaemon)."
+            .into())
+    }
+}
+
 /// Install the root CA into the Windows `LocalMachine\Root` store.
 ///
 /// On Windows this requires Administrator. We use `ShellExecuteExW` with

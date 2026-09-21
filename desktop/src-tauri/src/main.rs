@@ -64,6 +64,7 @@ fn main() {
             commands::get_traffic_stats,
             setup::setup_status,
             setup::setup_run_ca_init,
+            setup::setup_install_service,
             setup::setup_install_ca,
             setup::setup_install_dns,
             setup::setup_test_browse,

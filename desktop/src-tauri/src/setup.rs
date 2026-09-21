@@ -233,6 +233,24 @@ pub fn setup_install_ca() -> Result<String, String> {
 /// returns an explanatory error — system DNS rerouting on macOS/Linux
 /// is already handled by the daemon's `dns_setup.rs` and doesn't need
 /// a wizard step.
+/// Build the argv `runas_ztlp` passes to the elevated `ztlp.exe` for DNS
+/// setup on Windows.
+///
+/// Bug fixed here (found live 2026-09-21, defcon.ztlp box, after the
+/// runas_ztlp path-resolution fix let the CA-trust UAC prompt succeed):
+/// this used to hardcode `"--zone"` (singular), but `ztlp agent dns-setup`
+/// only accepts `--zones` (plural, comma/repeat-friendly). `ShellExecuteW`
+/// never captures the child's stdout/stderr, so the resulting clap
+/// "unexpected argument" parse failure was completely silent — the elevated
+/// process launched and exited immediately, no UAC prompt ever appeared
+/// (nothing to elevate for — clap rejects args before doing anything), and
+/// the Home checklist just sat on "Setting up DNS routing…" forever with no
+/// error surfaced anywhere. Verified live via SSH: running the exact old
+/// argv by hand reproduced `error: unexpected argument '--zone' found`.
+fn windows_dns_setup_args(zone: &str) -> Vec<&str> {
+    vec!["agent", "dns-setup", "--zones", zone]
+}
+
 #[tauri::command]
 pub fn setup_install_dns(zone: String) -> Result<String, String> {
     let z = zone.trim();
@@ -241,7 +259,7 @@ pub fn setup_install_dns(zone: String) -> Result<String, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        runas_ztlp(&["agent", "dns-setup", "--zone", z])
+        runas_ztlp(&windows_dns_setup_args(z))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -667,6 +685,22 @@ mod tests {
     fn setup_test_browse_rejects_empty_hostname() {
         let r = setup_test_browse(String::new());
         assert!(r.is_err());
+    }
+
+    /// Bug #4 (found live 2026-09-21, defcon.ztlp box): `windows_dns_setup_args`
+    /// must emit `--zones` (plural), the only flag `ztlp agent dns-setup`
+    /// accepts. The old hardcoded `--zone` (singular) argv made
+    /// `ShellExecuteW` launch a process that clap rejected instantly and
+    /// silently (no captured stdout/stderr, no UAC prompt, no error surfaced
+    /// to the UI — it just sat on "Setting up DNS routing…" forever).
+    #[test]
+    fn windows_dns_setup_args_uses_plural_zones_flag() {
+        let args = windows_dns_setup_args("defcon.ztlp");
+        assert_eq!(args, vec!["agent", "dns-setup", "--zones", "defcon.ztlp"]);
+        assert!(
+            !args.contains(&"--zone"),
+            "must not regress to the singular --zone flag clap rejects"
+        );
     }
 
     // ── runas_ztlp path resolution (bug: bare "ztlp.exe" is not on PATH) ──

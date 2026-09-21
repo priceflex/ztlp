@@ -211,7 +211,6 @@ final class EnrollmentViewModel: ObservableObject {
         }
         return r
     }
-    }
 
     // MARK: - Token Parsing
 

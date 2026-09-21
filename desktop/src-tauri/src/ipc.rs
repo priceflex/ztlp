@@ -30,6 +30,38 @@ const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const IPC_IO_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Result<Value, String> {
+    let req = ControlCommand {
+        cmd: cmd.to_string(),
+        name,
+        token: load_agent_token(),
+        ..Default::default()
+    };
+    ipc_send(addr, req)
+}
+
+/// Send an `enroll` command to the agent daemon at `addr` — the IPC-based
+/// enrollment path (Task A3): forwards the token straight to the daemon's
+/// control socket instead of a bare `ztlp setup` spawn under the desktop
+/// app's own (interactive-user) HOME.
+pub fn ipc_enroll_at(
+    addr: &str,
+    enrollment_uri: &str,
+    name: Option<String>,
+    relay_secret: Option<String>,
+) -> Result<Value, String> {
+    let req = ControlCommand {
+        cmd: "enroll".to_string(),
+        name,
+        token: load_agent_token(),
+        enrollment_uri: Some(enrollment_uri.to_string()),
+        relay_secret,
+    };
+    ipc_send(addr, req)
+}
+
+/// Shared low-level send/receive over the control socket for any
+/// [`ControlCommand`].
+fn ipc_send(addr: &str, req: ControlCommand) -> Result<Value, String> {
     // Resolve first so we can use `connect_timeout` (which requires a
     // SocketAddr, not a string). For a literal "127.x:port" this is
     // essentially free, but ToSocketAddrs handles the parse uniformly.
@@ -49,13 +81,6 @@ pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Res
     stream
         .set_write_timeout(Some(IPC_IO_TIMEOUT))
         .map_err(|e| format!("Failed to set write timeout: {}", e))?;
-
-    let req = ControlCommand {
-        cmd: cmd.to_string(),
-        name,
-        token: load_agent_token(),
-        ..Default::default()
-    };
 
     let mut req_bytes =
         serde_json::to_vec(&req).map_err(|e| format!("Failed to serialize request: {}", e))?;

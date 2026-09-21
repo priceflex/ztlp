@@ -8955,7 +8955,7 @@ async fn setup_join(
     };
 
     // Full ZTLP name
-    let full_name = format!("{}.{}", device_name, token.zone);
+    let mut full_name = format!("{}.{}", device_name, token.zone);
     eprintln!("  {} Enrolling as {}", c_cyan("→"), c_bold(&full_name));
 
     // Determine ZTLP config directory
@@ -9034,40 +9034,35 @@ async fn setup_join(
     // Determine address to register (optional)
     let addr_str = ""; // Empty = no address for now (device may be behind NAT)
 
-    let mut full_name = full_name;
-    let mut renamed_once = false;
-    let mut buf = vec![0u8; 65535];
-    let recv = loop {
-        let enroll_body = build_enroll_packet(
-            &token_bin,
-            pubkey_bytes,
-            node_id_bytes,
-            &full_name,
-            addr_str,
+    // Pre-check the name via a plain lookup (0x01) BEFORE spending the
+    // single-use enroll token (0x07). Live bug (2026-09-20): retrying the
+    // *enroll* packet itself on 0x08 0x05 sent a second 0x07 with the same
+    // token, and NS had already consumed it on the first send — every retry
+    // then failed as "token has been used up" and burned a fresh token per
+    // attempt. A name collision is knowable without touching the token.
+    if ns_name_is_taken_by_other_key(&token.ns_addr, &full_name, pubkey_bytes).await {
+        let node_hex = hex::encode(identity.node_id.as_bytes());
+        let new_device = disambiguated_device_name(&device_name, &node_hex);
+        full_name = format!("{}.{}", new_device, token.zone);
+        eprintln!(
+            "  {} name already taken by another device — enrolling as {}",
+            c_yellow("⚠"),
+            c_bold(&full_name)
         );
-        let packet = [&[0x07u8][..], &enroll_body].concat();
-        sock.send_to(&packet, ns_addr).await?;
+    }
 
-        let r = timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await;
-        if let Ok(Ok((len, _))) = &r {
-            if !renamed_once && buf[..*len] == [0x08, 0x05] {
-                // Name owned by another key (typically this same machine
-                // before a wipe). Retry once with a per-identity suffix.
-                let node_hex = hex::encode(identity.node_id.as_bytes());
-                let new_device = disambiguated_device_name(&device_name, &node_hex);
-                full_name = format!("{}.{}", new_device, token.zone);
-                renamed_once = true;
-                eprintln!(
-                    "  {} name already taken by another device — retrying as {}",
-                    c_yellow("⚠"),
-                    c_bold(&full_name)
-                );
-                continue;
-            }
-        }
-        break r;
-    };
-    match recv {
+    let enroll_body = build_enroll_packet(
+        &token_bin,
+        pubkey_bytes,
+        node_id_bytes,
+        &full_name,
+        addr_str,
+    );
+    let packet = [&[0x07u8][..], &enroll_body].concat();
+    sock.send_to(&packet, ns_addr).await?;
+
+    let mut buf = vec![0u8; 65535];
+    match timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await {
         Ok(Ok((len, _))) => {
             let resp = &buf[..len];
             match resp {
@@ -9664,6 +9659,24 @@ fn parse_enroll_config(
     }
 
     Ok((relays, gateways))
+}
+
+/// Plain NS lookup (0x01 via `ns_query_raw`, never consumes the enroll
+/// token) to check whether `full_name` already resolves to a DIFFERENT
+/// public key than the one about to enroll. Best-effort: any lookup
+/// failure (timeout, not found, unparseable record) is treated as "not
+/// taken" — the real enroll attempt is still the source of truth; this
+/// only avoids burning a single-use token on a name we can already see is
+/// claimed by someone else.
+async fn ns_name_is_taken_by_other_key(ns_server: &str, full_name: &str, our_pubkey: &[u8]) -> bool {
+    // KEY record (type 1) carries the owning identity's public_key.
+    let Ok(Some(result)) = ns_query_raw(full_name, ns_server, 1).await else {
+        return false;
+    };
+    let Some(existing) = cbor_extract_string(&result.data_bytes, "public_key") else {
+        return false;
+    };
+    existing.to_ascii_lowercase() != hex::encode(our_pubkey)
 }
 
 /// On NS `0x08 0x05` (name taken by a DIFFERENT key — e.g. this very Mac

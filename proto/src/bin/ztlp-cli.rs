@@ -13324,6 +13324,14 @@ async fn cmd_agent_install_windows(
                 eprintln!();
                 eprintln!("Status:");
                 eprintln!("  sc query {}", def.service_name);
+                // D5 (Phase D plan): grant Administrators access to the
+                // fixed ProgramData state dir the service will write to —
+                // LocalSystem owns it by default, but the interactive
+                // admin who installed this also needs to inspect/remove
+                // it. Best-effort: a failure here is logged by
+                // apply_programdata_acl itself and doesn't fail the
+                // install (the service is already registered correctly).
+                ztlp_proto::agent::windows_service_install::apply_programdata_acl();
             }
             Err(e) => {
                 eprintln!("{} Installation failed: {}", c_red("✗"), e);
@@ -13358,11 +13366,19 @@ async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
             windows_service_uninstall, WINDOWS_SERVICE_NAME,
         };
         match windows_service_uninstall(WINDOWS_SERVICE_NAME) {
-            Ok(()) => eprintln!(
-                "{} Service uninstalled: {}",
-                c_green("✓"),
-                WINDOWS_SERVICE_NAME
-            ),
+            Ok(()) => {
+                eprintln!(
+                    "{} Service uninstalled: {}",
+                    c_green("✓"),
+                    WINDOWS_SERVICE_NAME
+                );
+                // D5 (Phase D plan): remove the fixed ProgramData state dir
+                // the service was using. Best-effort, idempotent (a missing
+                // dir is fine — e.g. the service never actually ran).
+                // NEVER touches the binary install dir — that's the
+                // NSIS/MSI uninstaller's job, not ours.
+                ztlp_proto::agent::windows_service_install::remove_programdata_dir();
+            }
             Err(e) => {
                 eprintln!("{} Uninstall failed: {}", c_red("✗"), e);
                 eprintln!();

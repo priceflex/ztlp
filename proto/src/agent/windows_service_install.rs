@@ -124,6 +124,124 @@ pub fn windows_service_uninstall(service_name: &str) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+// ─── Phase D plan D5: post-install ACL + pre-enroll + uninstall cleanup ────
+
+/// The fixed ProgramData root for everything the `ZtlpAgent` service owns
+/// (re-exported from `windows_daemon` so the installer and the service
+/// share one source of truth for the path — never two separate constants
+/// that could drift apart).
+pub use crate::agent::windows_daemon::WINDOWS_SYSTEM_CONFIG_DIR;
+
+/// `icacls` argv that grants `Administrators` full control on
+/// [`WINDOWS_SYSTEM_CONFIG_DIR`] with inheritance reset (so the grant
+/// sticks even if the directory's inherited ACL from
+/// `C:\ProgramData` doesn't already include it). Computed as a pure
+/// `Vec<Vec<String>>` so the exact argv is unit-testable on Linux; the
+/// actual spawn is a thin `#[cfg(windows)]` wrapper below.
+///
+/// Why this is needed at all (per the Phase D plan, blocker 3): the
+/// service runs as `LocalSystem`, but the interactive admin who runs
+/// `ztlp install` and later needs to `icacls`-inspect, copy, or remove
+/// the token/config files must also be able to — a `LocalSystem`-only ACL
+/// would lock the human out of their own box's ZTLP state. `icacls`
+/// (not raw `CreateFile`/`SetNamedSecurityInfoW`) is used for the same
+/// reason `dns_setup_windows` already uses it: it's the one documented,
+/// stable Windows API surface for ad-hoc ACL edits, no FFI needed.
+pub fn programdata_acl_grant_commands() -> Vec<Vec<String>> {
+    vec![vec![
+        "icacls".to_string(),
+        WINDOWS_SYSTEM_CONFIG_DIR.to_string(),
+        "/inheritance:r".to_string(),
+        "/grant:r".to_string(),
+        "Administrators:(OI)(CI)F".to_string(),
+    ]]
+}
+
+/// `rmdir`-equivalent argv for removing the whole ProgramData state dir
+/// (and only it — never the binary install dir, which is a different
+/// location and belongs to the installer/NSIS uninstaller, not to us)
+/// during `ztlp uninstall`. Pure, unit-testable.
+pub fn programdata_cleanup_commands() -> Vec<Vec<String>> {
+    vec![vec![
+        "rmdir".to_string(),
+        "/s".to_string(),
+        "/q".to_string(),
+        WINDOWS_SYSTEM_CONFIG_DIR.to_string(),
+    ]]
+}
+
+/// Actually run the post-install ACL grant. Best-effort: a failure here
+/// doesn't fail the install itself (the service is already registered and
+/// running correctly at this point) — it's logged and surfaced so the
+/// operator can rerun the exact same `icacls` command by hand if needed.
+#[cfg(windows)]
+pub fn apply_programdata_acl() {
+    use tracing::{info, warn};
+    if let Err(e) = std::fs::create_dir_all(WINDOWS_SYSTEM_CONFIG_DIR) {
+        warn!("D5: failed to create {WINDOWS_SYSTEM_CONFIG_DIR}: {e}");
+        return;
+    }
+    for cmd in programdata_acl_grant_commands() {
+        let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        match std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                info!(
+                    "D5: {} ok: {:?}",
+                    argv[0],
+                    String::from_utf8_lossy(&out.stdout).trim()
+                )
+            }
+            Ok(out) => warn!(
+                "D5: {} failed (exit {:?}): {}",
+                argv[0],
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => warn!("D5: failed to spawn {}: {e}", argv[0]),
+        }
+    }
+}
+
+/// No-op off Windows — mirrors the rest of this module's `cfg(windows)`
+/// gating so the pure planner functions stay callable/testable everywhere.
+#[cfg(not(windows))]
+pub fn apply_programdata_acl() {}
+
+/// Best-effort removal of the ProgramData state dir during `ztlp
+/// uninstall`. Idempotent (missing dir is fine). Never touches the
+/// binary install dir.
+#[cfg(windows)]
+pub fn remove_programdata_dir() {
+    use tracing::{info, warn};
+    for cmd in programdata_cleanup_commands() {
+        let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
+        match std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                info!("D5: removed {WINDOWS_SYSTEM_CONFIG_DIR}")
+            }
+            Ok(out) => warn!(
+                "D5: {WINDOWS_SYSTEM_CONFIG_DIR} removal returned exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => warn!(
+                "D5: failed to spawn {rmdir} for cleanup: {e}",
+                rmdir = argv[0]
+            ),
+        }
+    }
+}
+
+/// No-op off Windows.
+#[cfg(not(windows))]
+pub fn remove_programdata_dir() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +284,43 @@ mod tests {
         // bare relative name here, not a "./"-prefixed one.
         let ztlp = Path::new("ztlp.exe");
         assert_eq!(winsvc_sibling_path(ztlp), PathBuf::from("ztlp-winsvc.exe"));
+    }
+
+    // ── D5 (Phase D plan): post-install ACL + uninstall cleanup ──────────
+
+    #[test]
+    fn programdata_acl_grant_targets_programdata_ztlp_and_grants_administrators_full() {
+        let cmds = programdata_acl_grant_commands();
+        assert_eq!(cmds.len(), 1, "exactly one icacls invocation");
+        let cmd = &cmds[0];
+        assert_eq!(cmd[0], "icacls");
+        assert_eq!(cmd[1], WINDOWS_SYSTEM_CONFIG_DIR);
+        // Inheritance must be reset before the grant, or the grant could
+        // be shadowed by an inherited ACE from C:\ProgramData.
+        assert!(cmd.contains(&"/inheritance:r".to_string()));
+        assert!(cmd.contains(&"/grant:r".to_string()));
+        // (OI)(CI) = Object Inherit + Container Inherit — the grant must
+        // propagate to files and subdirectories created later, not just
+        // the top-level dir.
+        assert!(cmd.contains(&"Administrators:(OI)(CI)F".to_string()));
+    }
+
+    #[test]
+    fn programdata_cleanup_targets_programdata_ztlp_and_only_it() {
+        let cmds = programdata_cleanup_commands();
+        assert_eq!(cmds.len(), 1, "exactly one rmdir invocation");
+        let cmd = &cmds[0];
+        assert_eq!(cmd[0], "rmdir");
+        assert!(cmd.contains(&"/s".to_string()), "recursive");
+        assert!(cmd.contains(&"/q".to_string()), "quiet, no prompts");
+        assert_eq!(cmd[cmd.len() - 1], WINDOWS_SYSTEM_CONFIG_DIR);
+        // Explicit regression guard: the binary install dir (a completely
+        // different path, e.g. C:\Program Files\ZTLP) must never appear
+        // in a cleanup argv — deleting the binary install dir is the
+        // NSIS/MSI uninstaller's job, not this one.
+        assert!(
+            !cmd.iter().any(|arg| arg.contains("Program Files")),
+            "cleanup must never touch the binary install dir"
+        );
     }
 }

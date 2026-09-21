@@ -465,11 +465,11 @@ impl AgentConfig {
         Self::load_from_default_path()
     }
 
-    /// Load from the default path `~/.ztlp/agent.toml`.
+    /// Load from the default path `~/.ztlp/agent.toml` (or
+    /// `$ZTLP_HOME/.ztlp/agent.toml` when running as the Windows service —
+    /// see [`ztlp_state_dir`]).
     fn load_from_default_path() -> Self {
-        let path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("agent.toml"))
-            .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
+        let path = ztlp_state_dir().join(".ztlp").join("agent.toml");
         Self::load_from_path(&path)
     }
 
@@ -601,6 +601,40 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Resolve the directory that owns `.ztlp/...` state (agent.toml,
+/// identity.json, ca/, agent.token, vip_state.json, agent.pid).
+///
+/// Resolution order (Phase D plan D1,
+/// `docs/handoffs/WINDOWS-SERVICE-PARITY-PHASE-D-PLAN-2026-09-21.md`):
+/// 1. [`crate::agent::windows_daemon::ZTLP_HOME_ENV_VAR`] (`ZTLP_HOME`) if
+///    set — this is what `ztlp-winsvc.rs`'s `main()` sets unconditionally on
+///    Windows so the SCM service process resolves everything under
+///    `C:\ProgramData\ZTLP` instead of LocalSystem's profile
+///    (`C:\Windows\System32\config\systemprofile`, which is NOT the
+///    enrolled user's `C:\Users\<user>\.ztlp`). This is the Windows
+///    analogue of the macOS LaunchDaemon plist pinning `HOME` — same goal,
+///    different mechanism, because `dirs::home_dir()` on Windows resolves
+///    via `SHGetKnownFolderPath(FOLDERID_Profile)`, which does NOT reliably
+///    honor a bare `HOME`/`USERPROFILE` env override the way Unix does.
+/// 2. `dirs::home_dir()` — unchanged behavior for the CLI, the foreground
+///    dev-mode agent, and every macOS/Linux path (they never set
+///    `ZTLP_HOME`, so this always falls through to the prior behavior).
+/// 3. `.` (current dir) as an absolute last resort, matching the existing
+///    per-call-site fallbacks this replaces.
+///
+/// Callers that used to write `dirs::home_dir().map(|h|
+/// h.join(".ztlp").join(...)).unwrap_or_else(...)` should call this once
+/// and `.join(...)` onto the result instead — one resolution point instead
+/// of N copies that could drift.
+pub fn ztlp_state_dir() -> PathBuf {
+    if let Ok(override_home) = std::env::var("ZTLP_HOME") {
+        if !override_home.is_empty() {
+            return PathBuf::from(override_home);
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Parse a short duration string like `"30s"`, `"5m"`, `"2h"`, or `"1d"`.
 ///
 /// Used to interpret `[tunnel].idle_timeout`, `[tunnel].keepalive_interval`,
@@ -660,11 +694,14 @@ pub fn parse_duration_str(s: &str) -> Result<Duration, String> {
 /// Default path to the per-install control-plane Bearer token file.
 ///
 /// Resolution order:
-/// 1. `ZTLP_AGENT_TOKEN_PATH` env var if set (used by tests and the D2
-///    Windows installer to place the file under `C:\ProgramData\ZTLP\`).
-/// 2. `~/.ztlp/agent.token` if `home_dir()` is available.
+/// 1. `ZTLP_AGENT_TOKEN_PATH` env var if set — most specific, wins over
+///    everything (used by tests and anywhere the exact file path matters
+///    independent of the state dir).
+/// 2. [`ztlp_state_dir`]`/.ztlp/agent.token` — honors `ZTLP_HOME` when set
+///    (Windows service), else `~/.ztlp/agent.token` (unchanged behavior).
 /// 3. `/tmp/ztlp-agent.token` as a last-resort fallback — mirrors the
-///    `control::default_pid_path` pattern.
+///    `control::default_pid_path` pattern, only reachable if `ztlp_state_dir`
+///    itself fell all the way through to `.` AND that's somehow unusable.
 ///
 /// The file itself is materialized (and chmodded 0o600 on unix) by
 /// `daemon::ensure_token_file`.
@@ -674,16 +711,20 @@ pub fn default_token_path() -> PathBuf {
             return PathBuf::from(override_path);
         }
     }
-    dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.token"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.token"))
+    let dir = ztlp_state_dir();
+    if dir == PathBuf::from(".") {
+        return PathBuf::from("/tmp/ztlp-agent.token");
+    }
+    dir.join(".ztlp").join("agent.token")
 }
 
 /// Where the agent persists name→VIP allocations across restarts.
 pub fn vip_state_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("vip_state.json"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-vip-state.json"))
+    let dir = ztlp_state_dir();
+    if dir == PathBuf::from(".") {
+        return PathBuf::from("/tmp/ztlp-vip-state.json");
+    }
+    dir.join(".ztlp").join("vip_state.json")
 }
 
 /// Best-effort load of the agent control-plane Bearer token.
@@ -713,9 +754,51 @@ pub fn load_agent_token() -> Option<String> {
     }
 }
 
+/// Shared lock guarding `ZTLP_HOME` env mutation across ALL test modules
+/// that touch it (`config::tests` and `windows_daemon::tests`) — env vars
+/// are process-global, and cargo test runs test fns in parallel threads by
+/// default, so two modules each with their own private mutex would still
+/// race each other. One shared lock serializes every test that reads or
+/// writes `ZTLP_HOME`.
+#[cfg(test)]
+pub(crate) static ZTLP_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ztlp_state_dir_prefers_ztlp_home_env_when_set() {
+        let _guard = ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::set_var("ZTLP_HOME", "/tmp/ztlp-home-test-marker");
+        let dir = ztlp_state_dir();
+        std::env::remove_var("ZTLP_HOME");
+        assert_eq!(dir, PathBuf::from("/tmp/ztlp-home-test-marker"));
+    }
+
+    #[test]
+    fn ztlp_state_dir_falls_back_to_dirs_home_dir_when_ztlp_home_unset() {
+        let _guard = ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::remove_var("ZTLP_HOME");
+        let dir = ztlp_state_dir();
+        // Unchanged behavior: whatever dirs::home_dir() returns in this
+        // environment (never ".", since a real home dir exists in CI/dev).
+        assert_ne!(dir, PathBuf::from("."));
+        assert_eq!(dir, dirs::home_dir().unwrap());
+    }
+
+    #[test]
+    fn default_token_path_honors_ztlp_home_when_ztlp_agent_token_path_unset() {
+        let _guard = ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::remove_var("ZTLP_AGENT_TOKEN_PATH");
+        std::env::set_var("ZTLP_HOME", "/tmp/ztlp-home-test-marker");
+        let p = default_token_path();
+        std::env::remove_var("ZTLP_HOME");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/ztlp-home-test-marker/.ztlp/agent.token")
+        );
+    }
 
     // ── [tunnel] relay_secret (2026-09-13) ─────────────────────────────
     // The relay in prod HMAC mode rejects unsigned CLIENT_ROUTE frames.

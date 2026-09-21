@@ -104,27 +104,41 @@ pub fn stop_tunnel() -> Result<(), String> {
 }
 
 /// Process an enrollment token URI.
+///
+/// ## Why this doesn't just spawn `ztlp setup --token ... --yes`
+///
+/// Once the background service exists (Phase A/B of the Windows/Linux
+/// parity plan), the service is a SEPARATE OS principal (root/SYSTEM) with
+/// its own HOME — a bare CLI spawn under the desktop app's own interactive
+/// user creates the identity in the WRONG HOME, recreating the exact
+/// two-identities bug macOS hit in `e730451`. Instead, enrollment is sent
+/// as an `enroll` command over the daemon's own control socket — the same
+/// path macOS's `EnrollmentViewModel.enrollDaemon` uses.
 pub fn process_enrollment(token_uri: &str) -> Result<EnrollResult, String> {
+    process_enrollment_at("127.100.255.1:4433", token_uri, None, None)
+}
+
+/// Same as [`process_enrollment`] but parameterized on the IPC address (and
+/// optional device name / relay secret) so it's testable against a fake
+/// control socket instead of the real, fixed daemon address.
+pub fn process_enrollment_at(
+    addr: &str,
+    token_uri: &str,
+    name: Option<String>,
+    relay_secret: Option<String>,
+) -> Result<EnrollResult, String> {
     if !token_uri.starts_with("ztlp://enroll/") {
         return Err("Invalid enrollment URI — must start with ztlp://enroll/".into());
     }
 
-    let child = get_daemon_cmd()
-        .args(["setup", "--token", token_uri, "--yes"])
-        .output();
-
-    match child {
-        Ok(output) if output.status.success() => Ok(EnrollResult {
+    match crate::ipc::ipc_enroll_at(addr, token_uri, name, relay_secret) {
+        Ok(_data) => Ok(EnrollResult {
             success: true,
             zone_name: Some("Enrolled Zone".to_string()),
             relay_address: None,
             message: "Enrollment successful".into(),
         }),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("Enrollment failed: {}", stderr))
-        }
-        Err(e) => Err(format!("Failed to execute command: {}", e)),
+        Err(e) => Err(format!("Enrollment failed: {}", e)),
     }
 }
 
@@ -281,5 +295,35 @@ mod tests {
         // this is the regression-proof unit for the fix.
         let addr = spawn_fake_agent();
         assert!(agent_is_reachable_at(&addr));
+    }
+
+    /// Task A3: enrollment must go through the daemon's IPC `enroll`
+    /// command, not a bare `ztlp setup` spawn under the desktop app's own
+    /// (interactive-user) HOME.
+    #[test]
+    fn process_enrollment_sends_ipc_enroll_not_a_bare_setup_spawn() {
+        let addr = spawn_fake_agent(); // answers {"ok":true,"data":{}} to anything
+        let result = process_enrollment_at(
+            &addr,
+            "ztlp://enroll/?zone=test.ztlp&token=abc&expires=999999999&nonce=1&mac=deadbeef",
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.unwrap().success);
+    }
+
+    #[test]
+    fn process_enrollment_rejects_non_enroll_uri_without_touching_the_network() {
+        // No fake agent spawned at all — if this reached the network it
+        // would fail to connect and return a DIFFERENT error message.
+        let result = process_enrollment_at(
+            "192.0.2.1:4433",
+            "not-an-enroll-uri",
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid enrollment URI"));
     }
 }

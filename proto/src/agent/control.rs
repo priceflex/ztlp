@@ -154,6 +154,17 @@ pub struct SetupStatus {
     /// JS doesn't have to guess them.
     pub ca_root_pem_path: String,
     pub identity_path: String,
+    /// Whether the agent control-plane token file exists AND is readable by
+    /// the interactive console user (not just the daemon/root user). Only
+    /// set when we can actually determine this — `None` when the console
+    /// user can't be resolved (e.g. nobody logged in yet) or on a platform
+    /// where we don't yet have a way to check. Surfacing this lets the
+    /// wizard distinguish "token not yet shared with the GUI user" (the
+    /// macOS `TokenGuiReadable` / Windows `icacls` step hasn't run or
+    /// failed) from "all setup steps done" — mirrors the macOS checklist's
+    /// existing token-sharing checkmark.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_shared_with_gui: Option<bool>,
 }
 
 /// DNS cache entry for reporting.
@@ -356,10 +367,7 @@ pub async fn handle_request_line(state: &AgentState, line: &str) -> String {
 /// * anything else → a clear `not enrolled yet` error.
 ///
 /// Returns `(response_json, shutdown_requested)`.
-pub async fn handle_standby_request_line(
-    expected_token: &str,
-    line: &str,
-) -> (String, bool) {
+pub async fn handle_standby_request_line(expected_token: &str, line: &str) -> (String, bool) {
     handle_standby_request_line_tracked(expected_token, line, None).await
 }
 
@@ -428,8 +436,9 @@ pub async fn handle_standby_request_line_tracked(
         ),
     };
     (
-        serde_json::to_string(&resp)
-            .unwrap_or_else(|_| r#"{"ok":false,"error":"response serialization failed"}"#.to_string()),
+        serde_json::to_string(&resp).unwrap_or_else(|_| {
+            r#"{"ok":false,"error":"response serialization failed"}"#.to_string()
+        }),
         shutdown,
     )
 }
@@ -628,54 +637,97 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             // already succeeded, so a TLS-provisioning failure is reported
             // in `tls_warning` rather than failing the whole command.
             let mut tls_warning: Option<String> = None;
-            match dirs::home_dir() {
-                Some(home) => match build_post_enroll_tls_plan(&home) {
-                    Ok(steps) => {
-                        for args in steps {
-                            info!("post-enroll TLS provisioning: {} {}", exe.display(), args.join(" "));
-                            match tokio::process::Command::new(&exe).args(&args).output().await {
-                                Ok(o) if o.status.success() => {
-                                    stdout.push_str(&String::from_utf8_lossy(&o.stdout));
-                                }
-                                Ok(o) => {
-                                    let msg = format!(
-                                        "{} failed (exit {}): {}",
-                                        args.join(" "),
-                                        o.status.code().unwrap_or(-1),
-                                        String::from_utf8_lossy(&o.stderr).trim()
-                                    );
-                                    warn!("post-enroll TLS provisioning: {msg}");
-                                    tls_warning = Some(msg);
-                                    break;
-                                }
-                                Err(e) => {
-                                    let msg = format!("failed to spawn {}: {e}", args.join(" "));
-                                    warn!("post-enroll TLS provisioning: {msg}");
-                                    tls_warning = Some(msg);
-                                    break;
+            match crate::agent::config::ztlp_state_dir() {
+                home if home != std::path::PathBuf::from(".") => {
+                    match build_post_enroll_tls_plan(&home) {
+                        Ok(steps) => {
+                            for args in steps {
+                                info!(
+                                    "post-enroll TLS provisioning: {} {}",
+                                    exe.display(),
+                                    args.join(" ")
+                                );
+                                match tokio::process::Command::new(&exe)
+                                    .args(&args)
+                                    .output()
+                                    .await
+                                {
+                                    Ok(o) if o.status.success() => {
+                                        stdout.push_str(&String::from_utf8_lossy(&o.stdout));
+                                    }
+                                    Ok(o) => {
+                                        let msg = format!(
+                                            "{} failed (exit {}): {}",
+                                            args.join(" "),
+                                            o.status.code().unwrap_or(-1),
+                                            String::from_utf8_lossy(&o.stderr).trim()
+                                        );
+                                        warn!("post-enroll TLS provisioning: {msg}");
+                                        tls_warning = Some(msg);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let msg =
+                                            format!("failed to spawn {}: {e}", args.join(" "));
+                                        warn!("post-enroll TLS provisioning: {msg}");
+                                        tls_warning = Some(msg);
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        Err(e) => tls_warning = Some(e),
                     }
-                    Err(e) => tls_warning = Some(e),
-                },
-                None => tls_warning = Some("cannot resolve home directory".to_string()),
+                }
+                _ => tls_warning = Some("cannot resolve home directory".to_string()),
             }
-            let mut data = serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
+            let mut data =
+                serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
             if let Some(w) = tls_warning {
                 data["tls_warning"] = serde_json::Value::String(w);
+            }
+            // ── Windows service: re-run the privileged startup plan (CA
+            // trust / NRPT / token ACL) post-enrollment — Phase D plan D3.
+            // On first enrollment under the ZtlpAgent service, the CA
+            // may not have been minted yet at daemon-start time (D3's
+            // daemon-post-bind hook skips InstallCaCertMachine when
+            // ca_root_pem_exists == false); once enrollment completes the
+            // CA exists and must be trusted + NRPT re-pointed here, in
+            // this same LocalSystem process. No-op off Windows, and no-op
+            // for a non-service `ztlp.exe agent start` (is_windows_service
+            // false) — mirrors the daemon-post-bind guard exactly.
+            #[cfg(target_os = "windows")]
+            if crate::agent::windows_daemon::is_windows_service() {
+                let cfg = crate::agent::config::AgentConfig::load();
+                let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
+                    is_service: true,
+                    dns_listen: cfg.dns.listen.clone(),
+                    ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
+                    ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
+                    ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
+                    token_path: crate::agent::config::default_token_path(),
+                    zones: cfg.dns.zones.clone(),
+                };
+                for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
+                    action.execute();
+                }
             }
             ControlResponse::ok(data)
         }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let full = if stderr.trim().is_empty() { stdout } else { stderr };
+            let full = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
             // A failed setup may have written identity.json before NS said
             // no. Leave it and the next Enroll is refused with "already
             // enrolled" (live wedge 2026-09-20). Remove the orphan; a
             // complete enrollment is never touched.
-            if let Some(home) = dirs::home_dir() {
+            let home = crate::agent::config::ztlp_state_dir();
+            if home != std::path::PathBuf::from(".") {
                 let idp = home.join(".ztlp").join("identity.json");
                 crate::agent::daemon::remove_orphan_identity(&idp);
             }
@@ -780,8 +832,9 @@ pub fn build_post_enroll_tls_plan_with(
     home: &std::path::Path,
     gui_owns_trust: bool,
 ) -> Result<Vec<Vec<String>>, String> {
-    let zone = read_zone_from_config(home)
-        .ok_or_else(|| "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string())?;
+    let zone = read_zone_from_config(home).ok_or_else(|| {
+        "cannot determine zone from ~/.ztlp/config.toml after enrollment".to_string()
+    })?;
     let ca_dir = home.join(".ztlp").join("ca");
     let root_pem = ca_dir.join("root.pem");
     let mut steps = Vec::new();
@@ -851,10 +904,10 @@ fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
 ///
 /// Daemon-running is implicitly `true` (we ARE the daemon answering).
 async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return ControlResponse::err("cannot resolve home directory"),
-    };
+    let home = crate::agent::config::ztlp_state_dir();
+    if home == std::path::PathBuf::from(".") {
+        return ControlResponse::err("cannot resolve home directory");
+    }
     let identity_path = home.join(".ztlp").join("identity.json");
     let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
     let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
@@ -934,6 +987,19 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
         (ca, dns)
     };
 
+    let token_path = crate::agent::config::default_token_path();
+    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path)
+        .or_else(|| {
+            #[cfg(target_os = "macos")]
+            {
+                crate::agent::macos_daemon::token_shared_with_gui(&token_path)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        });
+
     let status = SetupStatus {
         identity_present,
         identity_enrolled,
@@ -944,6 +1010,7 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
         zone,
         ca_root_pem_path: ca_root_path.display().to_string(),
         identity_path: identity_path.display().to_string(),
+        token_shared_with_gui,
     };
 
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
@@ -986,9 +1053,11 @@ pub fn default_ipc_address() -> String {
 
 /// Get the default PID file path.
 pub fn default_pid_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.pid"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.pid"))
+    let home = crate::agent::config::ztlp_state_dir();
+    if home == PathBuf::from(".") {
+        return PathBuf::from("/tmp/ztlp-agent.pid");
+    }
+    home.join(".ztlp").join("agent.pid")
 }
 
 /// Write the PID file.
@@ -1412,12 +1481,25 @@ mod tests {
         let home = tmp_home("fresh");
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
         let plan = build_post_enroll_tls_plan_with(&home, false).unwrap();
-        let root_pem = home.join(".ztlp/ca/root.pem").to_string_lossy().into_owned();
+        let root_pem = home
+            .join(".ztlp/ca/root.pem")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             plan,
             vec![
-                vec!["admin".to_string(), "ca-init".into(), "--zone".into(), "defcon.ztlp".into()],
-                vec!["agent".to_string(), "install-ca-cert".into(), "--cert".into(), root_pem],
+                vec![
+                    "admin".to_string(),
+                    "ca-init".into(),
+                    "--zone".into(),
+                    "defcon.ztlp".into()
+                ],
+                vec![
+                    "agent".to_string(),
+                    "install-ca-cert".into(),
+                    "--cert".into(),
+                    root_pem
+                ],
             ]
         );
         let _ = std::fs::remove_dir_all(&home);
@@ -1448,7 +1530,9 @@ mod tests {
         // and with an existing CA there is nothing at all left to run
         std::fs::create_dir_all(home.join(".ztlp/ca")).unwrap();
         std::fs::write(home.join(".ztlp/ca/root.key"), "k").unwrap();
-        assert!(build_post_enroll_tls_plan_with(&home, true).unwrap().is_empty());
+        assert!(build_post_enroll_tls_plan_with(&home, true)
+            .unwrap()
+            .is_empty());
         // the cfg-dispatching wrapper agrees with the current OS
         let via_wrapper = build_post_enroll_tls_plan(&home).unwrap();
         assert_eq!(via_wrapper.is_empty(), cfg!(target_os = "macos"));

@@ -413,6 +413,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+Environment=HOME=/var/lib/ztlp
 ExecStart={binary} agent start --foreground
 ExecStop={binary} agent stop
 Restart=always
@@ -422,7 +423,7 @@ RestartSec=5
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/ztlp /run/ztlp %h/.ztlp
+ReadWritePaths=/var/lib/ztlp /run/ztlp
 PrivateTmp=yes
 ProtectKernelTunables=yes
 
@@ -533,6 +534,12 @@ pub fn install_service(ztlp_binary: &str) -> Result<(PathBuf, String), Box<dyn s
         // Daemon HOME + log dir must exist before launchd starts it.
         fs::create_dir_all(crate::agent::macos_daemon::macos_system_ztlp_dir())?;
         fs::create_dir_all("/Library/Logs/ZTLP")?;
+    } else {
+        // Linux: the systemd unit pins Environment=HOME=/var/lib/ztlp (see
+        // generate_systemd_unit) so the service and the desktop app (running
+        // as the logged-in user) don't diverge on two different ~/.ztlp
+        // directories. That dir must exist before the unit starts.
+        fs::create_dir_all("/var/lib/ztlp")?;
     }
     fs::write(&target.path, &target.content)?;
     #[cfg(unix)]
@@ -594,6 +601,20 @@ mod tests {
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WatchdogSec=60"));
         assert!(unit.contains("CAP_NET_BIND_SERVICE"));
+    }
+
+    #[test]
+    fn systemd_unit_pins_a_fixed_home_not_the_installing_users() {
+        let unit = generate_systemd_unit("/usr/local/bin/ztlp");
+        assert!(
+            unit.contains("Environment=HOME=/var/lib/ztlp"),
+            "must pin HOME so the service and the desktop app don't diverge on ~/.ztlp: {unit}"
+        );
+        assert!(unit.contains("ReadWritePaths=/var/lib/ztlp /run/ztlp"));
+        assert!(
+            !unit.contains("%h/.ztlp"),
+            "with HOME pinned, the per-invoking-user specifier is stale/irrelevant: {unit}"
+        );
     }
 
     #[test]

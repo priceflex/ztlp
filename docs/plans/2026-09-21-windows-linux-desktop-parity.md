@@ -1,5 +1,73 @@
 # ZTLP Desktop (Windows + Linux) — Feature Parity with the macOS Single-Page App
 
+> **STATUS as of 2026-09-21 (end of session): Phase A + Phase B are CODE-COMPLETE
+> and test-verified, on branch `feat/linux-service-parity-phase-a` in
+> `/home/trs/ztlp`. NOT YET DONE: pushing that branch to GitHub (blocked mid-push
+> this session — `~/.ssh/github_token` was missing/stale on this box, see the
+> `ztlp-desktop-browser-clients` skill's git-push-token pitfall), Task B4, and all
+> of Phase C + Phase D. Read the "Session 2026-09-21 progress" section right below
+> this box before doing anything else — it has the exact commit list, what's
+> verified vs not, and the next 3 concrete steps.
+
+## Session 2026-09-21 progress (READ THIS FIRST)
+
+**Branch:** `feat/linux-service-parity-phase-a`, based on `main` at `39fa329`
+(this plan's own commit). 9 commits on top, all TDD, all tests currently green:
+
+1. `46053b7` fix(linux): pin systemd unit HOME to /var/lib/ztlp — **Task A1 done**
+2. `085a4ee` fix(agent): unenrolled standby is cross-platform, not macOS-only — **Task A2 done**
+3. `937630b` fix(desktop): enrollment goes through the daemon's IPC control socket — **Task A3 done**
+4. `f1259a5` docs(agent): confirm Linux needs no loopback alias — **Task A4 done**
+   (live-probed on this box: fresh agent binds/answers 127.100.255.1:4433 with
+   zero alias setup, unlike macOS)
+5. `b17f6b5` refactor(agent): extract run_agent_lifecycle so a Windows Service can
+   share it — **prep for Task B1**, verified no behavior change (same live WARN
+   line, same 6-test standby suite passing)
+6. `b22f990` feat(windows): add windows-service dependency + ztlp-winsvc service
+   host skeleton — **Task B1 done**
+7. `6b5c107` feat(windows): ztlp agent install/uninstall registers the real SCM
+   service — **Task B2 done** (new `agent::windows_service_install` module, pure
+   planner unit-tested, real SCM calls `#[cfg(windows)]`-gated)
+8. `9d699bb` feat(desktop): Install Service button runs 'ztlp agent install'
+   elevated — **Task B3 done** (reused existing `runas_ztlp` helper)
+
+**Verification so far:** proto lib suite 1272/1272 passing, desktop suite 27/27
+passing. Crucially, ALL Windows-only code (`ztlp-winsvc.rs`, the new
+`windows_service_install` module, `runas_ztlp`, the whole desktop crate) was
+proven to actually **compile AND LINK** as real Windows PE32+ binaries via
+`cargo build --target x86_64-pc-windows-gnu` on THIS Linux box — mingw-w64
+(`x86_64-w64-mingw32-gcc`) is installed here, which the earlier "Windows cross
+build is impossible from Linux" note in the `ztlp-desktop-browser-clients` skill
+had wrongly generalized from the MSVC target to the GNU target too (corrected in
+that skill 2026-09-21). This is real evidence the code is *correct*, not just
+type-checked — but it is NOT the same artifact Steven ships: the real NSIS/MSI
+installer and code signing specifically require the **MSVC** target, which
+genuinely cannot be cross-compiled from this Linux box (`aws-lc-sys` needs
+`cl.exe`). So B4 and Phase D still need either `windows-latest` CI or a real
+Windows box — that's the actual gap, not "does it compile."
+
+**Immediate next steps for a fresh session:**
+1. Push `feat/linux-service-parity-phase-a` to `origin` (GitHub). This was
+   attempted and BLOCKED this session because `~/.ssh/github_token` didn't
+   exist at the expected path (`cat: /home/trs/.ssh/github_token: No such file
+   or directory`) — check where the token actually lives now (may have moved,
+   rotated, or need re-creating via `gh auth token` or a fresh PAT), then push
+   with the one-shot-URL pattern documented in the `ztlp-desktop-browser-clients`
+   skill (do NOT `git remote set-url` to a token URL and leave it there).
+2. Open a draft PR (or just push the branch — the `desktop` job in
+   `.github/workflows/release.yml` doesn't require a tag) so the `windows-latest`
+   runner builds the REAL MSVC artifact.
+3. Once that CI run is green, do Task B4 (verify whether `install-ca-cert
+   --machine-scope` succeeds unattended as LocalSystem) and Phase D (drive the
+   real installer via the AI-computer worker, 10.170.3.207:7777).
+4. Phase C (single-page Home checklist UI, Tasks C1-C4) has NOT been started at
+   all — it doesn't depend on Windows CI and could be done in parallel/first if
+   preferred; it's pure frontend (`desktop/src/`) + a small Rust status-field
+   audit, all verifiable on this Linux box via the jsdom harness
+   (`scripts/verify_desktop_ui.js`).
+
+---
+
 > **For Hermes:** this is PLAN ONLY — nothing below has been implemented. Read
 > `HANDOFF-2026-09-21-live-verified.md` and the `ztlp-desktop-browser-clients` skill
 > (macOS section) before starting; almost every fix here is a straight port of a bug

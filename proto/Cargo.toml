@@ -202,6 +202,13 @@ tempfile = "3"
 # deterministically without sleeping for real.
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "sync", "time"] }
 
+# --- Windows Service host (Task B1, Windows/Linux desktop parity) ---
+# Only pulled in on the Windows MSVC/GNU target; a real Windows Service
+# (SCM), not a Tauri-spawned child process that dies with the GUI. See
+# proto/src/bin/ztlp-winsvc.rs.
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.
 # LTO gives good dead-code elimination without sacrificing speed.
@@ -300,3 +307,8 @@ required-features = ["quic-transport", "tokio-runtime"]
 name = "quic-client"
 path = "src/bin/quic-client.rs"
 required-features = ["quic-transport", "tokio-runtime"]
+
+[[bin]]
+name = "ztlp-winsvc"
+path = "src/bin/ztlp-winsvc.rs"
+required-features = ["tokio-runtime"]

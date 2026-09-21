@@ -480,6 +480,67 @@ All cryptographic operations use audited Rust crates from the RustCrypto project
 
 ---
 
+## Windows Agent Service
+
+On Windows the agent runs as a **Windows service** (`ZtlpAgent`,
+`LocalSystem` account), not as a desktop-app-spawned child process. The
+desktop app (see `desktop/`) is a thin client over the control API the
+service exposes — the app never holds the device identity key itself,
+mirrors the macOS root-LaunchDaemon design (`proto/src/agent/macos_daemon.rs`)
+and the Linux `systemd` design, and is covered end to end in
+`docs/handoffs/WINDOWS-SERVICE-PARITY-PHASE-D-PLAN-2026-09-21.md`.
+
+### Fixed state dir
+
+`LocalSystem`'s `USERPROFILE` is `C:\Windows\System32\config\systemprofile`
+— writing `~/.ztlp/...` there is wrong. Every agent state file instead
+lives under `C:\ProgramData\ZTLP\.ztlp\`, pinned by the `ZTLP_HOME` env
+var that `ztlp-winsvc.exe` sets unconditionally at service startup
+(`proto/src/agent/windows_daemon.rs`). A foreground `ztlp.exe agent
+start` (dev/debug, non-service) never sets `ZTLP_HOME` and keeps writing
+to the calling user's real home dir, byte-for-byte the pre-existing
+behavior — the service-ness gate is a single env-var check, no other code
+path is affected.
+
+### Privileged startup
+
+At service startup (and again after first enrollment completes), the
+service itself performs the three privileged steps the desktop app used
+to have to `runas` itself to do, in a single deterministic plan
+(`windows_startup_plan`, pure and unit-tested like the macOS analogue):
+
+1. **CA trust** — install the local root CA into `LocalMachine\Root` via
+   `certutil` (only if not already trusted and the cert exists).
+2. **NRPT** — install `Add-DnsClientNrptRule` rules pointing the enrolled
+   zone at the resolver's bare loopback IP (port stripped — Windows NRPT
+   only accepts a bare IP, `host:port` silently installs an empty
+   `NameServers` list).
+3. **Token ACL** — restrict `agent.token` to `Administrators` + the
+   interactive console user via `icacls`, so the GUI app (running as the
+   logged-in user, not `LocalSystem`) can read the control-plane token.
+   The desktop app reads the service's fixed token path first
+   (`desktop/src-tauri/src/ipc.rs` `load_gui_agent_token`), falling back
+   to `%USERPROFILE%\.ztlp\agent.token` for foreground/dev installs —
+   the same lookup the macOS app does against the LaunchDaemon's path.
+   `setup_status.token_shared_with_gui` reports whether the ACL actually
+   grants that user read access (parsed from a live `icacls` read).
+
+All three are best-effort, log-and-continue (a failure surfaces via the
+`setup_status` checklist instead of crashing the daemon), and are gated
+behind `is_windows_service()` so they never run from a foreground
+`ztlp.exe agent start`.
+
+### Install / uninstall
+
+`ztlp.exe install` (elevated, one UAC) registers the service via the
+`windows-service` crate and grants `Administrators` full control on
+`C:\ProgramData\ZTLP` via `icacls` (so the human who installed it can
+still inspect/remove the state files the service writes). `ztlp.exe
+uninstall` deletes the service and `rmdir /s /q`'s the ProgramData state
+dir only — the binary install dir is left for the NSIS/MSI uninstaller.
+
+---
+
 ## Roadmap
 
 This is Phase 1 of the ZTLP implementation:

@@ -28,6 +28,7 @@
 //!    so the user sees "Green Lock" in plain English.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::ipc;
@@ -135,6 +136,33 @@ pub fn setup_run_ca_init(zone: String) -> Result<String, String> {
     }
 }
 
+/// Install the agent as a Windows Service (Task B3 of the Windows/Linux
+/// desktop parity plan) — one UAC prompt, once, exactly like macOS's
+/// `AgentServiceInstaller.register()` / Linux's pkexec systemctl call.
+///
+/// Reuses the existing `runas_ztlp` helper (already used by
+/// `setup_install_ca`/`setup_install_dns` above) rather than writing a new
+/// elevation mechanism: runs `ztlp.exe agent install` elevated, which
+/// registers the real SCM service (Task B2) hosting `ztlp-winsvc.exe`.
+///
+/// On non-Windows platforms this is a no-op returning an explanatory
+/// message — Linux/macOS use `ztlp agent install` directly under sudo
+/// (systemd unit / LaunchDaemon), which the wizard's advanced/Settings
+/// panel already exposes without needing a Tauri-side elevation helper.
+#[tauri::command]
+pub fn setup_install_service() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        runas_ztlp(&["agent", "install"])
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("setup_install_service is Windows-only; on Linux/macOS run \
+             'sudo ztlp agent install' directly (systemd unit / LaunchDaemon)."
+            .into())
+    }
+}
+
 /// Install the root CA into the Windows `LocalMachine\Root` store.
 ///
 /// On Windows this requires Administrator. We use `ShellExecuteExW` with
@@ -149,7 +177,26 @@ pub fn setup_run_ca_init(zone: String) -> Result<String, String> {
 pub fn setup_install_ca() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        runas_ztlp(&["agent", "install-ca-cert", "--machine-scope"])
+        // D4 (Phase D plan, Windows Service Parity): the ZtlpAgent SCM
+        // service now installs the root CA into LocalMachine\Root itself,
+        // at service startup and after enroll (windows_daemon.rs
+        // `WindowsAction::InstallCaCertMachine`, wired into daemon.rs and
+        // control.rs in D3). This GUI-side `runas_ztlp` elevation path is
+        // no longer the mechanism for it on Windows — the Home page's
+        // "Trust HTTPS" row should simply not appear once the service has
+        // done its part (`setup_status`'s `ca_installed_system_trust`
+        // flips true, and `home-readiness.js` stops emitting the
+        // `trustHTTPS` action). Return an explanatory error rather than
+        // silently doing nothing, in case this command is still invoked
+        // directly (e.g. `setup.js`'s older wizard page) while the
+        // service's own CA install is still pending or failed.
+        Err(
+            "Windows: CA trust is now handled by the ZtlpAgent service itself \
+              (LocalSystem) after install — no manual UAC step needed here. \
+              Re-check the Home page checklist; if 'Trust HTTPS' is still \
+              showing, the service hasn't finished its startup CA install yet."
+                .into(),
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -200,11 +247,14 @@ pub fn setup_install_ca() -> Result<String, String> {
 
 /// Install NRPT rules for the device's zone (Windows only).
 ///
-/// Requires Administrator. We elevate via the same `runas` shell-out
-/// pattern as `setup_install_ca`. On non-Windows platforms this command
-/// returns an explanatory error — system DNS rerouting on macOS/Linux
-/// is already handled by the daemon's `dns_setup.rs` and doesn't need
-/// a wizard step.
+/// Requires Administrator. On Windows this is no longer a GUI-side step —
+/// the ZtlpAgent SCM service installs the NRPT/DNS rules itself at startup
+/// and after enroll (windows_daemon.rs `WindowsAction::SetupNrpt`, D3).
+/// This command's Windows branch now returns an explanatory error (see
+/// `setup_install_ca`'s Windows branch for the full rationale). On
+/// non-Windows platforms system DNS rerouting on macOS/Linux is already
+/// handled by the daemon's `dns_setup.rs` and doesn't need a wizard step —
+/// this branch shells out via pkexec/sudo as before (unchanged by D4).
 #[tauri::command]
 pub fn setup_install_dns(zone: String) -> Result<String, String> {
     let z = zone.trim();
@@ -213,7 +263,16 @@ pub fn setup_install_dns(zone: String) -> Result<String, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        runas_ztlp(&["agent", "dns-setup", "--zone", z])
+        // D4 (Phase D plan, Windows Service Parity): DNS/NRPT setup is now
+        // the service's own job, not a GUI elevation step. See
+        // setup_install_ca's Windows branch for the shared rationale.
+        let _ = z;
+        Err("Windows: DNS/NRPT setup is now handled by the ZtlpAgent \
+              service itself (LocalSystem) after install — no manual UAC \
+              step needed here. Re-check the Home page checklist; if 'DNS \
+              routing' is still showing, the service hasn't finished its \
+              startup DNS setup yet."
+            .into())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -494,6 +553,28 @@ pub fn setup_create_identity(
     })
 }
 
+/// Resolve `ztlp.exe`'s expected path given the CALLING binary's own path
+/// (`ztlp-desktop.exe`) — they always ship side by side in the same
+/// install directory (NSIS/MSI bundle), mirroring
+/// `windows_service_install::winsvc_sibling_path`'s "ztlp.exe /
+/// ztlp-winsvc.exe are siblings" logic one level over.
+///
+/// Bug this fixes (found live 2026-09-21): `runas_ztlp` used to pass the
+/// bare string `"ztlp.exe"` to `ShellExecuteW` with no directory. Windows
+/// resolves a bare exe name via the DLL search order / PATH, and
+/// `ztlp.exe` is NOT on PATH in the per-user install — it lives next to
+/// `ztlp-desktop.exe` in `%LOCALAPPDATA%\ZTLP\`. The result was
+/// `ShellExecuteW` returning rc=2 (`SE_ERR_FNF` — file not found) for
+/// EVERY elevation attempt, silently swallowed by the (misleading)
+/// "user cancelled or admin denied" error message — no UAC prompt ever
+/// appeared for Install Service, Trust HTTPS, or DNS setup.
+pub fn ztlp_sibling_exe_path(desktop_exe: &Path) -> PathBuf {
+    desktop_exe
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("ztlp.exe")
+}
+
 /// Windows-only: elevate `ztlp.exe <args>` via ShellExecuteExW("runas").
 ///
 /// Pops a UAC prompt. We don't capture stdout/stderr (ShellExecute
@@ -514,7 +595,17 @@ fn runas_ztlp(args: &[&str]) -> Result<String, String> {
             .collect()
     }
 
-    let exe = wide("ztlp.exe");
+    // Resolve ztlp.exe next to OUR OWN binary (not a bare name relying on
+    // PATH — see ztlp_sibling_exe_path's doc comment for the bug this
+    // fixes). `current_exe()` failing at all would be exceptional (the
+    // OS just launched us from somewhere), but fall back to the bare
+    // name rather than panicking so a truly bizarre environment still
+    // gets the OLD (broken but non-crashing) behavior instead of a hard
+    // failure before the UAC prompt even has a chance to appear.
+    let exe_path = std::env::current_exe()
+        .map(|p| ztlp_sibling_exe_path(&p))
+        .unwrap_or_else(|_| PathBuf::from("ztlp.exe"));
+    let exe = wide(&exe_path.to_string_lossy());
     let verb = wide("runas");
     let params = wide(&args.join(" "));
 
@@ -547,6 +638,11 @@ fn runas_ztlp(args: &[&str]) -> Result<String, String> {
     };
     if rc > 32 {
         Ok(format!("elevated `ztlp {}` (rc={})", args.join(" "), rc))
+    } else if rc == 2 {
+        Err(format!(
+            "elevation failed: ztlp.exe not found at {} (ShellExecuteW rc=2/SE_ERR_FNF)",
+            exe_path.display()
+        ))
     } else {
         Err(format!(
             "UAC elevation failed (ShellExecuteW rc={}); user cancelled or admin denied",
@@ -602,6 +698,43 @@ mod tests {
     fn setup_test_browse_rejects_empty_hostname() {
         let r = setup_test_browse(String::new());
         assert!(r.is_err());
+    }
+
+    // ── runas_ztlp path resolution (bug: bare "ztlp.exe" is not on PATH) ──
+    //
+    // Live-verified 2026-09-21 on the AI-computer worker (10.170.3.207):
+    // clicking "Trust HTTPS" produced NO UAC prompt at all and the log
+    // showed "UAC elevation failed (ShellExecuteW rc=2); user cancelled or
+    // admin denied". rc=2 is actually SE_ERR_FNF (file not found) per the
+    // ShellExecute return-value table, not a user/admin decision — Windows
+    // never found `ztlp.exe` because runas_ztlp passed the bare filename
+    // with no directory, and ztlp.exe is not on PATH (it lives next to
+    // ztlp-desktop.exe in the per-user install dir, e.g.
+    // C:\Users\<user>\AppData\Local\ZTLP\, confirmed via `Get-Command
+    // ztlp.exe` returning nothing on that box). The error message's own
+    // wording is misleading for every other non-32 rc too; this test only
+    // pins the NEW path-resolution helper, not the message text.
+    #[test]
+    fn ztlp_sibling_exe_path_resolves_next_to_the_calling_binary() {
+        let desktop_exe = std::path::Path::new("C:/Users/trs/AppData/Local/ZTLP/ztlp-desktop.exe");
+        let resolved = ztlp_sibling_exe_path(desktop_exe);
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("C:/Users/trs/AppData/Local/ZTLP/ztlp.exe"),
+            "must resolve ztlp.exe in the SAME directory as the calling \
+             ztlp-desktop.exe, not rely on PATH"
+        );
+    }
+
+    #[test]
+    fn ztlp_sibling_exe_path_falls_back_to_bare_name_with_no_parent() {
+        // Mirrors windows_service_install.rs's winsvc_sibling_path fallback
+        // for a bare filename with no directory component.
+        let desktop_exe = std::path::Path::new("ztlp-desktop.exe");
+        assert_eq!(
+            ztlp_sibling_exe_path(desktop_exe),
+            std::path::PathBuf::from("ztlp.exe")
+        );
     }
 
     // ── setup_create_identity (B: first-run identity in the NS) ─────────

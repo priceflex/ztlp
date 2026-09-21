@@ -177,7 +177,26 @@ pub fn setup_install_service() -> Result<String, String> {
 pub fn setup_install_ca() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        runas_ztlp(&["agent", "install-ca-cert", "--machine-scope"])
+        // D4 (Phase D plan, Windows Service Parity): the ZtlpAgent SCM
+        // service now installs the root CA into LocalMachine\Root itself,
+        // at service startup and after enroll (windows_daemon.rs
+        // `WindowsAction::InstallCaCertMachine`, wired into daemon.rs and
+        // control.rs in D3). This GUI-side `runas_ztlp` elevation path is
+        // no longer the mechanism for it on Windows — the Home page's
+        // "Trust HTTPS" row should simply not appear once the service has
+        // done its part (`setup_status`'s `ca_installed_system_trust`
+        // flips true, and `home-readiness.js` stops emitting the
+        // `trustHTTPS` action). Return an explanatory error rather than
+        // silently doing nothing, in case this command is still invoked
+        // directly (e.g. `setup.js`'s older wizard page) while the
+        // service's own CA install is still pending or failed.
+        Err(
+            "Windows: CA trust is now handled by the ZtlpAgent service itself \
+              (LocalSystem) after install — no manual UAC step needed here. \
+              Re-check the Home page checklist; if 'Trust HTTPS' is still \
+              showing, the service hasn't finished its startup CA install yet."
+                .into(),
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -228,29 +247,14 @@ pub fn setup_install_ca() -> Result<String, String> {
 
 /// Install NRPT rules for the device's zone (Windows only).
 ///
-/// Requires Administrator. We elevate via the same `runas` shell-out
-/// pattern as `setup_install_ca`. On non-Windows platforms this command
-/// returns an explanatory error — system DNS rerouting on macOS/Linux
-/// is already handled by the daemon's `dns_setup.rs` and doesn't need
-/// a wizard step.
-/// Build the argv `runas_ztlp` passes to the elevated `ztlp.exe` for DNS
-/// setup on Windows.
-///
-/// Bug fixed here (found live 2026-09-21, defcon.ztlp box, after the
-/// runas_ztlp path-resolution fix let the CA-trust UAC prompt succeed):
-/// this used to hardcode `"--zone"` (singular), but `ztlp agent dns-setup`
-/// only accepts `--zones` (plural, comma/repeat-friendly). `ShellExecuteW`
-/// never captures the child's stdout/stderr, so the resulting clap
-/// "unexpected argument" parse failure was completely silent — the elevated
-/// process launched and exited immediately, no UAC prompt ever appeared
-/// (nothing to elevate for — clap rejects args before doing anything), and
-/// the Home checklist just sat on "Setting up DNS routing…" forever with no
-/// error surfaced anywhere. Verified live via SSH: running the exact old
-/// argv by hand reproduced `error: unexpected argument '--zone' found`.
-fn windows_dns_setup_args(zone: &str) -> Vec<&str> {
-    vec!["agent", "dns-setup", "--zones", zone]
-}
-
+/// Requires Administrator. On Windows this is no longer a GUI-side step —
+/// the ZtlpAgent SCM service installs the NRPT/DNS rules itself at startup
+/// and after enroll (windows_daemon.rs `WindowsAction::SetupNrpt`, D3).
+/// This command's Windows branch now returns an explanatory error (see
+/// `setup_install_ca`'s Windows branch for the full rationale). On
+/// non-Windows platforms system DNS rerouting on macOS/Linux is already
+/// handled by the daemon's `dns_setup.rs` and doesn't need a wizard step —
+/// this branch shells out via pkexec/sudo as before (unchanged by D4).
 #[tauri::command]
 pub fn setup_install_dns(zone: String) -> Result<String, String> {
     let z = zone.trim();
@@ -259,7 +263,16 @@ pub fn setup_install_dns(zone: String) -> Result<String, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        runas_ztlp(&windows_dns_setup_args(z))
+        // D4 (Phase D plan, Windows Service Parity): DNS/NRPT setup is now
+        // the service's own job, not a GUI elevation step. See
+        // setup_install_ca's Windows branch for the shared rationale.
+        let _ = z;
+        Err("Windows: DNS/NRPT setup is now handled by the ZtlpAgent \
+              service itself (LocalSystem) after install — no manual UAC \
+              step needed here. Re-check the Home page checklist; if 'DNS \
+              routing' is still showing, the service hasn't finished its \
+              startup DNS setup yet."
+            .into())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -685,22 +698,6 @@ mod tests {
     fn setup_test_browse_rejects_empty_hostname() {
         let r = setup_test_browse(String::new());
         assert!(r.is_err());
-    }
-
-    /// Bug #4 (found live 2026-09-21, defcon.ztlp box): `windows_dns_setup_args`
-    /// must emit `--zones` (plural), the only flag `ztlp agent dns-setup`
-    /// accepts. The old hardcoded `--zone` (singular) argv made
-    /// `ShellExecuteW` launch a process that clap rejected instantly and
-    /// silently (no captured stdout/stderr, no UAC prompt, no error surfaced
-    /// to the UI — it just sat on "Setting up DNS routing…" forever).
-    #[test]
-    fn windows_dns_setup_args_uses_plural_zones_flag() {
-        let args = windows_dns_setup_args("defcon.ztlp");
-        assert_eq!(args, vec!["agent", "dns-setup", "--zones", "defcon.ztlp"]);
-        assert!(
-            !args.contains(&"--zone"),
-            "must not regress to the singular --zone flag clap rejects"
-        );
     }
 
     // ── runas_ztlp path resolution (bug: bare "ztlp.exe" is not on PATH) ──

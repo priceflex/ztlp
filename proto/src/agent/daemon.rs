@@ -254,20 +254,22 @@ pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
 /// B4 (HANDOFF-2026-09-20): should a daemon with no identity file wait in
 /// UNENROLLED STANDBY instead of exiting 1?
 ///
-/// * Only on macOS — the SMAppService root LaunchDaemon is started the
-///   instant the GUI registers it (RunAtLoad), before any enrollment has
-///   happened, and the GUI then needs the control socket UP to deliver the
-///   `enroll` command. Windows/Linux keep the historical "exit 1, run
-///   `ztlp setup`" behaviour.
+/// Cross-platform on every OS (was macOS-only until the Windows/Linux parity
+/// work — see docs/plans/2026-09-21-windows-linux-desktop-parity.md Task A2):
+/// a fresh Windows Service / systemd unit / macOS LaunchDaemon can all be
+/// started before enrollment ever happens, and the GUI/desktop app in every
+/// case needs the control socket UP to deliver the `enroll` command. Windows
+/// and Linux each need their OWN standby wiring at the call site (a real
+/// background service to host it) — see Phase A/B of that plan; this
+/// function only controls the DECISION, not whether a persistent process
+/// exists yet to make the decision inside.
+///
 /// * Only when the file is ABSENT, or when it is an ORPHAN of a failed
 ///   `ztlp setup` (identity.json without a config.toml zone — see
 ///   [`enrollment_is_complete`]); the orphan is removed so the next Enroll
 ///   is not refused as "already enrolled". A present, COMPLETE but
 ///   unparseable identity is a real error and must still fail loudly.
 pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
     if !identity_path.exists() {
         return true;
     }
@@ -2955,14 +2957,13 @@ mod unenrolled_standby_tests {
     }
 
     #[test]
-    fn missing_identity_is_standby_only_on_macos_and_only_when_absent() {
+    fn missing_identity_is_standby_on_every_platform() {
         let home = tmp_home("decide");
         let missing = home.join(".ztlp").join("identity.json");
-        // Absent file: standby iff macOS.
-        assert_eq!(
+        // Absent file: standby on every platform now (was macOS-only).
+        assert!(
             should_enter_unenrolled_standby(&missing),
-            cfg!(target_os = "macos"),
-            "absent identity -> standby decision must follow the macOS cfg gate"
+            "a fresh service/unit with no identity must enter standby on every platform"
         );
         // Corrupt (present but unparseable) file WITH a complete config: NEVER
         // standby — that is a real error the operator must see. (Without a
@@ -2972,6 +2973,21 @@ mod unenrolled_standby_tests {
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
         assert!(!should_enter_unenrolled_standby(&missing));
         assert!(missing.exists(), "complete enrollment must never be deleted");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn standby_decision_is_now_cross_platform_not_macos_only() {
+        let home = tmp_home("crossplat");
+        let missing = home.join(".ztlp").join("identity.json");
+        // Previously this only returned true on macOS. It must now return true
+        // on Linux and Windows too (still false when identity.json is present
+        // and complete — see missing_identity_is_standby_on_every_platform for
+        // that half, which stays correct unchanged).
+        assert!(
+            should_enter_unenrolled_standby(&missing),
+            "a fresh Linux/Windows service with no identity must enter standby too"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1,12 +1,17 @@
 # Windows Service Parity — Phase D — Implementation Plan
 
-> **Status (2026-09-21, session 3):** D1-D5 (code) DONE and pushed to
-> `feat/linux-service-parity-phase-a` (commits `a665bc8`, `bebba80`,
-> `b16c208`, `a9a77b6`, `dc15316`), plus D6 docs in `proto/README.md`
-> (this same commit batch). D6's "demo in Chrome" live-test and D5's
-> `--zone` pre-enroll flag are explicitly deferred (see those sections
-> below for why). Merge to `main` via PR #112 is BLOCKED on the live
-> Windows-box test — see "Merge (do not forget)" at the bottom.
+> **Status (2026-09-21, session 3):** ALL of D1-D6 code/docs DONE and
+> pushed to `feat/linux-service-parity-phase-a` (commits `a665bc8`,
+> `bebba80`, `b16c208`, `a9a77b6`, `dc15316`, `d0de448`, `35f47ac`).
+> Note: D4's *actual* code change (deleting the now-dead Windows
+> `runas_ztlp` CA/DNS branches in `desktop/src-tauri/src/setup.rs`) was
+> the last slice — the Home page itself was already Mac-parity from Task
+> C3 (shared 3-row `computeReadiness` checklist, no Windows-specific
+> buttons to delete), so D4 turned out to be a `setup.rs`-only change,
+> not a frontend button-removal as this plan doc originally assumed.
+> D5 (live deploy) + D6 (Chrome demo) are still explicitly deferred —
+> both need the live box `10.170.3.207` + an explicit go-ahead, per the
+> plan's own STOP rule; see "Merge (do not forget)" at the bottom.
 
 > **For Hermes:** Use `subagent-driven-development` for D1-D4 (pure Rust, unit
 > tested, no live box needed — each slice is a clean subagent task). D5 and D6

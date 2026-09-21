@@ -670,17 +670,78 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let full = if stderr.trim().is_empty() { stdout } else { stderr };
             ControlResponse::err(format!(
                 "enrollment failed (exit {}): {}",
                 out.status.code().unwrap_or(-1),
-                if stderr.trim().is_empty() {
-                    stdout
-                } else {
-                    stderr
-                }
+                summarize_setup_failure(&full)
             ))
         }
         Err(e) => ControlResponse::err(format!("failed to spawn ztlp setup: {}", e)),
+    }
+}
+
+/// The wizard prints a banner + progress before the actual failure line, and
+/// the GUI shows the first ~200 chars — so users saw "ZTLP Setup Wizard …
+/// Token valid …" and never the reason (live, 2026-09-20). Put the LAST
+/// `error:`-ish line first, then the full transcript for the log.
+pub fn summarize_setup_failure(transcript: &str) -> String {
+    let strip_ansi = |s: &str| -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // skip until a letter terminates the CSI sequence
+                for d in chars.by_ref() {
+                    if d.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+    let clean = strip_ansi(transcript);
+    let reason = clean
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| {
+            let low = l.to_ascii_lowercase();
+            low.starts_with("error") || low.contains("failed") || low.starts_with("✗")
+        })
+        .or_else(|| clean.lines().rev().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("")
+        .to_string();
+    if reason.is_empty() {
+        clean
+    } else {
+        format!("{}\n\n--- full output ---\n{}", reason, clean)
+    }
+}
+
+#[cfg(test)]
+mod setup_failure_summary_tests {
+    use super::summarize_setup_failure;
+
+    #[test]
+    fn puts_the_real_error_line_first() {
+        let t = "┌──┐\n│ ZTLP Setup Wizard │\n└──┘\n\u{1b}[32m✓\u{1b}[0m Token valid\n  Zone: defcon.ztlp\n  → Registering with namespace server...\n\u{1b}[31merror:\u{1b}[0m enrollment failed: token has been used up (max uses reached)\n";
+        let s = summarize_setup_failure(t);
+        assert!(
+            s.starts_with("error: enrollment failed: token has been used up (max uses reached)"),
+            "{s}"
+        );
+        assert!(s.contains("--- full output ---"));
+        assert!(!s.contains('\u{1b}'), "ANSI stripped");
+    }
+
+    #[test]
+    fn falls_back_to_last_nonempty_line() {
+        let s = summarize_setup_failure("banner\nsomething odd\n\n");
+        assert!(s.starts_with("something odd"), "{s}");
     }
 }
 

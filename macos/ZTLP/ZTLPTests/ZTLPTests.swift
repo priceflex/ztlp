@@ -189,6 +189,24 @@ final class ZTLPTests: XCTestCase {
         XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
     }
 
+    // MARK: - Single enrollment (2026-09-20): token goes straight to the daemon
+
+    func testEnrollErrorShowsReasonNotWizardBanner() {
+        let raw = "enrollment failed (exit 1): error: enrollment failed: token has been used up (max uses reached)\n\n--- full output ---\n┌──┐\n│ ZTLP Setup Wizard │\n✓ Token valid\n"
+        let msg = EnrollmentViewModel.userFacingEnrollError(raw)
+        XCTAssertFalse(msg.contains("Setup Wizard"), msg)
+        XCTAssertTrue(msg.hasPrefix("error: enrollment failed: token has been used up"), msg)
+        XCTAssertTrue(msg.contains("new enrollment link"), msg)
+    }
+
+    func testDeviceNameBecomesDnsLabel() {
+        XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "Steven’s MacBook Pro (2)"), "stevens-macbook-pro-2")
+        XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "Steven's MacBook Pro"), "stevens-macbook-pro")
+        XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "MACLLM4"), "macllm4")
+        XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "  ---  "), "mac")
+        XCTAssertEqual(EnrollmentViewModel.dnsLabel(from: "Café Ünïcode"), "cafe-unicode")
+    }
+
     func testTrustShellCommandTargetsSystemKeychainAndQuotesPath() {
         let cmd = TunnelViewModel.trustShellCommand(pemPath: "/Library/Application Support/ZTLP/.ztlp/ca/root.pem")
         XCTAssertEqual(

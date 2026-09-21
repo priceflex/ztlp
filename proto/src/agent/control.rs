@@ -675,6 +675,32 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             if let Some(w) = tls_warning {
                 data["tls_warning"] = serde_json::Value::String(w);
             }
+            // ── Windows service: re-run the privileged startup plan (CA
+            // trust / NRPT / token ACL) post-enrollment — Phase D plan D3.
+            // On first enrollment under the ZtlpAgent service, the CA
+            // may not have been minted yet at daemon-start time (D3's
+            // daemon-post-bind hook skips InstallCaCertMachine when
+            // ca_root_pem_exists == false); once enrollment completes the
+            // CA exists and must be trusted + NRPT re-pointed here, in
+            // this same LocalSystem process. No-op off Windows, and no-op
+            // for a non-service `ztlp.exe agent start` (is_windows_service
+            // false) — mirrors the daemon-post-bind guard exactly.
+            #[cfg(target_os = "windows")]
+            if crate::agent::windows_daemon::is_windows_service() {
+                let cfg = crate::agent::config::AgentConfig::load();
+                let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
+                    is_service: true,
+                    dns_listen: cfg.dns.listen.clone(),
+                    ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
+                    ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
+                    ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
+                    token_path: crate::agent::config::default_token_path(),
+                    zones: cfg.dns.zones.clone(),
+                };
+                for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
+                    action.execute();
+                }
+            }
             ControlResponse::ok(data)
         }
         Ok(out) => {

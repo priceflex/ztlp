@@ -745,6 +745,34 @@ pub async fn run_daemon(
         crate::agent::macos_daemon::run_startup_post_bind(&i);
     }
 
+    // ── Windows service startup (CA trust, NRPT, token ACL) — Phase D
+    //     plan D3 ─────────────────────────────────────────────────────────
+    // Needs the EFFECTIVE bound DNS port (hence after the bind) and only
+    // runs when this is actually the LocalSystem ZtlpAgent service (D1
+    // sets ZTLP_HOME unconditionally at service startup; a foreground
+    // `ztlp.exe agent start` for dev/debug never has it set and skips
+    // this entirely, preserving pre-D3 dev behavior byte-for-byte).
+    // Best-effort, log-and-continue — mirrors the macOS phase-2 tolerance:
+    // one failed privileged step must not crash the daemon, the checklist
+    // surfaces failures via `setup_status` instead.
+    #[cfg(target_os = "windows")]
+    {
+        if crate::agent::windows_daemon::is_windows_service() {
+            let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
+                is_service: true,
+                dns_listen: effective_dns_listen.clone(),
+                ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
+                ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
+                ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
+                token_path: config::default_token_path(),
+                zones: config.dns.zones.clone(),
+            };
+            for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
+                action.execute();
+            }
+        }
+    }
+
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
         dns_state: dns_state.clone(),

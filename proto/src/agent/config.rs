@@ -754,14 +754,18 @@ pub fn load_agent_token() -> Option<String> {
     }
 }
 
+/// Shared lock guarding `ZTLP_HOME` env mutation across ALL test modules
+/// that touch it (`config::tests` and `windows_daemon::tests`) — env vars
+/// are process-global, and cargo test runs test fns in parallel threads by
+/// default, so two modules each with their own private mutex would still
+/// race each other. One shared lock serializes every test that reads or
+/// writes `ZTLP_HOME`.
+#[cfg(test)]
+pub(crate) static ZTLP_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── ztlp_state_dir() / ZTLP_HOME resolution (Phase D plan D1) ──────
-    // Guards std::env mutation with a lock since tests run in parallel by
-    // default and env vars are process-global state.
-    static ZTLP_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn ztlp_state_dir_prefers_ztlp_home_env_when_set() {

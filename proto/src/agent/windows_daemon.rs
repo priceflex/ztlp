@@ -121,6 +121,146 @@ pub fn windows_startup_plan(i: &WindowsStartupInputs) -> Vec<WindowsAction> {
     plan
 }
 
+// ─── Execution — Phase D plan D3 ────────────────────────────────────────────
+
+/// Strip a trailing `:port` from a `host:port` listen string, returning the
+/// bare host. Windows NRPT can only route a namespace to a bare IP address
+/// (implicit port 53) — handing it `host:port` silently installs an empty
+/// `NameServers` list (`ztlp-cli.rs:13506-13526`, the same bug bug #4's
+/// `dns_setup_windows::plan_windows_nrpt_listen` already works around for
+/// the CLI path; this is the service-side equivalent guard).
+///
+/// Pure and platform-independent so it stays unit-testable on Linux.
+pub fn strip_port(listen: &str) -> &str {
+    listen
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(listen)
+}
+
+impl WindowsAction {
+    /// Run the action. Log-and-continue: every step is best-effort, mirrors
+    /// `MacosAction::execute`'s tolerance — one failed privileged step
+    /// shouldn't crash the daemon; the checklist surfaces failures via
+    /// `setup_status` instead.
+    #[cfg(windows)]
+    pub fn execute(&self) {
+        use tracing::{info, warn};
+        match self {
+            WindowsAction::InstallCaCertMachine(path) => {
+                match crate::agent::ca_trust::install_ca_cert_with_scope(
+                    path,
+                    crate::agent::ca_trust::CertStoreScope::Machine,
+                ) {
+                    Ok(()) => info!("Windows: ZTLP root CA trusted in LocalMachine\\Root"),
+                    Err(e) => warn!("Windows: CA trust install failed (continuing): {e}"),
+                }
+            }
+            WindowsAction::SetupNrpt { listen, zones } => {
+                let api = crate::agent::dns_setup_windows::WindowsNrptApi::with_powershell_path(
+                    r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                );
+                let bare_ip = strip_port(listen);
+                match crate::agent::dns_setup_windows::setup_zones(&api, zones, bare_ip) {
+                    Ok(installed) => {
+                        info!("Windows: NRPT rules installed for zones: {:?}", installed)
+                    }
+                    Err(e) => warn!("Windows: NRPT setup failed (continuing): {e}"),
+                }
+            }
+            WindowsAction::TokenGuiReadable(path) => {
+                acl_token_for_console_user(path);
+            }
+        }
+    }
+
+    /// No-op off Windows — mirrors `MacosAction`'s cfg gating so the pure
+    /// planner (`windows_startup_plan`) stays callable/testable everywhere
+    /// while only the real shell-outs are platform-gated.
+    #[cfg(not(windows))]
+    pub fn execute(&self) {}
+}
+
+/// Restrict `agent.token` so only Administrators and the interactive
+/// console user can read it — Windows analogue of macOS's
+/// `MacosAction::TokenGuiReadable` (`chgrp`/`chmod` there, `icacls` here).
+/// Falls back to leaving the ACL at its default (Administrators +
+/// LocalSystem, since the service itself wrote the file) if no interactive
+/// console user can be resolved — mirrors the macOS fallback tolerance:
+/// still not world-readable, just broader than the ideal single-user grant.
+#[cfg(windows)]
+fn acl_token_for_console_user(path: &std::path::Path) {
+    use tracing::{info, warn};
+    match console_user_name() {
+        Some(user) => {
+            info!("Windows: restricting agent.token to console user `{user}` via icacls");
+            let path_str = path.to_string_lossy().into_owned();
+            let status = std::process::Command::new("icacls")
+                .args([
+                    path_str.as_str(),
+                    "/inheritance:r",
+                    "/grant:r",
+                    "Administrators:F",
+                    "/grant:r",
+                    &format!("{user}:R"),
+                ])
+                .status();
+            if let Err(e) = status {
+                warn!(
+                    "Windows: icacls failed to spawn for {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        None => {
+            warn!(
+                "Windows: no interactive console user resolved — leaving agent.token at its \
+                 default ACL (Administrators/LocalSystem, still not world-readable)"
+            );
+        }
+    }
+}
+
+/// Best-effort resolution of the interactive console user's `DOMAIN\User`
+/// (or bare `User`) name, suitable for `icacls`'s account-name argument.
+/// Returns `None` if no interactive session can be found (e.g. nobody is
+/// logged in at the console yet, mirroring macOS's `console_user_name`
+/// returning `None` when nobody is at the console).
+#[cfg(windows)]
+fn console_user_name() -> Option<String> {
+    let output = std::process::Command::new("query")
+        .arg("user")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // `query user` header: "USERNAME  SESSIONNAME  ID  STATE ..."; data
+    // rows start with the username (optionally prefixed with '>' marking
+    // the current session). Take the first Active session's username.
+    stdout
+        .lines()
+        .skip(1)
+        .find(|line| line.contains("Active"))
+        .and_then(|line| {
+            line.trim_start_matches('>')
+                .split_whitespace()
+                .next()
+                .map(str::to_string)
+        })
+}
+
+/// Best-effort service detection: true only when the `ZTLP_HOME` env var
+/// is set, which `ztlp-winsvc.rs` sets unconditionally at its own startup
+/// before doing anything else (D1) and nothing else in the codebase ever
+/// sets. A foreground `ztlp.exe agent start` for dev/debug never has this
+/// set, so it correctly skips the privileged startup plan below — mirrors
+/// macOS's `is_root()` gate on `MacosStartupInputs.is_root`.
+pub fn is_windows_service() -> bool {
+    std::env::var(ZTLP_HOME_ENV_VAR).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +375,36 @@ mod tests {
     fn windows_startup_plan_is_deterministic_for_same_inputs() {
         let i = base_inputs();
         assert_eq!(windows_startup_plan(&i), windows_startup_plan(&i));
+    }
+
+    // ── strip_port() (Phase D plan D3, bare-IP NRPT guard) ─────────────
+
+    #[test]
+    fn strip_port_removes_trailing_port() {
+        assert_eq!(strip_port("127.0.0.53:5353"), "127.0.0.53");
+    }
+
+    #[test]
+    fn strip_port_is_noop_on_bare_ip() {
+        assert_eq!(strip_port("127.0.0.53"), "127.0.0.53");
+    }
+
+    #[test]
+    fn strip_port_handles_bare_port_only() {
+        // Degenerate input; must not panic, and should treat everything
+        // before the last colon as "host" even if empty.
+        assert_eq!(strip_port(":53"), "");
+    }
+
+    // ── is_windows_service() ────────────────────────────────────────────
+
+    #[test]
+    fn is_windows_service_true_only_when_ztlp_home_set() {
+        let _guard = crate::agent::config::ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::remove_var(ZTLP_HOME_ENV_VAR);
+        assert!(!is_windows_service());
+        std::env::set_var(ZTLP_HOME_ENV_VAR, WINDOWS_SYSTEM_CONFIG_DIR);
+        assert!(is_windows_service());
+        std::env::remove_var(ZTLP_HOME_ENV_VAR);
     }
 }

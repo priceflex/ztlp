@@ -347,6 +347,19 @@ pub async fn run_unenrolled_standby(
     #[cfg(target_os = "macos")]
     if crate::agent::macos_daemon::is_root() {
         use crate::agent::macos_daemon::MacosAction;
+        // Only macOS needs this: 127.100.255.1 is outside macOS's default
+        // loopback (only 127.0.0.1 is auto-configured), so the control
+        // socket bind fails until `ifconfig lo0 alias 127.100.255.1 up` (or
+        // this root-daemon startup action) runs. Linux needs NO alias here —
+        // its loopback covers the full 127.0.0.0/8 range by default;
+        // confirmed live 2026-09-21 (Task A4): a fresh agent on this Linux
+        // box bound and answered on 127.100.255.1:4433 with zero extra setup
+        // (raw TCP connect + real `{"ok":false,"error":"unauthorized"}`
+        // protocol response, not a connection refusal). Windows also
+        // generally allows binding anywhere in 127.0.0.0/8 without an
+        // explicit alias (same as Linux) — not yet independently verified
+        // live on that OS as of this task, but there's no evidence of a
+        // Windows-specific loopback restriction in this codebase either.
         if let Some(ip) = ipc_addr
             .rsplit_once(':')
             .and_then(|(h, _)| h.parse::<std::net::Ipv4Addr>().ok())

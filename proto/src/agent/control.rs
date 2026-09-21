@@ -626,46 +626,49 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             // already succeeded, so a TLS-provisioning failure is reported
             // in `tls_warning` rather than failing the whole command.
             let mut tls_warning: Option<String> = None;
-            match dirs::home_dir() {
-                Some(home) => match build_post_enroll_tls_plan(&home) {
-                    Ok(steps) => {
-                        for args in steps {
-                            info!(
-                                "post-enroll TLS provisioning: {} {}",
-                                exe.display(),
-                                args.join(" ")
-                            );
-                            match tokio::process::Command::new(&exe)
-                                .args(&args)
-                                .output()
-                                .await
-                            {
-                                Ok(o) if o.status.success() => {
-                                    stdout.push_str(&String::from_utf8_lossy(&o.stdout));
-                                }
-                                Ok(o) => {
-                                    let msg = format!(
-                                        "{} failed (exit {}): {}",
-                                        args.join(" "),
-                                        o.status.code().unwrap_or(-1),
-                                        String::from_utf8_lossy(&o.stderr).trim()
-                                    );
-                                    warn!("post-enroll TLS provisioning: {msg}");
-                                    tls_warning = Some(msg);
-                                    break;
-                                }
-                                Err(e) => {
-                                    let msg = format!("failed to spawn {}: {e}", args.join(" "));
-                                    warn!("post-enroll TLS provisioning: {msg}");
-                                    tls_warning = Some(msg);
-                                    break;
+            match crate::agent::config::ztlp_state_dir() {
+                home if home != std::path::PathBuf::from(".") => {
+                    match build_post_enroll_tls_plan(&home) {
+                        Ok(steps) => {
+                            for args in steps {
+                                info!(
+                                    "post-enroll TLS provisioning: {} {}",
+                                    exe.display(),
+                                    args.join(" ")
+                                );
+                                match tokio::process::Command::new(&exe)
+                                    .args(&args)
+                                    .output()
+                                    .await
+                                {
+                                    Ok(o) if o.status.success() => {
+                                        stdout.push_str(&String::from_utf8_lossy(&o.stdout));
+                                    }
+                                    Ok(o) => {
+                                        let msg = format!(
+                                            "{} failed (exit {}): {}",
+                                            args.join(" "),
+                                            o.status.code().unwrap_or(-1),
+                                            String::from_utf8_lossy(&o.stderr).trim()
+                                        );
+                                        warn!("post-enroll TLS provisioning: {msg}");
+                                        tls_warning = Some(msg);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        let msg =
+                                            format!("failed to spawn {}: {e}", args.join(" "));
+                                        warn!("post-enroll TLS provisioning: {msg}");
+                                        tls_warning = Some(msg);
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        Err(e) => tls_warning = Some(e),
                     }
-                    Err(e) => tls_warning = Some(e),
-                },
-                None => tls_warning = Some("cannot resolve home directory".to_string()),
+                }
+                _ => tls_warning = Some("cannot resolve home directory".to_string()),
             }
             let mut data =
                 serde_json::json!({ "output": stdout, "tls_provisioned": tls_warning.is_none() });
@@ -686,7 +689,8 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             // no. Leave it and the next Enroll is refused with "already
             // enrolled" (live wedge 2026-09-20). Remove the orphan; a
             // complete enrollment is never touched.
-            if let Some(home) = dirs::home_dir() {
+            let home = crate::agent::config::ztlp_state_dir();
+            if home != std::path::PathBuf::from(".") {
                 let idp = home.join(".ztlp").join("identity.json");
                 crate::agent::daemon::remove_orphan_identity(&idp);
             }
@@ -863,10 +867,10 @@ fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
 ///
 /// Daemon-running is implicitly `true` (we ARE the daemon answering).
 async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return ControlResponse::err("cannot resolve home directory"),
-    };
+    let home = crate::agent::config::ztlp_state_dir();
+    if home == std::path::PathBuf::from(".") {
+        return ControlResponse::err("cannot resolve home directory");
+    }
     let identity_path = home.join(".ztlp").join("identity.json");
     let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
     let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
@@ -998,9 +1002,11 @@ pub fn default_ipc_address() -> String {
 
 /// Get the default PID file path.
 pub fn default_pid_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.pid"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/ztlp-agent.pid"))
+    let home = crate::agent::config::ztlp_state_dir();
+    if home == PathBuf::from(".") {
+        return PathBuf::from("/tmp/ztlp-agent.pid");
+    }
+    home.join(".ztlp").join("agent.pid")
 }
 
 /// Write the PID file.

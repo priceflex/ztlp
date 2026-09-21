@@ -45,6 +45,11 @@ pub mod stream;
 pub mod tunnel_pool;
 pub mod user_binding;
 pub mod vip_pool;
+// Windows service-tier locations/planning (pure) + executor. Compiles on
+// every platform so the plan/path tests run in Linux CI; only invoked from
+// daemon.rs behind cfg(windows) + a real "are we the service" check.
+// Phase D plan: docs/handoffs/WINDOWS-SERVICE-PARITY-PHASE-D-PLAN-2026-09-21.md
+pub mod windows_daemon;
 pub mod windows_service_install;
 
 /// Shared standby-then-full-daemon startup sequence (Task B1 of the

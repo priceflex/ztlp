@@ -100,9 +100,9 @@ struct TransportConfig {
 }
 
 fn load_config() -> Config {
-    let config_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let config_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("config.toml");
 
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
@@ -10005,10 +10005,10 @@ fn get_hostname() -> String {
         .replace(' ', "-")
 }
 
-/// Get the ZTLP config directory (~/.ztlp).
+/// Get the ZTLP config directory (~/.ztlp, or `$ZTLP_HOME/.ztlp` under the
+/// Windows service — see `ztlp_state_dir`).
 fn get_ztlp_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let home = dirs::home_dir().ok_or("could not determine home directory")?;
-    Ok(home.join(".ztlp"))
+    Ok(ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp"))
 }
 
 /// Test connectivity to relay addresses.
@@ -11529,7 +11529,7 @@ fn cmd_admin_rotate_zone_key(json_output: bool) -> Result<(), Box<dyn std::error
     let public_hex = hex::encode(public.as_bytes());
 
     // Save to the default zone key path
-    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    let ztlp_dir = ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp");
     std::fs::create_dir_all(&ztlp_dir)?;
 
     let key_path = ztlp_dir.join("zone.key");
@@ -11580,7 +11580,7 @@ fn cmd_admin_export_zone_key(
     format: &str,
     json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    let ztlp_dir = ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp");
     let key_path = ztlp_dir.join("zone.key");
 
     if !key_path.exists() {
@@ -11660,8 +11660,7 @@ fn cmd_admin_export_zone_key(
 // ─── CA / Certificate Management Commands ─────────────────────────────────
 
 fn default_ca_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
+    ztlp_proto::agent::config::ztlp_state_dir()
         .join(".ztlp")
         .join("ca")
 }
@@ -13457,12 +13456,12 @@ async fn cmd_agent_dns_setup_windows(
     // bound address post-fallback) over the static config file. Only fall
     // back to the merged config file's `config.dns.listen` if the agent
     // isn't reachable (e.g. `dns-setup` run before `agent start`).
-    let agent_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
-    let cli_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let agent_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("agent.toml");
+    let cli_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("config.toml");
     let config = AgentConfig::load_merged(&agent_path, &cli_path);
 
     let live_dns_listen = {

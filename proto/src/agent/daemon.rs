@@ -799,9 +799,9 @@ pub async fn run_daemon(
         // `~/.ztlp/ca/intermediate.{pem,key}`) we silently fall back
         // to disk-only mode via the plain `new` constructor — the wizard
         // surface step "CA initialized?" tells the user how to fix that.
-        let ca_dir = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("ca"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/ca"));
+        let ca_dir = crate::agent::config::ztlp_state_dir()
+            .join(".ztlp")
+            .join("ca");
         let intermediate_pem = ca_dir.join("intermediate.pem");
         let intermediate_key = ca_dir.join("intermediate.key");
         let resolver = if intermediate_pem.exists() && intermediate_key.exists() {

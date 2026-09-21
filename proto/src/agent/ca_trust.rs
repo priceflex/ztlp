@@ -66,8 +66,10 @@ pub enum CertStoreScope {
 
 /// Get the default CA cert path.
 pub fn default_ca_cert_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".ztlp").join("ca").join("root.pem")
+    crate::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("ca")
+        .join("root.pem")
 }
 
 /// Install a CA certificate into the system trust store at user scope.

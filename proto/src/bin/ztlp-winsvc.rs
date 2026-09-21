@@ -55,6 +55,23 @@ mod svc {
     }
 
     fn run_service() -> Result<(), Box<dyn std::error::Error>> {
+        // D1 (Phase D plan,
+        // docs/handoffs/WINDOWS-SERVICE-PARITY-PHASE-D-PLAN-2026-09-21.md):
+        // LocalSystem's home_dir() resolves to
+        // C:\Windows\System32\config\systemprofile, not the enrolled user's
+        // C:\Users\<user>\.ztlp. Set ZTLP_HOME unconditionally, before
+        // anything else runs, so every `ztlp_state_dir()` call in this
+        // process (and in any `ztlp.exe` child it re-execs, e.g. `enroll`'s
+        // self re-exec in control.rs) resolves under
+        // C:\ProgramData\ZTLP\.ztlp instead. Mirrors the macOS LaunchDaemon
+        // plist pinning HOME to /Library/Application Support/ZTLP — same
+        // goal, set via env var here because Windows's dirs::home_dir()
+        // doesn't reliably honor a bare HOME/USERPROFILE override.
+        std::env::set_var(
+            ztlp_proto::agent::windows_daemon::ZTLP_HOME_ENV_VAR,
+            ztlp_proto::agent::windows_daemon::WINDOWS_SYSTEM_CONFIG_DIR,
+        );
+
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
         // Standard SCM status-reporting dance: register a control handler

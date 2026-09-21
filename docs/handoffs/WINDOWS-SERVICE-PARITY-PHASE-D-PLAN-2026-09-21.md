@@ -572,6 +572,16 @@ Do this only after D5's checklist is fully green.
 
 ---
 
+## Merge (do not forget)
+
+Once Phase D work in this session/branch is complete (all slices done, or
+the session is wrapping up with whatever landed so far verified green):
+merge `feat/linux-service-parity-phase-a` into `main` via PR #112.
+Steps: `gh pr checks 112` green -> `gh pr merge 112 --repo priceflex/ztlp`
+(squash or merge per repo convention — check existing merged PRs first).
+Ask Steven before merging (standing rule: ask before commit/push/merge
+except "commit what you have").
+
 ## Cross-cutting notes
 
 - Every Rust slice (D1-D3) must stay unit-testable on Linux for the pure

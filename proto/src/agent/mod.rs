@@ -45,6 +45,7 @@ pub mod stream;
 pub mod tunnel_pool;
 pub mod user_binding;
 pub mod vip_pool;
+pub mod windows_service_install;
 
 /// Shared standby-then-full-daemon startup sequence (Task B1 of the
 /// Windows/Linux desktop parity plan,

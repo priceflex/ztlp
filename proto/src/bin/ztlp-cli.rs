@@ -877,7 +877,7 @@ enum AgentCommands {
     #[command(after_help = "EXAMPLES:\n  sudo ztlp agent dns-teardown")]
     DnsTeardown,
 
-    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon)
+    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon / Windows SCM service)
     #[command(after_help = "EXAMPLES:\n  \
             sudo ztlp agent install\n  \
             sudo ztlp agent install --binary /usr/local/bin/ztlp")]
@@ -886,6 +886,11 @@ enum AgentCommands {
         #[arg(long)]
         binary: Option<PathBuf>,
     },
+
+    /// Uninstall the agent system service (Windows SCM service today; systemd/macOS use `rm`/`launchctl bootout` directly — see `agent install`'s own printed instructions)
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp agent uninstall")]
+    Uninstall,
 
     /// Pull TLS certificates for all known service hostnames
     ///
@@ -13287,6 +13292,98 @@ async fn cmd_agent_dns_teardown() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `ztlp agent install` — Windows: register the ztlp-winsvc.exe SCM service
+/// (Task B2/B3 of the Windows/Linux desktop parity plan). Requires one UAC
+/// elevation — same privilege tier as macOS's SMAppService.register() /
+/// Linux's `pkexec systemctl enable --now`.
+#[cfg(not(unix))]
+async fn cmd_agent_install_windows(
+    binary: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::windows_service_install::{
+        windows_service_definition, winsvc_sibling_path,
+    };
+
+    let ztlp_binary = if let Some(path) = binary {
+        path.clone()
+    } else {
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ztlp.exe"))
+    };
+    let winsvc_binary = winsvc_sibling_path(&ztlp_binary);
+    let def = windows_service_definition(&winsvc_binary);
+
+    #[cfg(windows)]
+    {
+        use ztlp_proto::agent::windows_service_install::windows_service_install;
+        match windows_service_install(&def) {
+            Ok(()) => {
+                eprintln!("{} Service installed: {}", c_green("✓"), def.service_name);
+                eprintln!("  {}", winsvc_binary.display());
+                eprintln!();
+                eprintln!("Start now (and at every boot):");
+                eprintln!("  sc start {}", def.service_name);
+                eprintln!();
+                eprintln!("Status:");
+                eprintln!("  sc query {}", def.service_name);
+            }
+            Err(e) => {
+                eprintln!("{} Installation failed: {}", c_red("✗"), e);
+                eprintln!();
+                eprintln!(
+                    "{}",
+                    c_dim("Hint: Installing a Windows service usually requires an elevated (Administrator) prompt.")
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &def;
+        eprintln!(
+            "{} Windows service install is only meaningful on Windows (cross-compiled here for CI type-checking only)",
+            c_yellow("⚠")
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp agent uninstall` — Windows: unregister the ztlp-winsvc.exe SCM
+/// service. On Unix, systemd/macOS use `rm`/`launchctl bootout` directly
+/// per `agent install`'s own printed instructions, so this is a no-op with
+/// a pointer back to those instructions rather than a silent success.
+async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        use ztlp_proto::agent::windows_service_install::{
+            windows_service_uninstall, WINDOWS_SERVICE_NAME,
+        };
+        match windows_service_uninstall(WINDOWS_SERVICE_NAME) {
+            Ok(()) => eprintln!("{} Service uninstalled: {}", c_green("✓"), WINDOWS_SERVICE_NAME),
+            Err(e) => {
+                eprintln!("{} Uninstall failed: {}", c_red("✗"), e);
+                eprintln!();
+                eprintln!(
+                    "{}",
+                    c_dim("Hint: Uninstalling a Windows service usually requires an elevated (Administrator) prompt.")
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!(
+            "{} 'agent uninstall' is Windows-only. On Linux: sudo systemctl disable --now ztlp-agent && sudo rm /etc/systemd/system/ztlp-agent.service",
+            c_yellow("⚠")
+        );
+        eprintln!(
+            "  {} sudo launchctl bootout system/org.ztlp.agent && sudo rm /Library/LaunchDaemons/org.ztlp.agent.plist",
+            c_dim("On macOS:")
+        );
+    }
+    Ok(())
+}
+
 /// `ztlp agent install` — Install as system service.
 #[cfg(unix)]
 async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
@@ -14295,10 +14392,8 @@ async fn main() {
                 }
             }
             #[cfg(not(unix))]
-            AgentCommands::Install { .. } => Err(
-                "install is only supported on Unix; use the ZTLP Windows service installer instead"
-                    .into(),
-            ),
+            AgentCommands::Install { binary } => cmd_agent_install_windows(binary).await,
+            AgentCommands::Uninstall => cmd_agent_uninstall().await,
         },
     };
 

@@ -71,11 +71,10 @@ log "═════════════════════════
 ztlp connect "${SERVER_ADDR}" \
     --key "${KEY_FILE}" \
     --service ssh \
+    --ns-server "${NS_SERVER}" \
     -L "${LOCAL_PORT}:127.0.0.1:22" \
     -vv \
-    2>&1 | while IFS= read -r line; do
-        echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"
-    done &
+    > >(while IFS= read -r line; do echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"; done) 2>&1 &
 TUNNEL_PID=$!
 
 log "→ Waiting for tunnel on :${LOCAL_PORT}..."
@@ -116,6 +115,7 @@ fi
 # Kill the old tunnel, start a new one.
 
 kill $TUNNEL_PID 2>/dev/null || true
+wait $TUNNEL_PID 2>/dev/null || true
 sleep 1
 
 # ── Step 7: Benchmarks (each gets its own tunnel) ──────────
@@ -141,10 +141,9 @@ if [ "${BENCHMARK}" = "true" ]; then
         ztlp connect "${SERVER_ADDR}" \
             --key "${KEY_FILE}" \
             --service ssh \
+            --ns-server "${NS_SERVER}" \
             -L "${LOCAL_PORT}:127.0.0.1:22" \
-            -vv 2>&1 | while IFS= read -r line; do
-                echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"
-            done &
+            -vv > >(while IFS= read -r line; do echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"; done) 2>&1 &
         BENCH_TUNNEL_PID=$!
         
         # Wait for tunnel
@@ -186,6 +185,7 @@ if [ "${BENCHMARK}" = "true" ]; then
 
         # Kill this tunnel before next iteration
         kill $BENCH_TUNNEL_PID 2>/dev/null || true
+        wait $BENCH_TUNNEL_PID 2>/dev/null || true
         sleep 1
     done
 
@@ -205,10 +205,9 @@ log "  Starting idle tunnel for manual access..."
 ztlp connect "${SERVER_ADDR}" \
     --key "${KEY_FILE}" \
     --service ssh \
+    --ns-server "${NS_SERVER}" \
     -L "${LOCAL_PORT}:127.0.0.1:22" \
-    -vv 2>&1 | while IFS= read -r line; do
-        echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"
-    done &
+    -vv > >(while IFS= read -r line; do echo "[$(date '+%H:%M:%S.%3N')] [tunnel] ${line}"; done) 2>&1 &
 FINAL_TUNNEL=$!
 log "  Tunnel active — docker exec -it ztlp-client sshpass -e ssh -p ${LOCAL_PORT} -o StrictHostKeyChecking=no testuser@127.0.0.1"
 wait $FINAL_TUNNEL

@@ -20,23 +20,35 @@ defmodule ZtlpGateway.CrlFailClosedTest do
 
   alias ZtlpGateway.{Config, TlsSession, CrlServer}
 
+  # Stop CrlServer if it's running, tolerating the race where it has
+  # already exited on its own between `whereis` and `stop`. GenServer.stop
+  # on a dead pid raises exit reason `{:noproc, _}` specifically — only
+  # that shape is swallowed, so a real timeout or a crash during shutdown
+  # still fails the test instead of being silently hidden.
+  defp stop_crl_server do
+    case GenServer.whereis(CrlServer) do
+      nil ->
+        :ok
+
+      pid ->
+        try do
+          GenServer.stop(pid, :normal, 5000)
+        catch
+          :exit, {:noproc, _} -> :ok
+        end
+    end
+  end
+
   setup do
     # Clean slate: ensure CrlServer is stopped and config is default.
-    case GenServer.whereis(CrlServer) do
-      nil -> :ok
-      pid ->
-        GenServer.stop(pid, :normal, 5000)
-        Process.sleep(50)
-    end
+    stop_crl_server()
+    Process.sleep(50)
 
     System.delete_env("ZTLP_GATEWAY_CRL_FAIL_CLOSED")
     Application.delete_env(:ztlp_gateway, :crl_fail_closed)
 
     on_exit(fn ->
-      case GenServer.whereis(CrlServer) do
-        nil -> :ok
-        pid -> GenServer.stop(pid, :normal, 5000)
-      end
+      stop_crl_server()
 
       System.delete_env("ZTLP_GATEWAY_CRL_FAIL_CLOSED")
       Application.delete_env(:ztlp_gateway, :crl_fail_closed)

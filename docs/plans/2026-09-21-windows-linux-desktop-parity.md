@@ -731,7 +731,7 @@ redirect-stripping recipe for headless artifact download from this box).
 `desktop` job doesn't require a tag) so `windows-latest` builds it.
 **Step 2:** Download the NSIS installer artifact.
 **Step 3:** Use the AI computer (10.170.3.207:7777, `trs-uiagent`, auth header
-`X-Auth: trs-uiagent-2026` — see `/home/trs/7 - How to use ai computer.md`) to:
+`X-Auth: <trs-uiagent key, see /home/trs/7 - How to use ai computer.md>` — see `/home/trs/7 - How to use ai computer.md`) to:
    a. Transfer the installer to that box (it has no direct file-drop endpoint in the
       documented API — check for an upload/download HTTP verb in the agent; if none
       exists, host the file briefly via a Cloudflare Tunnel or `python -m

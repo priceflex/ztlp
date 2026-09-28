@@ -1034,17 +1034,13 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
     };
 
     let token_path = crate::agent::config::default_token_path();
-    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path)
-        .or_else(|| {
-            #[cfg(target_os = "macos")]
-            {
-                crate::agent::macos_daemon::token_shared_with_gui(&token_path)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                None
-            }
-        });
+    // PR #112 review fix: windows_daemon::token_shared_with_gui is compiled
+    // on Windows and on non-macOS only, so calling it unconditionally broke
+    // the macOS build (E0425). Pick the platform's own implementation.
+    #[cfg(target_os = "macos")]
+    let token_shared_with_gui = crate::agent::macos_daemon::token_shared_with_gui(&token_path);
+    #[cfg(not(target_os = "macos"))]
+    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path);
 
     let status = SetupStatus {
         identity_present,

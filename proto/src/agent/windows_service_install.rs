@@ -120,6 +120,16 @@ pub fn windows_service_uninstall(service_name: &str) -> Result<(), Box<dyn std::
     // Best-effort stop before delete — an already-stopped service returns
     // an error here that we deliberately ignore (delete still proceeds).
     let _ = service.stop();
+    // PR #112 review fix: stop() only REQUESTS the stop. Wait (bounded) for
+    // the process to exit so it releases its handles on the ProgramData
+    // state dir (ztlp-winsvc.log, agent.pid) before the caller removes it.
+    for _ in 0..40 {
+        match service.query_status() {
+            Ok(st) if st.current_state == windows_service::service::ServiceState::Stopped => break,
+            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
+            Err(_) => break,
+        }
+    }
     service.delete()?;
     Ok(())
 }
@@ -157,12 +167,19 @@ pub fn programdata_acl_grant_commands() -> Vec<Vec<String>> {
     ]]
 }
 
-/// `rmdir`-equivalent argv for removing the whole ProgramData state dir
-/// (and only it — never the binary install dir, which is a different
-/// location and belongs to the installer/NSIS uninstaller, not to us)
-/// during `ztlp uninstall`. Pure, unit-testable.
+/// argv for removing the whole ProgramData state dir (and only it — never
+/// the binary install dir, which belongs to the NSIS uninstaller) during
+/// `ztlp agent uninstall`. Pure, unit-testable.
+///
+/// PR #112 review fix: this used to be `["rmdir", "/s", "/q", dir]`, but
+/// `rmdir` is a cmd.exe BUILT-IN, not an executable, so spawning it always
+/// failed and the state dir (identity, CA key, agent.token) was left
+/// behind on every uninstall. It must go through `cmd.exe /d /c`.
 pub fn programdata_cleanup_commands() -> Vec<Vec<String>> {
     vec![vec![
+        "cmd.exe".to_string(),
+        "/d".to_string(),
+        "/c".to_string(),
         "rmdir".to_string(),
         "/s".to_string(),
         "/q".to_string(),
@@ -216,29 +233,37 @@ pub fn apply_programdata_acl() {}
 #[cfg(windows)]
 pub fn remove_programdata_dir() {
     use tracing::{info, warn};
-    for cmd in programdata_cleanup_commands() {
-        let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
-        match std::process::Command::new(argv[0])
-            .args(&argv[1..])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                info!("D5: removed {WINDOWS_SYSTEM_CONFIG_DIR}")
-            }
-            Ok(out) => warn!(
-                "D5: {WINDOWS_SYSTEM_CONFIG_DIR} removal returned exit {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => warn!(
-                "D5: failed to spawn {rmdir} for cleanup: {e}",
-                rmdir = argv[0]
-            ),
+    let dir = std::path::Path::new(WINDOWS_SYSTEM_CONFIG_DIR);
+    // Prefer the std API; fall back to cmd's rmdir (handles some ACL edge
+    // cases std can't, e.g. read-only attributes set by icacls-era tools).
+    for attempt in 0..3 {
+        if !dir.exists() {
+            info!("D5: {WINDOWS_SYSTEM_CONFIG_DIR} removed");
+            return;
         }
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if std::fs::remove_dir_all(dir).is_ok() {
+            continue;
+        }
+        for cmd in programdata_cleanup_commands() {
+            let argv: Vec<&str> = cmd.iter().map(String::as_str).collect();
+            if let Err(e) = std::process::Command::new(argv[0])
+                .args(&argv[1..])
+                .output()
+            {
+                warn!("D5: failed to spawn {} for cleanup: {e}", argv[0]);
+            }
+        }
+    }
+    if dir.exists() {
+        warn!("D5: {WINDOWS_SYSTEM_CONFIG_DIR} could not be fully removed (files still in use?)");
+    } else {
+        info!("D5: {WINDOWS_SYSTEM_CONFIG_DIR} removed");
     }
 }
 
-/// No-op off Windows.
 #[cfg(not(windows))]
 pub fn remove_programdata_dir() {}
 
@@ -310,7 +335,10 @@ mod tests {
         let cmds = programdata_cleanup_commands();
         assert_eq!(cmds.len(), 1, "exactly one rmdir invocation");
         let cmd = &cmds[0];
-        assert_eq!(cmd[0], "rmdir");
+        // rmdir is a cmd.exe built-in: it can only run via cmd.exe /c.
+        assert_eq!(cmd[0], "cmd.exe");
+        assert!(cmd.contains(&"/c".to_string()));
+        assert!(cmd.contains(&"rmdir".to_string()));
         assert!(cmd.contains(&"/s".to_string()), "recursive");
         assert!(cmd.contains(&"/q".to_string()), "quiet, no prompts");
         assert_eq!(cmd[cmd.len() - 1], WINDOWS_SYSTEM_CONFIG_DIR);

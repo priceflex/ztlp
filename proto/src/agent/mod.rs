@@ -32,6 +32,9 @@ pub mod dns_setup;
 pub mod dns_setup_windows;
 pub mod domain_map;
 pub mod hardware_key;
+// Linux system-service token sharing (PR #112 review fix). Pure planners
+// compile everywhere; the executor is cfg(target_os = "linux").
+pub mod linux_daemon;
 pub mod local_tls;
 // macOS root-LaunchDaemon planning (pure) + executor. Compiles on every
 // platform so the plan/plist tests run in Linux CI; only invoked from

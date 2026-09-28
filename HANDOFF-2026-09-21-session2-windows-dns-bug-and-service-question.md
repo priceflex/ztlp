@@ -199,7 +199,7 @@ service-first work replaces the `runas` call path.
 
 - SSH: `ssh trs@10.170.3.207` → `cmd.exe`; wrap PS as
   `powershell -NoProfile -Command "..."`. Authoritative for stdout/state.
-- Automation agent: `http://10.170.3.207:7777`, header `X-Auth: trs-uiagent-2026`.
+- Automation agent: `http://10.170.3.207:7777`, header `X-Auth: <trs-uiagent key, see /home/trs/7 - How to use ai computer.md>`.
   `/health /focus /screenshot /click /key /ps`. Build `/ps` JSON with a real
   encoder (`json.dumps`), never hand-escaped shell strings.
 - Cross-compile: `cd desktop/src-tauri && cargo build --release --target

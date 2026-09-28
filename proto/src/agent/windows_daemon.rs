@@ -237,23 +237,29 @@ fn acl_token_for_console_user(path: &std::path::Path) {
 /// returning `None` when nobody is at the console).
 #[cfg(windows)]
 fn console_user_name() -> Option<String> {
+    // NOTE: do NOT gate on `output.status.success()`. On 10.170.3.207
+    // (2026-09-28) `query user` exits 1 while still printing the Active
+    // console row, so the old success() check returned None, the service
+    // skipped the agent.token ACL grant, and the non-elevated GUI could not
+    // read the token ("Service check: unauthorized" in the app).
     let output = std::process::Command::new("query")
         .arg("user")
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // `query user` header: "USERNAME  SESSIONNAME  ID  STATE ..."; data
-    // rows start with the username (optionally prefixed with '>' marking
-    // the current session). Take the first Active session's username.
+    parse_query_user_active(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Pure parser for `query user` output: username of the first Active
+/// session (leading `>` current-session marker stripped). Platform-
+/// independent so it is unit-tested in Linux CI.
+pub fn parse_query_user_active(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .skip(1)
         .find(|line| line.contains("Active"))
         .and_then(|line| {
-            line.trim_start_matches('>')
+            line.trim()
+                .trim_start_matches('>')
                 .split_whitespace()
                 .next()
                 .map(str::to_string)
@@ -378,6 +384,18 @@ pub fn is_windows_service() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_query_user_active_reads_console_row() {
+        // Captured live from 10.170.3.207 (query user exit code was 1).
+        let out = " USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\r\n trs                   console             1  Active   19+19:22  7/7/2026 1:30 AM\r\n";
+        assert_eq!(parse_query_user_active(out).as_deref(), Some("trs"));
+        let cur = " USERNAME  SESSIONNAME  ID  STATE\n>steven    console      1  Active\n";
+        assert_eq!(parse_query_user_active(cur).as_deref(), Some("steven"));
+        let none = " USERNAME  SESSIONNAME  ID  STATE\n bob  rdp-tcp#1  2  Disc\n";
+        assert_eq!(parse_query_user_active(none), None);
+        assert_eq!(parse_query_user_active(""), None);
+    }
 
     #[test]
     fn windows_system_ztlp_dir_is_programdata_ztlp() {

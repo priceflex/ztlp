@@ -591,12 +591,25 @@ impl CliConfigForMerge {
     }
 }
 
-/// Expand `~` prefix to the user's home directory.
+/// Expand `~` prefix to the ZTLP state root, NOT the raw OS home dir.
+///
+/// D5 live-test fix (2026-09-21): this used to call `dirs::home_dir()`
+/// directly, completely bypassing `ztlp_state_dir()`'s `ZTLP_HOME` check
+/// (D1). Effect: `AgentConfig::default().identity_path()` — what
+/// `run_agent_lifecycle`'s pre-standby check and `run_unenrolled_standby`'s
+/// poll loop use to detect "has enrollment finished yet?" — resolved to
+/// `C:\Windows\System32\config\systemprofile\.ztlp\identity.json` under
+/// the Windows service (LocalSystem's real home dir), while `ztlp setup`'s
+/// re-exec subprocess (inheriting `ZTLP_HOME`, correctly routed through
+/// `ztlp_state_dir()` everywhere else) wrote the real file to
+/// `C:\ProgramData\ZTLP\.ztlp\identity.json`. The standby loop polled a
+/// path the file could never appear at and never handed over to the full
+/// daemon — reproduced live on 10.170.3.207: `enroll` returned
+/// `tls_provisioned: true` (the subprocess genuinely succeeded) but
+/// `setup_status` kept reporting `standby: true, enrolled: false` forever.
 fn expand_tilde(path: &str) -> PathBuf {
     if path.starts_with("~/") || path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
-        }
+        return ztlp_state_dir().join(&path[2..]);
     }
     PathBuf::from(path)
 }
@@ -743,9 +756,46 @@ pub fn vip_state_path() -> PathBuf {
 /// This function intentionally never errors: callers (CLI / desktop IPC)
 /// already get a useful connect-error from `send_command` if the daemon
 /// is not running at all.
+///
+/// D5 live-test fix (2026-09-21): on Windows, a NON-service caller (the
+/// `ztlp` CLI run interactively, the desktop GUI) has no `ZTLP_HOME` set,
+/// so `default_token_path()` resolves under `%USERPROFILE%\.ztlp\` — a
+/// file the ZtlpAgent service (which DOES have `ZTLP_HOME` pinned to
+/// `C:\ProgramData\ZTLP`, D1) never writes. Without this fallback, EVERY
+/// non-service Windows caller reports `agent token not found` even with
+/// the service running and healthy — reproduced live on 10.170.3.207
+/// (`ztlp.exe agent status` against a freshly-installed, running
+/// ZtlpAgent service). Try the service's fixed path first when it
+/// differs from our own, then fall back to the (already-checked) own
+/// path — this covers a foreground `ztlp.exe agent start` dev install
+/// where there is no service and the CLI's own path is genuinely right.
 pub fn load_agent_token() -> Option<String> {
     let path = default_token_path();
-    let contents = std::fs::read_to_string(&path).ok()?;
+    // 2026-09-28 live fix: the own path used to be tried FIRST, which
+    // contradicted the doc above. On a box that ever ran a user-context
+    // agent, %USERPROFILE%\.ztlp\agent.token exists but is STALE, so the
+    // GUI sent the wrong bearer to the service and every call came back
+    // `unauthorized` (UI stuck on "Service: Not installed"). Service path
+    // first, own path as the fallback.
+    #[cfg(target_os = "windows")]
+    let candidates = if std::env::var(crate::agent::windows_daemon::ZTLP_HOME_ENV_VAR).is_ok() {
+        vec![path]
+    } else {
+        crate::agent::windows_daemon::gui_token_candidates(path)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let candidates = vec![path];
+    load_first_token(&candidates)
+}
+
+/// First non-empty token among `candidates`, in order. Pure over the
+/// filesystem so the precedence rule is unit-testable on every platform.
+pub fn load_first_token(candidates: &[PathBuf]) -> Option<String> {
+    candidates.iter().find_map(|c| read_token_file(c))
+}
+
+fn read_token_file(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
     let trimmed = contents.trim();
     if trimmed.is_empty() {
         None
@@ -785,6 +835,40 @@ mod tests {
         // environment (never ".", since a real home dir exists in CI/dev).
         assert_ne!(dir, PathBuf::from("."));
         assert_eq!(dir, dirs::home_dir().unwrap());
+    }
+
+    #[test]
+    fn load_first_token_prefers_earlier_candidate_even_if_later_exists() {
+        // Regression (2026-09-28): a stale user-profile token must NOT win
+        // over the service token that comes first in the candidate list.
+        let dir = std::env::temp_dir().join(format!("ztlp-tok-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let service = dir.join("service.token");
+        let stale = dir.join("stale.token");
+        std::fs::write(&service, "servicetoken\n").unwrap();
+        std::fs::write(&stale, "staletoken").unwrap();
+        assert_eq!(
+            load_first_token(&[service.clone(), stale.clone()]).as_deref(),
+            Some("servicetoken")
+        );
+        // Missing/empty first candidate falls through to the next.
+        std::fs::write(&service, "  \n").unwrap();
+        assert_eq!(
+            load_first_token(&[service, stale]).as_deref(),
+            Some("staletoken")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gui_token_candidates_put_service_path_first() {
+        let own = PathBuf::from(r"C:\Users\trs\.ztlp\agent.token");
+        let c = crate::agent::windows_daemon::gui_token_candidates(own.clone());
+        assert_eq!(
+            c[0],
+            crate::agent::windows_daemon::windows_system_token_path()
+        );
+        assert_eq!(c.last(), Some(&own));
     }
 
     #[test]
@@ -866,6 +950,28 @@ relay_secret = "06984504bf07f1cd8462fd9909dcd39cd3e04beb96100a3bbe45eb6113025103
     fn test_expand_tilde_no_tilde() {
         let result = expand_tilde("/etc/ztlp/identity.json");
         assert_eq!(result, PathBuf::from("/etc/ztlp/identity.json"));
+    }
+
+    #[test]
+    fn expand_tilde_honors_ztlp_home_override() {
+        // D5 live-test fix (2026-09-21): expand_tilde must resolve `~`
+        // through ztlp_state_dir() (ZTLP_HOME-aware), not dirs::home_dir()
+        // directly — otherwise AgentConfig::default().identity_path()
+        // disagrees with every OTHER ZTLP_HOME-routed path (config.rs's
+        // own token/vip_state paths, ca_trust.rs, control.rs, ztlp-cli.rs)
+        // about where the Windows service's state actually lives, and the
+        // unenrolled-standby poll loop watches a file that can never
+        // appear. Reproduced live: `enroll` succeeded (tls_provisioned:
+        // true) but `setup_status` stayed `standby: true` forever because
+        // this exact function was watching the wrong directory.
+        let _guard = ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::set_var("ZTLP_HOME", "/tmp/ztlp-expand-tilde-test-marker");
+        let result = expand_tilde("~/.ztlp/identity.json");
+        std::env::remove_var("ZTLP_HOME");
+        assert_eq!(
+            result,
+            PathBuf::from("/tmp/ztlp-expand-tilde-test-marker/.ztlp/identity.json")
+        );
     }
 
     #[test]

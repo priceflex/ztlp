@@ -52,6 +52,15 @@ pub mod vip_pool;
 pub mod windows_daemon;
 pub mod windows_service_install;
 
+/// Install `ring` as the process-level rustls `CryptoProvider` if none is
+/// installed yet. Safe to call any number of times from any host binary.
+/// Returns `true` once a provider is in place (either just installed or
+/// already present).
+pub fn ensure_rustls_crypto_provider() -> bool {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    rustls::crypto::CryptoProvider::get_default().is_some()
+}
+
 /// Shared standby-then-full-daemon startup sequence (Task B1 of the
 /// Windows/Linux desktop parity plan,
 /// docs/plans/2026-09-21-windows-linux-desktop-parity.md).
@@ -77,6 +86,18 @@ pub async fn run_agent_lifecycle(
     foreground: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use config::AgentConfig;
+
+    // Bug D (HANDOFF-2026-09-21-session5): both `ring` and `aws-lc-rs` are
+    // in the dep tree, so rustls cannot auto-select a process-level
+    // CryptoProvider and PANICS the first time local TLS builds a config
+    // ("Could not automatically determine the process-level
+    // CryptoProvider"). The CLI's `main()` installs ring up front, so a
+    // foreground `ztlp agent start` never hit it — but `ztlp-winsvc.exe`
+    // has its own `main()` and never did. Caught live 2026-09-28 by the
+    // winsvc panic hook, right after post-enroll handover
+    // (tls.enabled=true). Installing here covers EVERY host of the shared
+    // lifecycle. Idempotent: `Err` just means one is already installed.
+    ensure_rustls_crypto_provider();
 
     // Check if already running.
     if let Some(pid) = daemon::get_agent_pid() {
@@ -123,16 +144,41 @@ pub async fn run_agent_lifecycle(
         // (the file `setup` DOES write) whenever agent.toml leaves those
         // fields at their bare default — see agent::config for the full
         // rationale and unit tests.
-        let agent_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("agent.toml"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/agent.toml"));
-        let cli_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("config.toml"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/config.toml"));
+        // D5 live-test fix (2026-09-21): must resolve through
+        // `config::ztlp_state_dir()` (ZTLP_HOME-aware, D1), not
+        // dirs::home_dir() directly — this is the SAME process that just
+        // ran the pre-standby check and (via `ztlp setup`'s subprocess)
+        // wrote agent.toml/config.toml under the Windows service's
+        // ProgramData state dir. Reproduced live on 10.170.3.207: a fresh
+        // enroll wrote everything correctly to
+        // C:\ProgramData\ZTLP\.ztlp\{agent,config}.toml, `enroll` reported
+        // tls_provisioned: true, standby handed over — and then the
+        // service crashed (exit 1067) because THIS code loaded
+        // agent.toml/config.toml from LocalSystem's real profile dir
+        // instead, where neither file exists.
+        let state_dir = config::ztlp_state_dir();
+        let agent_path = state_dir.join(".ztlp").join("agent.toml");
+        let cli_path = state_dir.join(".ztlp").join("config.toml");
         AgentConfig::load_merged(&agent_path, &cli_path)
     };
 
     daemon::run_daemon(&config, foreground)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+}
+
+#[cfg(test)]
+mod crypto_provider_tests {
+    /// Bug D regression: the agent lifecycle must leave a process-level
+    /// rustls CryptoProvider installed. Without it, the first
+    /// `ServerConfig::builder()` in local TLS panics under any host binary
+    /// whose own main() didn't install one (the Windows service).
+    #[test]
+    fn ensure_rustls_crypto_provider_installs_and_is_idempotent() {
+        assert!(super::ensure_rustls_crypto_provider());
+        assert!(super::ensure_rustls_crypto_provider());
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        // The exact call that panicked live must now succeed.
+        let _ = rustls::ServerConfig::builder().with_no_client_auth();
+    }
 }

@@ -317,12 +317,7 @@ mod tests {
     fn process_enrollment_rejects_non_enroll_uri_without_touching_the_network() {
         // No fake agent spawned at all — if this reached the network it
         // would fail to connect and return a DIFFERENT error message.
-        let result = process_enrollment_at(
-            "192.0.2.1:4433",
-            "not-an-enroll-uri",
-            None,
-            None,
-        );
+        let result = process_enrollment_at("192.0.2.1:4433", "not-an-enroll-uri", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid enrollment URI"));
     }

@@ -682,12 +682,20 @@ pub async fn maybe_wrap_tls(
 
 // ─── Utility ────────────────────────────────────────────────────────────────
 
-/// Expand `~` prefix to the user's home directory.
+/// Expand `~` prefix to the ZTLP state root, NOT the raw OS home dir.
+///
+/// D5 live-test fix (2026-09-21): this duplicated `config.rs`'s
+/// `expand_tilde` and had the exact same bug — calling `dirs::home_dir()`
+/// directly bypasses `ztlp_state_dir()`'s `ZTLP_HOME` check (D1).
+/// Reproduced live on 10.170.3.207: a freshly-enrolled Windows service
+/// (identity/config/CA all correctly under `C:\ProgramData\ZTLP\.ztlp`)
+/// logged `local TLS: enabled but no certs found in
+/// C:\Users\trs\.ztlp/certs` — the default `cert_dir` (`~/.ztlp/certs`)
+/// resolved through THIS function, landing in the interactive user's
+/// profile instead of the service's own ProgramData tree.
 fn expand_tilde(path: &str) -> PathBuf {
     if path.starts_with("~/") || path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
-        }
+        return crate::agent::config::ztlp_state_dir().join(&path[2..]);
     }
     PathBuf::from(path)
 }
@@ -933,6 +941,22 @@ enabled = false
     fn test_expand_tilde_no_tilde() {
         let result = expand_tilde("/etc/ztlp/certs");
         assert_eq!(result, PathBuf::from("/etc/ztlp/certs"));
+    }
+
+    #[test]
+    fn expand_tilde_honors_ztlp_home_override() {
+        // D5 live-test fix (2026-09-21): must resolve `~` through
+        // ztlp_state_dir(), not dirs::home_dir() directly — see the
+        // matching test + doc comment in agent::config for the live
+        // symptom (TLS cert dir landed in the wrong profile entirely).
+        let _guard = crate::agent::config::ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        std::env::set_var("ZTLP_HOME", "/tmp/ztlp-local-tls-expand-tilde-test-marker");
+        let result = expand_tilde("~/.ztlp/certs");
+        std::env::remove_var("ZTLP_HOME");
+        assert_eq!(
+            result,
+            PathBuf::from("/tmp/ztlp-local-tls-expand-tilde-test-marker/.ztlp/certs")
+        );
     }
 
     // ── Mint rate limiter tests ─────────────────────────────────────────

@@ -139,14 +139,22 @@ const HomeComponent = (() => {
       ]);
       applyStatus(status, identity);
     } catch (e) {
-      applyStatus({ daemon_running: false }, null);
+      applyStatus({ daemon_running: false, daemon_error: `setup_status invoke failed: ${e}` }, null);
     }
   }
 
   // Recompute + repaint readiness from a fresh `setup_status` snapshot.
   // `identity` is optional — when omitted we keep the current zone label.
+  let lastDaemonError = null;
   function applyStatus(status, identity) {
     const s = status || { daemon_running: false };
+    // Surface WHY the service looks down (deduped) instead of silently
+    // showing "Not installed".
+    const err = s.daemon_running ? null : (s.daemon_error || null);
+    if (err && err !== lastDaemonError && typeof LiveLog !== 'undefined' && LiveLog.fail) {
+      LiveLog.fail(`Service check: ${err}`);
+    }
+    lastDaemonError = err;
     currentZone = s.zone || (identity && identity.zone_name) || currentZone;
 
     const serviceState = s.daemon_running ? 'running' : 'not_installed';

@@ -594,6 +594,52 @@ pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, St
     Ok(EnrollExecPlan { args })
 }
 
+/// Resolve the binary `cmd_enroll` should re-exec to run `ztlp setup`.
+///
+/// D5 live-test fix (2026-09-21): `cmd_enroll` used to assume
+/// `std::env::current_exe()` IS the `ztlp` CLI binary and re-exec it
+/// directly. That's true for the CLI's own `ztlp agent start` (foreground
+/// daemon) but FALSE for the Windows service host: the SCM launches
+/// `ztlp-winsvc.exe`, whose `main()` is `service_dispatcher::start(...)`
+/// only — it has no `setup` subcommand and re-execing it as a plain
+/// child process fails immediately with Windows error 1063 ("The service
+/// process could not connect to the service controller"). Reproduced
+/// live on 10.170.3.207: a real `enroll` control command against a
+/// freshly-installed, running `ZtlpAgent` service returned exactly that
+/// error instead of running `ztlp setup`.
+///
+/// Fix: if the running binary's file stem is `ztlp-winsvc` (case-
+/// insensitive, extension-agnostic — covers `ztlp-winsvc.exe` on Windows
+/// and a hypothetical extensionless build), resolve the sibling `ztlp`
+/// binary in the same directory instead (same install layout `agent
+/// install`/`windows_service_install.rs` already assumes: `ztlp.exe` and
+/// `ztlp-winsvc.exe` are installed side by side). Otherwise, `current_exe`
+/// unmodified is correct (the CLI's own foreground `agent start`, or any
+/// non-Windows daemon binary, which is always `ztlp`/`ztlp-node` itself).
+///
+/// Pure path logic — no filesystem access, no existence check (the
+/// subprocess spawn itself surfaces a clear "no such file" error if the
+/// sibling genuinely isn't there, same as any other exec failure).
+pub fn resolve_enroll_exec_path(current_exe: &std::path::Path) -> std::path::PathBuf {
+    let is_winsvc = current_exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("ztlp-winsvc"))
+        .unwrap_or(false);
+    if !is_winsvc {
+        return current_exe.to_path_buf();
+    }
+    let ext = current_exe.extension();
+    let sibling_name = match ext {
+        Some(e) => format!("ztlp.{}", e.to_string_lossy()),
+        None => "ztlp".to_string(),
+    };
+    match current_exe.parent() {
+        Some(dir) => dir.join(sibling_name),
+        None => std::path::PathBuf::from(sibling_name),
+    }
+}
+
 /// `"enroll"` control command: have the daemon enroll ITSELF (its own
 /// identity, under its own HOME) by re-execing `ztlp setup --token ...
 /// --yes` via its own already-running binary.
@@ -612,7 +658,7 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
     };
 
     let exe = match std::env::current_exe() {
-        Ok(p) => p,
+        Ok(p) => resolve_enroll_exec_path(&p),
         Err(e) => return ControlResponse::err(format!("cannot resolve own binary path: {}", e)),
     };
 
@@ -1188,6 +1234,81 @@ impl AgentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── resolve_enroll_exec_path() (D5 live-test fix, 2026-09-21) ───────
+    //
+    // Real bug found live on 10.170.3.207: a real `enroll` control command
+    // against a freshly-installed, running ZtlpAgent service returned
+    // Windows error 1063 ("service process could not connect to the
+    // service controller") instead of running `ztlp setup`. Root cause:
+    // cmd_enroll re-execs current_exe() unmodified, but current_exe()
+    // under the SCM is ztlp-winsvc.exe, which has no CLI subcommands at
+    // all — only windows_service::service_dispatcher::start().
+
+    #[test]
+    fn resolve_enroll_exec_path_redirects_winsvc_to_sibling_ztlp_exe() {
+        // Forward slashes, not backslashes: std::path::Path only treats
+        // the OS's native separator specially, and this test must run
+        // (and mean something) on Linux CI too, not just real Windows.
+        // Windows itself accepts forward slashes identically, so this
+        // exercises the exact same component-splitting logic that runs
+        // against a real `C:\...\ztlp-winsvc.exe` in production.
+        let winsvc = std::path::Path::new("C:/Users/trs/AppData/Local/ZTLP/ztlp-winsvc.exe");
+        assert_eq!(
+            resolve_enroll_exec_path(winsvc),
+            std::path::PathBuf::from("C:/Users/trs/AppData/Local/ZTLP/ztlp.exe")
+        );
+    }
+
+    #[test]
+    fn resolve_enroll_exec_path_is_case_insensitive_on_stem() {
+        // Defensive: Windows filesystems are case-insensitive, and we
+        // shouldn't silently fail this redirect just because something
+        // upstream normalized the case differently.
+        let winsvc = std::path::Path::new("C:/ZTLP/ZTLP-WinSvc.exe");
+        assert_eq!(
+            resolve_enroll_exec_path(winsvc),
+            std::path::PathBuf::from("C:/ZTLP/ztlp.exe")
+        );
+    }
+
+    #[test]
+    fn resolve_enroll_exec_path_leaves_non_winsvc_binaries_unchanged() {
+        // The CLI's own foreground `ztlp agent start` — current_exe() IS
+        // already the right binary to re-exec, must not be redirected.
+        let cli = std::path::Path::new("C:/Users/trs/AppData/Local/ZTLP/ztlp.exe");
+        assert_eq!(resolve_enroll_exec_path(cli), cli.to_path_buf());
+    }
+
+    #[test]
+    fn resolve_enroll_exec_path_leaves_unix_daemon_binaries_unchanged() {
+        // Linux/macOS: the daemon binary IS ztlp (or ztlp-node); there is
+        // no winsvc concept on those platforms at all.
+        let unix = std::path::Path::new("/usr/local/bin/ztlp");
+        assert_eq!(resolve_enroll_exec_path(unix), unix.to_path_buf());
+    }
+
+    #[test]
+    fn resolve_enroll_exec_path_handles_extensionless_winsvc() {
+        // Hypothetical/defensive: an extensionless build (e.g. renamed by
+        // an installer) should still redirect to an extensionless sibling,
+        // not silently produce a wrong path with a stray leftover
+        // extension inherited from the wrong source.
+        let winsvc = std::path::Path::new("/opt/ztlp/ztlp-winsvc");
+        assert_eq!(
+            resolve_enroll_exec_path(winsvc),
+            std::path::PathBuf::from("/opt/ztlp/ztlp")
+        );
+    }
+
+    #[test]
+    fn resolve_enroll_exec_path_falls_back_to_bare_name_with_no_parent_dir() {
+        let winsvc = std::path::Path::new("ztlp-winsvc.exe");
+        assert_eq!(
+            resolve_enroll_exec_path(winsvc),
+            std::path::PathBuf::from("ztlp.exe")
+        );
+    }
 
     // ── read_zone_from_config (2026-08-30) ─────────────────────────────
     //

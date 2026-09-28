@@ -52,6 +52,11 @@ pub struct SetupStatusUi {
     pub zone: String,
     pub ca_root_pem_path: String,
     pub identity_path: String,
+    /// Why the daemon was judged unreachable (IPC connect/read/auth/parse
+    /// error). Previously swallowed, which made "Service: Not installed"
+    /// undiagnosable when the service was actually running (2026-09-28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_error: Option<String>,
 }
 
 /// Build a `std::process::Command` for the ztlp binary, hiding the
@@ -86,25 +91,27 @@ fn ztlp_cmd() -> Command {
 /// daemon still fails both attempts fast (OS RST) and returns the default.
 #[tauri::command]
 pub fn setup_status() -> SetupStatusUi {
+    let mut last_err = String::new();
     for attempt in 0..2 {
         match ipc::ipc_request("setup_status", None) {
-            Ok(v) => return serde_json::from_value(v).unwrap_or_default(),
-            Err(_) if attempt == 0 => {
-                // brief backoff, then retry once
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                continue;
-            }
-            Err(_) => {
-                return SetupStatusUi {
-                    daemon_running: false,
-                    ..Default::default()
+            Ok(v) => match serde_json::from_value::<SetupStatusUi>(v) {
+                Ok(s) => return s,
+                Err(e) => {
+                    last_err = format!("setup_status reply did not parse: {e}");
+                    break;
+                }
+            },
+            Err(e) => {
+                last_err = e;
+                if attempt == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                 }
             }
         }
     }
-    // Unreachable (the loop always returns), but keep the compiler happy.
     SetupStatusUi {
         daemon_running: false,
+        daemon_error: Some(last_err),
         ..Default::default()
     }
 }

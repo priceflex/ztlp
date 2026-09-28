@@ -254,20 +254,22 @@ pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
 /// B4 (HANDOFF-2026-09-20): should a daemon with no identity file wait in
 /// UNENROLLED STANDBY instead of exiting 1?
 ///
-/// * Only on macOS — the SMAppService root LaunchDaemon is started the
-///   instant the GUI registers it (RunAtLoad), before any enrollment has
-///   happened, and the GUI then needs the control socket UP to deliver the
-///   `enroll` command. Windows/Linux keep the historical "exit 1, run
-///   `ztlp setup`" behaviour.
+/// Cross-platform on every OS (was macOS-only until the Windows/Linux parity
+/// work — see docs/plans/2026-09-21-windows-linux-desktop-parity.md Task A2):
+/// a fresh Windows Service / systemd unit / macOS LaunchDaemon can all be
+/// started before enrollment ever happens, and the GUI/desktop app in every
+/// case needs the control socket UP to deliver the `enroll` command. Windows
+/// and Linux each need their OWN standby wiring at the call site (a real
+/// background service to host it) — see Phase A/B of that plan; this
+/// function only controls the DECISION, not whether a persistent process
+/// exists yet to make the decision inside.
+///
 /// * Only when the file is ABSENT, or when it is an ORPHAN of a failed
 ///   `ztlp setup` (identity.json without a config.toml zone — see
 ///   [`enrollment_is_complete`]); the orphan is removed so the next Enroll
 ///   is not refused as "already enrolled". A present, COMPLETE but
 ///   unparseable identity is a real error and must still fail loudly.
 pub fn should_enter_unenrolled_standby(identity_path: &Path) -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
     if !identity_path.exists() {
         return true;
     }
@@ -297,12 +299,20 @@ pub fn enrollment_is_complete(identity_path: &Path) -> bool {
     if !identity_path.exists() {
         return false;
     }
-    let Some(dir) = identity_path.parent() else { return false };
-    let Ok(cfg) = std::fs::read_to_string(dir.join("config.toml")) else { return false };
+    let Some(dir) = identity_path.parent() else {
+        return false;
+    };
+    let Ok(cfg) = std::fs::read_to_string(dir.join("config.toml")) else {
+        return false;
+    };
     cfg.lines().any(|l| {
         let l = l.trim();
-        if !l.starts_with("zone") { return false; }
-        let Some((_, v)) = l.split_once('=') else { return false };
+        if !l.starts_with("zone") {
+            return false;
+        }
+        let Some((_, v)) = l.split_once('=') else {
+            return false;
+        };
         let v = v.trim().trim_matches('"').trim_matches('\'');
         !v.is_empty()
     })
@@ -315,7 +325,10 @@ pub fn enrollment_is_complete(identity_path: &Path) -> bool {
 pub fn remove_orphan_identity(identity_path: &Path) -> bool {
     if identity_path.exists() && !enrollment_is_complete(identity_path) {
         if std::fs::remove_file(identity_path).is_ok() {
-            warn!("removed orphan {} left by a failed enrollment", identity_path.display());
+            warn!(
+                "removed orphan {} left by a failed enrollment",
+                identity_path.display()
+            );
             return true;
         }
     }
@@ -345,6 +358,19 @@ pub async fn run_unenrolled_standby(
     #[cfg(target_os = "macos")]
     if crate::agent::macos_daemon::is_root() {
         use crate::agent::macos_daemon::MacosAction;
+        // Only macOS needs this: 127.100.255.1 is outside macOS's default
+        // loopback (only 127.0.0.1 is auto-configured), so the control
+        // socket bind fails until `ifconfig lo0 alias 127.100.255.1 up` (or
+        // this root-daemon startup action) runs. Linux needs NO alias here —
+        // its loopback covers the full 127.0.0.0/8 range by default;
+        // confirmed live 2026-09-21 (Task A4): a fresh agent on this Linux
+        // box bound and answered on 127.100.255.1:4433 with zero extra setup
+        // (raw TCP connect + real `{"ok":false,"error":"unauthorized"}`
+        // protocol response, not a connection refusal). Windows also
+        // generally allows binding anywhere in 127.0.0.0/8 without an
+        // explicit alias (same as Linux) — not yet independently verified
+        // live on that OS as of this task, but there's no evidence of a
+        // Windows-specific loopback restriction in this codebase either.
         if let Some(ip) = ipc_addr
             .rsplit_once(':')
             .and_then(|(h, _)| h.parse::<std::net::Ipv4Addr>().ok())
@@ -354,9 +380,12 @@ pub async fn run_unenrolled_standby(
         }
         MacosAction::TokenGuiReadable(token_path.to_path_buf()).execute();
     }
-    let listener = TcpListener::bind(ipc_addr)
-        .await
-        .map_err(|e| format!("failed to bind control socket {} (standby): {}", ipc_addr, e))?;
+    let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
+        format!(
+            "failed to bind control socket {} (standby): {}",
+            ipc_addr, e
+        )
+    })?;
     warn!(
         "no identity at {} — entering UNENROLLED STANDBY: control socket on {} answers \
          status/enroll only; waiting for enrollment",
@@ -435,7 +464,9 @@ pub async fn run_daemon(
         if !proceed {
             return Ok(());
         }
-        return Err("enrolled during standby: restart the daemon to load the new configuration".into());
+        return Err(
+            "enrolled during standby: restart the daemon to load the new configuration".into(),
+        );
     }
     let identity = NodeIdentity::load(&identity_path).map_err(|e| {
         format!(
@@ -714,6 +745,34 @@ pub async fn run_daemon(
         crate::agent::macos_daemon::run_startup_post_bind(&i);
     }
 
+    // ── Windows service startup (CA trust, NRPT, token ACL) — Phase D
+    //     plan D3 ─────────────────────────────────────────────────────────
+    // Needs the EFFECTIVE bound DNS port (hence after the bind) and only
+    // runs when this is actually the LocalSystem ZtlpAgent service (D1
+    // sets ZTLP_HOME unconditionally at service startup; a foreground
+    // `ztlp.exe agent start` for dev/debug never has it set and skips
+    // this entirely, preserving pre-D3 dev behavior byte-for-byte).
+    // Best-effort, log-and-continue — mirrors the macOS phase-2 tolerance:
+    // one failed privileged step must not crash the daemon, the checklist
+    // surfaces failures via `setup_status` instead.
+    #[cfg(target_os = "windows")]
+    {
+        if crate::agent::windows_daemon::is_windows_service() {
+            let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
+                is_service: true,
+                dns_listen: effective_dns_listen.clone(),
+                ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
+                ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
+                ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
+                token_path: config::default_token_path(),
+                zones: config.dns.zones.clone(),
+            };
+            for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
+                action.execute();
+            }
+        }
+    }
+
     // Agent state for control socket
     let agent_state = Arc::new(AgentState {
         dns_state: dns_state.clone(),
@@ -768,9 +827,9 @@ pub async fn run_daemon(
         // `~/.ztlp/ca/intermediate.{pem,key}`) we silently fall back
         // to disk-only mode via the plain `new` constructor — the wizard
         // surface step "CA initialized?" tells the user how to fix that.
-        let ca_dir = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("ca"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/ca"));
+        let ca_dir = crate::agent::config::ztlp_state_dir()
+            .join(".ztlp")
+            .join("ca");
         let intermediate_pem = ca_dir.join("intermediate.pem");
         let intermediate_key = ca_dir.join("intermediate.key");
         let resolver = if intermediate_pem.exists() && intermediate_key.exists() {
@@ -2955,14 +3014,13 @@ mod unenrolled_standby_tests {
     }
 
     #[test]
-    fn missing_identity_is_standby_only_on_macos_and_only_when_absent() {
+    fn missing_identity_is_standby_on_every_platform() {
         let home = tmp_home("decide");
         let missing = home.join(".ztlp").join("identity.json");
-        // Absent file: standby iff macOS.
-        assert_eq!(
+        // Absent file: standby on every platform now (was macOS-only).
+        assert!(
             should_enter_unenrolled_standby(&missing),
-            cfg!(target_os = "macos"),
-            "absent identity -> standby decision must follow the macOS cfg gate"
+            "a fresh service/unit with no identity must enter standby on every platform"
         );
         // Corrupt (present but unparseable) file WITH a complete config: NEVER
         // standby — that is a real error the operator must see. (Without a
@@ -2971,7 +3029,25 @@ mod unenrolled_standby_tests {
         std::fs::write(&missing, "not json").unwrap();
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
         assert!(!should_enter_unenrolled_standby(&missing));
-        assert!(missing.exists(), "complete enrollment must never be deleted");
+        assert!(
+            missing.exists(),
+            "complete enrollment must never be deleted"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn standby_decision_is_now_cross_platform_not_macos_only() {
+        let home = tmp_home("crossplat");
+        let missing = home.join(".ztlp").join("identity.json");
+        // Previously this only returned true on macOS. It must now return true
+        // on Linux and Windows too (still false when identity.json is present
+        // and complete — see missing_identity_is_standby_on_every_platform for
+        // that half, which stays correct unchanged).
+        assert!(
+            should_enter_unenrolled_standby(&missing),
+            "a fresh Linux/Windows service with no identity must enter standby too"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2983,12 +3059,18 @@ mod unenrolled_standby_tests {
         std::fs::write(&idp, "{}").unwrap();
         // identity.json written by `ztlp setup`, but nothing else yet ->
         // orphan; MUST NOT hand over (this is the live wedge of 2026-09-20).
-        assert!(!standby_may_hand_over(&idp, 0), "identity without config -> stay");
+        assert!(
+            !standby_may_hand_over(&idp, 0),
+            "identity without config -> stay"
+        );
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
         // complete on disk, but the enroll command is still running ca-init
         // -> MUST NOT hand over yet.
         assert!(!standby_may_hand_over(&idp, 1), "enroll in flight -> stay");
-        assert!(standby_may_hand_over(&idp, 0), "identity + config + enroll done -> go");
+        assert!(
+            standby_may_hand_over(&idp, 0),
+            "identity + config + enroll done -> go"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2997,7 +3079,11 @@ mod unenrolled_standby_tests {
         let home = tmp_home("complete");
         let idp = home.join(".ztlp").join("identity.json");
         std::fs::write(&idp, "{}").unwrap();
-        std::fs::write(home.join(".ztlp/config.toml"), "# no zone\nns_server = \"x\"\n").unwrap();
+        std::fs::write(
+            home.join(".ztlp/config.toml"),
+            "# no zone\nns_server = \"x\"\n",
+        )
+        .unwrap();
         assert!(!enrollment_is_complete(&idp));
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"\"\n").unwrap();
         assert!(!enrollment_is_complete(&idp));
@@ -3016,7 +3102,10 @@ mod unenrolled_standby_tests {
         assert!(!idp.exists());
         std::fs::write(&idp, "{}").unwrap();
         std::fs::write(home.join(".ztlp/config.toml"), "zone = \"a.ztlp\"\n").unwrap();
-        assert!(!remove_orphan_identity(&idp), "complete enrollment must never be touched");
+        assert!(
+            !remove_orphan_identity(&idp),
+            "complete enrollment must never be touched"
+        );
         assert!(idp.exists());
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3048,7 +3137,10 @@ mod unenrolled_standby_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let mut stream = stream.expect("standby control socket must come up");
-        let token = std::fs::read_to_string(&token_path).unwrap().trim().to_string();
+        let token = std::fs::read_to_string(&token_path)
+            .unwrap()
+            .trim()
+            .to_string();
         assert_eq!(token.len(), 64, "standby must materialize agent.token");
 
         // `status` answers, and says enrolled:false + standby:true.
@@ -3056,7 +3148,10 @@ mod unenrolled_standby_tests {
         stream.write_all(req.as_bytes()).await.unwrap();
         stream.write_all(b"\n").await.unwrap();
         let mut line = String::new();
-        BufReader::new(&mut stream).read_line(&mut line).await.unwrap();
+        BufReader::new(&mut stream)
+            .read_line(&mut line)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["ok"], true, "status must succeed in standby: {line}");
         assert_eq!(v["data"]["standby"], true);
@@ -3064,7 +3159,9 @@ mod unenrolled_standby_tests {
 
         // Wrong token is still rejected in standby (no auth regression).
         let mut s2 = TcpStream::connect(&ipc_addr).await.unwrap();
-        s2.write_all(br#"{"cmd":"status","token":"nope"}"#).await.unwrap();
+        s2.write_all(br#"{"cmd":"status","token":"nope"}"#)
+            .await
+            .unwrap();
         s2.write_all(b"\n").await.unwrap();
         let mut l2 = String::new();
         BufReader::new(&mut s2).read_line(&mut l2).await.unwrap();
@@ -3074,7 +3171,10 @@ mod unenrolled_standby_tests {
         assert!(!standby.is_finished());
         std::fs::write(&identity_path, "{}").unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(!standby.is_finished(), "identity.json without config.toml must not end standby");
+        assert!(
+            !standby.is_finished(),
+            "identity.json without config.toml must not end standby"
+        );
 
         // Complete enrollment (config.toml with a zone) -> standby returns Ok
         // and releases the port.
@@ -3090,7 +3190,10 @@ mod unenrolled_standby_tests {
         assert!(res.is_ok(), "{res:?}");
         // Port must be free again for the full daemon to bind.
         let rebind = TcpListener::bind(&ipc_addr).await;
-        assert!(rebind.is_ok(), "control port must be released after standby");
+        assert!(
+            rebind.is_ok(),
+            "control port must be released after standby"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 }

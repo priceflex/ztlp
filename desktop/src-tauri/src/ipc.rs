@@ -2,8 +2,19 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
-use ztlp_proto::agent::config::load_agent_token;
 use ztlp_proto::agent::control::{ControlCommand, ControlResponse};
+
+/// Locate the daemon's control-API bearer token from the GUI's (interactive
+/// user's) point of view.
+///
+/// `ztlp_proto::agent::config::load_agent_token()` already handles the
+/// Windows service-vs-caller path split (D1/D5 review fix); this is a
+/// thin wrapper kept so call sites here read as GUI-specific and to
+/// leave room for a future GUI-only override without touching the
+/// shared library function.
+pub fn load_gui_agent_token() -> Option<String> {
+    ztlp_proto::agent::config::load_agent_token()
+}
 
 /// Maximum time to wait for the agent control socket to accept a connection.
 ///
@@ -29,7 +40,57 @@ const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 /// generous while still cheap to recover from.
 const IPC_IO_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Per-command read budget. The 500ms default is right for the cheap 2s
+/// status polls, but two commands do real work inside the daemon:
+///
+/// * `setup_status` shells out on Windows (icacls / query user / NRPT and
+///   cert-store probes) — measured 800-870ms against the ZtlpAgent service
+///   on 10.170.3.207 (2026-09-28). With 500ms the GUI always timed out and
+///   painted "Service: Not installed" over a healthy, enrolled service.
+/// * `enroll` runs `ztlp setup` + ca-init + install-ca-cert as subprocesses
+///   (several seconds, NS round trip).
+pub fn io_timeout_for(cmd: &str) -> Duration {
+    match cmd {
+        "setup_status" => Duration::from_secs(5),
+        "enroll" => Duration::from_secs(120),
+        _ => IPC_IO_TIMEOUT,
+    }
+}
+
 pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Result<Value, String> {
+    let req = ControlCommand {
+        cmd: cmd.to_string(),
+        name,
+        token: load_gui_agent_token(),
+        ..Default::default()
+    };
+    ipc_send(addr, req)
+}
+
+/// Send an `enroll` command to the agent daemon at `addr` — the IPC-based
+/// enrollment path (Task A3): forwards the token straight to the daemon's
+/// control socket instead of a bare `ztlp setup` spawn under the desktop
+/// app's own (interactive-user) HOME.
+pub fn ipc_enroll_at(
+    addr: &str,
+    enrollment_uri: &str,
+    name: Option<String>,
+    relay_secret: Option<String>,
+) -> Result<Value, String> {
+    let req = ControlCommand {
+        cmd: "enroll".to_string(),
+        name,
+        token: load_gui_agent_token(),
+        enrollment_uri: Some(enrollment_uri.to_string()),
+        relay_secret,
+    };
+    ipc_send(addr, req)
+}
+
+/// Shared low-level send/receive over the control socket for any
+/// [`ControlCommand`].
+fn ipc_send(addr: &str, req: ControlCommand) -> Result<Value, String> {
+    let io_timeout = io_timeout_for(&req.cmd);
     // Resolve first so we can use `connect_timeout` (which requires a
     // SocketAddr, not a string). For a literal "127.x:port" this is
     // essentially free, but ToSocketAddrs handles the parse uniformly.
@@ -44,18 +105,11 @@ pub fn ipc_request_with_addr(addr: &str, cmd: &str, name: Option<String>) -> Res
 
     // Apply read/write timeouts so a stuck daemon can't hang the UI thread.
     stream
-        .set_read_timeout(Some(IPC_IO_TIMEOUT))
+        .set_read_timeout(Some(io_timeout))
         .map_err(|e| format!("Failed to set read timeout: {}", e))?;
     stream
-        .set_write_timeout(Some(IPC_IO_TIMEOUT))
+        .set_write_timeout(Some(io_timeout))
         .map_err(|e| format!("Failed to set write timeout: {}", e))?;
-
-    let req = ControlCommand {
-        cmd: cmd.to_string(),
-        name,
-        token: load_agent_token(),
-        ..Default::default()
-    };
 
     let mut req_bytes =
         serde_json::to_vec(&req).map_err(|e| format!("Failed to serialize request: {}", e))?;
@@ -94,6 +148,36 @@ pub fn ipc_request(cmd: &str, name: Option<String>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_timeout_covers_slow_daemon_commands() {
+        // Regression (2026-09-28): setup_status measured ~850ms live.
+        assert!(io_timeout_for("setup_status") >= Duration::from_secs(2));
+        assert!(io_timeout_for("enroll") >= Duration::from_secs(60));
+        assert_eq!(io_timeout_for("status"), IPC_IO_TIMEOUT);
+    }
+
+    #[test]
+    fn slow_setup_status_reply_is_not_a_timeout() {
+        // A daemon that takes 900ms (> the 500ms poll budget) to answer
+        // setup_status must still be read successfully.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let h = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            thread::sleep(Duration::from_millis(900));
+            let mut w = s;
+            let resp = ControlResponse::ok(json!({"daemon_running": true}));
+            writeln!(w, "{}", serde_json::to_string(&resp).unwrap()).unwrap();
+        });
+        let v =
+            ipc_request_with_addr(&addr, "setup_status", None).expect("slow reply must succeed");
+        assert_eq!(v["daemon_running"], json!(true));
+        h.join().unwrap();
+    }
     use serde_json::json;
     use std::net::TcpListener;
     use std::thread;

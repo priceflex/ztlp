@@ -66,8 +66,10 @@ pub enum CertStoreScope {
 
 /// Get the default CA cert path.
 pub fn default_ca_cert_path() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".ztlp").join("ca").join("root.pem")
+    crate::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("ca")
+        .join("root.pem")
 }
 
 /// Install a CA certificate into the system trust store at user scope.
@@ -286,24 +288,6 @@ fn certutil_install_args(scope: CertStoreScope) -> Vec<&'static str> {
     }
 }
 
-/// Build the `certutil` argv for removing a cert at the given scope.
-///
-/// Removal uses the CA's CommonName ("ZTLP Root CA") as the matching key.
-fn certutil_remove_args(scope: CertStoreScope) -> Vec<&'static str> {
-    match scope {
-        CertStoreScope::User => vec!["-delstore", "Root", "ZTLP Root CA"],
-        CertStoreScope::Machine => vec!["-delstore", "-enterprise", "Root", "ZTLP Root CA"],
-    }
-}
-
-/// Build the `certutil` argv for checking whether the cert is installed.
-fn certutil_check_args(scope: CertStoreScope) -> Vec<&'static str> {
-    match scope {
-        CertStoreScope::User => vec!["-store", "Root", "ZTLP Root CA"],
-        CertStoreScope::Machine => vec!["-store", "-enterprise", "Root", "ZTLP Root CA"],
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn install_windows(cert_path: &Path, scope: CertStoreScope) -> Result<()> {
     info!(
@@ -400,16 +384,44 @@ fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, &'static str> {
 
 #[cfg(target_os = "windows")]
 fn check_windows_installed() -> bool {
-    // Same fallback pattern as remove_windows — check machine scope first.
-    let machine_args = certutil_check_args(CertStoreScope::Machine);
-    if let Ok(out) = Command::new("certutil").args(&machine_args).output() {
+    let cert_path = default_ca_cert_path();
+    check_windows_installed_for(&cert_path)
+}
+
+/// Testable core of `check_windows_installed` — takes the cert path
+/// explicitly instead of resolving it from `default_ca_cert_path()`.
+///
+/// Bug fixed here (found live 2026-09-21, demo.spongebob.ztlp box): this
+/// used to match on the CN substring `"ZTLP Root CA"` via
+/// `certutil_check_args`. That stopped working the same way `remove_windows`
+/// broke under D5 — `ca-init` suffixes the CN with the zone
+/// (`ZTLP Root CA - demo.spongebob.ztlp`), and `certutil -store Root "ZTLP
+/// Root CA"` requires an EXACT name match, not a substring — it returns
+/// `0x80090011 NTE_NOT_FOUND` for a suffixed CN even when the cert is
+/// genuinely present in the store (verified live: `certutil -store
+/// -enterprise Root "ZTLP Root CA"` failed with NTE_NOT_FOUND while
+/// `certutil -store -enterprise Root` listing showed the cert sitting right
+/// there under `ZTLP Root CA - demo.spongebob.ztlp`). `remove_windows`
+/// already worked around this by matching on the cert's SHA1 thumbprint
+/// instead of its CN — this brings the check path in line with the same
+/// fix, so `setup_status`'s `ca_installed_system_trust` (and therefore the
+/// Home checklist's "Network ready" row / Trust HTTPS button) reflects
+/// reality instead of staying permanently "not trusted" for every
+/// zone-suffixed cert.
+#[cfg(target_os = "windows")]
+fn check_windows_installed_for(cert_path: &Path) -> bool {
+    let Ok(thumbprint) = sha1_thumbprint_hex(cert_path) else {
+        return false;
+    };
+    let machine_args = ["-store", "-enterprise", "Root", thumbprint.as_str()];
+    if let Ok(out) = Command::new("certutil").args(machine_args).output() {
         if out.status.success() {
             return true;
         }
     }
-    let user_args = certutil_check_args(CertStoreScope::User);
-    match Command::new("certutil").args(&user_args).output() {
-        Ok(o) => o.status.success(),
+    let user_args = ["-store", "Root", thumbprint.as_str()];
+    match Command::new("certutil").args(user_args).output() {
+        Ok(out) => out.status.success(),
         Err(_) => false,
     }
 }
@@ -468,31 +480,48 @@ mod tests {
         assert_eq!(args, vec!["-addstore", "-enterprise", "-f", "Root"]);
     }
 
+    // certutil_remove_args/certutil_check_args (CN-substring matchers) were
+    // removed 2026-09-21 — dead code once remove_windows/check_windows_installed
+    // both switched to SHA1-thumbprint matching (see
+    // check_windows_installed_for's doc comment for why: certutil requires
+    // an EXACT CN match, and ca-init suffixes the CN with the zone, so a
+    // hardcoded "ZTLP Root CA" never matches a real zone-suffixed cert).
+
+    // check_windows_installed_for is #[cfg(target_os = "windows")]-gated (it
+    // shells out to the real certutil.exe) — these tests only compile/run on
+    // a Windows target. This dev box is Linux; per the
+    // test-driven-development skill's "CI as RED witness" pattern, the
+    // windows-latest CI run on this commit's SHA is the RED/GREEN proof,
+    // not a local `cargo test` here.
+    #[cfg(target_os = "windows")]
     #[test]
-    fn certutil_remove_user_scope_targets_root_store_by_cn() {
-        let args = certutil_remove_args(CertStoreScope::User);
-        assert_eq!(args, vec!["-delstore", "Root", "ZTLP Root CA"]);
+    fn check_windows_installed_for_returns_false_for_a_cert_never_installed() {
+        // A syntactically-valid but never-installed self-signed cert must
+        // report false, not error/panic — this is the safe default the
+        // Home checklist's Network row depends on before the daemon has
+        // even made a CA yet.
+        let dir = std::env::temp_dir().join("ztlp_test_check_windows_installed");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("never_installed.pem");
+        // Minimal syntactically-valid-looking PEM (base64 of a short byte
+        // string) — sha1_thumbprint_hex only needs to decode base64
+        // between the markers, it never validates X.509 structure.
+        std::fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        assert!(!check_windows_installed_for(&cert_path));
+
+        std::fs::remove_file(&cert_path).ok();
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn certutil_remove_machine_scope_uses_enterprise() {
-        let args = certutil_remove_args(CertStoreScope::Machine);
-        assert_eq!(
-            args,
-            vec!["-delstore", "-enterprise", "Root", "ZTLP Root CA"]
-        );
-    }
-
-    #[test]
-    fn certutil_check_user_scope_uses_store_subcommand() {
-        let args = certutil_check_args(CertStoreScope::User);
-        assert_eq!(args, vec!["-store", "Root", "ZTLP Root CA"]);
-    }
-
-    #[test]
-    fn certutil_check_machine_scope_uses_enterprise() {
-        let args = certutil_check_args(CertStoreScope::Machine);
-        assert_eq!(args, vec!["-store", "-enterprise", "Root", "ZTLP Root CA"]);
+    fn check_windows_installed_for_returns_false_when_cert_file_missing() {
+        let missing = std::path::Path::new("C:/nonexistent/root.pem");
+        assert!(!check_windows_installed_for(missing));
     }
 
     #[test]

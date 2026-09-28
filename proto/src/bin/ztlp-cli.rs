@@ -100,9 +100,9 @@ struct TransportConfig {
 }
 
 fn load_config() -> Config {
-    let config_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let config_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("config.toml");
 
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
@@ -877,7 +877,7 @@ enum AgentCommands {
     #[command(after_help = "EXAMPLES:\n  sudo ztlp agent dns-teardown")]
     DnsTeardown,
 
-    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon)
+    /// Install the agent as a system service (systemd unit / macOS root LaunchDaemon / Windows SCM service)
     #[command(after_help = "EXAMPLES:\n  \
             sudo ztlp agent install\n  \
             sudo ztlp agent install --binary /usr/local/bin/ztlp")]
@@ -886,6 +886,11 @@ enum AgentCommands {
         #[arg(long)]
         binary: Option<PathBuf>,
     },
+
+    /// Uninstall the agent system service (Windows SCM service today; systemd/macOS use `rm`/`launchctl bootout` directly — see `agent install`'s own printed instructions)
+    #[command(after_help = "EXAMPLES:\n  \
+            ztlp agent uninstall")]
+    Uninstall,
 
     /// Pull TLS certificates for all known service hostnames
     ///
@@ -9668,7 +9673,11 @@ fn parse_enroll_config(
 /// taken" — the real enroll attempt is still the source of truth; this
 /// only avoids burning a single-use token on a name we can already see is
 /// claimed by someone else.
-async fn ns_name_is_taken_by_other_key(ns_server: &str, full_name: &str, our_pubkey: &[u8]) -> bool {
+async fn ns_name_is_taken_by_other_key(
+    ns_server: &str,
+    full_name: &str,
+    our_pubkey: &[u8],
+) -> bool {
     // KEY record (type 1) carries the owning identity's public_key.
     let Ok(Some(result)) = ns_query_raw(full_name, ns_server, 1).await else {
         return false;
@@ -9996,10 +10005,10 @@ fn get_hostname() -> String {
         .replace(' ', "-")
 }
 
-/// Get the ZTLP config directory (~/.ztlp).
+/// Get the ZTLP config directory (~/.ztlp, or `$ZTLP_HOME/.ztlp` under the
+/// Windows service — see `ztlp_state_dir`).
 fn get_ztlp_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let home = dirs::home_dir().ok_or("could not determine home directory")?;
-    Ok(home.join(".ztlp"))
+    Ok(ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp"))
 }
 
 /// Test connectivity to relay addresses.
@@ -11520,7 +11529,7 @@ fn cmd_admin_rotate_zone_key(json_output: bool) -> Result<(), Box<dyn std::error
     let public_hex = hex::encode(public.as_bytes());
 
     // Save to the default zone key path
-    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    let ztlp_dir = ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp");
     std::fs::create_dir_all(&ztlp_dir)?;
 
     let key_path = ztlp_dir.join("zone.key");
@@ -11571,7 +11580,7 @@ fn cmd_admin_export_zone_key(
     format: &str,
     json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ztlp_dir = dirs::home_dir().unwrap_or_default().join(".ztlp");
+    let ztlp_dir = ztlp_proto::agent::config::ztlp_state_dir().join(".ztlp");
     let key_path = ztlp_dir.join("zone.key");
 
     if !key_path.exists() {
@@ -11651,8 +11660,7 @@ fn cmd_admin_export_zone_key(
 // ─── CA / Certificate Management Commands ─────────────────────────────────
 
 fn default_ca_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
+    ztlp_proto::agent::config::ztlp_state_dir()
         .join(".ztlp")
         .join("ca")
 }
@@ -11897,11 +11905,7 @@ fn cmd_admin_ca_init(
         eprintln!("{}", c_bold(&format!("ZTLP CA Initialized for {}", zone)));
         eprintln!();
         eprintln!("  {} {}", c_cyan("CA directory:"), ca_dir.display());
-        eprintln!(
-            "  {} {}",
-            c_cyan("Root CN:     "),
-            ZTLP_LOCAL_ROOT_CN
-        );
+        eprintln!("  {} {}", c_cyan("Root CN:     "), ZTLP_LOCAL_ROOT_CN);
         eprintln!(
             "  {} {}",
             c_cyan("Intermediate:"),
@@ -12855,70 +12859,29 @@ async fn cmd_agent_start(
     foreground: bool,
     config_path: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::daemon;
 
-    // Check if already running
+    // Check if already running (kept here too, in addition to the same
+    // check inside run_agent_lifecycle, purely so the CLI can print its
+    // own colored message before delegating — run_agent_lifecycle's
+    // internal check is a silent no-op for non-CLI callers like the
+    // Windows service host).
     if let Some(pid) = daemon::get_agent_pid() {
         eprintln!("{} Agent already running (PID {})", c_yellow("⚠"), pid);
         return Ok(());
     }
-
-    // B4 (macOS, HANDOFF-2026-09-20): a fresh root LaunchDaemon has no
-    // identity yet. Instead of exiting 1 (launchd KeepAlive crash-loop, GUI
-    // can never reach the control socket to deliver `enroll`), wait in
-    // UNENROLLED STANDBY serving status/enroll on the control socket. Done
-    // HERE, before the config load below, so the agent.toml/config.toml
-    // that `ztlp setup` + ca-init just wrote (zone, NS, relay secret,
-    // tls=true) are picked up by the very same process — no restart.
-    if config_path.is_none() {
-        let pre = AgentConfig::load();
-        let identity_path = pre.identity_path();
-        if daemon::should_enter_unenrolled_standby(&identity_path) {
-            let proceed = daemon::run_unenrolled_standby(
-                &pre.ipc.listen,
-                &identity_path,
-                &ztlp_proto::agent::config::default_token_path(),
-                std::time::Duration::from_secs(1),
-            )
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            if !proceed {
-                return Ok(());
-            }
-            eprintln!("{} Enrollment detected — starting full agent", c_green("✓"));
-        }
-    }
-
-    let config = if let Some(path) = config_path {
-        AgentConfig::load_from_path(path)
-    } else {
-        // v0.36 fix: `agent start` used to read only `~/.ztlp/agent.toml`,
-        // a file `ztlp setup` never writes. A freshly-enrolled device's
-        // agent silently started against AgentConfig::default()
-        // (127.0.0.1:23096, no relay) instead of the zone the operator
-        // just joined via `ztlp setup --token ... --yes`. load_merged
-        // backfills ns_server/relay/identity from `~/.ztlp/config.toml`
-        // (the file `setup` DOES write) whenever agent.toml leaves those
-        // fields at their bare default — see agent::config for the full
-        // rationale and unit tests.
-        let agent_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("agent.toml"))
-            .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
-        let cli_path = dirs::home_dir()
-            .map(|h| h.join(".ztlp").join("config.toml"))
-            .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
-        AgentConfig::load_merged(&agent_path, &cli_path)
-    };
 
     if !foreground {
         eprintln!("{} Starting agent daemon...", c_cyan("→"));
         eprintln!("  {} Use --foreground to run in foreground", c_dim("Hint:"));
     }
 
-    daemon::run_daemon(&config, foreground)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })
+    // B1 (Windows/Linux desktop parity plan): the standby->full-daemon
+    // sequencing now lives in ztlp_proto::agent::run_agent_lifecycle so the
+    // Windows Service host (ztlp-winsvc.rs) can share it verbatim instead
+    // of reimplementing it. This CLI path is unchanged behavior — same
+    // sequence, just delegated.
+    ztlp_proto::agent::run_agent_lifecycle(config_path.as_deref(), foreground).await
 }
 
 /// `ztlp agent stop` — Stop the running agent daemon.
@@ -13328,6 +13291,118 @@ async fn cmd_agent_dns_teardown() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `ztlp agent install` — Windows: register the ztlp-winsvc.exe SCM service
+/// (Task B2/B3 of the Windows/Linux desktop parity plan). Requires one UAC
+/// elevation — same privilege tier as macOS's SMAppService.register() /
+/// Linux's `pkexec systemctl enable --now`.
+#[cfg(not(unix))]
+async fn cmd_agent_install_windows(
+    binary: &Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ztlp_proto::agent::windows_service_install::{
+        windows_service_definition, winsvc_sibling_path,
+    };
+
+    let ztlp_binary = if let Some(path) = binary {
+        path.clone()
+    } else {
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ztlp.exe"))
+    };
+    let winsvc_binary = winsvc_sibling_path(&ztlp_binary);
+    let def = windows_service_definition(&winsvc_binary);
+
+    #[cfg(windows)]
+    {
+        use ztlp_proto::agent::windows_service_install::windows_service_install;
+        match windows_service_install(&def) {
+            Ok(()) => {
+                eprintln!("{} Service installed: {}", c_green("✓"), def.service_name);
+                eprintln!("  {}", winsvc_binary.display());
+                eprintln!();
+                eprintln!("Start now (and at every boot):");
+                eprintln!("  sc start {}", def.service_name);
+                eprintln!();
+                eprintln!("Status:");
+                eprintln!("  sc query {}", def.service_name);
+                // D5 (Phase D plan): grant Administrators access to the
+                // fixed ProgramData state dir the service will write to —
+                // LocalSystem owns it by default, but the interactive
+                // admin who installed this also needs to inspect/remove
+                // it. Best-effort: a failure here is logged by
+                // apply_programdata_acl itself and doesn't fail the
+                // install (the service is already registered correctly).
+                ztlp_proto::agent::windows_service_install::apply_programdata_acl();
+            }
+            Err(e) => {
+                eprintln!("{} Installation failed: {}", c_red("✗"), e);
+                eprintln!();
+                eprintln!(
+                    "{}",
+                    c_dim("Hint: Installing a Windows service usually requires an elevated (Administrator) prompt.")
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &def;
+        eprintln!(
+            "{} Windows service install is only meaningful on Windows (cross-compiled here for CI type-checking only)",
+            c_yellow("⚠")
+        );
+    }
+
+    Ok(())
+}
+
+/// `ztlp agent uninstall` — Windows: unregister the ztlp-winsvc.exe SCM
+/// service. On Unix, systemd/macOS use `rm`/`launchctl bootout` directly
+/// per `agent install`'s own printed instructions, so this is a no-op with
+/// a pointer back to those instructions rather than a silent success.
+async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        use ztlp_proto::agent::windows_service_install::{
+            windows_service_uninstall, WINDOWS_SERVICE_NAME,
+        };
+        match windows_service_uninstall(WINDOWS_SERVICE_NAME) {
+            Ok(()) => {
+                eprintln!(
+                    "{} Service uninstalled: {}",
+                    c_green("✓"),
+                    WINDOWS_SERVICE_NAME
+                );
+                // D5 (Phase D plan): remove the fixed ProgramData state dir
+                // the service was using. Best-effort, idempotent (a missing
+                // dir is fine — e.g. the service never actually ran).
+                // NEVER touches the binary install dir — that's the
+                // NSIS/MSI uninstaller's job, not ours.
+                ztlp_proto::agent::windows_service_install::remove_programdata_dir();
+            }
+            Err(e) => {
+                eprintln!("{} Uninstall failed: {}", c_red("✗"), e);
+                eprintln!();
+                eprintln!(
+                    "{}",
+                    c_dim("Hint: Uninstalling a Windows service usually requires an elevated (Administrator) prompt.")
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!(
+            "{} 'agent uninstall' is Windows-only. On Linux: sudo systemctl disable --now ztlp-agent && sudo rm /etc/systemd/system/ztlp-agent.service",
+            c_yellow("⚠")
+        );
+        eprintln!(
+            "  {} sudo launchctl bootout system/org.ztlp.agent && sudo rm /Library/LaunchDaemons/org.ztlp.agent.plist",
+            c_dim("On macOS:")
+        );
+    }
+    Ok(())
+}
+
 /// `ztlp agent install` — Install as system service.
 #[cfg(unix)]
 async fn cmd_agent_install(binary: &Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
@@ -13397,12 +13472,12 @@ async fn cmd_agent_dns_setup_windows(
     // bound address post-fallback) over the static config file. Only fall
     // back to the merged config file's `config.dns.listen` if the agent
     // isn't reachable (e.g. `dns-setup` run before `agent start`).
-    let agent_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("agent.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/agent.toml"));
-    let cli_path = dirs::home_dir()
-        .map(|h| h.join(".ztlp").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from(".ztlp/config.toml"));
+    let agent_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("agent.toml");
+    let cli_path = ztlp_proto::agent::config::ztlp_state_dir()
+        .join(".ztlp")
+        .join("config.toml");
     let config = AgentConfig::load_merged(&agent_path, &cli_path);
 
     let live_dns_listen = {
@@ -14336,10 +14411,8 @@ async fn main() {
                 }
             }
             #[cfg(not(unix))]
-            AgentCommands::Install { .. } => Err(
-                "install is only supported on Unix; use the ZTLP Windows service installer instead"
-                    .into(),
-            ),
+            AgentCommands::Install { binary } => cmd_agent_install_windows(binary).await,
+            AgentCommands::Uninstall => cmd_agent_uninstall().await,
         },
     };
 
@@ -14377,9 +14450,14 @@ mod tests {
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
         assert!(cn.contains(ZTLP_LOCAL_ROOT_CN), "root CN was {cn}");
-        assert!(!cn.contains("defcon"), "root CN must not be zone-specific: {cn}");
+        assert!(
+            !cn.contains("defcon"),
+            "root CN must not be zone-specific: {cn}"
+        );
 
-        let nc = root.name_constraints.expect("root must carry nameConstraints");
+        let nc = root
+            .name_constraints
+            .expect("root must carry nameConstraints");
         assert_eq!(
             nc.permitted_subtrees,
             vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())],
@@ -14395,18 +14473,30 @@ mod tests {
             .get(&rcgen::DnType::CommonName)
             .map(|v| format!("{v:?}"))
             .unwrap_or_default();
-        assert!(!icn.contains("defcon"), "intermediate CN must not be zone-specific: {icn}");
-        let inc = inter.name_constraints.expect("intermediate must carry nameConstraints");
-        assert_eq!(inc.permitted_subtrees, vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]);
+        assert!(
+            !icn.contains("defcon"),
+            "intermediate CN must not be zone-specific: {icn}"
+        );
+        let inc = inter
+            .name_constraints
+            .expect("intermediate must carry nameConstraints");
+        assert_eq!(
+            inc.permitted_subtrees,
+            vec![rcgen::GeneralSubtree::DnsName(".ztlp".to_string())]
+        );
     }
 
     #[test]
     fn name_taken_retry_uses_short_stable_node_suffix() {
-        let n = disambiguated_device_name("stevens-macbook-pro-2", "4c4469d10e426bb73e30c933b96c75f2");
+        let n =
+            disambiguated_device_name("stevens-macbook-pro-2", "4c4469d10e426bb73e30c933b96c75f2");
         assert_eq!(n, "stevens-macbook-pro-2-4c44");
         // idempotent for the same identity; no double dash on a trailing '-'
         assert_eq!(disambiguated_device_name("mac-", "abcd0000"), "mac-abcd");
-        assert_eq!(disambiguated_device_name("mac", "abcd0000"), disambiguated_device_name("mac", "abcd0000"));
+        assert_eq!(
+            disambiguated_device_name("mac", "abcd0000"),
+            disambiguated_device_name("mac", "abcd0000")
+        );
     }
 
     #[test]

@@ -48,6 +48,18 @@ const HomeComponent = (() => {
     LiveLog.render();
   }
 
+  // PR #112 review fix: row details can carry daemon/config-supplied text
+  // (the zone name, failure reasons). Escape everything interpolated into
+  // innerHTML — Setup/Settings already do; Home did not.
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function rowBadge(state) {
     switch (state.kind) {
       case 'ready': return { cls: 'ready', symbol: '✓' };
@@ -76,13 +88,13 @@ const HomeComponent = (() => {
       .map((row, i) => {
         const badge = rowBadge(row.state);
         const btn = row.state.kind === 'needsAction'
-          ? `<button class="btn btn-sm readiness-action" data-row="${i}" data-action="${row.state.action}">${actionLabel(row.state.action)}</button>`
+          ? `<button class="btn btn-sm readiness-action" data-row="${i}" data-action="${escapeHtml(row.state.action)}">${escapeHtml(actionLabel(row.state.action))}</button>`
           : '';
         return `
-          <div class="readiness-row" id="home.row.${row.title.toLowerCase().replace(/\s+/g, '-')}">
+          <div class="readiness-row" id="home.row.${escapeHtml(row.title.toLowerCase().replace(/\s+/g, '-'))}">
             <span class="readiness-badge ${badge.cls}">${badge.symbol}</span>
-            <span class="readiness-title">${row.title}</span>
-            <span class="readiness-detail">${row.state.detail}</span>
+            <span class="readiness-title">${escapeHtml(row.title)}</span>
+            <span class="readiness-detail">${escapeHtml(row.state.detail)}</span>
             ${btn}
           </div>
         `;
@@ -185,5 +197,5 @@ const HomeComponent = (() => {
     load();
   }
 
-  return { render, load, update, applyStatus };
+  return { render, load, update, applyStatus, escapeHtml };
 })();

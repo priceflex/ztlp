@@ -13386,6 +13386,9 @@ async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
                     "{}",
                     c_dim("Hint: Uninstalling a Windows service usually requires an elevated (Administrator) prompt.")
                 );
+                // Non-zero so the NSIS uninstaller (and scripts) can tell
+                // that the service was NOT removed.
+                return Err(format!("service uninstall failed: {e}").into());
             }
         }
     }

@@ -783,7 +783,12 @@ pub fn load_agent_token() -> Option<String> {
     } else {
         crate::agent::windows_daemon::gui_token_candidates(path)
     };
-    #[cfg(not(target_os = "windows"))]
+    // PR #112 review fix: the Linux systemd service keeps its token at
+    // /var/lib/ztlp/.ztlp/agent.token (HOME pinned by the unit); the GUI
+    // must try that before its own ~/.ztlp path.
+    #[cfg(target_os = "linux")]
+    let candidates = crate::agent::linux_daemon::gui_token_candidates(path);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let candidates = vec![path];
     load_first_token(&candidates)
 }

@@ -47,10 +47,11 @@ pub fn is_linux_system_service(euid_is_root: bool, home: Option<&str>) -> bool {
     euid_is_root && home.map(|h| h.trim_end_matches('/')) == Some(LINUX_SYSTEM_HOME)
 }
 
-/// Commands that give `user` (and only `user`) read access to the token.
-/// `None` (nobody logged in graphically yet) leaves the root-only 0600 ACL
-/// in place — the safe default; the grant is re-applied at every startup
-/// and after enrollment.
+/// Commands that give `user` (and only `user`) READ access to the token while
+/// root stays the owner (PR #112 review: chowning the file to the user let
+/// them overwrite the service's bearer, not just read it).
+/// `None` (nobody logged in graphically yet) leaves the root-only 0600 file
+/// as is; the refresher re-applies the grant once someone logs in.
 pub fn token_share_commands(user: Option<&str>, token: &Path) -> Vec<Vec<String>> {
     let Some(u) = user else { return Vec::new() };
     let t = token.to_string_lossy().to_string();
@@ -60,11 +61,25 @@ pub fn token_share_commands(user: Option<&str>, token: &Path) -> Vec<Vec<String>
         .unwrap_or_default();
     vec![
         // Traverse-only (no listing) on /var/lib/ztlp and /var/lib/ztlp/.ztlp,
-        // so the identity key and CA key stay unreadable (they are 0600).
+        // so the identity key and CA key (0600) stay unreadable.
         vec!["chmod".into(), "0711".into(), LINUX_SYSTEM_HOME.into()],
         vec!["chmod".into(), "0711".into(), state],
-        vec!["chown".into(), format!("{u}:root"), t.clone()],
-        vec!["chmod".into(), "0600".into(), t],
+        // Owner stays root:root 0600; add a read-only ACL entry for the user.
+        vec!["chown".into(), "root:root".into(), t.clone()],
+        vec!["chmod".into(), "0600".into(), t.clone()],
+        vec!["setfacl".into(), "-m".into(), format!("u:{u}:r"), t],
+    ]
+}
+
+/// Fallback when `setfacl` is unavailable / the filesystem has no ACLs:
+/// root keeps ownership, group = the user's own private group, mode 0640.
+/// Only used when that group is the user's private group (name == user), so
+/// no other account is granted access.
+pub fn token_share_group_fallback(user: &str, token: &Path) -> Vec<Vec<String>> {
+    let t = token.to_string_lossy().to_string();
+    vec![
+        vec!["chown".into(), format!("root:{user}"), t.clone()],
+        vec!["chmod".into(), "0640".into(), t],
     ]
 }
 
@@ -140,10 +155,10 @@ fn graphical_session_user() -> Option<String> {
 
 /// Apply the token grant if (and only if) this is the root system service.
 /// Best-effort, log-and-continue, like the macOS/Windows equivalents.
+/// Returns the user that was granted access, if any.
 #[cfg(target_os = "linux")]
-pub fn share_token_with_gui_if_service(token: &Path) {
+pub fn share_token_with_gui_if_service(token: &Path) -> Option<String> {
     use tracing::{info, warn};
-    // SAFETY-free root check: `id -u` avoids pulling in libc for one call.
     let is_root = std::process::Command::new("id")
         .arg("-u")
         .output()
@@ -151,33 +166,86 @@ pub fn share_token_with_gui_if_service(token: &Path) {
         .unwrap_or(false);
     let home = std::env::var("HOME").ok();
     if !is_linux_system_service(is_root, home.as_deref()) {
-        return;
+        return None;
     }
-    let user = graphical_session_user();
-    let cmds = token_share_commands(user.as_deref(), token);
-    if cmds.is_empty() {
-        warn!("Linux: no active graphical session user — agent.token stays root-only (0600)");
-        return;
-    }
-    for c in cmds {
+    let user = graphical_session_user()?;
+    let run = |c: &Vec<String>| -> bool {
         match std::process::Command::new(&c[0]).args(&c[1..]).output() {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => warn!(
-                "Linux: `{}` failed (continuing): {}",
-                c.join(" "),
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => warn!("Linux: failed to spawn `{}` (continuing): {e}", c[0]),
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                warn!(
+                    "Linux: `{}` failed: {}",
+                    c.join(" "),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                false
+            }
+            Err(e) => {
+                warn!("Linux: failed to spawn `{}`: {e}", c[0]);
+                false
+            }
+        }
+    };
+    let mut acl_ok = true;
+    for c in token_share_commands(Some(&user), token) {
+        if !run(&c) && c[0] == "setfacl" {
+            acl_ok = false;
         }
     }
-    info!(
-        "Linux: agent.token shared with graphical user `{}`",
-        user.unwrap_or_default()
-    );
+    if !acl_ok {
+        let private_group = std::process::Command::new("id")
+            .args(["-gn", &user])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == user)
+            .unwrap_or(false);
+        if private_group {
+            for c in token_share_group_fallback(&user, token) {
+                run(&c);
+            }
+        } else {
+            warn!("Linux: no ACL support and `{user}` has no private group; agent.token stays root-only");
+            return None;
+        }
+    }
+    info!("Linux: agent.token readable by graphical user `{user}` (root remains owner)");
+    Some(user)
+}
+
+/// Re-apply the grant every 30s so a user who logs in (or switches) AFTER
+/// the service started still gets access. No-op unless this is the root
+/// system service. Idempotent and cheap (two loginctl calls when nothing
+/// changed).
+#[cfg(target_os = "linux")]
+pub fn spawn_token_share_refresher(token: PathBuf) {
+    // Standby and the full daemon both call this in one process; run once.
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("ztlp-token-share".into())
+        .spawn(move || {
+            let mut last: Option<String> = None;
+            loop {
+                let now = graphical_session_user();
+                if now != last {
+                    if now.is_some() {
+                        share_token_with_gui_if_service(&token);
+                    }
+                    last = now;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn share_token_with_gui_if_service(_token: &Path) {}
+pub fn share_token_with_gui_if_service(_token: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_token_share_refresher(_token: PathBuf) {}
 
 #[cfg(test)]
 mod tests {
@@ -217,16 +285,25 @@ mod tests {
     fn share_commands_grant_one_user_and_keep_dirs_unlistable() {
         let t = linux_system_token_path();
         let cmds = token_share_commands(Some("steven"), &t);
+        // Root stays the OWNER (the user must not be able to overwrite the
+        // bearer); the user gets a read-only ACL entry.
         assert!(cmds.contains(&vec![
             "chown".to_string(),
-            "steven:root".into(),
+            "root:root".into(),
             t.to_string_lossy().into()
         ]));
         assert!(cmds.contains(&vec![
-            "chmod".to_string(),
-            "0600".into(),
+            "setfacl".to_string(),
+            "-m".into(),
+            "u:steven:r".into(),
             t.to_string_lossy().into()
         ]));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| c[0] == "chown" && c[1].starts_with("steven")),
+            "must never chown the token to the desktop user"
+        );
         // Dirs are traverse-only, never world-readable/listable.
         for c in cmds
             .iter()
@@ -236,6 +313,14 @@ mod tests {
         }
         // Nobody logged in => no change (root-only stays).
         assert!(token_share_commands(None, &t).is_empty());
+    }
+
+    #[test]
+    fn group_fallback_keeps_root_owner_and_is_group_read_only() {
+        let t = linux_system_token_path();
+        let c = token_share_group_fallback("steven", &t);
+        assert_eq!(c[0][1], "root:steven");
+        assert_eq!(c[1][1], "0640");
     }
 
     #[test]

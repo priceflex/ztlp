@@ -117,17 +117,37 @@ pub fn windows_service_uninstall(service_name: &str) -> Result<(), Box<dyn std::
         ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
     )?;
 
-    // Best-effort stop before delete — an already-stopped service returns
-    // an error here that we deliberately ignore (delete still proceeds).
-    let _ = service.stop();
-    // PR #112 review fix: stop() only REQUESTS the stop. Wait (bounded) for
-    // the process to exit so it releases its handles on the ProgramData
-    // state dir (ztlp-winsvc.log, agent.pid) before the caller removes it.
-    for _ in 0..40 {
-        match service.query_status() {
-            Ok(st) if st.current_state == windows_service::service::ServiceState::Stopped => break,
-            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
-            Err(_) => break,
+    // An already-stopped service returns an error from stop(); that is fine.
+    // Anything else must be CONFIRMED stopped before we delete the service
+    // and let the caller remove its state dir (the service holds
+    // ztlp-winsvc.log / agent.pid open until the process exits).
+    use windows_service::service::ServiceState;
+    let already_stopped = matches!(
+        service.query_status(),
+        Ok(st) if st.current_state == ServiceState::Stopped
+    );
+    if !already_stopped {
+        let _ = service.stop();
+        let mut stopped = false;
+        for _ in 0..60 {
+            match service.query_status() {
+                Ok(st) if st.current_state == ServiceState::Stopped => {
+                    stopped = true;
+                    break;
+                }
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
+                Err(e) => {
+                    return Err(
+                        format!("could not query {service_name} while stopping: {e}").into(),
+                    )
+                }
+            }
+        }
+        if !stopped {
+            return Err(format!(
+                "{service_name} did not stop within 15s; not deleting it (its state dir would still be in use)"
+            )
+            .into());
         }
     }
     service.delete()?;

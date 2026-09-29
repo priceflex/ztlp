@@ -355,6 +355,7 @@ pub async fn run_unenrolled_standby(
     // PR #112 review fix: let the Linux desktop GUI authenticate to the root
     // systemd service (no-op unless this IS that service).
     crate::agent::linux_daemon::share_token_with_gui_if_service(token_path);
+    crate::agent::linux_daemon::spawn_token_share_refresher(token_path.to_path_buf());
     // macOS root: the control IP (127.100.255.1) is unbindable until lo0
     // is aliased, and the GUI must be able to READ agent.token to talk to
     // us — the same two startup actions the full daemon performs.
@@ -612,6 +613,7 @@ pub async fn run_daemon(
     let token_path = config::default_token_path();
     let token = ensure_token_file(&token_path).map_err(|e| format!("token file: {e}"))?;
     crate::agent::linux_daemon::share_token_with_gui_if_service(&token_path);
+    crate::agent::linux_daemon::spawn_token_share_refresher(token_path.clone());
     info!(
         "control plane token at {} ({} chars)",
         token_path.display(),

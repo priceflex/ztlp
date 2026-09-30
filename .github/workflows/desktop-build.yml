@@ -70,6 +70,12 @@ jobs:
             cp ../proto/target/release/ztlp src-tauri/binaries/ztlp-x86_64-unknown-linux-gnu
           else
             cp ../proto/target/release/ztlp.exe src-tauri/binaries/ztlp-x86_64-pc-windows-msvc.exe
+            # The ZtlpAgent SCM service host. Registered by `ztlp agent install`
+            # from the app's "Install Service" button; it must ship next to
+            # ztlp.exe (winsvc_sibling_path). Windows-only: declared in
+            # tauri.windows.conf.json so Linux bundling is unchanged.
+            (cd ../proto && cargo build --release --bin ztlp-winsvc)
+            cp ../proto/target/release/ztlp-winsvc.exe src-tauri/binaries/ztlp-winsvc-x86_64-pc-windows-msvc.exe
           fi
 
       - name: Build ztlp-service

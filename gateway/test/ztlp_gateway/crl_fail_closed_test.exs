@@ -25,7 +25,7 @@ defmodule ZtlpGateway.CrlFailClosedTest do
     case GenServer.whereis(CrlServer) do
       nil -> :ok
       pid ->
-        GenServer.stop(pid, :normal, 5000)
+        safe_stop(pid)
         Process.sleep(50)
     end
 
@@ -35,7 +35,7 @@ defmodule ZtlpGateway.CrlFailClosedTest do
     on_exit(fn ->
       case GenServer.whereis(CrlServer) do
         nil -> :ok
-        pid -> GenServer.stop(pid, :normal, 5000)
+        pid -> safe_stop(pid)
       end
 
       System.delete_env("ZTLP_GATEWAY_CRL_FAIL_CLOSED")
@@ -43,6 +43,17 @@ defmodule ZtlpGateway.CrlFailClosedTest do
     end)
 
     :ok
+  end
+
+  # The server can exit between `whereis` and `stop` (it is linked to other
+  # tests' supervisors); `GenServer.stop` then exits with :noproc and failed
+  # this suite intermittently on CI. A server that is already gone is the
+  # state we wanted, so treat :noproc as success.
+  defp safe_stop(pid) do
+    GenServer.stop(pid, :normal, 5000)
+  catch
+    :exit, {:noproc, _} -> :ok
+    :exit, :noproc -> :ok
   end
 
   describe "Config.get(:crl_fail_closed)" do

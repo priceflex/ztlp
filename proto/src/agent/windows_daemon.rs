@@ -121,6 +121,13 @@ pub fn windows_startup_plan(i: &WindowsStartupInputs) -> Vec<WindowsAction> {
     plan
 }
 
+/// Startup actions for the UNENROLLED STANDBY service (no identity, hence
+/// no CA yet): only the token ACL. CA trust and NRPT are planned by
+/// [`windows_startup_plan`] once enrollment has produced a CA. Pure.
+pub fn standby_startup_plan(token_path: &std::path::Path) -> Vec<WindowsAction> {
+    vec![WindowsAction::TokenGuiReadable(token_path.to_path_buf())]
+}
+
 // ─── Execution — Phase D plan D3 ────────────────────────────────────────────
 
 /// Strip a trailing `:port` from a `host:port` listen string, returning the
@@ -616,5 +623,12 @@ mod tests {
         let out = "C:\\ProgramData\\ZTLP\\.ztlp\\agent.token trs:(R)\n";
         assert!(icacls_output_grants_read(out, "trs"));
         assert!(!icacls_output_grants_read(out, "c"));
+    }
+
+    #[test]
+    fn standby_plan_grants_token_but_touches_no_ca_or_dns() {
+        let p = std::path::PathBuf::from(r"C:\ProgramData\ZTLP\.ztlp\agent.token");
+        let plan = standby_startup_plan(&p);
+        assert_eq!(plan, vec![WindowsAction::TokenGuiReadable(p)]);
     }
 }

@@ -179,6 +179,12 @@ const SetupComponent = (() => {
         </div>
         <div class="form-hint">Get this string from your zone admin or the ZTLP gateway dashboard.</div>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="enroll-relay-secret">Relay secret (optional, from your admin)</label>
+        <input type="password" id="enroll-relay-secret" class="form-input"
+               placeholder="Only needed for some networks"
+               spellcheck="false" autocomplete="off">
+      </div>
       <label class="form-label attestation-label">
         <input type="checkbox" id="enroll-attestation">
         <span>I attest I am the only user of this device.</span>
@@ -247,7 +253,9 @@ const SetupComponent = (() => {
     LiveLog.setup(`Enrolling device with zone "${tokenUri.split('/')[3] || '…'}".`);
 
     try {
-      const result = await invoke('enroll', { tokenUri });
+      const rs = document.getElementById('enroll-relay-secret');
+      const relaySecret = rs && rs.value.trim() ? rs.value.trim() : null;
+      const result = await invoke('enroll', { tokenUri, relaySecret });
       if (result.success) {
         // Record the attestation audit trail (non-fatal if it fails).
         try {

@@ -93,8 +93,18 @@ pub fn get_identity(state: State<'_, AppState>) -> Option<IdentityInfo> {
 // ── Enrollment ──────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn enroll(token_uri: String, state: State<'_, AppState>) -> Result<EnrollResult, String> {
-    let result = tunnel::process_enrollment(&token_uri)?;
+pub fn enroll(
+    token_uri: String,
+    relay_secret: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<EnrollResult, String> {
+    // Optional relay CLIENT_ROUTE HMAC secret (same as the macOS app's
+    // "Relay secret" field). Needed against a relay in
+    // ZTLP_RELAY_HMAC_MODE=prod; blank means unsigned routes.
+    let relay_secret = relay_secret
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let result = tunnel::process_enrollment_with_secret(&token_uri, relay_secret)?;
 
     if result.success {
         // Update identity with zone info

@@ -104,6 +104,5 @@ jobs:
           name: ztlp-desktop-windows
           path: |
             desktop/src-tauri/target/release/bundle/nsis/*.exe
-            desktop/src-tauri/target/release/bundle/msi/*.msi
             service/target/release/ztlp-service.exe
           if-no-files-found: warn

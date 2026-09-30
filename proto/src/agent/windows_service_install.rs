@@ -100,9 +100,57 @@ pub fn windows_service_install(
         account_password: None,
     };
 
-    let service = manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
+    let service = match manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG) {
+        Ok(s) => s,
+        // ERROR_SERVICE_EXISTS (1073): the user clicked Install Service again
+        // (or reinstalled over an old registration). Repoint the existing
+        // service at THIS install's ztlp-winsvc.exe instead of failing.
+        Err(windows_service::Error::Winapi(e)) if e.raw_os_error() == Some(1073) => {
+            let existing = manager.open_service(
+                &def.service_name,
+                ServiceAccess::CHANGE_CONFIG | ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+            )?;
+            existing.change_config(&service_info)?;
+            existing
+        }
+        Err(e) => return Err(e.into()),
+    };
     service.set_description(&def.description)?;
     Ok(())
+}
+
+/// Start the installed service and wait (bounded) until it is RUNNING.
+/// `Install Service` used to only REGISTER it, leaving it STOPPED (exit
+/// 1077) until the next reboot, so a fresh install showed "agent is not
+/// running" (live, 2026-09-29). Already-running is success.
+#[cfg(windows)]
+pub fn windows_service_start(service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        service_name,
+        ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+    )?;
+    if service.query_status()?.current_state != ServiceState::Running {
+        // ERROR_SERVICE_ALREADY_RUNNING (1056) is fine (raced with autostart).
+        if let Err(windows_service::Error::Winapi(e)) = service.start::<&str>(&[]) {
+            if e.raw_os_error() != Some(1056) {
+                return Err(e.into());
+            }
+        }
+    }
+    for _ in 0..60 {
+        match service.query_status()?.current_state {
+            ServiceState::Running => return Ok(()),
+            ServiceState::Stopped => {
+                return Err(format!("{service_name} stopped right after starting").into())
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+        }
+    }
+    Err(format!("{service_name} did not reach RUNNING within 15s").into())
 }
 
 /// Unregister the service from the SCM (real, not unit-tested).

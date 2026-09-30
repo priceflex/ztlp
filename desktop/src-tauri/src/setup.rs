@@ -41,7 +41,12 @@ use crate::ipc;
 /// stays decoupled from the proto crate's serde wire format. If the
 /// underlying SetupStatus shape evolves, this struct is the seam we
 /// update.
+// `#[serde(default)]`: an UNENROLLED-STANDBY service replies with only
+// {standby, enrolled, identity_enrolled, daemon_running, ...}; a missing
+// field must not make the whole reply "not parse" and flip the Service row
+// to "Not installed" (live, fresh install 2026-09-29).
 #[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SetupStatusUi {
     pub identity_present: bool,
     pub identity_enrolled: bool,
@@ -666,6 +671,20 @@ mod tests {
     /// UI can render — even when the daemon socket is closed. The default
     /// returned should signal `daemon_running: false` so the UI knows to
     /// show the "Start agent" banner.
+    #[test]
+    fn standby_reply_parses_and_reports_service_running_not_enrolled() {
+        // Verbatim shape of control.rs's unenrolled-standby setup_status data.
+        let v = serde_json::json!({
+            "standby": true, "enrolled": false, "identity_enrolled": false,
+            "daemon_running": true, "version": "0.35.11", "pid": 4242,
+            "message": "service running, not enrolled yet - send \"enroll\"",
+        });
+        let s: SetupStatusUi = serde_json::from_value(v).expect("standby reply must parse");
+        assert!(s.daemon_running, "service IS running in standby");
+        assert!(!s.identity_enrolled);
+        assert!(!s.identity_present);
+    }
+
     #[test]
     fn setup_status_returns_default_when_daemon_unreachable() {
         // The default IPC address is 127.100.255.1:4433, which is not

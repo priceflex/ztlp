@@ -221,6 +221,14 @@ pub mod tokio_endpoint {
         tc.max_concurrent_bidi_streams(quinn::VarInt::from_u32(256));
         tc.max_concurrent_uni_streams(quinn::VarInt::from_u32(256));
 
+        // Windows: quinn coalesces datagrams with UDP_SEND_MSG_SIZE (USO). On
+        // the test PC every coalesced send failed with WSAEMSGSIZE (10040),
+        // quinn-udp logged "sendmsg error", the QUIC handshake/first flight
+        // never left the box, and the browser hung until "connection error:
+        // timed out". One datagram per send works everywhere.
+        #[cfg(windows)]
+        tc.enable_segmentation_offload(false);
+
         // Preserve the existing idle/keepalive tuning (v0.29.3 idiom).
         if let Some(idle_ms) = max_idle_timeout_ms {
             tc.max_idle_timeout(Some(quinn::VarInt::from_u32(idle_ms).into()));

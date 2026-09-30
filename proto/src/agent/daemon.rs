@@ -384,6 +384,22 @@ pub async fn run_unenrolled_standby(
         }
         MacosAction::TokenGuiReadable(token_path.to_path_buf()).execute();
     }
+    // Windows service: grant the console user read on agent.token BEFORE
+    // enrollment. Previously this ran only in the full daemon (identity
+    // present) and after a successful enroll, so a fresh install sat in
+    // standby with an Administrators/SYSTEM-only token and the desktop app's
+    // Enroll failed with "unauthorized" (live, 2026-09-29). Only the token
+    // ACL runs here: CA trust + NRPT still wait for the CA that enrollment
+    // creates. No-op unless this process IS the service.
+    #[cfg(target_os = "windows")]
+    if crate::agent::windows_daemon::is_windows_service() {
+        for action in crate::agent::windows_daemon::standby_startup_plan(token_path) {
+            action.execute();
+        }
+        // Boot autostart precedes logon: keep re-applying until a console
+        // user exists (and follow user switches).
+        crate::agent::windows_daemon::spawn_token_acl_refresher(token_path.to_path_buf());
+    }
     let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
         format!(
             "failed to bind control socket {} (standby): {}",

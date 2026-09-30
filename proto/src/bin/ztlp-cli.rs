@@ -13318,12 +13318,18 @@ async fn cmd_agent_install_windows(
             Ok(()) => {
                 eprintln!("{} Service installed: {}", c_green("✓"), def.service_name);
                 eprintln!("  {}", winsvc_binary.display());
-                eprintln!();
-                eprintln!("Start now (and at every boot):");
-                eprintln!("  sc start {}", def.service_name);
-                eprintln!();
-                eprintln!("Status:");
-                eprintln!("  sc query {}", def.service_name);
+                // Start it now (it is AutoStart, so it also starts at boot).
+                // Without this a fresh install sat STOPPED until reboot.
+                match ztlp_proto::agent::windows_service_install::windows_service_start(
+                    &def.service_name,
+                ) {
+                    Ok(()) => eprintln!("{} Service running", c_green("✓")),
+                    Err(e) => {
+                        eprintln!("{} Service installed but did not start: {}", c_red("✗"), e);
+                        eprintln!("  Try: sc start {}", def.service_name);
+                        return Err(format!("service did not start: {e}").into());
+                    }
+                }
                 // D5 (Phase D plan): grant Administrators access to the
                 // fixed ProgramData state dir the service will write to —
                 // LocalSystem owns it by default, but the interactive
@@ -13340,6 +13346,8 @@ async fn cmd_agent_install_windows(
                     "{}",
                     c_dim("Hint: Installing a Windows service usually requires an elevated (Administrator) prompt.")
                 );
+                // Non-zero so the desktop app does not report success.
+                return Err(format!("service install failed: {e}").into());
             }
         }
     }

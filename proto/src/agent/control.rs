@@ -407,6 +407,7 @@ pub async fn handle_standby_request_line_tracked(
             ControlResponse::ok(serde_json::json!({
                 "standby": true,
                 "enrolled": false,
+                "identity_present": false,
                 "identity_enrolled": false,
                 "daemon_running": true,
                 "version": env!("CARGO_PKG_VERSION"),

@@ -124,6 +124,20 @@ const HomeComponent = (() => {
         LiveLog.setup('Installing background service (one-time permission prompt)…');
         await invoke('setup_install_service');
         LiveLog.success('Service install requested.');
+        // The elevated `ztlp agent install` runs detached (UAC) and returns
+        // immediately; it registers AND starts the service. Poll until the
+        // control socket answers so the checklist advances by itself.
+        LiveLog.setup('Waiting for the service to start…');
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          await load();
+          if (currentReadiness && currentReadiness.service &&
+              currentReadiness.service.state.kind === 'ready') {
+            LiveLog.success('Service is running.');
+            return;
+          }
+        }
+        LiveLog.log('warn', 'Service has not started yet — check Windows Services (ZtlpAgent).');
       } else if (action === 'trustHTTPS') {
         LiveLog.setup('Installing CA into system trust (one-time permission prompt)…');
         await invoke('setup_install_ca');

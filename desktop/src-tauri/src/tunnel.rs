@@ -114,8 +114,17 @@ pub fn stop_tunnel() -> Result<(), String> {
 /// two-identities bug macOS hit in `e730451`. Instead, enrollment is sent
 /// as an `enroll` command over the daemon's own control socket — the same
 /// path macOS's `EnrollmentViewModel.enrollDaemon` uses.
+#[allow(dead_code)]
 pub fn process_enrollment(token_uri: &str) -> Result<EnrollResult, String> {
-    process_enrollment_at("127.100.255.1:4433", token_uri, None, None)
+    process_enrollment_with_secret(token_uri, None)
+}
+
+/// [`process_enrollment`] plus the optional relay HMAC secret.
+pub fn process_enrollment_with_secret(
+    token_uri: &str,
+    relay_secret: Option<String>,
+) -> Result<EnrollResult, String> {
+    process_enrollment_at("127.100.255.1:4433", token_uri, None, relay_secret)
 }
 
 /// Same as [`process_enrollment`] but parameterized on the IPC address (and

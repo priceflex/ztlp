@@ -1,0 +1,11 @@
+{
+    "bundle": {
+        "externalBin": [
+            "binaries/ztlp",
+            "binaries/ztlp-winsvc"
+        ],
+        "targets": [
+            "nsis"
+        ]
+    }
+}

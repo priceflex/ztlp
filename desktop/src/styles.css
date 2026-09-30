@@ -889,12 +889,31 @@ html, body {
   color: var(--text-secondary);
 }
 
+/* Detail text is 12px, so it needs 4.5:1 against the row background: use
+   darker shades in the light theme (the brighter ones stay for dark). */
 .readiness-row.state-needs-action .readiness-detail {
-  color: var(--mac-orange, #f97316);
+  color: #b45309;
 }
 
 .readiness-row.state-failed .readiness-detail {
-  color: var(--red);
+  color: #b91c1c;
+}
+
+@media (prefers-color-scheme: dark) {
+  .readiness-row.state-needs-action .readiness-detail {
+    color: #fb923c;
+  }
+
+  .readiness-row.state-failed .readiness-detail {
+    color: #f87171;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readiness-badge.waiting {
+    animation: none;
+    border-top-color: rgba(127, 127, 127, 0.35);
+  }
 }
 
 .readiness-action {

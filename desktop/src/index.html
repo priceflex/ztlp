@@ -8,25 +8,20 @@
 </head>
 <body>
   <div id="app">
-    <!-- Sidebar: minimal, brand + 3 nav items -->
-    <aside class="sidebar">
-      <div class="sidebar-header">
+    <!-- Toolbar (Mac-style single window): brand on the left, Home / Setup
+         tabs and a gear (Advanced settings) on the right. The .nav-item +
+         data-page contract is what app.js navigates on. -->
+    <header class="toolbar">
+      <div class="toolbar-brand">
         <img src="assets/ztlp-logo.png" alt="ZTLP">
         <span class="brand-name">ZTLP</span>
       </div>
-      <nav class="sidebar-nav" id="sidebar-nav">
-        <button class="nav-item active" data-page="home">
-          <span class="nav-icon">●</span> Home
-        </button>
-        <button class="nav-item" data-page="setup">
-          <span class="nav-icon">◎</span> Setup
-        </button>
-        <button class="nav-item" data-page="settings">
-          <span class="nav-icon">≡</span> Settings
-        </button>
+      <nav class="toolbar-nav" id="sidebar-nav">
+        <button class="nav-item active" data-page="home">Home</button>
+        <button class="nav-item" data-page="setup">Setup</button>
+        <button class="nav-item nav-gear" data-page="settings" title="Advanced settings (service, identity, reset)" aria-label="Advanced settings">&#9881;</button>
       </nav>
-      <div class="sidebar-footer" id="sidebar-footer">ZTLP v1.1.0</div>
-    </aside>
+    </header>
 
     <!-- Main content: exactly three pages -->
     <main class="main-content">

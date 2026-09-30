@@ -75,89 +75,73 @@ html, body {
 
 #app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
 }
 
-/* ── Sidebar ───────────────────────────────────────────────────────── */
+/* ── Toolbar (Mac-style single window) ─────────────────────────────── */
 
-.sidebar {
-  width: 220px;
-  min-width: 220px;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--border);
+.toolbar {
   display: flex;
-  flex-direction: column;
-  padding: 0;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
-.sidebar-header {
+.toolbar-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 20px 16px 16px;
-  border-bottom: 1px solid var(--border);
 }
 
-.sidebar-header img {
-  width: 28px;
-  height: 28px;
+.toolbar-brand img {
+  width: 30px;
+  height: auto;
 }
 
-.sidebar-header h1 {
-  font-size: 18px;
+.toolbar-brand .brand-name {
+  font-size: 16px;
   font-weight: 700;
-  color: var(--blue);
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
-.sidebar-nav {
-  flex: 1;
-  padding: 8px;
+.toolbar-nav {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
 }
 
 .nav-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  font-size: 14px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary);
-  transition: all 0.15s ease;
-  border: none;
-  background: none;
-  width: 100%;
-  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .nav-item:hover {
-  background: var(--border);
+  background: rgba(127, 127, 127, 0.14);
   color: var(--text);
 }
 
 .nav-item.active {
-  background: var(--blue);
-  color: #ffffff;
+  background: rgba(2, 132, 199, 0.14);
+  color: var(--blue);
 }
 
-.nav-item .nav-icon {
-  font-size: 18px;
-  width: 22px;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.sidebar-footer {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-muted);
-  text-align: center;
+.nav-gear {
+  font-size: 17px;
+  padding: 4px 10px;
+  line-height: 1;
 }
 
 /* ── Main Content ──────────────────────────────────────────────────── */
@@ -165,12 +149,13 @@ html, body {
 .main-content {
   flex: 1;
   overflow-y: auto;
-  padding: 32px;
+  padding: 28px;
 }
 
 .page {
   display: none;
   max-width: 720px;
+  margin: 0 auto;
   animation: fadeIn 0.15s ease;
 }
 
@@ -797,72 +782,53 @@ html, body {
   display: flex;
   flex-direction: column;
   max-width: 560px;
+  margin: 0 auto;
 }
 
-.home-hero {
+.home-header {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  text-align: center;
-  padding: 28px 20px 8px;
+  gap: 14px;
+  margin-bottom: 20px;
 }
 
 .home-logo {
-  width: 132px;
+  width: 64px;
   height: auto;
-  margin-bottom: 18px;
+  flex-shrink: 0;
   user-select: none;
   -webkit-user-drag: none;
 }
 
-/* Home uses a tighter ring than the default so the logo above it keeps
-   the hero compact. */
-.home-hero .status-ring {
-  width: 92px;
-  height: 92px;
-  margin-bottom: 16px;
-}
-
-.home-hero .status-ring .status-dot {
-  width: 36px;
-  height: 36px;
-}
-
-.home-hero .status-label {
+.home-titles .status-label {
   font-size: 22px;
+  font-weight: 600;
+  line-height: 1.2;
 }
 
-.home-hero .status-sublabel {
-  max-width: 360px;
-  margin-bottom: 20px;
+.home-titles .status-sublabel {
+  margin-top: 2px;
+  font-family: "Cascadia Mono", "SF Mono", Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
-/* The single, big Connect button. */
-.btn-connect {
-  padding: 13px 44px;
-  font-size: 15px;
-  border-radius: 999px;
-  min-width: 180px;
-}
+/* ── Readiness checklist — same shape as macOS HomeView rows ───────── */
 
-/* ── Readiness checklist (Task C3 — Service / Identity / Network ready) ── */
-
-.readiness-card {
+.readiness-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
 }
 
 .readiness-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 4px;
-  border-bottom: 1px solid var(--border);
-}
-
-.readiness-row:last-of-type {
-  border-bottom: none;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.12);
+  transition: background 0.25s ease;
 }
 
 .readiness-badge {
@@ -873,50 +839,104 @@ html, body {
   height: 22px;
   border-radius: 50%;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .readiness-badge.ready {
-  background: var(--green-100, #d1f5e0);
-  color: var(--green-700, #0a7a3d);
+  background: var(--green);
+  color: #ffffff;
 }
 
 .readiness-badge.needs-action {
-  background: var(--yellow-100, #fef3c7);
-  color: var(--yellow-700, #b45309);
+  border: 2px solid var(--mac-orange, #f97316);
 }
 
 .readiness-badge.failed {
-  background: var(--red-100, #fde2e2);
-  color: var(--red-700, #b42318);
+  background: var(--red);
+  color: #ffffff;
 }
 
 .readiness-badge.waiting {
-  background: var(--gray-100, #f1f1f4);
-  color: var(--gray-500, #7b7b86);
+  border: 2px solid rgba(127, 127, 127, 0.35);
+  border-top-color: var(--blue);
+  animation: ztlp-spin 0.9s linear infinite;
+}
+
+@keyframes ztlp-spin {
+  to { transform: rotate(360deg); }
+}
+
+.readiness-text {
+  flex: 1;
+  min-width: 0;
 }
 
 .readiness-title {
-  font-weight: 600;
-  min-width: 110px;
-  flex-shrink: 0;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.readiness-num {
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .readiness-detail {
-  color: var(--gray-500, #7b7b86);
-  flex: 1;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.readiness-row.state-needs-action .readiness-detail {
+  color: var(--mac-orange, #f97316);
+}
+
+.readiness-row.state-failed .readiness-detail {
+  color: var(--red);
 }
 
 .readiness-action {
   flex-shrink: 0;
+  padding: 6px 16px;
+  border: none;
+  border-radius: 7px;
+  background: var(--blue);
+  color: #ffffff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.readiness-action:hover {
+  background: var(--blue-dark);
 }
 
 .readiness-guidance {
-  padding: 14px 4px 4px;
-  color: var(--gray-500, #7b7b86);
-  font-size: 13px;
+  padding-top: 18px;
+  font-size: 14px;
   line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.log-details {
+  margin-top: 22px;
+}
+
+.log-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.log-details .log {
+  margin-top: 10px;
 }
 
 /* ── Live activity log ───────────────────────────────────────────────── */
@@ -982,19 +1002,4 @@ html, body {
 
 .log-sys .log-msg {
   color: var(--blue-light);
-}
-
-/* ── Brand header (logo + wordmark, all 3 platforms) ─────────────────── */
-
-.sidebar-header .brand-name {
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--text);
-}
-
-/* The ZTLP logo in the header is a landscape PNG (1000×744); size by width. */
-.sidebar-header img {
-  width: 34px;
-  height: auto;
 }

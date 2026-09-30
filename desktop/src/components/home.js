@@ -27,21 +27,21 @@ const HomeComponent = (() => {
   function render() {
     container.innerHTML = `
       <div class="home">
-        <div class="home-hero">
+        <div class="home-header">
           <img class="home-logo" src="assets/ztlp-logo.png" alt="ZTLP">
-          <div class="status-label" id="home-status-label">Ready</div>
-          <div class="status-sublabel" id="home-status-sublabel"></div>
+          <div class="home-titles">
+            <div class="status-label" id="home-status-label">Set up ZTLP</div>
+            <div class="status-sublabel" id="home-status-sublabel"></div>
+          </div>
         </div>
 
-        <div class="card readiness-card">
-          <div id="home-readiness-rows"></div>
-          <div class="readiness-guidance" id="home-guidance"></div>
-        </div>
+        <div class="readiness-list" id="home-readiness-rows"></div>
+        <div class="readiness-guidance" id="home-guidance"></div>
 
-        <div class="card log-card">
-          <div class="card-title">Live activity</div>
+        <details class="log-details">
+          <summary>Live activity</summary>
           <div class="log" id="home-log"></div>
-        </div>
+        </details>
       </div>
     `;
 
@@ -63,9 +63,9 @@ const HomeComponent = (() => {
   function rowBadge(state) {
     switch (state.kind) {
       case 'ready': return { cls: 'ready', symbol: '✓' };
-      case 'needsAction': return { cls: 'needs-action', symbol: '!' };
-      case 'failed': return { cls: 'failed', symbol: '✗' };
-      default: return { cls: 'waiting', symbol: '…' }; // 'waiting'
+      case 'needsAction': return { cls: 'needs-action', symbol: '' };
+      case 'failed': return { cls: 'failed', symbol: '✕' };
+      default: return { cls: 'waiting', symbol: '' }; // 'waiting' (CSS spinner)
     }
   }
 
@@ -91,10 +91,12 @@ const HomeComponent = (() => {
           ? `<button class="btn btn-sm readiness-action" data-row="${i}" data-action="${escapeHtml(row.state.action)}">${escapeHtml(actionLabel(row.state.action))}</button>`
           : '';
         return `
-          <div class="readiness-row" id="home.row.${escapeHtml(row.title.toLowerCase().replace(/\s+/g, '-'))}">
+          <div class="readiness-row state-${badge.cls}" id="home.row.${escapeHtml(row.title.toLowerCase().replace(/\s+/g, '-'))}">
             <span class="readiness-badge ${badge.cls}">${badge.symbol}</span>
-            <span class="readiness-title">${escapeHtml(row.title)}</span>
-            <span class="readiness-detail">${escapeHtml(row.state.detail)}</span>
+            <div class="readiness-text">
+              <div class="readiness-title"><span class="readiness-num">${i + 1}.</span> ${escapeHtml(row.title)}</div>
+              <div class="readiness-detail">${escapeHtml(row.state.detail)}</div>
+            </div>
             ${btn}
           </div>
         `;
@@ -109,7 +111,7 @@ const HomeComponent = (() => {
 
     const label = document.getElementById('home-status-label');
     const sublabel = document.getElementById('home-status-sublabel');
-    if (label) label.textContent = readiness.allReady ? 'Ready' : 'Setting up…';
+    if (label) label.textContent = readiness.allReady ? 'Ready' : 'Set up ZTLP';
     if (sublabel) {
       sublabel.textContent = readiness.allReady
         ? currentZone || ''

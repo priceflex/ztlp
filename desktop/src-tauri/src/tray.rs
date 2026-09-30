@@ -35,8 +35,13 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    let _tray = TrayIconBuilder::new()
-        .menu(&menu)
+    let mut builder = TrayIconBuilder::new().menu(&menu);
+    // Use the app icon (the ZTLP shield) in the tray; without this the
+    // tray entry is blank.
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    let _tray = builder
         .tooltip("ZTLP — Disconnected")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "connect" => {

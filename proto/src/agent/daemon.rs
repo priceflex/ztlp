@@ -396,6 +396,9 @@ pub async fn run_unenrolled_standby(
         for action in crate::agent::windows_daemon::standby_startup_plan(token_path) {
             action.execute();
         }
+        // Boot autostart precedes logon: keep re-applying until a console
+        // user exists (and follow user switches).
+        crate::agent::windows_daemon::spawn_token_acl_refresher(token_path.to_path_buf());
     }
     let listener = TcpListener::bind(ipc_addr).await.map_err(|e| {
         format!(

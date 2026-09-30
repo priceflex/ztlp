@@ -121,6 +121,38 @@ pub fn windows_startup_plan(i: &WindowsStartupInputs) -> Vec<WindowsAction> {
     plan
 }
 
+/// Re-apply the token ACL every 30s while the service runs, so a user who
+/// logs on AFTER the service started (boot autostart precedes logon) still
+/// gets read access. `console_user_name()` is `None` before logon, which made
+/// the one-shot startup grant a silent no-op (PR #114 review). Single thread
+/// per process; the ACL action is idempotent. No-op off Windows.
+pub fn spawn_token_acl_refresher(token_path: std::path::PathBuf) {
+    #[cfg(windows)]
+    {
+        static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("ztlp-token-acl".into())
+            .spawn(move || {
+                let mut last: Option<String> = None;
+                loop {
+                    let now = console_user_name();
+                    if now != last {
+                        if now.is_some() {
+                            WindowsAction::TokenGuiReadable(token_path.clone()).execute();
+                        }
+                        last = now;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            });
+    }
+    #[cfg(not(windows))]
+    let _ = token_path;
+}
+
 /// Startup actions for the UNENROLLED STANDBY service (no identity, hence
 /// no CA yet): only the token ACL. CA trust and NRPT are planned by
 /// [`windows_startup_plan`] once enrollment has produced a CA. Pure.

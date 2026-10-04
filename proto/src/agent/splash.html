@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Connecting to {{HOST}}</title>
+<style>
+:root{color-scheme:light dark;--bg1:#eef3ff;--bg2:#dfe8fb;--card:#ffffff;--fg:#14213d;--muted:#5b6b8c;--accent:#4f46e5;--track:#d9def0}
+@media (prefers-color-scheme: dark){:root{--bg1:#0d1224;--bg2:#161d38;--card:#1b2342;--fg:#e8ecfa;--muted:#9aa7c7;--accent:#8b8cff;--track:#2c3558}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;align-items:center;justify-content:center;padding:24px;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:linear-gradient(135deg,var(--bg1),var(--bg2))}
+.card{width:100%;max-width:440px;background:var(--card);border-radius:20px;padding:36px 32px;text-align:center;box-shadow:0 10px 40px rgba(20,33,61,.15)}
+.logo{width:160px;height:auto;animation:pulse 2.4s ease-in-out infinite}
+.spinner{width:34px;height:34px;margin:22px auto 18px;border:4px solid var(--track);border-top-color:var(--accent);border-radius:50%;animation:spin .9s linear infinite}
+#msg{min-height:1.6em;font-size:1.1rem;font-weight:600;margin:0 0 8px}
+.host{font-size:.9rem;color:var(--muted);overflow-wrap:anywhere;margin:0}
+#fail{display:none}
+#fail p{margin:0 0 16px}
+button{font:inherit;font-weight:600;color:#fff;background:var(--accent);border:0;border-radius:10px;padding:10px 22px;cursor:pointer}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.04);opacity:.92}}
+@media (prefers-reduced-motion: reduce){.logo{animation:none}.spinner{animation-duration:3s}}
+</style>
+</head>
+<body>
+<main class="card">
+<img class="logo" src="data:image/png;base64,{{LOGO}}" alt="ZTLP">
+<div id="wait">
+<div class="spinner" role="status" aria-label="Connecting"></div>
+<p id="msg" aria-live="polite"></p>
+<p class="host">{{HOST}}</p>
+</div>
+<div id="fail">
+<p><strong>This is taking longer than expected.</strong></p>
+<p class="host">Could not connect to {{HOST}} yet. The ZTLP agent is still running.</p>
+<p><button type="button" id="retry">Retry</button></p>
+</div>
+</main>
+<script>
+(function(){
+var M={{MESSAGES}};
+var msg=document.getElementById("msg"),last=-1,done=false;
+function pick(){var i;do{i=Math.floor(Math.random()*M.length)}while(M.length>1&&i===last);last=i;msg.textContent=M[i]}
+pick();
+var rot=setInterval(pick,3000);
+var start=Date.now();
+function stop(){done=true;clearInterval(rot)}
+function poll(){
+if(done)return;
+if(Date.now()-start>60000){
+stop();
+document.getElementById("wait").style.display="none";
+document.getElementById("fail").style.display="block";
+return}
+fetch("/.ztlp/ready",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+if(j&&j.ready===true){stop();location.reload()}else{setTimeout(poll,500)}
+}).catch(function(){setTimeout(poll,500)})
+}
+document.getElementById("retry").addEventListener("click",function(){location.reload()});
+setTimeout(poll,500);
+})();
+</script>
+</body>
+</html>

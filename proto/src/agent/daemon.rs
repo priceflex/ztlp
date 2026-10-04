@@ -1447,7 +1447,7 @@ async fn handle_tcp_connection_with_tls(
     match local_tls::maybe_wrap_tls(tcp_stream, port, tls_acceptor).await {
         Ok(local_tls::MaybeWrapped::Tls(tls_stream)) => {
             info!("TLS handshake OK for {} (port {})", ztlp_name, port);
-            handle_tcp_connection_bridged(
+            handle_tcp_connection_gated(
                 tls_stream,
                 ztlp_name,
                 port,
@@ -1461,7 +1461,7 @@ async fn handle_tcp_connection_with_tls(
             .await
         }
         Ok(local_tls::MaybeWrapped::Plain(stream)) => {
-            handle_tcp_connection_bridged(
+            handle_tcp_connection_gated(
                 stream,
                 ztlp_name,
                 port,
@@ -1475,7 +1475,7 @@ async fn handle_tcp_connection_with_tls(
             .await
         }
         Ok(local_tls::MaybeWrapped::PlainWithPeek(peek_stream)) => {
-            handle_tcp_connection_bridged(
+            handle_tcp_connection_gated(
                 peek_stream,
                 ztlp_name,
                 port,
@@ -2012,22 +2012,38 @@ pub async fn proxy_dial_then_bridge(
     }
 }
 
-/// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
+/// A dialed, handshaken tunnel with its data stream open. Holds the QUIC
+/// connection so it stays alive for as long as the stream is in use.
+struct DialedTunnel {
+    _conn: crate::quic_transport::tokio_endpoint::QuicConnection,
+    q_send: quinn::SendStream,
+    q_recv: quinn::RecvStream,
+    session_id: String,
+}
+
+/// Establish a ZTLP tunnel: NS resolve (when uncached), relay CLIENT_ROUTE,
+/// QUIC connect, Noise handshake, open the data stream.
+///
+/// Takes owned arguments so the splash gate can run it in a spawned task.
+/// This is the single copy of the dial sequence (the 2026-08-30 fixes had to
+/// be applied twice when it was duplicated).
 #[allow(clippy::too_many_arguments)]
-async fn handle_tcp_connection_bridged<S>(
-    stream: S,
-    ztlp_name: &str,
+async fn dial_tunnel(
+    ztlp_name: String,
     port: u16,
     peer_addr: Option<SocketAddr>,
     peer_node_id: Option<crate::identity::NodeId>,
-    identity: &NodeIdentity,
-    bind_addr: &str,
-    ns_server: &str,
-    relay_addr: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+    identity: NodeIdentity,
+    bind_addr: String,
+    ns_server: String,
+    relay_addr: Option<String>,
+) -> Result<DialedTunnel, Box<dyn std::error::Error + Send + Sync>> {
+    let ztlp_name = ztlp_name.as_str();
+    let identity = &identity;
+    let bind_addr = bind_addr.as_str();
+    let ns_server = ns_server.as_str();
+    let relay_addr = relay_addr.as_deref();
+
     // Resolve peer address (use cached or query NS). Also capture the
     // resolved NodeID when available — the gateway relay's CLIENT_ROUTE
     // handler falls back to routing by NodeID when the plain service-
@@ -2170,10 +2186,42 @@ where
         ztlp_name, peer, handshake_result.session_id
     );
 
-    let (mut q_send, mut q_recv) = quic_conn
+    let (q_send, q_recv) = quic_conn
         .open_bi()
         .await
         .map_err(|e| format!("failed to open QUIC data stream: {}", e))?;
+
+    Ok(DialedTunnel {
+        _conn: quic_conn,
+        q_send,
+        q_recv,
+        session_id: handshake_result.session_id.to_string(),
+    })
+}
+
+/// Bridge a local stream to a dialed tunnel until either side closes.
+/// `initial` (the already-read request head, if any) is sent first.
+async fn bridge_tunnel<S>(
+    stream: S,
+    tunnel: DialedTunnel,
+    initial: &[u8],
+    ztlp_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let DialedTunnel {
+        _conn,
+        mut q_send,
+        mut q_recv,
+        session_id,
+    } = tunnel;
+
+    if !initial.is_empty() {
+        crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, initial)
+            .await
+            .map_err(|e| format!("failed to forward request head: {}", e))?;
+    }
 
     // Bridge the (potentially TLS-unwrapped) local stream <-> the QUIC
     // data stream, one task per direction (mirrors `cmd_connect`'s
@@ -2218,12 +2266,118 @@ where
 
     let _ = tokio::join!(pump_up, pump_down);
 
-    debug!(
-        "tunnel closed: {} (session {})",
-        ztlp_name, handshake_result.session_id
-    );
+    debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
 
     Ok(())
+}
+
+/// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
+#[allow(clippy::too_many_arguments)]
+async fn handle_tcp_connection_bridged<S>(
+    stream: S,
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let tunnel = dial_tunnel(
+        ztlp_name.to_string(),
+        port,
+        peer_addr,
+        peer_node_id,
+        identity.clone(),
+        bind_addr.to_string(),
+        ns_server.to_string(),
+        relay_addr.map(|r| r.to_string()),
+    )
+    .await?;
+    bridge_tunnel(stream, tunnel, &[], ztlp_name).await
+}
+
+/// Like `handle_tcp_connection_bridged`, but for HTTP-ish ports it first reads
+/// the request head so a browser page load on a slow dial can be shown the
+/// splash page (see `splash_gate`). Other ports take the plain path.
+#[allow(clippy::too_many_arguments)]
+async fn handle_tcp_connection_gated<S>(
+    mut stream: S,
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use super::splash_gate::{global_tracker, run_gated, tracker_key, GateConfig, GateOutcome};
+
+    if stall_close_strategy(port) != StallCloseStrategy::Deliver504 {
+        return handle_tcp_connection_bridged(
+            stream,
+            ztlp_name,
+            port,
+            peer_addr,
+            peer_node_id,
+            identity,
+            bind_addr,
+            ns_server,
+            relay_addr,
+        )
+        .await;
+    }
+
+    let name = ztlp_name.to_string();
+    let identity = identity.clone();
+    let bind = bind_addr.to_string();
+    let ns = ns_server.to_string();
+    let relay = relay_addr.map(|r| r.to_string());
+    let key = tracker_key(ztlp_name, port);
+
+    let outcome = run_gated(
+        &mut stream,
+        ztlp_name,
+        &key,
+        global_tracker(),
+        GateConfig::default(),
+        move || {
+            dial_tunnel(
+                name,
+                port,
+                peer_addr,
+                peer_node_id,
+                identity,
+                bind,
+                ns,
+                relay,
+            )
+        },
+    )
+    .await;
+
+    match outcome {
+        GateOutcome::Proceed { head, tunnel } => {
+            bridge_tunnel(stream, tunnel, &head, ztlp_name).await
+        }
+        GateOutcome::DialFailed { error, .. } => Err(error),
+        GateOutcome::DialAborted { .. } => Err("tunnel dial task aborted".into()),
+        GateOutcome::Served(what) => {
+            debug!(
+                "splash gate served {:?} for {} (port {})",
+                what, ztlp_name, port
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Handle a single TCP connection by establishing a ZTLP tunnel (no TLS).
@@ -2982,6 +3136,102 @@ mod option_a_tests {
 // and the core property that the local acceptor is ready to complete a real
 // TLS handshake (the cert chain + key load correctly).
 // ────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod splash_wiring_tests {
+    //! The real `dial_tunnel` against a black-hole NS (it hangs), driven
+    //! through `handle_tcp_connection_gated`.
+    use super::handle_tcp_connection_gated;
+    use crate::identity::NodeIdentity;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn blackhole_ns() -> String {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut b = [0u8; 256];
+                    let _ = s.read(&mut b).await;
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                });
+            }
+        });
+        addr
+    }
+
+    async fn run(port: u16, request: &'static [u8]) -> Vec<u8> {
+        let ns = blackhole_ns().await;
+        let (mut browser, agent) = tokio::io::duplex(256 * 1024);
+        browser.write_all(request).await.unwrap();
+        let id = NodeIdentity::generate().unwrap();
+        let task = tokio::spawn(async move {
+            let _ = handle_tcp_connection_gated(
+                agent,
+                "slow.splash.test",
+                port,
+                None,
+                None,
+                &id,
+                "127.0.0.1",
+                &ns,
+                None,
+            )
+            .await;
+        });
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(2500), async {
+            let mut b = [0u8; 4096];
+            loop {
+                match browser.read(&mut b).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&b[..n]),
+                }
+            }
+        })
+        .await;
+        task.abort();
+        got
+    }
+
+    const BROWSER: &[u8] = b"GET / HTTP/1.1\r\nHost: slow.splash.test\r\nAccept: text/html\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n\r\n";
+    const CURL: &[u8] = b"GET / HTTP/1.1\r\nHost: slow.splash.test\r\nAccept: */*\r\n\r\n";
+
+    #[tokio::test]
+    async fn stalled_dial_browser_on_https_port_gets_splash() {
+        let got = run(443, BROWSER).await;
+        let text = String::from_utf8_lossy(&got);
+        assert!(
+            text.starts_with("HTTP/1.1 200 "),
+            "got {} bytes: {:.80}",
+            got.len(),
+            text
+        );
+        assert!(text.contains("slow.splash.test") && text.contains("/.ztlp/ready"));
+    }
+
+    #[tokio::test]
+    async fn stalled_dial_curl_on_https_port_gets_no_bytes() {
+        let got = run(443, CURL).await;
+        assert!(
+            got.is_empty(),
+            "curl-style client got {:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_http_port_never_gets_splash() {
+        let got = run(3306, BROWSER).await;
+        assert!(
+            got.is_empty(),
+            "db port got {:?}",
+            String::from_utf8_lossy(&got)
+        );
+    }
+}
+
 #[cfg(test)]
 mod local_tls_termination_tests {
     use crate::agent::local_tls::{tls_mode_for_port, TlsMode};

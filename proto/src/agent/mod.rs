@@ -44,6 +44,7 @@ pub mod macos_daemon;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;
+pub mod splash;
 pub mod stream;
 pub mod tunnel_pool;
 pub mod user_binding;

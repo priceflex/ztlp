@@ -1,6 +1,6 @@
 # Browser splash page while the tunnel connects
 
-Status: plan, not built. Written 2026-09-30 after the v0.35.12 Windows release.
+Status: built in v0.35.13 (see "As built" at the end). Written 2026-09-30 after the v0.35.12 Windows release.
 Branch: `feat/browser-splash-page` (from main at `829016f`).
 
 ## 1. Problem
@@ -159,7 +159,7 @@ The splash script polls `GET /.ztlp/ready` on the same origin.
    normal path. Integration test with a stalled dial: browser request gets
    the splash; `curl`-style request does not.
 6. Restyle the 504 page to match and add Retry.
-7. Windows end-to-end on the AI computer (10.170.3.207): fresh install,
+7. Windows end-to-end on the AI computer (the Windows test PC): fresh install,
    enroll, open the site in Chrome with the tunnel cold, confirm the splash
    shows and the site appears on its own; confirm `curl.exe` against the same
    host never gets HTML from the splash.
@@ -194,7 +194,7 @@ The splash script polls `GET /.ztlp/ready` on the same origin.
 ## 11. Context for the next session
 
 - Repo `/home/trs/ztlp`, this branch, no code written yet.
-- The test PC for end-to-end is 10.170.3.207 (see skill
+- The test PC for end-to-end is the Windows test PC (see skill
   `ztlp-ai-computer-agent-deploy` and the Windows first-run handoffs).
   Enrollment codes are single use; mint a fresh one per test.
 - Release flow: PR, CI green, read CodeRabbit comments, then merge, then tag
@@ -205,3 +205,25 @@ The splash script polls `GET /.ztlp/ready` on the same origin.
   restyle to match Home, design doc
   `docs/WINDOWS-MULTI-USER-IDENTITY-DESIGN.md` (committed on branch
   `docs/windows-multi-user-identity`, not pushed).
+
+## 12. As built (v0.35.13)
+
+Findings that changed the design while building:
+
+- `TunnelPool` is bookkeeping only; nothing in the TCP path registers tunnels
+  in it, and every connection dials its own QUIC tunnel. There is no warm
+  tunnel to reuse, and the abandoned dial of a splashed request is not kept.
+- Cold dials measured from the Windows test PC (60 requests, relay path): p50
+  147 ms, p90 811 ms, max 1.3 s, with occasional hangs on HTTPS that never
+  completed. A 1 s grace period therefore hides the splash for ~98% of loads.
+- Built without a warm-tunnel cache. The splash path keeps the dial running
+  only to record success in `ReadyTracker` (`splash_gate.rs`, 30 s TTL). The
+  page polls `/.ztlp/ready`; when true it reloads and takes a fresh dial.
+- The splash CSP needs `connect-src 'self'` or the readiness poll is blocked.
+- Local TLS offers no ALPN h2, so head parsing is HTTP/1.1 only.
+- Wired into the local-TLS path (ports 443/8443) via
+  `handle_tcp_connection_gated`. Plain HTTP on 80/8080
+  (`proxy_dial_then_bridge`) is NOT wired yet, and the HTTPS path still has no
+  first-byte deadline.
+- Not yet verified end to end: splash on a forced slow dial, the reload, and
+  Chrome. Only curl-style checks against the installed build so far.

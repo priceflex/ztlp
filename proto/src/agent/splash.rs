@@ -99,6 +99,88 @@ where
     }
 }
 
+/// Messages rotated on the splash page (approved list; see plan section 7).
+pub const MESSAGES: [&str; 8] = [
+    "Securing your connection",
+    "Zipping through the internet securely",
+    "Look mom, no passwords",
+    "Knocking politely on the zero-trust door",
+    "Teaching the packets to whisper",
+    "Checking everyone's name tag",
+    "Building you a private tunnel",
+    "Almost there, it is worth the wait",
+];
+
+/// Escape text for HTML element content and quoted attributes.
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+const TEMPLATE: &str = include_str!("splash.html");
+const LOGO_PNG: &[u8] = include_bytes!("splash_logo.png");
+
+/// MESSAGES as a JS array literal. `<` is escaped so the text can never
+/// close the surrounding `<script>` element.
+fn messages_js() -> String {
+    let items: Vec<String> = MESSAGES
+        .iter()
+        .map(|m| {
+            let mut q = String::from("\"");
+            for c in m.chars() {
+                match c {
+                    '\\' => q.push_str("\\\\"),
+                    '"' => q.push_str("\\\""),
+                    '<' => q.push_str("\\u003c"),
+                    c => q.push(c),
+                }
+            }
+            q.push('"');
+            q
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Complete HTTP/1.1 response (head + body) for the splash page.
+///
+/// `host` is attacker-influenced (DNS / Host header) and is HTML-escaped.
+pub fn splash_response(host: &str) -> Vec<u8> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    // Substitute LOGO and MESSAGES first and HOST last, so that
+    // host text can never be re-interpreted as a placeholder.
+    let body = TEMPLATE
+        .replace("{{LOGO}}", &STANDARD.encode(LOGO_PNG))
+        .replace("{{MESSAGES}}", &messages_js())
+        .replace("{{HOST}}", &escape_html(host));
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: default-src 'none'; img-src data:; \
+         style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\n\
+         \r\n",
+        body.len()
+    );
+    let mut out = head.into_bytes();
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +391,143 @@ mod tests {
         let got = read_request_head(&mut s, MAX_HEAD_BYTES, T).await;
         assert!(matches!(got, HeadRead::Complete(_)));
         assert!(is_browser_navigation(got.bytes()));
+    }
+
+    // ---- splash page ----
+    fn split_resp(r: &[u8]) -> (String, String) {
+        let i = r
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("head end");
+        (
+            String::from_utf8(r[..i].to_vec()).unwrap(),
+            String::from_utf8(r[i + 4..].to_vec()).unwrap(),
+        )
+    }
+
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().skip(1).find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case(name).then(|| v.trim())
+        })
+    }
+
+    #[test]
+    fn escape_html_escapes_all_specials() {
+        assert_eq!(
+            escape_html(r#"<script>"a" & 'b'</script>"#),
+            "&lt;script&gt;&quot;a&quot; &amp; &#39;b&#39;&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn splash_is_200_html_with_correct_length() {
+        let r = splash_response("app.zone.ztlp");
+        let (head, body) = split_resp(&r);
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        assert_eq!(
+            header(&head, "content-type"),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            header(&head, "content-length")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            body.len()
+        );
+    }
+
+    #[test]
+    fn splash_headers_no_store_close_nosniff() {
+        let (head, _) = split_resp(&splash_response("a.ztlp"));
+        assert_eq!(header(&head, "cache-control"), Some("no-store"));
+        assert_eq!(header(&head, "connection"), Some("close"));
+        assert_eq!(header(&head, "x-content-type-options"), Some("nosniff"));
+    }
+
+    #[test]
+    fn splash_csp_locks_down_but_allows_ready_poll() {
+        let (head, _) = split_resp(&splash_response("a.ztlp"));
+        let csp = header(&head, "content-security-policy").expect("CSP header");
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+        assert!(csp.contains("img-src data:"), "{csp}");
+        // The page polls /.ztlp/ready on its own origin; default-src 'none'
+        // would block that without this.
+        assert!(csp.contains("connect-src 'self'"), "{csp}");
+        assert!(!csp.contains("http"), "no external origins: {csp}");
+    }
+
+    #[test]
+    fn splash_hostname_is_escaped_and_never_raw() {
+        let evil = "<img src=x onerror=alert(1)>.ztlp";
+        let (_, body) = split_resp(&splash_response(evil));
+        assert!(!body.contains(evil));
+        assert!(!body.contains("<img src=x"));
+        assert!(body.contains("&lt;img src=x onerror=alert(1)&gt;.ztlp"));
+    }
+
+    #[test]
+    fn splash_shows_hostname() {
+        let (_, body) = split_resp(&splash_response("billing.acme.ztlp"));
+        assert!(body.contains("billing.acme.ztlp"));
+    }
+
+    #[test]
+    fn splash_has_logo_data_uri_and_no_external_requests() {
+        let (_, body) = split_resp(&splash_response("a.ztlp"));
+        assert!(body.contains("src=\"data:image/png;base64,"));
+        for bad in ["http://", "https://", "src=\"//", "url(//", "@import"] {
+            assert!(!body.contains(bad), "external ref {bad}");
+        }
+    }
+
+    #[test]
+    fn splash_polls_ready_endpoint_and_reloads() {
+        let (_, body) = split_resp(&splash_response("a.ztlp"));
+        assert!(body.contains("/.ztlp/ready"));
+        assert!(body.contains("location.reload()"));
+        assert!(body.contains("500")); // poll interval ms
+    }
+
+    #[test]
+    fn splash_embeds_every_message_and_rotation() {
+        let (_, body) = split_resp(&splash_response("a.ztlp"));
+        for m in MESSAGES {
+            // apostrophes are JSON/JS-escaped inside the script; match a stem
+            let stem = m.split('\'').next().unwrap();
+            assert!(body.contains(stem), "missing message {m}");
+        }
+        assert!(body.contains("3000")); // rotate every ~3s
+    }
+
+    #[test]
+    fn splash_gives_up_after_60s_with_retry_button() {
+        let (_, body) = split_resp(&splash_response("a.ztlp"));
+        assert!(body.contains("60000"));
+        assert!(body.to_lowercase().contains("retry"));
+    }
+
+    #[test]
+    fn splash_supports_dark_and_reduced_motion() {
+        let (_, body) = split_resp(&splash_response("a.ztlp"));
+        assert!(body.contains("prefers-color-scheme: dark"));
+        assert!(body.contains("prefers-reduced-motion"));
+    }
+
+    #[test]
+    fn dump_splash_for_manual_review() {
+        // Only writes when asked: SPLASH_DUMP=/path/out.html cargo test ...
+        if let Ok(path) = std::env::var("SPLASH_DUMP") {
+            let r = splash_response("billing.acme.ztlp");
+            let (_, body) = split_resp(&r);
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    #[test]
+    fn splash_under_size_budget() {
+        let r = splash_response("a.ztlp");
+        assert!(r.len() < 60 * 1024, "splash is {} bytes", r.len());
     }
 }

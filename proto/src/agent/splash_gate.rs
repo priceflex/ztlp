@@ -189,6 +189,9 @@ pub struct GateConfig {
     pub head_max: usize,
     /// Overall deadline for the head read (idle preconnects fall through).
     pub head_timeout: Duration,
+    /// Total budget for a dial that was handed to the splash page. On expiry
+    /// the dial task is aborted and recorded as a failure.
+    pub warm_deadline: Duration,
 }
 
 impl Default for GateConfig {
@@ -197,6 +200,7 @@ impl Default for GateConfig {
             grace: Duration::from_secs(1),
             head_max: super::splash::MAX_HEAD_BYTES,
             head_timeout: Duration::from_secs(2),
+            warm_deadline: WARMING_STALE,
         }
     }
 }
@@ -274,8 +278,18 @@ where
                 let _ = stream.write_all(&splash_response(host)).await;
                 let _ = stream.shutdown().await;
                 let key = key.to_string();
+                // Budget counts from when the dial started, so the grace
+                // period already spent is deducted.
+                let remaining = cfg.warm_deadline.saturating_sub(cfg.grace);
                 tokio::spawn(async move {
-                    let ok = matches!(handle.await, Ok(Ok(_)));
+                    let ok = match tokio::time::timeout(remaining, &mut handle).await {
+                        Ok(joined) => matches!(joined, Ok(Ok(_))),
+                        Err(_elapsed) => {
+                            // Timing out the wait does not cancel the task.
+                            handle.abort();
+                            false
+                        }
+                    };
                     tracker.finish(&key, ok, Instant::now());
                 });
                 return GateOutcome::Served(Served::Splash);
@@ -768,7 +782,7 @@ Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\nContent-Length: 0\r\n\r\
     #[tokio::test(start_paused = true)]
     async fn oversize_head_is_forwarded_not_splashed() {
         let mut req = b"GET / HTTP/1.1\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\nAccept: text/html\r\nX: ".to_vec();
-        req.extend(std::iter::repeat(b'a').take(40_000));
+        req.extend(std::iter::repeat_n(b'a', 40_000));
         let (out, got, _d) = drive(
             &req,
             Duration::from_secs(5),
@@ -781,5 +795,67 @@ Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\nContent-Length: 0\r\n\r\
             other => panic!("expected Proceed, got {other:?}"),
         }
         assert!(got.is_empty());
+    }
+
+    /// Sets a flag when the dial future is dropped (i.e. the task is aborted).
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_dial_after_splash_is_aborted_at_warm_deadline() {
+        let tracker = Arc::new(ReadyTracker::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d2 = dropped.clone();
+        let (mut browser, mut agent) = tokio::io::duplex(256 * 1024);
+        browser.write_all(&browser_get()).await.unwrap();
+        let out = run_gated(
+            &mut agent,
+            HOST,
+            &key(),
+            tracker.clone(),
+            GateConfig::default(),
+            move || async move {
+                let _guard = DropFlag(d2);
+                std::future::pending::<Result<u32, String>>().await
+            },
+        )
+        .await;
+        assert!(
+            matches!(out, GateOutcome::Served(Served::Splash)),
+            "{out:?}"
+        );
+
+        // Before the deadline the dial is still alive and not ready.
+        tokio::time::sleep(WARMING_STALE - Duration::from_secs(2)).await;
+        assert!(!dropped.load(Ordering::SeqCst), "aborted too early");
+        // Past the deadline it must be cancelled and recorded as a failure.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "hung dial was never aborted"
+        );
+        assert!(!tracker.is_ready(&key(), Instant::now()));
+        assert!(
+            tracker.begin_warm(&key(), Instant::now()),
+            "slot must be free again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dial_that_finishes_before_warm_deadline_still_marks_ready() {
+        let tracker = Arc::new(ReadyTracker::new());
+        let (_o, _g, _d) = drive(
+            &browser_get(),
+            Duration::from_secs(20),
+            true,
+            tracker.clone(),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert!(tracker.is_ready(&key(), Instant::now()));
     }
 }

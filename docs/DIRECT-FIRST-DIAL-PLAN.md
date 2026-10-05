@@ -1,6 +1,7 @@
 # Direct-First Dialing for the Agent (ZTLP)
 
-Status: plan, not built. Written 2026-10-05 after the ChooseForce
+Status: steps A and B built and live-tested (PR #117, v0.35.14); steps C, D
+and E still open. Written 2026-10-05 after the ChooseForce
 (`www.chooseforce.ztlp`) deployment failed end to end. Steven approved the
 three-part direction on 2026-10-05.
 

@@ -100,6 +100,8 @@ impl DnsResolverState {
         if let Some(entry) = self.vip_pool.lookup_name_mut(ztlp_name) {
             entry.peer_addr = Some(resolution.addr);
             entry.peer_node_id = resolution.node_id;
+            entry.peer_candidates = resolution.candidates.clone();
+            super::daemon::set_peer_candidates(ztlp_name, &resolution.candidates);
         }
         if let Some(path) = &self.vip_state_path {
             if let Err(e) = self.vip_pool.save_to(path) {

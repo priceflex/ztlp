@@ -73,6 +73,53 @@ fn prefer_relay() -> bool {
     PREFER_RELAY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── Per-name ranked candidate cache ───────────────────────────────────────
+//
+// The VIP listener snapshots `(peer_addr, peer_node_id)` once per entry
+// when it binds, so threading the full candidate list through the eight
+// signatures between there and `connect_tunnel` would be invasive. The DNS
+// resolver instead publishes each name's ranked list here on every
+// resolution (same process-wide pattern as the relay secret above);
+// `connect_tunnel` consults it on a cache hit. `VipEntry.peer_candidates`
+// holds the same list for status/inspection.
+static PEER_CANDIDATES: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>>,
+> = std::sync::OnceLock::new();
+
+fn candidate_cache(
+) -> &'static std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>> {
+    PEER_CANDIDATES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Record the ranked candidate list for `ztlp_name` (called by the DNS
+/// resolver after each successful NS resolution).
+pub(crate) fn set_peer_candidates(ztlp_name: &str, candidates: &[SocketAddr]) {
+    if let Ok(mut g) = candidate_cache().write() {
+        g.insert(ztlp_name.to_ascii_lowercase(), candidates.to_vec());
+    }
+}
+
+fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
+    candidate_cache()
+        .read()
+        .ok()
+        .and_then(|g| g.get(&ztlp_name.to_ascii_lowercase()).cloned())
+        .unwrap_or_default()
+}
+
+/// What the dial planner sees on a VIP cache hit: the full cached ranked
+/// list when we have one, else the single cached best address, else
+/// empty (caller resolves via NS). Pure; see `direct_first_plan` tests.
+fn candidates_for_dial(
+    cached_best: Option<SocketAddr>,
+    cached_list: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    if !cached_list.is_empty() {
+        return cached_list.to_vec();
+    }
+    cached_best.into_iter().collect()
+}
+
 /// Build a CLIENT_ROUTE frame, HMAC-signed with the installed relay secret
 /// when one is configured (zero HMAC otherwise — accepted only by relays in
 /// dev/staging mode).
@@ -2346,6 +2393,38 @@ mod tests {
             assert!(DIRECT_ATTEMPT_TIMEOUT >= std::time::Duration::from_millis(250));
             assert!(DIRECT_ATTEMPT_TIMEOUT <= std::time::Duration::from_millis(1500));
         }
+
+        // ── Cache hit must dial the FULL ranked list (2026-10-05 follow-up) ──
+        //
+        // The VIP cache used to hand the dialer only `peer_addr` (the best
+        // single candidate). A client whose cached LAN candidate went stale
+        // (laptop left the office) would fail that one direct attempt and
+        // fall to the relay, never trying the gateway's public address.
+        // `candidates_for_dial` is the one place that decides what the
+        // planner sees: cached list when present, else [cached best], else
+        // the fresh resolution.
+        #[test]
+        fn cache_hit_with_list_uses_the_whole_list() {
+            use super::super::candidates_for_dial;
+            let cached = vec![sa("10.42.42.112:23097"), sa("204.16.122.24:23097")];
+            let got = candidates_for_dial(Some(sa("10.42.42.112:23097")), &cached);
+            assert_eq!(got, cached);
+        }
+
+        #[test]
+        fn cache_hit_without_list_falls_back_to_the_single_best() {
+            use super::super::candidates_for_dial;
+            // Entries restored from vip_state.json have no peer info until the
+            // first DNS hit; an older in-memory entry may have addr but no list.
+            let got = candidates_for_dial(Some(sa("10.0.0.5:23097")), &[]);
+            assert_eq!(got, vec![sa("10.0.0.5:23097")]);
+        }
+
+        #[test]
+        fn no_cache_means_empty_so_caller_resolves() {
+            use super::super::candidates_for_dial;
+            assert!(candidates_for_dial(None, &[]).is_empty());
+        }
     }
 
     // ── CLIENT_ROUTE signing via the daemon-wide relay secret (2026-09-13) ──
@@ -2758,17 +2837,17 @@ async fn connect_tunnel(
     ns_server: &str,
     relay_addr: Option<&str>,
 ) -> Result<ConnectedTunnel, Box<dyn std::error::Error + Send + Sync>> {
-    // Candidates: the cached VIP entry carries only the best address (and
-    // the gateway NodeID). A cache hit therefore dials that one address;
-    // the full ranked list comes from a fresh NS resolution. (Caching the
-    // whole list in VipEntry is a follow-up; the cached best address IS
-    // the top-ranked direct candidate, so same-LAN still wins on a hit.)
-    let (candidates, resolved_node_id): (Vec<SocketAddr>, Option<NodeId>) = match peer_addr {
-        Some(addr) => (vec![addr], peer_node_id),
-        None => {
-            let r = proxy::ns_resolve(ztlp_name, ns_server).await?;
-            (r.candidates, r.node_id)
-        }
+    // Candidates: on a VIP cache hit use the full ranked list the DNS
+    // resolver published for this name (falls back to the single cached
+    // best address for entries that predate the list); otherwise resolve
+    // fresh via NS.
+    let cached = candidates_for_dial(peer_addr, &cached_peer_candidates(ztlp_name));
+    let (candidates, resolved_node_id): (Vec<SocketAddr>, Option<NodeId>) = if !cached.is_empty() {
+        (cached, peer_node_id)
+    } else {
+        let r = proxy::ns_resolve(ztlp_name, ns_server).await?;
+        set_peer_candidates(ztlp_name, &r.candidates);
+        (r.candidates, r.node_id)
     };
 
     let relay: Option<SocketAddr> = match relay_addr {

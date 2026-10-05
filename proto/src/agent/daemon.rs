@@ -57,6 +57,87 @@ pub(crate) fn set_relay_secret(secret: Option<Vec<u8>>) {
     }
 }
 
+// ── Dial order: direct-first (default) or relay-first ─────────────────────
+//
+// `[tunnel] prefer_relay` from the agent config, installed once by
+// `run_daemon`, read by `connect_tunnel`. Same process-wide pattern as the
+// relay secret above, for the same reason (eight signatures in between).
+static PREFER_RELAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the dial-order preference (`[tunnel] prefer_relay`).
+pub(crate) fn set_prefer_relay(v: bool) {
+    PREFER_RELAY.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn prefer_relay() -> bool {
+    PREFER_RELAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ── Per-name ranked candidate cache ───────────────────────────────────────
+//
+// The VIP listener snapshots `(peer_addr, peer_node_id)` once per entry
+// when it binds, so threading the full candidate list through the eight
+// signatures between there and `connect_tunnel` would be invasive. The DNS
+// resolver instead publishes each name's ranked list here on every
+// resolution (same process-wide pattern as the relay secret above);
+// `connect_tunnel` consults it on a cache hit. `VipEntry.peer_candidates`
+// holds the same list for status/inspection.
+static PEER_CANDIDATES: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>>,
+> = std::sync::OnceLock::new();
+
+fn candidate_cache(
+) -> &'static std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>> {
+    PEER_CANDIDATES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Record the ranked candidate list for `ztlp_name` (called by the DNS
+/// resolver after each successful NS resolution).
+pub(crate) fn set_peer_candidates(ztlp_name: &str, candidates: &[SocketAddr]) {
+    if let Ok(mut g) = candidate_cache().write() {
+        g.insert(ztlp_name.to_ascii_lowercase(), candidates.to_vec());
+    }
+}
+
+/// Drop the cached list for `ztlp_name` (called when its VIP entry is
+/// reaped, so the cache cannot grow without bound or outlive the entry).
+pub(crate) fn forget_peer_candidates(ztlp_name: &str) {
+    if let Ok(mut g) = candidate_cache().write() {
+        g.remove(&ztlp_name.to_ascii_lowercase());
+    }
+}
+
+fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
+    candidate_cache()
+        .read()
+        .ok()
+        .and_then(|g| g.get(&ztlp_name.to_ascii_lowercase()).cloned())
+        .unwrap_or_default()
+}
+
+/// What the dial planner sees on a VIP cache hit: the full cached ranked
+/// list when we have one, else the single cached best address, else
+/// empty (caller resolves via NS). Pure; see `direct_first_plan` tests.
+///
+/// The list is only honoured alongside a cache hit (`cached_best` is
+/// `Some`). `None` means the caller found no usable VIP entry (expired and
+/// reaped, or a first request) and wants a FRESH resolution; the
+/// process-wide candidate cache outlives VIP entries, so a leftover list
+/// must not override that, or a gateway that moved would keep being dialed
+/// at its old addresses until restart.
+fn candidates_for_dial(
+    cached_best: Option<SocketAddr>,
+    cached_list: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let Some(best) = cached_best else {
+        return Vec::new();
+    };
+    if !cached_list.is_empty() {
+        return cached_list.to_vec();
+    }
+    vec![best]
+}
+
 /// Build a CLIENT_ROUTE frame, HMAC-signed with the installed relay secret
 /// when one is configured (zero HMAC otherwise — accepted only by relays in
 /// dev/staging mode).
@@ -929,6 +1010,15 @@ pub async fn run_daemon(
     let proxy_first_byte_timeout = config.tunnel.first_byte_timeout.clone();
     if let Some(ref r) = proxy_relay {
         info!("relay configured: {}", r);
+        // Direct-first dial order (docs/DIRECT-FIRST-DIAL-PLAN.md step B):
+        // published gateway endpoints are tried before the relay unless the
+        // operator sets `[tunnel] prefer_relay = true`.
+        set_prefer_relay(config.tunnel.prefer_relay);
+        if config.tunnel.prefer_relay {
+            info!("dial order: relay first, direct endpoints as fallback (prefer_relay = true)");
+        } else {
+            info!("dial order: direct endpoints first, relay as fallback");
+        }
     } else {
         info!("no relay configured, using direct connections");
     }
@@ -1561,120 +1651,27 @@ async fn proxy_dial_phase(
 ) -> Result<DialOutcome, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncReadExt;
 
-    // ── Peer resolution (NS query when uncached) ────────────────────────
-    let (peer, resolved_node_id) = match peer_addr {
-        Some(addr) => (addr, peer_node_id),
-        None => {
-            let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
-            (resolution.addr, resolution.node_id)
-        }
-    };
-
-    let send_addr: SocketAddr = match relay_addr {
-        Some(relay) => {
-            info!("routing tunnel through relay {} (dial)", relay);
-            relay
-                .parse()
-                .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
-        }
-        None => peer,
-    };
-
-    debug!(
-        "dial phase: establishing tunnel to {} ({}) port {}",
-        ztlp_name, peer, port
-    );
-
-    let service_name = service_name_for_ztlp_name(ztlp_name, port);
-
-    let std_socket = std::net::UdpSocket::bind(bind_addr)?;
-
-    if relay_addr.is_some() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let client_route_node_id: [u8; 16] = resolved_node_id
-            .map(|nid| *nid.as_bytes())
-            .unwrap_or(*identity.node_id.as_bytes());
-        match build_signed_client_route(&client_route_node_id, &service_name, ts) {
-            Ok(route_pkt) => {
-                if let Err(e) = std_socket.send_to(&route_pkt, send_addr) {
-                    warn!("failed to send CLIENT_ROUTE (dial) to {}: {}", send_addr, e);
-                } else {
-                    debug!(
-                        "CLIENT_ROUTE sent (dial) to {} (service={})",
-                        send_addr, service_name
-                    );
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => {
-                warn!(
-                    "could not build CLIENT_ROUTE (dial) for service '{}': {}",
-                    service_name, e
-                );
-            }
-        }
-    }
-
-    let quic_conn = crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket(
-        crate::quic_transport::QuicEndpointConfig::default(),
-        send_addr,
-        "localhost",
-        std_socket,
+    // ── Connect (direct-first plan, then relay) ─────────────────────────
+    // See `connect_tunnel`: ranked direct candidates each get a short
+    // timeout; the relay attempt is bounded only by the caller's
+    // first-byte deadline (unchanged behaviour for the relay path).
+    let connected = connect_tunnel(
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
     )
     .await?;
-
-    let responder_id = resolved_node_id.unwrap_or_else(NodeId::zero);
-    let service_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
-        let mut svc = [0u8; 16];
-        let port_str = port.to_string();
-        let bytes = port_str.as_bytes();
-        let len = bytes.len().min(16);
-        svc[..len].copy_from_slice(&bytes[..len]);
-        svc
-    });
-
-    let handshake_result = crate::quic_transport::noise_stream::run_initiator_handshake(
-        &quic_conn,
-        identity,
-        responder_id,
-        service_hash,
-    )
-    .await
-    .map_err(|e| format!("QUIC Noise handshake failed (dial): {}", e))?;
-
-    info!(
-        "dial phase: tunnel active: {} → {} (session {})",
-        ztlp_name, peer, handshake_result.session_id
+    let quic_conn = connected.conn;
+    debug!(
+        "dial phase: tunnel active: {} → {} via {:?} (session {})",
+        ztlp_name, connected.addr, connected.via, connected.session_id
     );
 
-    // ── First-byte pump: client → tunnel, until first backend byte ─────
-    //
-    // The deadline covers THIS phase (accept → first response byte). The
-    // steady-state bridge (both directions, both halves) runs afterwards
-    // with NO deadline — websockets/SSE/RDP survive arbitrary idle.
-    //
-    // Two concurrent pumps run until the first backend byte arrives:
-    //   pump_up: client read half → tunnel write (client → backend)
-    //   pump_down: tunnel read → (holds the first backend frame)
-    // Each pump handles exactly ONE frame and exits; the caller awaits
-    // pump_down first, then aborts pump_up and hands the tunnel halves to
-    // the steady-state bridge.
-    //
-    // PR #108 — why pump_up stops after the FIRST client frame (the
-    // Chrome double-refresh stall): the pre-#108 up-pump drained the
-    // client socket in an unbounded loop (up to ~64KB per read) BEFORE
-    // forwarding. A browser request is a single small frame, so that was
-    // harmless in practice — but any client streaming more bytes before
-    // the backend speaks (large request bodies, chunked uploads, or a
-    // client that sends the request in multiple packets over a slow link)
-    // starved the backend: nothing reached it until the read drained to
-    // EOF. With one-stop-after-first-frame semantics the request reaches
-    // the backend as soon as its first frame is complete, and the
-    // steady-state bridge takes over with the same one-frame-at-a-time
-    // rhythm it already uses.
     let (mut q_send, mut q_recv) = quic_conn
         .open_bi()
         .await
@@ -2038,153 +2035,21 @@ async fn dial_tunnel(
     ns_server: String,
     relay_addr: Option<String>,
 ) -> Result<DialedTunnel, Box<dyn std::error::Error + Send + Sync>> {
-    let ztlp_name = ztlp_name.as_str();
-    let identity = &identity;
-    let bind_addr = bind_addr.as_str();
-    let ns_server = ns_server.as_str();
-    let relay_addr = relay_addr.as_deref();
-
-    // Resolve peer address (use cached or query NS). Also capture the
-    // resolved NodeID when available — the gateway relay's CLIENT_ROUTE
-    // handler falls back to routing by NodeID when the plain service-
-    // name lookup misses (see `udp_listener.ex`'s
-    // `pick_fallback_gateway/2`), which matters for exactly the shared-
-    // relay case this demo exercises (gateway registered under a zone
-    // key, not the bare service name). When `peer_addr` is already
-    // cached (the common VIP-proxy path), use the CALLER-supplied
-    // `peer_node_id` (cached alongside `peer_addr` in `VipEntry` — see
-    // `vip_pool.rs`) instead of discarding it; only a fresh NS lookup
-    // (uncached path) needs to re-resolve it here.
-    let (peer, resolved_node_id) = match peer_addr {
-        Some(addr) => (addr, peer_node_id),
-        None => {
-            let resolution = proxy::ns_resolve(ztlp_name, ns_server).await?;
-            (resolution.addr, resolution.node_id)
-        }
-    };
-
-    // If relay is configured, route all ZTLP packets through the relay
-    let send_addr: SocketAddr = match relay_addr {
-        Some(relay) => {
-            info!("routing tunnel through relay {}", relay);
-            relay
-                .parse()
-                .map_err(|e| format!("invalid relay address '{}': {}", relay, e))?
-        }
-        None => peer,
-    };
-
-    debug!(
-        "establishing tunnel to {} ({}) port {}",
-        ztlp_name, peer, port
-    );
-
-    // Encode port as service name — derive from the hostname's leading
-    // label when present (real gateways register arbitrary operator-
-    // chosen names like "web", not port-derivable ones — see
-    // `service_name_for_ztlp_name` for the real mismatch this fixes,
-    // found live 2026-08-30), falling back to a port-based guess.
-    let service_name = service_name_for_ztlp_name(ztlp_name, port);
-
-    // ── QUIC transport (2026-08-30 architecture fix) ───────────────────
-    //
-    // The automatic VIP tunnel dialer used to speak a raw-UDP Noise
-    // handshake directly (`TransportNode` + `HandshakeHeader`). Root-
-    // caused live: every modern ZTLP gateway (confirmed via this demo's
-    // `ztlp listen --gateway` process, whose own log literally says
-    // "ZTLP QUIC server listening on UDP ...") is a pure QUIC endpoint —
-    // it has no raw-UDP listener at all. A raw HELLO packet reaching it
-    // gets "dropping packet with invalid CID" (Quinn trying to parse it
-    // as a malformed QUIC packet) and is silently discarded, which is
-    // why the handshake always timed out even after CLIENT_ROUTE,
-    // NodeID-fallback routing, and VIP-cache threading were all fixed
-    // and independently verified working (confirmed live: the relay's
-    // own stats showed `forwarded` incrementing correctly, so the
-    // packet WAS reaching the gateway — it just spoke the wrong
-    // protocol once there). `ztlp connect`'s `cmd_connect` already uses
-    // this exact QUIC path successfully against the same relay/gateway
-    // (see `bin/ztlp-cli.rs`'s `QuicEndpoint::connect_with_socket` +
-    // `noise_stream::run_initiator_handshake`); this brings the
-    // automatic agent dialer onto the same, actually-working transport
-    // instead of a protocol no real-world gateway speaks anymore.
-    let std_socket = std::net::UdpSocket::bind(bind_addr)?;
-
-    if relay_addr.is_some() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        // Prefer the NS-resolved GATEWAY NodeID over our own identity —
-        // this is the relay's fallback lookup key when the plain
-        // service-name doesn't match a registered gateway (e.g. a
-        // gateway registered under a zone key like
-        // "gw:demo.spongebob.ztlp" rather than the bare service name
-        // "web"). Using our OWN node_id here was the bug: the relay's
-        // fallback-by-NodeID lookup needs the PEER's (gateway's) NodeID,
-        // not the client's — confirmed live 2026-08-30 by comparing
-        // against `ztlp connect`'s cmd_connect, which does exactly this
-        // (stamps the NS-resolved gateway NodeID when available).
-        let client_route_node_id: [u8; 16] = resolved_node_id
-            .map(|nid| *nid.as_bytes())
-            .unwrap_or(*identity.node_id.as_bytes());
-        match build_signed_client_route(&client_route_node_id, &service_name, ts) {
-            Ok(route_pkt) => {
-                if let Err(e) = std_socket.send_to(&route_pkt, send_addr) {
-                    warn!("failed to send CLIENT_ROUTE to {}: {}", send_addr, e);
-                } else {
-                    debug!(
-                        "CLIENT_ROUTE sent to {} (service={})",
-                        send_addr, service_name
-                    );
-                }
-                // Brief delay to let the relay install the 5-tuple
-                // mapping before the first QUIC INITIAL races down the
-                // same socket — mirrors `cmd_connect`'s identical
-                // 50ms wait for the exact same reason (see
-                // "Brief delay to let the relay install the 5-tuple"
-                // in ztlp-cli.rs).
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(e) => {
-                warn!(
-                    "could not build CLIENT_ROUTE for service '{}': {}",
-                    service_name, e
-                );
-            }
-        }
-    }
-
-    let quic_conn = crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket(
-        crate::quic_transport::QuicEndpointConfig::default(),
-        send_addr,
-        "localhost",
-        std_socket,
+    // Direct-first plan, then relay (see `connect_tunnel`): ranked direct
+    // candidates each get a short timeout; the relay attempt is bounded
+    // only by the caller's first-byte deadline.
+    let connected = connect_tunnel(
+        &ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        &identity,
+        &bind_addr,
+        &ns_server,
+        relay_addr.as_deref(),
     )
     .await?;
-
-    let responder_id = resolved_node_id.unwrap_or_else(NodeId::zero);
-    let service_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
-        let mut svc = [0u8; 16];
-        let port_str = port.to_string();
-        let bytes = port_str.as_bytes();
-        let len = bytes.len().min(16);
-        svc[..len].copy_from_slice(&bytes[..len]);
-        svc
-    });
-
-    let handshake_result = crate::quic_transport::noise_stream::run_initiator_handshake(
-        &quic_conn,
-        identity,
-        responder_id,
-        service_hash,
-    )
-    .await
-    .map_err(|e| format!("QUIC Noise handshake failed: {}", e))?;
-
-    info!(
-        "tunnel active: {} → {} (session {})",
-        ztlp_name, peer, handshake_result.session_id
-    );
+    let quic_conn = connected.conn;
 
     let (q_send, q_recv) = quic_conn
         .open_bi()
@@ -2195,7 +2060,7 @@ async fn dial_tunnel(
         _conn: quic_conn,
         q_send,
         q_recv,
-        session_id: handshake_result.session_id.to_string(),
+        session_id: connected.session_id.to_string(),
     })
 }
 
@@ -2439,6 +2304,222 @@ pub fn get_agent_pid() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    // ── Direct-first dial plan, step B3 (2026-10-05) ────────────────────────
+    //
+    // docs/DIRECT-FIRST-DIAL-PLAN.md. `dial_plan` is the pure planner the
+    // dialers walk: ranked direct candidates first (each with a short
+    // timeout), the relay last (with the remaining budget). It never dials;
+    // it only decides the order, so it is fully unit-testable.
+    mod direct_first_plan {
+        use super::super::{dial_plan, DialAttempt, DialVia, DIRECT_ATTEMPT_TIMEOUT};
+        use std::net::SocketAddr;
+
+        fn sa(s: &str) -> SocketAddr {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn direct_candidates_first_then_relay() {
+            let plan = dial_plan(
+                &[sa("10.42.42.112:23097"), sa("204.16.122.24:23097")],
+                Some(sa("44.227.148.151:23095")),
+                false,
+            );
+            assert_eq!(plan.len(), 3);
+            assert_eq!(
+                plan[0],
+                DialAttempt {
+                    addr: sa("10.42.42.112:23097"),
+                    via: DialVia::Direct
+                }
+            );
+            assert_eq!(
+                plan[1],
+                DialAttempt {
+                    addr: sa("204.16.122.24:23097"),
+                    via: DialVia::Direct
+                }
+            );
+            assert_eq!(
+                plan[2],
+                DialAttempt {
+                    addr: sa("44.227.148.151:23095"),
+                    via: DialVia::Relay
+                }
+            );
+        }
+
+        #[test]
+        fn relay_address_published_as_a_candidate_is_not_dialed_direct() {
+            // The Rust gateway appends the relay as the last `addresses`
+            // entry. Dialing it "direct" (no CLIENT_ROUTE) can never work;
+            // it must collapse into the single Relay attempt.
+            let plan = dial_plan(
+                &[sa("10.42.42.112:23097"), sa("44.227.148.151:23095")],
+                Some(sa("44.227.148.151:23095")),
+                false,
+            );
+            assert_eq!(plan.len(), 2);
+            assert_eq!(plan[0].via, DialVia::Direct);
+            assert_eq!(
+                plan[1],
+                DialAttempt {
+                    addr: sa("44.227.148.151:23095"),
+                    via: DialVia::Relay
+                }
+            );
+        }
+
+        #[test]
+        fn prefer_relay_puts_relay_first_and_keeps_direct_as_fallback() {
+            let plan = dial_plan(&[sa("10.0.0.5:23097")], Some(sa("1.2.3.4:23095")), true);
+            assert_eq!(plan[0].via, DialVia::Relay);
+            assert_eq!(
+                plan[1],
+                DialAttempt {
+                    addr: sa("10.0.0.5:23097"),
+                    via: DialVia::Direct
+                }
+            );
+        }
+
+        #[test]
+        fn no_relay_configured_means_direct_only_as_today() {
+            let plan = dial_plan(&[sa("10.0.0.5:23097"), sa("10.0.0.6:23097")], None, false);
+            assert_eq!(plan.len(), 2);
+            assert!(plan.iter().all(|a| a.via == DialVia::Direct));
+        }
+
+        #[test]
+        fn relay_only_when_gateway_published_nothing_dialable() {
+            let plan = dial_plan(&[], Some(sa("1.2.3.4:23095")), false);
+            assert_eq!(
+                plan,
+                vec![DialAttempt {
+                    addr: sa("1.2.3.4:23095"),
+                    via: DialVia::Relay
+                }]
+            );
+        }
+
+        #[test]
+        fn direct_attempt_timeout_is_short_but_not_silly() {
+            // Same-LAN QUIC+Noise completes in well under 100 ms; a dead
+            // candidate must not eat the 15 s first-byte budget. Pin the
+            // band so a "let's be generous" edit gets flagged.
+            assert!(DIRECT_ATTEMPT_TIMEOUT >= std::time::Duration::from_millis(250));
+            assert!(DIRECT_ATTEMPT_TIMEOUT <= std::time::Duration::from_millis(1500));
+        }
+
+        // ── Cache hit must dial the FULL ranked list (2026-10-05 follow-up) ──
+        //
+        // The VIP cache used to hand the dialer only `peer_addr` (the best
+        // single candidate). A client whose cached LAN candidate went stale
+        // (laptop left the office) would fail that one direct attempt and
+        // fall to the relay, never trying the gateway's public address.
+        // `candidates_for_dial` is the one place that decides what the
+        // planner sees: cached list when present, else [cached best], else
+        // the fresh resolution.
+        #[test]
+        fn cache_hit_with_list_uses_the_whole_list() {
+            use super::super::candidates_for_dial;
+            let cached = vec![sa("10.42.42.112:23097"), sa("204.16.122.24:23097")];
+            let got = candidates_for_dial(Some(sa("10.42.42.112:23097")), &cached);
+            assert_eq!(got, cached);
+        }
+
+        #[test]
+        fn cache_hit_without_list_falls_back_to_the_single_best() {
+            use super::super::candidates_for_dial;
+            // Entries restored from vip_state.json have no peer info until the
+            // first DNS hit; an older in-memory entry may have addr but no list.
+            let got = candidates_for_dial(Some(sa("10.0.0.5:23097")), &[]);
+            assert_eq!(got, vec![sa("10.0.0.5:23097")]);
+        }
+
+        #[test]
+        fn no_cache_means_empty_so_caller_resolves() {
+            use super::super::candidates_for_dial;
+            assert!(candidates_for_dial(None, &[]).is_empty());
+        }
+
+        // ── Only bound a DIRECT attempt when something follows it ──────────
+        //
+        // CodeRabbit (PR #117): with no relay configured the plan is
+        // direct-only, and the LAST attempt used to be cut at 750 ms with no
+        // fallback, where the old code had no inner timeout (the 15 s
+        // first-byte deadline bounded it). A WAN gateway (QUIC + Noise is
+        // ~3 round trips) or one lost QUIC Initial (~1 s PTO) then failed
+        // where it worked before. The short budget only makes sense when a
+        // next attempt can take over.
+        #[test]
+        fn direct_attempt_is_bounded_only_when_another_attempt_follows() {
+            use super::super::attempt_timeout;
+            let direct = DialAttempt {
+                addr: sa("10.0.0.5:23097"),
+                via: DialVia::Direct,
+            };
+            let relay = DialAttempt {
+                addr: sa("1.2.3.4:23095"),
+                via: DialVia::Relay,
+            };
+            assert_eq!(attempt_timeout(direct, true), Some(DIRECT_ATTEMPT_TIMEOUT));
+            assert_eq!(
+                attempt_timeout(direct, false),
+                None,
+                "last direct attempt: caller's deadline bounds it"
+            );
+            assert_eq!(attempt_timeout(relay, true), None);
+            assert_eq!(attempt_timeout(relay, false), None);
+        }
+
+        #[test]
+        fn direct_only_plan_never_times_out_early_on_its_last_candidate() {
+            use super::super::attempt_timeout;
+            let plan = dial_plan(
+                &[sa("10.0.0.5:23097"), sa("203.0.113.9:23097")],
+                None,
+                false,
+            );
+            let n = plan.len();
+            let budgets: Vec<_> = plan
+                .iter()
+                .enumerate()
+                .map(|(i, a)| attempt_timeout(*a, i + 1 < n))
+                .collect();
+            assert_eq!(budgets, vec![Some(DIRECT_ATTEMPT_TIMEOUT), None]);
+        }
+
+        // ── A stale list must never override "resolve fresh" ───────────────
+        //
+        // `peer_addr == None` is the caller saying "no usable VIP cache
+        // entry; resolve via NS" (entry expired and was reaped, or a first
+        // request). The process-wide candidate cache outlives VIP entries,
+        // so consulting it in that case would keep dialing a gateway's OLD
+        // addresses after it moved, until the process restarts. The list is
+        // only valid alongside a cache hit.
+        #[test]
+        fn stale_list_is_ignored_when_the_vip_entry_is_gone() {
+            use super::super::candidates_for_dial;
+            let stale = vec![sa("10.0.0.5:23097"), sa("203.0.113.9:23097")];
+            assert!(
+                candidates_for_dial(None, &stale).is_empty(),
+                "peer_addr None means resolve fresh; a leftover list must not win"
+            );
+        }
+
+        #[test]
+        fn forgetting_a_name_drops_its_cached_list() {
+            use super::super::{
+                cached_peer_candidates, forget_peer_candidates, set_peer_candidates,
+            };
+            set_peer_candidates("forget.me.ztlp", &[sa("10.0.0.5:23097")]);
+            assert_eq!(cached_peer_candidates("FORGET.me.ztlp").len(), 1);
+            forget_peer_candidates("forget.ME.ztlp");
+            assert!(cached_peer_candidates("forget.me.ztlp").is_empty());
+        }
+    }
 
     // ── CLIENT_ROUTE signing via the daemon-wide relay secret (2026-09-13) ──
     //
@@ -2799,6 +2880,291 @@ fn conventional_service_name_for_port(port: u16) -> String {
         3306 => "mysql".to_string(),
         5432 => "postgres".to_string(),
         _ => format!("tcp:{}", port),
+    }
+}
+
+// ── Direct-first dial plan (docs/DIRECT-FIRST-DIAL-PLAN.md, step B3) ──────
+//
+// The VIP dialer used to pick ONE send address: the relay when configured,
+// else the single SVC `address`. A gateway on the same LAN (or behind the
+// same NAT) was therefore reached via relay → NAT hairpin, which the office
+// edge drops (504 after the 15 s deadline; found live 2026-10-05 with
+// www.chooseforce.ztlp). Now the resolver returns every endpoint the gateway
+// published, ranked for this client, and `dial_plan` orders the attempts:
+// direct candidates first (each bounded by `DIRECT_ATTEMPT_TIMEOUT`), the
+// relay last with whatever budget remains. `[tunnel] prefer_relay = true`
+// flips the order. No relay configured = direct-only, exactly as before.
+
+/// Per-candidate budget for a DIRECT attempt (QUIC + Noise handshake).
+/// Same-LAN completes in tens of ms; this is the cost of ONE dead
+/// candidate before moving on. Pinned by
+/// `direct_attempt_timeout_is_short_but_not_silly`.
+const DIRECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// A QUIC connection with the Noise handshake done; what both VIP dial
+/// paths need before they open the data stream.
+struct ConnectedTunnel {
+    conn: crate::quic_transport::tokio_endpoint::QuicConnection,
+    session_id: crate::packet::SessionId,
+    /// Which attempt won (for the log line and tests).
+    via: DialVia,
+    addr: SocketAddr,
+}
+
+/// Resolve `ztlp_name` (or use the cached peer), build the dial plan and
+/// walk it: every DIRECT candidate gets `DIRECT_ATTEMPT_TIMEOUT`; the RELAY
+/// attempt gets no inner timeout (the caller's first-byte deadline bounds
+/// it, exactly as before this change). Returns the first attempt whose QUIC
+/// connect AND Noise handshake both succeed.
+///
+/// Shared by `proxy_dial_phase` (deadline path, PR #108) and
+/// `handle_tcp_connection_bridged` (plain path), which previously carried
+/// two copies of the single-address dial.
+#[allow(clippy::too_many_arguments)]
+async fn connect_tunnel(
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+) -> Result<ConnectedTunnel, Box<dyn std::error::Error + Send + Sync>> {
+    // Candidates: on a VIP cache hit use the full ranked list the DNS
+    // resolver published for this name (falls back to the single cached
+    // best address for entries that predate the list); otherwise resolve
+    // fresh via NS.
+    let cached = candidates_for_dial(peer_addr, &cached_peer_candidates(ztlp_name));
+    let (candidates, resolved_node_id): (Vec<SocketAddr>, Option<NodeId>) = if !cached.is_empty() {
+        (cached, peer_node_id)
+    } else {
+        let r = proxy::ns_resolve(ztlp_name, ns_server).await?;
+        set_peer_candidates(ztlp_name, &r.candidates);
+        (r.candidates, r.node_id)
+    };
+
+    let relay: Option<SocketAddr> = match relay_addr {
+        Some(r) => Some(
+            r.parse()
+                .map_err(|e| format!("invalid relay address '{}': {}", r, e))?,
+        ),
+        None => None,
+    };
+
+    let plan = dial_plan(&candidates, relay, prefer_relay());
+    if plan.is_empty() {
+        return Err(format!("no dialable endpoint for '{}'", ztlp_name).into());
+    }
+
+    let service_name = service_name_for_ztlp_name(ztlp_name, port);
+    let responder_id = resolved_node_id.unwrap_or_else(NodeId::zero);
+    let service_hash = tunnel::encode_service_name(&service_name).unwrap_or_else(|_| {
+        let mut svc = [0u8; 16];
+        let port_str = port.to_string();
+        let bytes = port_str.as_bytes();
+        let len = bytes.len().min(16);
+        svc[..len].copy_from_slice(&bytes[..len]);
+        svc
+    });
+
+    let n = plan.len();
+    let mut last_err: String = String::new();
+    for (i, attempt) in plan.into_iter().enumerate() {
+        info!(
+            "dial {}/{} {} → {} via {:?} (service={})",
+            i + 1,
+            n,
+            ztlp_name,
+            attempt.addr,
+            attempt.via,
+            service_name
+        );
+        let one = connect_one(
+            attempt,
+            &service_name,
+            resolved_node_id,
+            responder_id,
+            service_hash,
+            identity,
+            bind_addr,
+        );
+        let result = match attempt_timeout(attempt, i + 1 < n) {
+            Some(budget) => match tokio::time::timeout(budget, one).await {
+                Ok(r) => r,
+                Err(_) => Err(format!(
+                    "direct candidate {} did not answer within {:?}",
+                    attempt.addr, budget
+                )
+                .into()),
+            },
+            // Relay, or the LAST attempt: the caller's first-byte deadline
+            // bounds it (unchanged from before direct-first).
+            None => one.await,
+        };
+        match result {
+            Ok((conn, session_id)) => {
+                info!(
+                    "tunnel active: {} → {} via {:?} (session {})",
+                    ztlp_name, attempt.addr, attempt.via, session_id
+                );
+                return Ok(ConnectedTunnel {
+                    conn,
+                    session_id,
+                    via: attempt.via,
+                    addr: attempt.addr,
+                });
+            }
+            Err(e) => {
+                info!(
+                    "dial {}/{} {} via {:?} failed: {}",
+                    i + 1,
+                    n,
+                    attempt.addr,
+                    attempt.via,
+                    e
+                );
+                last_err = e.to_string();
+            }
+        }
+    }
+    Err(format!(
+        "all {} dial attempts failed for '{}': {}",
+        n, ztlp_name, last_err
+    )
+    .into())
+}
+
+/// One attempt: (CLIENT_ROUTE when via relay) + QUIC connect + Noise handshake.
+async fn connect_one(
+    attempt: DialAttempt,
+    service_name: &str,
+    resolved_node_id: Option<NodeId>,
+    responder_id: NodeId,
+    service_hash: [u8; 16],
+    identity: &NodeIdentity,
+    bind_addr: &str,
+) -> Result<
+    (
+        crate::quic_transport::tokio_endpoint::QuicConnection,
+        crate::packet::SessionId,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let std_socket = std::net::UdpSocket::bind(bind_addr)?;
+
+    if attempt.via == DialVia::Relay {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        // Prefer the NS-resolved GATEWAY NodeID over our own identity —
+        // the relay's fallback-by-NodeID lookup needs the PEER's NodeID
+        // (confirmed live 2026-08-30 against cmd_connect).
+        let client_route_node_id: [u8; 16] = resolved_node_id
+            .map(|nid| *nid.as_bytes())
+            .unwrap_or(*identity.node_id.as_bytes());
+        match build_signed_client_route(&client_route_node_id, service_name, ts) {
+            Ok(route_pkt) => {
+                if let Err(e) = std_socket.send_to(&route_pkt, attempt.addr) {
+                    warn!("failed to send CLIENT_ROUTE to {}: {}", attempt.addr, e);
+                } else {
+                    debug!(
+                        "CLIENT_ROUTE sent to {} (service={})",
+                        attempt.addr, service_name
+                    );
+                }
+                // Let the relay install the 5-tuple mapping before the
+                // first QUIC INITIAL races down the same socket (mirrors
+                // cmd_connect's identical 50 ms wait).
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => {
+                warn!(
+                    "could not build CLIENT_ROUTE for service '{}': {}",
+                    service_name, e
+                );
+            }
+        }
+    }
+
+    let quic_conn = crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket(
+        crate::quic_transport::QuicEndpointConfig::default(),
+        attempt.addr,
+        "localhost",
+        std_socket,
+    )
+    .await?;
+
+    let handshake_result = crate::quic_transport::noise_stream::run_initiator_handshake(
+        &quic_conn,
+        identity,
+        responder_id,
+        service_hash,
+    )
+    .await
+    .map_err(|e| format!("QUIC Noise handshake failed: {}", e))?;
+
+    Ok((quic_conn, handshake_result.session_id))
+}
+
+/// How an attempt reaches the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialVia {
+    /// Straight to the published endpoint; no CLIENT_ROUTE.
+    Direct,
+    /// Through the configured relay (CLIENT_ROUTE first, then QUIC).
+    Relay,
+}
+
+/// One ordered attempt in a dial plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DialAttempt {
+    addr: SocketAddr,
+    via: DialVia,
+}
+
+/// Order the attempts for one tunnel. Pure; never dials.
+///
+/// * `ranked` — candidates best-first (see `proxy::NsResolution::candidates`).
+///   An entry equal to the relay address is dropped (the Rust gateway
+///   appends the relay as a backstop; dialing it without CLIENT_ROUTE can't
+///   work and would waste a slot).
+/// * `relay` — the configured relay, appended as the final `Relay` attempt
+///   (first, when `prefer_relay`).
+fn dial_plan(
+    ranked: &[SocketAddr],
+    relay: Option<SocketAddr>,
+    prefer_relay: bool,
+) -> Vec<DialAttempt> {
+    let direct = ranked
+        .iter()
+        .copied()
+        .filter(|a| Some(*a) != relay)
+        .map(|addr| DialAttempt {
+            addr,
+            via: DialVia::Direct,
+        });
+    let relay_attempt = relay.map(|addr| DialAttempt {
+        addr,
+        via: DialVia::Relay,
+    });
+    if prefer_relay {
+        relay_attempt.into_iter().chain(direct).collect()
+    } else {
+        direct.chain(relay_attempt).collect()
+    }
+}
+
+/// Inner time budget for one attempt. A DIRECT attempt gets the short
+/// `DIRECT_ATTEMPT_TIMEOUT` ONLY when another attempt follows it (so a dead
+/// candidate costs ~750 ms before the next one takes over). The relay, and
+/// the final attempt of any plan, get `None`: the caller's first-byte
+/// deadline bounds them, exactly as before direct-first dialing.
+fn attempt_timeout(attempt: DialAttempt, has_fallback: bool) -> Option<Duration> {
+    match attempt.via {
+        DialVia::Direct if has_fallback => Some(DIRECT_ATTEMPT_TIMEOUT),
+        _ => None,
     }
 }
 

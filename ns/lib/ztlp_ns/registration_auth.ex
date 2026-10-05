@@ -53,22 +53,34 @@ defmodule ZtlpNs.RegistrationAuth do
   @doc """
   Check rate limiting for identity registration.
 
-  Enforces max 1 registration per name per hour to prevent key-rotation abuse.
-  Zone authorities (admins) bypass this limit.
+  Enforces max 1 registration per `{name, type}` per window to prevent
+  key-rotation abuse and churn. Zone authorities (admins) bypass this limit.
+
+  The key is `{name, type}` (2026-10-05), not bare `name`: a self-registering
+  gateway publishes KEY then SVC for the same name back to back, and keying
+  on name alone rejected the SVC (the dialable record) on every boot and
+  heartbeat. KEY and SVC are different records; same-record churn is still
+  limited.
 
   Returns `:ok` or `{:error, :rate_limited}`.
   """
-  @spec check_rate_limit(String.t(), binary()) :: :ok | {:error, :rate_limited}
-  def check_rate_limit(name, pubkey) do
+  @spec check_rate_limit(String.t(), atom(), binary()) :: :ok | {:error, :rate_limited}
+  def check_rate_limit(name, type, pubkey) when is_atom(type) do
     # Zone authorities bypass rate limiting
     pubkey_hex = Base.encode16(pubkey, case: :lower)
     case check_zone_authority(pubkey_hex, name) do
       :ok -> :ok
-      {:error, _} -> do_check_rate_limit(name)
+      {:error, _} -> do_check_rate_limit({name, type})
     end
   end
 
-  defp do_check_rate_limit(name) do
+  @doc "Legacy 2-arity form; equivalent to `check_rate_limit(name, :key, pubkey)`."
+  @spec check_rate_limit(String.t(), binary()) :: :ok | {:error, :rate_limited}
+  def check_rate_limit(name, pubkey) when is_binary(pubkey) do
+    check_rate_limit(name, :key, pubkey)
+  end
+
+  defp do_check_rate_limit(key) do
     # Verify the ETS table actually exists before using it
     case :ets.whereis(@rate_limit_table) do
       :undefined -> 
@@ -83,17 +95,17 @@ defmodule ZtlpNs.RegistrationAuth do
 
     now = System.system_time(:second)
 
-    case :ets.lookup(@rate_limit_table, name) do
-      [{^name, last_registered_at}] ->
+    case :ets.lookup(@rate_limit_table, key) do
+      [{^key, last_registered_at}] ->
         if now - last_registered_at < @rate_limit_window do
           {:error, :rate_limited}
         else
-          :ets.insert(@rate_limit_table, {name, now})
+          :ets.insert(@rate_limit_table, {key, now})
           :ok
         end
 
       [] ->
-        :ets.insert(@rate_limit_table, {name, now})
+        :ets.insert(@rate_limit_table, {key, now})
         :ok
     end
   end

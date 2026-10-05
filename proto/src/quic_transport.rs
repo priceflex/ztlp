@@ -264,8 +264,9 @@ pub mod tokio_endpoint {
     ///
     /// This TOFU verifier closes that gap as defense-in-depth: it
     /// computes the SHA-256 fingerprint of the leaf certificate and
-    /// pins it (in `~/.ztlp/quic_pins/<server_name>.pin`) on first
-    /// connection to a given `server_name`. Every subsequent connection
+    /// pins it (in `~/.ztlp/quic_pins/<sni>_<ip>_<port>.pin` after
+    /// sanitization, see
+    /// `pin_key_for`) on first connection to a given gateway endpoint. Every subsequent connection
     /// must present a certificate matching the pinned fingerprint or
     /// verification fails outright — same trust model as SSH host-key
     /// pinning and the rhf-phvo/sjy-yrjl iOS fixes: doesn't protect the
@@ -282,11 +283,85 @@ pub mod tokio_endpoint {
         pin_dir: std::path::PathBuf,
     }
 
+    /// TOFU pin identity for a dial: the REMOTE ENDPOINT plus the SNI.
+    ///
+    /// Every ZTLP dial uses the fixed SNI "localhost" (gateways serve a
+    /// self-signed "localhost" cert), so pinning on the SNI alone yielded a
+    /// single global pin: the first gateway ever contacted was pinned and
+    /// every other gateway was rejected as a fingerprint mismatch (found
+    /// live 2026-10-05 with direct-first dialing to a second gateway).
+    /// Keying on `ip:port` + SNI gives each gateway its own pin while the
+    /// on-wire SNI is unchanged. `TofuCertVerifier::pin_path` sanitizes the
+    /// result into one flat filename.
+    pub(crate) fn pin_key_for(remote: SocketAddr, server_name: &str) -> String {
+        format!("{}@{}", server_name, remote)
+    }
+
+    /// Remove the pin file the pre-2026-10-05 per-SNI scheme wrote for
+    /// `sni` (`<sanitized sni>.pin`), if present. Only that exact file:
+    /// per-endpoint pins (`<sni>_<ip>_<port>.pin`), operator backups and
+    /// unrelated files are untouched. Never creates the directory. Returns
+    /// the number of files removed (0 or 1).
+    pub(crate) fn remove_legacy_sni_pins(pin_dir: &std::path::Path, sni: &str) -> usize {
+        if !pin_dir.is_dir() {
+            return 0;
+        }
+        let legacy = TofuCertVerifier::with_pin_dir_pub(sni, pin_dir.to_path_buf()).pin_path();
+        match std::fs::remove_file(&legacy) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Remove the legacy pin for `sni` unless this process already did so,
+    /// tracked per SNI in `done`. Returns the number of files removed.
+    /// Split out from `cleanup_legacy_pins_once` so the bookkeeping is
+    /// testable without touching the real pin directory.
+    pub(crate) fn cleanup_legacy_pin_for(
+        pin_dir: &std::path::Path,
+        sni: &str,
+        done: &std::sync::Mutex<std::collections::HashSet<String>>,
+    ) -> usize {
+        let first_time = match done.lock() {
+            Ok(mut g) => g.insert(sni.to_string()),
+            // a poisoned lock must not block dialing; skip the cleanup
+            Err(_) => false,
+        };
+        if !first_time {
+            return 0;
+        }
+        remove_legacy_sni_pins(pin_dir, sni)
+    }
+
+    /// Run the legacy-pin cleanup for the default pin dir once PER SNI per
+    /// process (first dial with that SNI). Cheap, idempotent, logs only when
+    /// it actually removed something.
+    fn cleanup_legacy_pins_once(sni: &str) {
+        static DONE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let done = DONE.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        let dir = TofuCertVerifier::default_pin_dir();
+        if cleanup_legacy_pin_for(&dir, sni, done) > 0 {
+            tracing::info!(
+                "removed legacy per-SNI QUIC pin for '{}' from {} (pins are per gateway endpoint now)",
+                sni,
+                dir.display()
+            );
+        }
+    }
+
     impl TofuCertVerifier {
         fn new(server_name: &str) -> Self {
             Self {
                 server_name: server_name.to_string(),
                 pin_dir: Self::default_pin_dir(),
+            }
+        }
+
+        fn with_pin_dir_pub(server_name: &str, pin_dir: std::path::PathBuf) -> Self {
+            Self {
+                server_name: server_name.to_string(),
+                pin_dir,
             }
         }
 
@@ -592,9 +667,13 @@ pub mod tokio_endpoint {
             std_socket: std::net::UdpSocket,
         ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
+            cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
+                    remote,
+                    server_name,
+                ))))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -630,9 +709,13 @@ pub mod tokio_endpoint {
             server_name: &str,
         ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
+            cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
+                    remote,
+                    server_name,
+                ))))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -954,6 +1037,124 @@ pub mod tokio_endpoint {
                 "sanitized pin path must not contain '..' components"
             );
 
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── Pin per GATEWAY ENDPOINT, not per SNI string (2026-10-05) ──────
+        //
+        // Every agent/CLI dial passes the fixed SNI "localhost" (gateways
+        // serve a self-signed "localhost" cert). Keying the TOFU pin on the
+        // SNI therefore produced ONE global pin: the first gateway ever
+        // contacted was pinned and every other gateway was rejected as a
+        // "fingerprint mismatch" (MITM-shaped failure). Found live with
+        // direct-first dialing: the AI computer had the demo gateway pinned
+        // under `localhost.pin`, so the ChooseForce gateway's direct dial
+        // failed in 10 ms and fell back to the relay. `pin_key_for` derives
+        // the pin identity from the dialed endpoint instead, so each
+        // gateway gets its own TOFU pin while the wire SNI is unchanged.
+        #[test]
+        fn pin_key_is_per_remote_endpoint_not_per_sni() {
+            let a: SocketAddr = "10.42.42.112:23097".parse().unwrap();
+            let b: SocketAddr = "44.227.148.151:23095".parse().unwrap();
+            let ka = pin_key_for(a, "localhost");
+            let kb = pin_key_for(b, "localhost");
+            assert_ne!(
+                ka, kb,
+                "two gateways behind the same SNI must not share a pin"
+            );
+            // stable for the same endpoint
+            assert_eq!(ka, pin_key_for(a, "localhost"));
+            // the SNI still participates (same ip:port, different SNI → different pin)
+            assert_ne!(ka, pin_key_for(a, "gw.example"));
+        }
+
+        #[test]
+        fn pin_key_sanitizes_into_a_single_safe_filename() {
+            let tmp = tempfile_dir();
+            let v6: SocketAddr = "[fe80::1]:23097".parse().unwrap();
+            let key = pin_key_for(v6, "localhost");
+            let verifier = TofuCertVerifier::with_pin_dir(&key, tmp.clone());
+            let path = verifier.pin_path();
+            assert!(path.starts_with(&tmp));
+            assert_eq!(
+                path.parent().unwrap(),
+                tmp.as_path(),
+                "no nested dirs from ':' or '[]'"
+            );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── Legacy per-SNI pin cleanup (2026-10-05) ────────────────────────
+        //
+        // Installs that ran the per-SNI pinning left `<sni>.pin` files
+        // (in practice one: `localhost.pin`). The new key never reads
+        // them, so they are dead weight and, worse, misleading to anyone
+        // debugging a pin problem. `remove_legacy_sni_pins` deletes exactly
+        // the files the OLD scheme would have produced for `sni` and
+        // nothing else: per-endpoint pins, backups and foreign files stay.
+        #[test]
+        fn legacy_cleanup_removes_only_the_old_sni_pin() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let legacy = tmp.join("localhost.pin");
+            let modern = tmp.join("localhost_10_42_42_112_23097.pin");
+            let backup = tmp.join("localhost.pin.bak-demo");
+            let other = tmp.join("gw_example.pin");
+            for f in [&legacy, &modern, &backup, &other] {
+                std::fs::write(f, "ab").unwrap();
+            }
+            let removed = remove_legacy_sni_pins(&tmp, "localhost");
+            assert_eq!(removed, 1);
+            assert!(!legacy.exists(), "legacy per-SNI pin must go");
+            assert!(modern.exists(), "per-endpoint pin must stay");
+            assert!(backup.exists(), "operator backups must stay");
+            assert!(other.exists(), "unrelated pins must stay");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn legacy_cleanup_is_a_noop_when_nothing_to_remove() {
+            let tmp = tempfile_dir();
+            // dir does not exist yet: must not panic or create it
+            assert_eq!(remove_legacy_sni_pins(&tmp, "localhost"), 0);
+            assert!(!tmp.exists());
+            std::fs::create_dir_all(&tmp).unwrap();
+            assert_eq!(remove_legacy_sni_pins(&tmp, "localhost"), 0);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // CodeRabbit (PR #117): a single process-wide `Once` cleaned only the
+        // FIRST SNI it saw; a later dial with a different SNI never got its
+        // legacy pin removed. Track completion per SNI instead.
+        #[test]
+        fn legacy_cleanup_is_tracked_per_sni_not_once_per_process() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let done = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            std::fs::write(tmp.join("gw-example.pin"), "cd").unwrap();
+
+            // first SNI cleaned
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 1);
+            // a DIFFERENT sni is still cleaned afterwards (the old Once skipped it)
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "gw-example", &done), 1);
+            assert!(!tmp.join("localhost.pin").exists());
+            assert!(!tmp.join("gw-example.pin").exists());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn legacy_cleanup_for_the_same_sni_runs_once() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let done = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 1);
+            // a legacy file reappearing later in the same process is NOT touched
+            // again (idempotent, no repeated filesystem work on the hot path)
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 0);
+            assert!(tmp.join("localhost.pin").exists());
             let _ = std::fs::remove_dir_all(&tmp);
         }
 

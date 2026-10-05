@@ -544,8 +544,8 @@ defmodule ZtlpNs.AdminTest do
 
     test "rate limit allows after expiry" do
       {pub, _priv} = Crypto.generate_keypair()
-      # Manually set an old timestamp
-      :ets.insert(:ztlp_ns_registration_rate_limit, {"test.ztlp", System.system_time(:second) - 7200})
+      # Manually set an old timestamp (ETS key is {name, type} since 2026-10-05)
+      :ets.insert(:ztlp_ns_registration_rate_limit, {{"test.ztlp", :key}, System.system_time(:second) - 7200})
       assert :ok = RegistrationAuth.check_rate_limit("test.ztlp", pub)
     end
 
@@ -560,7 +560,7 @@ defmodule ZtlpNs.AdminTest do
       # Insert a timestamp 61 seconds ago (just past the new window).
       # Under the pre-v0.33.0 3600s window this would still be rejected;
       # under the v0.33.0 60s window it must succeed.
-      :ets.insert(:ztlp_ns_registration_rate_limit, {"v033.test.ztlp", now - 61})
+      :ets.insert(:ztlp_ns_registration_rate_limit, {{"v033.test.ztlp", :key}, now - 61})
       assert :ok = RegistrationAuth.check_rate_limit("v033.test.ztlp", pub)
     end
 
@@ -570,8 +570,36 @@ defmodule ZtlpNs.AdminTest do
 
       # Insert a timestamp 30 seconds ago — well inside the 60s anti-flood
       # window. This must still be rejected to preserve the anti-flood goal.
-      :ets.insert(:ztlp_ns_registration_rate_limit, {"v033.flood.ztlp", now - 30})
+      :ets.insert(:ztlp_ns_registration_rate_limit, {{"v033.flood.ztlp", :key}, now - 30})
       assert {:error, :rate_limited} = RegistrationAuth.check_rate_limit("v033.flood.ztlp", pub)
+    end
+
+    # 2026-10-05 — rate limit is per {name, type}, not per name.
+    #
+    # A self-registering gateway (`ztlp listen --ns-register-name`, signed
+    # v2 path, NOT a zone authority) publishes KEY then SVC for the SAME name
+    # milliseconds apart. With a per-name key the SVC (which carries the
+    # dialable `address`/`addresses`) was rejected `rate_limited` on every
+    # boot and every heartbeat tick, so the name was never dialable. Seen
+    # live against the trs.ztlp NS on 2026-10-05 (sigtest.trs.ztlp). KEY and
+    # SVC are different records; the anti-flood goal (no rapid churn of the
+    # SAME record) is preserved by keying on type as well.
+    test "KEY then SVC for the same name are rate-limited independently" do
+      {pub, _priv} = Crypto.generate_keypair()
+      assert :ok = RegistrationAuth.check_rate_limit("gw.pertype.ztlp", :key, pub)
+      assert :ok = RegistrationAuth.check_rate_limit("gw.pertype.ztlp", :svc, pub)
+    end
+
+    test "same name AND same type back-to-back is still rate limited" do
+      {pub, _priv} = Crypto.generate_keypair()
+      assert :ok = RegistrationAuth.check_rate_limit("gw.sametype.ztlp", :svc, pub)
+      assert {:error, :rate_limited} = RegistrationAuth.check_rate_limit("gw.sametype.ztlp", :svc, pub)
+    end
+
+    test "legacy 2-arity check_rate_limit still works (defaults to :key)" do
+      {pub, _priv} = Crypto.generate_keypair()
+      assert :ok = RegistrationAuth.check_rate_limit("legacy.arity.ztlp", pub)
+      assert {:error, :rate_limited} = RegistrationAuth.check_rate_limit("legacy.arity.ztlp", :key, pub)
     end
   end
 

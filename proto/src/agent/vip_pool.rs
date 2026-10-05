@@ -38,6 +38,13 @@ pub struct VipEntry {
     /// live 2026-08-30 while debugging why the automatic tunnel dial
     /// still failed even after fixing NS NodeID resolution itself.
     pub peer_node_id: Option<crate::identity::NodeId>,
+    /// ALL dialable endpoints the gateway published, ranked for this
+    /// client, best first (`peer_candidates[0] == peer_addr`). The
+    /// direct-first dialer walks this list on a cache hit so a stale
+    /// first candidate (laptop left the office LAN) still falls through
+    /// to the gateway's other addresses before the relay. Empty for
+    /// entries restored from disk until the first DNS hit refills it.
+    pub peer_candidates: Vec<std::net::SocketAddr>,
     /// When this allocation was created.
     pub created_at: Instant,
     /// When this allocation expires (based on NS record TTL).
@@ -125,6 +132,7 @@ impl VipPool {
                     ztlp_name: name.clone(),
                     peer_addr: None,
                     peer_node_id: None,
+                    peer_candidates: Vec::new(),
                     created_at: now,
                     expires_at: ttl.map(|d| now + d),
                     active_connections: 0,
@@ -190,6 +198,9 @@ impl VipPool {
             if let Some(entry) = self.name_to_vip.remove(&name) {
                 self.ip_to_name.remove(&entry.ip);
             }
+            // The process-wide ranked-candidate cache must not outlive the
+            // VIP entry it belongs to (stale list / unbounded growth).
+            super::daemon::forget_peer_candidates(&name);
         }
         count
     }
@@ -298,6 +309,7 @@ impl VipPool {
                     ztlp_name: name.clone(),
                     peer_addr: None,
                     peer_node_id: None,
+                    peer_candidates: Vec::new(),
                     created_at: Instant::now(),
                     expires_at: None,
                     active_connections: 0,

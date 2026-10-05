@@ -759,6 +759,7 @@ mod tests {
             addr: "10.9.8.7:23095".parse().unwrap(),
             node_id: None,
             ztlp_name: name.to_string(),
+            candidates: vec!["10.9.8.7:23095".parse().unwrap()],
         }
     }
 

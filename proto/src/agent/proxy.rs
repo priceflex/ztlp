@@ -105,30 +105,79 @@ const MAX_REORDER_BUFFER: usize = 512;
 /// Result of resolving a ZTLP name via NS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NsResolution {
-    /// The resolved peer endpoint address.
+    /// The resolved peer endpoint address (the BEST candidate — see
+    /// `candidates`). Kept so existing callers are unchanged.
     pub addr: SocketAddr,
     /// The peer's NodeID (if found in KEY record).
     pub node_id: Option<NodeId>,
     /// The ZTLP-NS name that was queried.
     pub ztlp_name: String,
+    /// All dialable endpoints the gateway published, ranked for THIS
+    /// client (same subnet > other RFC1918 > public …), best first.
+    /// `candidates[0] == addr`. A gateway that publishes only the legacy
+    /// single `address` yields a one-element list. Direct-first dialing
+    /// (docs/DIRECT-FIRST-DIAL-PLAN.md step B) walks this list before
+    /// falling back to the relay.
+    pub candidates: Vec<SocketAddr>,
 }
 
-/// Query ZTLP-NS for a name, returning the SVC endpoint and optional NodeID.
+impl NsResolution {
+    /// Build a resolution from an already-RANKED candidate list.
+    /// Errors on an empty list (nothing to dial).
+    pub fn from_candidates(
+        ztlp_name: &str,
+        candidates: Vec<SocketAddr>,
+        node_id: Option<NodeId>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let addr = *candidates
+            .first()
+            .ok_or_else(|| format!("no SVC address found for '{}'", ztlp_name))?;
+        Ok(NsResolution {
+            addr,
+            node_id,
+            ztlp_name: ztlp_name.to_string(),
+            candidates,
+        })
+    }
+}
+
+/// Extract every dialable endpoint from a bare SVC CBOR map.
+///
+/// Reads the multi-candidate `addresses` field (comma-joined `ip:port`,
+/// best-first, written by `ztlp listen` since v0.35.x — see
+/// `svc_candidates.rs`) and the legacy single `address`. Unparseable
+/// entries are skipped, duplicates removed, order preserved. Empty when
+/// the record carries neither.
+pub fn svc_candidates_from_cbor(cbor_data: &[u8]) -> Vec<SocketAddr> {
+    let address = crate::ns_cbor::cbor_extract_string(cbor_data, "address");
+    let addresses = crate::ns_cbor::cbor_extract_string(cbor_data, "addresses");
+    crate::svc_candidates::resolve_candidates(address.as_deref(), addresses.as_deref())
+}
+
+/// Rank published candidates against this client's local subnets.
+/// Thin wrapper over `svc_candidates::rank_candidates` so the agent and
+/// the `ztlp connect` CLI apply the identical ladder.
+pub fn rank_candidates_for_client(
+    set: &[SocketAddr],
+    local_subnets: &[(std::net::IpAddr, u8)],
+) -> Vec<SocketAddr> {
+    crate::svc_candidates::rank_candidates(set, local_subnets)
+}
+
+/// Query ZTLP-NS for a name, returning the SVC endpoint(s) and optional NodeID.
 pub async fn ns_resolve(
     ztlp_name: &str,
     ns_server: &str,
 ) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
-    let addr = ns_query_addr(ztlp_name, ns_server)
-        .await?
-        .ok_or_else(|| format!("no SVC address found for '{}'", ztlp_name))?;
+    let set = ns_query_candidates(ztlp_name, ns_server).await?;
+    if set.is_empty() {
+        return Err(format!("no SVC address found for '{}'", ztlp_name).into());
+    }
+    let ranked = rank_candidates_for_client(&set, &crate::local_candidates::our_local_subnets());
 
     let node_id = ns_query_node_id(ztlp_name, ns_server).await?;
 
-    Ok(NsResolution {
-        addr,
-        node_id,
-        ztlp_name: ztlp_name.to_string(),
-    })
+    NsResolution::from_candidates(ztlp_name, ranked, node_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,18 +225,26 @@ fn static_proxy_resolution(
             .ztlp_name
             .clone()
             .unwrap_or_else(|| hostname.to_lowercase()),
+        candidates: vec![addr],
     })
 }
 
-async fn ns_query_addr(
+/// All published endpoints for a name: SVC `addresses`/`address` first,
+/// falling back to a KEY record's `address` (legacy single-endpoint
+/// gateways). Unranked; order is the gateway's publish order.
+async fn ns_query_candidates(
     ztlp_name: &str,
     ns_server: &str,
-) -> Result<Option<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(data) = ns_query_raw(ztlp_name, ns_server, 2).await? {
-        match parse_svc_response(&data) {
-            Ok(addr) => return Ok(Some(addr)),
-            Err(e) => eprintln!("DEBUG: parse_svc_response failed for type 2: {}", e),
+        let set = svc_candidates_from_cbor(&data);
+        if !set.is_empty() {
+            return Ok(set);
         }
+        eprintln!(
+            "DEBUG: SVC record for '{}' carries no parseable address",
+            ztlp_name
+        );
     }
 
     if let Some(data) = ns_query_raw(ztlp_name, ns_server, 1).await? {
@@ -203,11 +260,11 @@ async fn ns_query_addr(
             let addr = addr_str
                 .parse()
                 .map_err(|e| format!("invalid address in KEY record '{}': {}", addr_str, e))?;
-            return Ok(Some(addr));
+            return Ok(vec![addr]);
         }
     }
 
-    Ok(None)
+    Ok(Vec::new())
 }
 
 async fn ns_query_node_id(
@@ -352,6 +409,7 @@ async fn ns_query_raw(
 /// correctly returning. The KEY fallback (line 202) already did the right
 /// thing (direct `cbor_extract_string` on the bare CBOR); the SVC path did
 /// the double-unwrap. Fix: detect which shape and handle each.
+#[cfg(test)] // superseded by `svc_candidates_from_cbor` on the live path (2026-10-05); tests pin the envelope handling
 fn parse_svc_response(data: &[u8]) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
     // If `data` is the full envelope (starts with 0x02 status byte), unwrap it
     // first to get the bare CBOR. Otherwise it's already the bare CBOR.
@@ -1005,6 +1063,128 @@ mod tests {
     use crate::agent::config::{AgentConfig, StaticProxyTargetConfig};
     use crate::reject::{RejectFrame, RejectReason};
 
+    // ── Direct-first dial, step B1/B2 (2026-10-05) ────────────────────────
+    //
+    // docs/DIRECT-FIRST-DIAL-PLAN.md. The agent's VIP proxy read only the
+    // single SVC `address` and, when a relay was configured, always dialed
+    // the relay. A same-LAN gateway behind the same NAT was therefore
+    // unreachable (relay → NAT hairpin, 504). The Rust gateway publishes
+    // `addresses` (comma list, best first, relay as backstop); the agent
+    // must read it, rank it against its own subnets, and expose the ranked
+    // list so `dial_tunnel` can try direct candidates before the relay.
+    mod direct_first_candidates {
+        use super::*;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        fn cbor_text(s: &str) -> Vec<u8> {
+            let b = s.as_bytes();
+            let mut v = Vec::new();
+            match b.len() {
+                0..=23 => v.push(0x60 | b.len() as u8),
+                24..=255 => {
+                    v.push(0x78);
+                    v.push(b.len() as u8);
+                }
+                _ => {
+                    v.push(0x79);
+                    v.extend_from_slice(&(b.len() as u16).to_be_bytes());
+                }
+            }
+            v.extend_from_slice(b);
+            v
+        }
+
+        fn cbor_map(pairs: &[(&str, &str)]) -> Vec<u8> {
+            let mut v = vec![0xA0 | pairs.len() as u8];
+            for (k, val) in pairs {
+                v.extend(cbor_text(k));
+                v.extend(cbor_text(val));
+            }
+            v
+        }
+
+        fn sa(s: &str) -> SocketAddr {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn svc_with_addresses_yields_all_candidates_best_first() {
+            let data = cbor_map(&[
+                ("address", "10.42.42.112:23097"),
+                ("addresses", "10.42.42.112:23097,44.227.148.151:23095"),
+                ("zone", "chooseforce.ztlp"),
+            ]);
+            let c = svc_candidates_from_cbor(&data);
+            assert_eq!(
+                c,
+                vec![sa("10.42.42.112:23097"), sa("44.227.148.151:23095")]
+            );
+        }
+
+        #[test]
+        fn svc_with_only_address_yields_single_candidate() {
+            // Old (Elixir) gateway: no `addresses` key.
+            let data = cbor_map(&[("address", "204.16.122.24:23097")]);
+            assert_eq!(
+                svc_candidates_from_cbor(&data),
+                vec![sa("204.16.122.24:23097")]
+            );
+        }
+
+        #[test]
+        fn malformed_entries_in_addresses_are_skipped_not_fatal() {
+            let data = cbor_map(&[
+                ("address", "10.0.0.5:23097"),
+                ("addresses", "10.0.0.5:23097,not-an-addr,,192.168.1.9:23097"),
+            ]);
+            assert_eq!(
+                svc_candidates_from_cbor(&data),
+                vec![sa("10.0.0.5:23097"), sa("192.168.1.9:23097")]
+            );
+        }
+
+        #[test]
+        fn ranking_prefers_lan_over_public_over_nothing_else() {
+            // Client on 10.170.3.0/24 (different VLAN, same office NAT).
+            // Gateway published LAN first already, but publish order must
+            // not matter: rank by the client's view.
+            let set = vec![sa("44.227.148.151:23095"), sa("10.42.42.112:23097")];
+            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 170, 3, 207)), 24u8)];
+            let ranked = rank_candidates_for_client(&set, &subnets);
+            assert_eq!(ranked[0], sa("10.42.42.112:23097"), "RFC1918 beats public");
+            assert_eq!(ranked[1], sa("44.227.148.151:23095"));
+        }
+
+        #[test]
+        fn ranking_puts_same_subnet_first() {
+            let set = vec![
+                sa("10.42.42.112:23097"),
+                sa("10.170.3.50:23097"),
+                sa("44.227.148.151:23095"),
+            ];
+            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 170, 3, 207)), 24u8)];
+            let ranked = rank_candidates_for_client(&set, &subnets);
+            assert_eq!(ranked[0], sa("10.170.3.50:23097"), "same subnet first");
+            assert_eq!(ranked[1], sa("10.42.42.112:23097"));
+            assert_eq!(ranked[2], sa("44.227.148.151:23095"));
+        }
+
+        #[test]
+        fn resolution_carries_candidates_and_addr_is_the_best_one() {
+            // NsResolution grows a `candidates` field; `addr` stays the
+            // best single candidate so existing callers are unchanged.
+            let r = NsResolution::from_candidates(
+                "www.chooseforce.ztlp",
+                vec![sa("10.42.42.112:23097"), sa("44.227.148.151:23095")],
+                None,
+            )
+            .unwrap();
+            assert_eq!(r.addr, sa("10.42.42.112:23097"));
+            assert_eq!(r.candidates.len(), 2);
+            assert!(NsResolution::from_candidates("x.ztlp", vec![], None).is_err());
+        }
+    }
+
     #[test]
     fn test_cbor_extract_string() {
         // Build a simple CBOR map: {"address": "10.0.0.1:23095"}
@@ -1247,8 +1427,9 @@ mod tests {
         );
         let result = ns_resolve("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
         eprintln!("ns_resolve result: {:?}", result);
-        let addr_result = ns_query_addr("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
-        eprintln!("ns_query_addr result: {:?}", addr_result);
+        let addr_result =
+            ns_query_candidates("web.demo.spongebob.ztlp", "34.221.165.244:24096").await;
+        eprintln!("ns_query_candidates result: {:?}", addr_result);
     }
 
     // TEMP DIAGNOSTIC (2026-08-31) — removed after use. Finding: parse_svc_response
@@ -1383,6 +1564,7 @@ mod tests {
             addr: "10.0.0.99:22000".parse().unwrap(),
             node_id: None,
             ztlp_name: "test.techrockstars.ztlp".to_string(),
+            candidates: vec!["10.0.0.99:22000".parse().unwrap()],
         };
 
         assert_eq!(resolved_peer_addr(&resolution), resolution.addr);
@@ -1424,6 +1606,7 @@ mod tests {
                         .unwrap(),
                 )),
                 ztlp_name: "windows.techrockstars.ztlp".to_string(),
+                candidates: vec!["10.170.3.111:23095".parse().unwrap()],
             })
         );
     }

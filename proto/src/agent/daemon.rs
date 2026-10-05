@@ -1547,6 +1547,7 @@ async fn handle_tcp_connection_with_tls(
                 bind_addr,
                 ns_server,
                 relay_addr,
+                true,
             )
             .await
         }
@@ -1561,6 +1562,7 @@ async fn handle_tcp_connection_with_tls(
                 bind_addr,
                 ns_server,
                 relay_addr,
+                false,
             )
             .await
         }
@@ -1575,6 +1577,7 @@ async fn handle_tcp_connection_with_tls(
                 bind_addr,
                 ns_server,
                 relay_addr,
+                false,
             )
             .await
         }
@@ -2064,6 +2067,17 @@ async fn dial_tunnel(
     })
 }
 
+/// The request-head stamper for a connection, or `None`.
+///
+/// Only connections whose TLS the AGENT terminated get one: the backend then
+/// receives plain HTTP and must be told the client used https
+/// (`X-Forwarded-Proto: https`), or a framework behind it rejects https form
+/// POSTs as cross-origin (Rails 422, found live 2026-10-05). Plain-HTTP
+/// connections are forwarded byte-for-byte as before.
+fn request_stamper(tls_terminated: bool) -> Option<super::forwarded_proto::ForwardedProtoStamper> {
+    tls_terminated.then(super::forwarded_proto::ForwardedProtoStamper::new)
+}
+
 /// Bridge a local stream to a dialed tunnel until either side closes.
 /// `initial` (the already-read request head, if any) is sent first.
 async fn bridge_tunnel<S>(
@@ -2071,6 +2085,7 @@ async fn bridge_tunnel<S>(
     tunnel: DialedTunnel,
     initial: &[u8],
     ztlp_name: &str,
+    tls_terminated: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2082,10 +2097,19 @@ where
         session_id,
     } = tunnel;
 
+    // The splash gate may already have read the first request head; it must
+    // be stamped like everything after it.
+    let mut stamper = request_stamper(tls_terminated);
     if !initial.is_empty() {
-        crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, initial)
-            .await
-            .map_err(|e| format!("failed to forward request head: {}", e))?;
+        let first = match stamper.as_mut() {
+            Some(st) => st.feed(initial),
+            None => initial.to_vec(),
+        };
+        if !first.is_empty() {
+            crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &first)
+                .await
+                .map_err(|e| format!("failed to forward request head: {}", e))?;
+        }
     }
 
     // Bridge the (potentially TLS-unwrapped) local stream <-> the QUIC
@@ -2101,14 +2125,41 @@ where
             match local_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &buf[..n])
-                        .await
-                        .is_err()
-                    {
+                    // Stamp request heads on TLS-terminated connections. The
+                    // stamper may hold a partial head (empty output): that is
+                    // not EOF, just read more.
+                    let out = match stamper.as_mut() {
+                        Some(st) => st.feed(&buf[..n]),
+                        None => buf[..n].to_vec(),
+                    };
+                    if out.is_empty() {
+                        continue;
+                    }
+                    // A frame is capped at u16::MAX; stamping adds ~24 bytes,
+                    // so split rather than fail on a full-size read.
+                    let mut failed = false;
+                    for part in out.chunks(60_000) {
+                        if crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, part)
+                            .await
+                            .is_err()
+                        {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed {
                         break;
                     }
                 }
                 Err(_) => break,
+            }
+        }
+        // EOF mid-head: forward what was held instead of dropping it.
+        if let Some(st) = stamper.as_mut() {
+            let rest = st.finish();
+            if !rest.is_empty() {
+                let _ =
+                    crate::quic_transport::noise_stream::write_ztlp_frame(&mut q_send, &rest).await;
             }
         }
         let _ = q_send.finish();
@@ -2148,6 +2199,7 @@ async fn handle_tcp_connection_bridged<S>(
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
+    tls_terminated: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2163,7 +2215,7 @@ where
         relay_addr.map(|r| r.to_string()),
     )
     .await?;
-    bridge_tunnel(stream, tunnel, &[], ztlp_name).await
+    bridge_tunnel(stream, tunnel, &[], ztlp_name, tls_terminated).await
 }
 
 /// Like `handle_tcp_connection_bridged`, but for HTTP-ish ports it first reads
@@ -2180,6 +2232,7 @@ async fn handle_tcp_connection_gated<S>(
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
+    tls_terminated: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2197,6 +2250,7 @@ where
             bind_addr,
             ns_server,
             relay_addr,
+            tls_terminated,
         )
         .await;
     }
@@ -2231,7 +2285,7 @@ where
 
     match outcome {
         GateOutcome::Proceed { head, tunnel } => {
-            bridge_tunnel(stream, tunnel, &head, ztlp_name).await
+            bridge_tunnel(stream, tunnel, &head, ztlp_name, tls_terminated).await
         }
         GateOutcome::DialFailed { error, .. } => Err(error),
         GateOutcome::DialAborted { .. } => Err("tunnel dial task aborted".into()),
@@ -2277,6 +2331,7 @@ async fn handle_tcp_connection(
         bind_addr,
         ns_server,
         relay_addr,
+        false,
     )
     .await
 }
@@ -2311,6 +2366,54 @@ mod tests {
     // dialers walk: ranked direct candidates first (each with a short
     // timeout), the relay last (with the remaining budget). It never dials;
     // it only decides the order, so it is fully unit-testable.
+    // ── X-Forwarded-Proto wiring (2026-10-05) ───────────────────────────────
+    //
+    // The stamper itself is covered in `forwarded_proto`. These pin WHERE it
+    // applies: only when the agent terminated TLS, and to the request head the
+    // splash gate already consumed (the gate reads the first head before
+    // `bridge_tunnel` runs, so stamping only the pump would miss request #1,
+    // which is exactly the first page load / first form POST).
+    mod forwarded_proto_wiring {
+        use super::super::request_stamper;
+
+        const POST: &[u8] =
+            b"POST /p HTTP/1.1\r\nHost: a\r\nOrigin: https://a\r\nContent-Length: 2\r\n\r\nhi";
+
+        #[test]
+        fn tls_terminated_connections_get_a_stamper() {
+            let mut st = request_stamper(true).expect("TLS-terminated must stamp");
+            let out = String::from_utf8(st.feed(POST)).unwrap();
+            assert!(out.contains("X-Forwarded-Proto: https\r\n"), "{out:?}");
+        }
+
+        #[test]
+        fn plain_connections_are_forwarded_byte_for_byte() {
+            assert!(
+                request_stamper(false).is_none(),
+                "no stamper means the plain-HTTP path is untouched"
+            );
+        }
+
+        #[test]
+        fn the_head_the_splash_gate_already_read_is_stamped_too() {
+            // bridge_tunnel feeds `initial` through the SAME stamper that then
+            // handles the pump, so request #1 (consumed by the gate) and the
+            // later requests are all stamped, and a head split between the gate's
+            // read and the pump's first read is reassembled correctly.
+            let mut st = request_stamper(true).unwrap();
+            let (gate_head, pump_rest) = POST.split_at(25); // mid-head split
+            let mut out = st.feed(gate_head);
+            out.extend(st.feed(pump_rest));
+            let out = String::from_utf8(out).unwrap();
+            assert_eq!(
+                out.matches("X-Forwarded-Proto: https\r\n").count(),
+                1,
+                "{out:?}"
+            );
+            assert!(out.ends_with("\r\n\r\nhi"), "body intact: {out:?}");
+        }
+    }
+
     mod direct_first_plan {
         use super::super::{dial_plan, DialAttempt, DialVia, DIRECT_ATTEMPT_TIMEOUT};
         use std::net::SocketAddr;
@@ -3543,6 +3646,7 @@ mod splash_wiring_tests {
                 "127.0.0.1",
                 &ns,
                 None,
+                port == 443, // the https port is the one the agent terminates TLS on
             )
             .await;
         });

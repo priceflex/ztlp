@@ -264,7 +264,8 @@ pub mod tokio_endpoint {
     ///
     /// This TOFU verifier closes that gap as defense-in-depth: it
     /// computes the SHA-256 fingerprint of the leaf certificate and
-    /// pins it (in `~/.ztlp/quic_pins/<sni>@<ip>_<port>.pin`, see
+    /// pins it (in `~/.ztlp/quic_pins/<sni>_<ip>_<port>.pin` after
+    /// sanitization, see
     /// `pin_key_for`) on first connection to a given gateway endpoint. Every subsequent connection
     /// must present a certificate matching the pinned fingerprint or
     /// verification fails outright — same trust model as SSH host-key
@@ -312,21 +313,41 @@ pub mod tokio_endpoint {
         }
     }
 
-    /// Run `remove_legacy_sni_pins` for the default pin dir exactly once
-    /// per process (first dial). Cheap, idempotent, logs only when it
-    /// actually removed something.
+    /// Remove the legacy pin for `sni` unless this process already did so,
+    /// tracked per SNI in `done`. Returns the number of files removed.
+    /// Split out from `cleanup_legacy_pins_once` so the bookkeeping is
+    /// testable without touching the real pin directory.
+    pub(crate) fn cleanup_legacy_pin_for(
+        pin_dir: &std::path::Path,
+        sni: &str,
+        done: &std::sync::Mutex<std::collections::HashSet<String>>,
+    ) -> usize {
+        let first_time = match done.lock() {
+            Ok(mut g) => g.insert(sni.to_string()),
+            // a poisoned lock must not block dialing; skip the cleanup
+            Err(_) => false,
+        };
+        if !first_time {
+            return 0;
+        }
+        remove_legacy_sni_pins(pin_dir, sni)
+    }
+
+    /// Run the legacy-pin cleanup for the default pin dir once PER SNI per
+    /// process (first dial with that SNI). Cheap, idempotent, logs only when
+    /// it actually removed something.
     fn cleanup_legacy_pins_once(sni: &str) {
-        static DONE: std::sync::Once = std::sync::Once::new();
-        DONE.call_once(|| {
-            let dir = TofuCertVerifier::default_pin_dir();
-            if remove_legacy_sni_pins(&dir, sni) > 0 {
-                tracing::info!(
-                    "removed legacy per-SNI QUIC pin for '{}' from {} (pins are per gateway endpoint now)",
-                    sni,
-                    dir.display()
-                );
-            }
-        });
+        static DONE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let done = DONE.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        let dir = TofuCertVerifier::default_pin_dir();
+        if cleanup_legacy_pin_for(&dir, sni, done) > 0 {
+            tracing::info!(
+                "removed legacy per-SNI QUIC pin for '{}' from {} (pins are per gateway endpoint now)",
+                sni,
+                dir.display()
+            );
+        }
     }
 
     impl TofuCertVerifier {
@@ -1099,6 +1120,41 @@ pub mod tokio_endpoint {
             assert!(!tmp.exists());
             std::fs::create_dir_all(&tmp).unwrap();
             assert_eq!(remove_legacy_sni_pins(&tmp, "localhost"), 0);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // CodeRabbit (PR #117): a single process-wide `Once` cleaned only the
+        // FIRST SNI it saw; a later dial with a different SNI never got its
+        // legacy pin removed. Track completion per SNI instead.
+        #[test]
+        fn legacy_cleanup_is_tracked_per_sni_not_once_per_process() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let done = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            std::fs::write(tmp.join("gw-example.pin"), "cd").unwrap();
+
+            // first SNI cleaned
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 1);
+            // a DIFFERENT sni is still cleaned afterwards (the old Once skipped it)
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "gw-example", &done), 1);
+            assert!(!tmp.join("localhost.pin").exists());
+            assert!(!tmp.join("gw-example.pin").exists());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn legacy_cleanup_for_the_same_sni_runs_once() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let done = std::sync::Mutex::new(std::collections::HashSet::<String>::new());
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 1);
+            // a legacy file reappearing later in the same process is NOT touched
+            // again (idempotent, no repeated filesystem work on the hot path)
+            std::fs::write(tmp.join("localhost.pin"), "ab").unwrap();
+            assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 0);
+            assert!(tmp.join("localhost.pin").exists());
             let _ = std::fs::remove_dir_all(&tmp);
         }
 

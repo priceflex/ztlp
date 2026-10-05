@@ -109,25 +109,44 @@ In `proto/src/agent/`:
 - B2 Rank with `svc_candidates::rank_candidates(&set,
   &local_candidates::our_local_subnets())`. Tests: client on <CLIENT-LAN>/24
   ranks <APP-SERVER-LAN-IP> above <OFFICE-NAT-IP> above relay.
-- B3 `dial_tunnel` dials ranked direct candidates first using
-  `multi_candidate_dial::try_multi_candidate_connect` (or its `QuicDialer`),
-  with a short per-candidate timeout (start at 400 ms, measure, then tune),
-  then falls back to today's relay path. The relay stays the last candidate.
-  Tests: fake dialer where only the LAN candidate answers; where none answer
-  (relay used); where the relay is unconfigured (direct only, as today).
-- B4 Config switch `[tunnel] direct_first = true` (default on), `false` restores
-  current behaviour. Log one line per dial: which candidate won and why.
-- B5 Keep the splash gate and the 15 s first-byte deadline unchanged; the dial
-  change happens inside `dial_tunnel`, below them. Re-run `agent::splash*` and
-  `splash_wiring_tests`.
+- B3 DONE. `connect_tunnel` (daemon.rs) is the single dial path, replacing the
+  duplicated single-address bodies in `proxy_dial_phase` and
+  `handle_tcp_connection_bridged` (and `dial_tunnel`, added by the splash gate).
+  `dial_plan` orders the attempts (ranked direct candidates first, relay last;
+  a published candidate equal to the relay collapses into the relay attempt).
+  `attempt_timeout` bounds a DIRECT attempt at `DIRECT_ATTEMPT_TIMEOUT` (750 ms,
+  pinned to a 250-1500 ms band by a test) ONLY when another attempt follows it;
+  the relay and the final attempt of any plan are bounded by the caller's 15 s
+  first-byte deadline, as before. This keeps "no relay configured" truly
+  direct-only: a high-RTT WAN gateway or one lost QUIC Initial is not cut off at
+  750 ms. (Found in review of PR #117.) The candidate walk is plain sequential
+  dialing, not `multi_candidate_dial`'s racing orchestrator.
+- B4 DONE, with a different switch than first planned: the existing
+  `[tunnel] prefer_relay` (default `false` = direct first). `true` puts the
+  relay first and keeps the direct candidates as the fallback. One info line per
+  attempt and per winner.
+- B5 DONE. Splash gate and the 15 s first-byte deadline are unchanged; the
+  dial change sits inside `dial_tunnel`/`proxy_dial_phase`, below them. The
+  splash and `splash_wiring_tests` suites pass with it.
+- Cache: a VIP cache hit now dials the FULL ranked list. `VipEntry.peer_candidates`
+  plus a per-name process-wide list (`set_peer_candidates`); `candidates_for_dial`
+  honours the list only alongside a cache hit, and `gc_expired` drops it with the
+  entry (stale-list bug found in self-review of PR #117).
+- QUIC pin: found live while doing B6. Pins were keyed on the fixed SNI
+  `localhost`, so a second gateway was rejected as a fingerprint mismatch. Pins
+  are now per gateway endpoint (`pin_key_for`), and the legacy `<sni>.pin` is
+  removed once per SNI per process.
 - Gate: macOS `cargo check --lib --bins` (required for `proto/src/agent/**`),
   `cargo fmt --check`, clippy on touched files, full `cargo test --lib`.
-- Test B6 (live): rebuild `ztlp-winsvc` for the AI computer, swap with backup,
-  `curl http://www.chooseforce.ztlp/up` returns 200 in well under 1 s, agent log
-  shows the <APP-SERVER-LAN-IP> candidate won; relay log shows NO CLIENT_ROUTE for it.
-- Test B7 (fallback): block <APP-SERVER-LAN-IP>:23097 from the AI computer (Windows
-  firewall rule, temporary); the same request must fall back to the relay and
-  behave as today (504 until part 3 or a port forward exists). Remove the rule.
+- Test B6 (live) DONE: `curl http://www.chooseforce.ztlp/up` from the AI computer
+  went from 504 after 15 s to 200 in ~0.1 s (23 ms on a cache hit); the agent
+  log shows `tunnel active ... via Direct` for the LAN candidate and the relay
+  saw no CLIENT_ROUTE for it.
+- Test B7 (forced fallback) NOT YET RUN live: block the LAN candidate from the
+  AI computer (temporary Windows firewall rule) and confirm the same request
+  falls to the relay and behaves as before (504 until step D or a port forward
+  exists). The ordering is covered by unit tests (`direct_first_plan`), but not
+  yet exercised against a real dead candidate.
 
 ### Step C: Elixir gateway parity (part 1, proper)
 
@@ -167,7 +186,8 @@ Two designs to evaluate before coding; write the choice into this doc:
 - Should the agent keep the relay path warm in parallel (race) or strictly
   fall back (sequential)? `multi_candidate_dial` races in priority bands with
   250 ms gaps. Sequential is simpler to reason about; racing is faster when the
-  LAN candidate is dead. Measure in B3.
+  LAN candidate is dead. Sequential was chosen for B3; revisit if B7 shows a
+  noticeable stall.
 - Elixir vs Rust gateway as the production image. Step A will show how much the
   Rust one lacks (TLS termination, policies, audit, admin API are Elixir-only).
 - Cert issuance: the NS rejects the gateway's cert request (`unauthorized`);

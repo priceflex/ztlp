@@ -7058,10 +7058,24 @@ fn build_signed_registration_packet(
     type_byte: u8,
     data_bin: &[u8],
     identity: &ztlp_proto::identity::NodeIdentity,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, String> {
     let name_bytes = name.as_bytes();
-    let name_len = name_bytes.len() as u16;
-    let data_len = data_bin.len() as u16;
+    // Checked, not `as u16`: a wrapped length would make the NS read
+    // different bytes than the ones we sign.
+    let name_len = u16::try_from(name_bytes.len()).map_err(|_| {
+        format!(
+            "registration name is {} bytes (max {})",
+            name_bytes.len(),
+            u16::MAX
+        )
+    })?;
+    let data_len = u16::try_from(data_bin.len()).map_err(|_| {
+        format!(
+            "registration data is {} bytes (max {})",
+            data_bin.len(),
+            u16::MAX
+        )
+    })?;
 
     let mut canonical = Vec::with_capacity(1 + 2 + name_bytes.len() + data_bin.len());
     canonical.push(type_byte);
@@ -7085,7 +7099,7 @@ fn build_signed_registration_packet(
     pkt.extend_from_slice(&sig);
     pkt.extend_from_slice(&(pubkey.len() as u16).to_be_bytes());
     pkt.extend_from_slice(&pubkey);
-    pkt
+    Ok(pkt)
 }
 
 /// Publish KEY and (optionally) SVC records for `identity` to NS at `ns_server`.
@@ -7191,7 +7205,7 @@ async fn ns_publish_self(
 
     // Signed (v2): required by an auth-on NS (production default). KEY is a
     // self-registration (data.public_key == this identity's signing pubkey).
-    let key_pkt = build_signed_registration_packet(name, 1, &key_data_bin, identity); // type 1 = KEY
+    let key_pkt = build_signed_registration_packet(name, 1, &key_data_bin, identity)?; // type 1 = KEY
     sock.send_to(&key_pkt, ns_addr).await?;
 
     let mut buf = vec![0u8; 65535];
@@ -7250,7 +7264,7 @@ async fn ns_publish_self(
 
         // Signed (v2): NS authorizes SVC via the KEY owner (same pubkey) or a
         // zone-authority delegation on the parent zone.
-        let svc_pkt = build_signed_registration_packet(name, 2, &svc_data_bin, identity); // type 2 = SVC
+        let svc_pkt = build_signed_registration_packet(name, 2, &svc_data_bin, identity)?; // type 2 = SVC
         sock.send_to(&svc_pkt, ns_addr).await?;
 
         // SVC failures are non-fatal — KEY is the critical record. Callers can
@@ -7414,7 +7428,7 @@ async fn cmd_ns_register(
 
     // Signed (v2): required by an auth-on NS (production default). KEY is a
     // self-registration (data.public_key == this identity's signing pubkey).
-    let key_pkt = build_signed_registration_packet(name, 1, &key_data_bin, &identity); // type 1 = KEY
+    let key_pkt = build_signed_registration_packet(name, 1, &key_data_bin, &identity)?; // type 1 = KEY
     sock.send_to(&key_pkt, ns_addr).await?;
 
     let mut buf = vec![0u8; 65535];
@@ -7472,7 +7486,7 @@ async fn cmd_ns_register(
 
         // Signed (v2): NS authorizes SVC via the KEY owner (same pubkey) or a
         // zone-authority delegation on the parent zone.
-        let svc_pkt = build_signed_registration_packet(name, 2, &svc_data_bin, &identity); // type 2 = SVC
+        let svc_pkt = build_signed_registration_packet(name, 2, &svc_data_bin, &identity)?; // type 2 = SVC
         sock.send_to(&svc_pkt, ns_addr).await?;
 
         match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
@@ -14547,7 +14561,8 @@ mod tests {
         fn signed_packet_has_v2_shape_with_sig_and_pubkey_trailer() {
             let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
             let data = cbor_map(&mut vec![("address", "10.0.0.5:23097")]);
-            let pkt = build_signed_registration_packet("www.chooseforce.ztlp", 2, &data, &id);
+            let pkt =
+                build_signed_registration_packet("www.chooseforce.ztlp", 2, &data, &id).unwrap();
             let (op, name, ty, d, sig, pk) = parse(&pkt);
             assert_eq!(op, 0x09);
             assert_eq!(name, b"www.chooseforce.ztlp");
@@ -14564,7 +14579,7 @@ mod tests {
             let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
             let data = cbor_map(&mut vec![("public_key", "ab")]);
             let name = "gw.chooseforce.ztlp";
-            let pkt = build_signed_registration_packet(name, 1, &data, &id);
+            let pkt = build_signed_registration_packet(name, 1, &data, &id).unwrap();
             let (_, _, _, _, sig, pk) = parse(&pkt);
 
             let mut canonical = Vec::new();
@@ -14583,7 +14598,7 @@ mod tests {
         fn signature_does_not_verify_if_name_is_tampered() {
             let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
             let data = cbor_map(&mut vec![("k", "v")]);
-            let pkt = build_signed_registration_packet("a.ztlp", 1, &data, &id);
+            let pkt = build_signed_registration_packet("a.ztlp", 1, &data, &id).unwrap();
             let (_, _, _, _, sig, pk) = parse(&pkt);
             let mut canonical = vec![1u8];
             canonical.extend_from_slice(&(b"b.ztlp".len() as u16).to_be_bytes());
@@ -14592,6 +14607,36 @@ mod tests {
             let vk = VerifyingKey::from_bytes(&pk.try_into().unwrap()).unwrap();
             let s = Signature::from_bytes(&sig.try_into().unwrap());
             assert!(vk.verify(&canonical, &s).is_err());
+        }
+
+        // CodeRabbit (PR #117): `as u16` silently wraps. A name or data blob
+        // over 65535 bytes would write a length header that no longer matches
+        // the payload, so the NS would read different bytes than were signed.
+        // The operator-controlled SVC `addresses` list is unbounded, so refuse
+        // up front with a clear error instead of emitting a corrupt frame.
+        #[test]
+        fn oversize_data_is_rejected_not_truncated() {
+            let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+            let big = vec![0u8; 65_536];
+            let err = build_signed_registration_packet("a.ztlp", 2, &big, &id).unwrap_err();
+            assert!(err.contains("data"), "error should name the field: {err}");
+        }
+
+        #[test]
+        fn oversize_name_is_rejected_not_truncated() {
+            let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+            let long = "a".repeat(65_536);
+            let err = build_signed_registration_packet(&long, 1, &[1, 2, 3], &id).unwrap_err();
+            assert!(err.contains("name"), "error should name the field: {err}");
+        }
+
+        #[test]
+        fn data_at_exactly_u16_max_is_accepted() {
+            let id = ztlp_proto::identity::NodeIdentity::generate().unwrap();
+            let max = vec![7u8; 65_535];
+            let pkt = build_signed_registration_packet("a.ztlp", 2, &max, &id).unwrap();
+            let (_, _, _, d, _, _) = parse(&pkt);
+            assert_eq!(d.len(), 65_535);
         }
 
         #[test]

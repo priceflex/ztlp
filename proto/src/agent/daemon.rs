@@ -2444,6 +2444,53 @@ mod tests {
             assert!(candidates_for_dial(None, &[]).is_empty());
         }
 
+        // ── Only bound a DIRECT attempt when something follows it ──────────
+        //
+        // CodeRabbit (PR #117): with no relay configured the plan is
+        // direct-only, and the LAST attempt used to be cut at 750 ms with no
+        // fallback, where the old code had no inner timeout (the 15 s
+        // first-byte deadline bounded it). A WAN gateway (QUIC + Noise is
+        // ~3 round trips) or one lost QUIC Initial (~1 s PTO) then failed
+        // where it worked before. The short budget only makes sense when a
+        // next attempt can take over.
+        #[test]
+        fn direct_attempt_is_bounded_only_when_another_attempt_follows() {
+            use super::super::attempt_timeout;
+            let direct = DialAttempt {
+                addr: sa("10.0.0.5:23097"),
+                via: DialVia::Direct,
+            };
+            let relay = DialAttempt {
+                addr: sa("1.2.3.4:23095"),
+                via: DialVia::Relay,
+            };
+            assert_eq!(attempt_timeout(direct, true), Some(DIRECT_ATTEMPT_TIMEOUT));
+            assert_eq!(
+                attempt_timeout(direct, false),
+                None,
+                "last direct attempt: caller's deadline bounds it"
+            );
+            assert_eq!(attempt_timeout(relay, true), None);
+            assert_eq!(attempt_timeout(relay, false), None);
+        }
+
+        #[test]
+        fn direct_only_plan_never_times_out_early_on_its_last_candidate() {
+            use super::super::attempt_timeout;
+            let plan = dial_plan(
+                &[sa("10.0.0.5:23097"), sa("203.0.113.9:23097")],
+                None,
+                false,
+            );
+            let n = plan.len();
+            let budgets: Vec<_> = plan
+                .iter()
+                .enumerate()
+                .map(|(i, a)| attempt_timeout(*a, i + 1 < n))
+                .collect();
+            assert_eq!(budgets, vec![Some(DIRECT_ATTEMPT_TIMEOUT), None]);
+        }
+
         // ── A stale list must never override "resolve fresh" ───────────────
         //
         // `peer_addr == None` is the caller saying "no usable VIP cache
@@ -2942,16 +2989,18 @@ async fn connect_tunnel(
             identity,
             bind_addr,
         );
-        let result = match attempt.via {
-            DialVia::Direct => match tokio::time::timeout(DIRECT_ATTEMPT_TIMEOUT, one).await {
+        let result = match attempt_timeout(attempt, i + 1 < n) {
+            Some(budget) => match tokio::time::timeout(budget, one).await {
                 Ok(r) => r,
                 Err(_) => Err(format!(
                     "direct candidate {} did not answer within {:?}",
-                    attempt.addr, DIRECT_ATTEMPT_TIMEOUT
+                    attempt.addr, budget
                 )
                 .into()),
             },
-            DialVia::Relay => one.await,
+            // Relay, or the LAST attempt: the caller's first-byte deadline
+            // bounds it (unchanged from before direct-first).
+            None => one.await,
         };
         match result {
             Ok((conn, session_id)) => {
@@ -3104,6 +3153,18 @@ fn dial_plan(
         relay_attempt.into_iter().chain(direct).collect()
     } else {
         direct.chain(relay_attempt).collect()
+    }
+}
+
+/// Inner time budget for one attempt. A DIRECT attempt gets the short
+/// `DIRECT_ATTEMPT_TIMEOUT` ONLY when another attempt follows it (so a dead
+/// candidate costs ~750 ms before the next one takes over). The relay, and
+/// the final attempt of any plan, get `None`: the caller's first-byte
+/// deadline bounds them, exactly as before direct-first dialing.
+fn attempt_timeout(attempt: DialAttempt, has_fallback: bool) -> Option<Duration> {
+    match attempt.via {
+        DialVia::Direct if has_fallback => Some(DIRECT_ATTEMPT_TIMEOUT),
+        _ => None,
     }
 }
 

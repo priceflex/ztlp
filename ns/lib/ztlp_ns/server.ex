@@ -588,8 +588,8 @@ defmodule ZtlpNs.Server do
          :ok <- RegistrationAuth.check_revocation(data),
          # 7. Check name revocation (revoked entities cannot re-register)
          :ok <- RegistrationAuth.check_name_revocation(name),
-         # 8. Check rate limiting (max 1 registration per name per hour)
-         :ok <- RegistrationAuth.check_rate_limit(name, pubkey) do
+         # 8. Check rate limiting (max 1 registration per {name, type} per window)
+         :ok <- RegistrationAuth.check_rate_limit(name, type, pubkey) do
       # Build the record and sign with the NS registration key.
       # The registrant's identity was verified above (Ed25519 sig + zone auth).
       # The stored record needs a signature that matches Record.serialize()

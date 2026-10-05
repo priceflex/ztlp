@@ -31,6 +31,7 @@ pub mod dns_setup;
 // inside it is gated to `cfg(windows)` in D4.T2.
 pub mod dns_setup_windows;
 pub mod domain_map;
+pub mod forwarded_proto;
 pub mod hardware_key;
 // Linux system-service token sharing (PR #112 review fix). Pure planners
 // compile everywhere; the executor is cfg(target_os = "linux").

@@ -198,6 +198,9 @@ impl VipPool {
             if let Some(entry) = self.name_to_vip.remove(&name) {
                 self.ip_to_name.remove(&entry.ip);
             }
+            // The process-wide ranked-candidate cache must not outlive the
+            // VIP entry it belongs to (stale list / unbounded growth).
+            super::daemon::forget_peer_candidates(&name);
         }
         count
     }

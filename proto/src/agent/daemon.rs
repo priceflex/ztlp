@@ -99,6 +99,14 @@ pub(crate) fn set_peer_candidates(ztlp_name: &str, candidates: &[SocketAddr]) {
     }
 }
 
+/// Drop the cached list for `ztlp_name` (called when its VIP entry is
+/// reaped, so the cache cannot grow without bound or outlive the entry).
+pub(crate) fn forget_peer_candidates(ztlp_name: &str) {
+    if let Ok(mut g) = candidate_cache().write() {
+        g.remove(&ztlp_name.to_ascii_lowercase());
+    }
+}
+
 fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
     candidate_cache()
         .read()
@@ -110,14 +118,24 @@ fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
 /// What the dial planner sees on a VIP cache hit: the full cached ranked
 /// list when we have one, else the single cached best address, else
 /// empty (caller resolves via NS). Pure; see `direct_first_plan` tests.
+///
+/// The list is only honoured alongside a cache hit (`cached_best` is
+/// `Some`). `None` means the caller found no usable VIP entry (expired and
+/// reaped, or a first request) and wants a FRESH resolution; the
+/// process-wide candidate cache outlives VIP entries, so a leftover list
+/// must not override that, or a gateway that moved would keep being dialed
+/// at its old addresses until restart.
 fn candidates_for_dial(
     cached_best: Option<SocketAddr>,
     cached_list: &[SocketAddr],
 ) -> Vec<SocketAddr> {
+    let Some(best) = cached_best else {
+        return Vec::new();
+    };
     if !cached_list.is_empty() {
         return cached_list.to_vec();
     }
-    cached_best.into_iter().collect()
+    vec![best]
 }
 
 /// Build a CLIENT_ROUTE frame, HMAC-signed with the installed relay secret
@@ -2424,6 +2442,35 @@ mod tests {
         fn no_cache_means_empty_so_caller_resolves() {
             use super::super::candidates_for_dial;
             assert!(candidates_for_dial(None, &[]).is_empty());
+        }
+
+        // ── A stale list must never override "resolve fresh" ───────────────
+        //
+        // `peer_addr == None` is the caller saying "no usable VIP cache
+        // entry; resolve via NS" (entry expired and was reaped, or a first
+        // request). The process-wide candidate cache outlives VIP entries,
+        // so consulting it in that case would keep dialing a gateway's OLD
+        // addresses after it moved, until the process restarts. The list is
+        // only valid alongside a cache hit.
+        #[test]
+        fn stale_list_is_ignored_when_the_vip_entry_is_gone() {
+            use super::super::candidates_for_dial;
+            let stale = vec![sa("10.0.0.5:23097"), sa("203.0.113.9:23097")];
+            assert!(
+                candidates_for_dial(None, &stale).is_empty(),
+                "peer_addr None means resolve fresh; a leftover list must not win"
+            );
+        }
+
+        #[test]
+        fn forgetting_a_name_drops_its_cached_list() {
+            use super::super::{
+                cached_peer_candidates, forget_peer_candidates, set_peer_candidates,
+            };
+            set_peer_candidates("forget.me.ztlp", &[sa("10.0.0.5:23097")]);
+            assert_eq!(cached_peer_candidates("FORGET.me.ztlp").len(), 1);
+            forget_peer_candidates("forget.ME.ztlp");
+            assert!(cached_peer_candidates("forget.me.ztlp").is_empty());
         }
     }
 

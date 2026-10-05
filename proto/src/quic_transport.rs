@@ -296,11 +296,51 @@ pub mod tokio_endpoint {
         format!("{}@{}", server_name, remote)
     }
 
+    /// Remove the pin file the pre-2026-10-05 per-SNI scheme wrote for
+    /// `sni` (`<sanitized sni>.pin`), if present. Only that exact file:
+    /// per-endpoint pins (`<sni>_<ip>_<port>.pin`), operator backups and
+    /// unrelated files are untouched. Never creates the directory. Returns
+    /// the number of files removed (0 or 1).
+    pub(crate) fn remove_legacy_sni_pins(pin_dir: &std::path::Path, sni: &str) -> usize {
+        if !pin_dir.is_dir() {
+            return 0;
+        }
+        let legacy = TofuCertVerifier::with_pin_dir_pub(sni, pin_dir.to_path_buf()).pin_path();
+        match std::fs::remove_file(&legacy) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Run `remove_legacy_sni_pins` for the default pin dir exactly once
+    /// per process (first dial). Cheap, idempotent, logs only when it
+    /// actually removed something.
+    fn cleanup_legacy_pins_once(sni: &str) {
+        static DONE: std::sync::Once = std::sync::Once::new();
+        DONE.call_once(|| {
+            let dir = TofuCertVerifier::default_pin_dir();
+            if remove_legacy_sni_pins(&dir, sni) > 0 {
+                tracing::info!(
+                    "removed legacy per-SNI QUIC pin for '{}' from {} (pins are per gateway endpoint now)",
+                    sni,
+                    dir.display()
+                );
+            }
+        });
+    }
+
     impl TofuCertVerifier {
         fn new(server_name: &str) -> Self {
             Self {
                 server_name: server_name.to_string(),
                 pin_dir: Self::default_pin_dir(),
+            }
+        }
+
+        fn with_pin_dir_pub(server_name: &str, pin_dir: std::path::PathBuf) -> Self {
+            Self {
+                server_name: server_name.to_string(),
+                pin_dir,
             }
         }
 
@@ -606,6 +646,7 @@ pub mod tokio_endpoint {
             std_socket: std::net::UdpSocket,
         ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
+            cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
@@ -647,6 +688,7 @@ pub mod tokio_endpoint {
             server_name: &str,
         ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
+            cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
@@ -1018,6 +1060,45 @@ pub mod tokio_endpoint {
                 tmp.as_path(),
                 "no nested dirs from ':' or '[]'"
             );
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── Legacy per-SNI pin cleanup (2026-10-05) ────────────────────────
+        //
+        // Installs that ran the per-SNI pinning left `<sni>.pin` files
+        // (in practice one: `localhost.pin`). The new key never reads
+        // them, so they are dead weight and, worse, misleading to anyone
+        // debugging a pin problem. `remove_legacy_sni_pins` deletes exactly
+        // the files the OLD scheme would have produced for `sni` and
+        // nothing else: per-endpoint pins, backups and foreign files stay.
+        #[test]
+        fn legacy_cleanup_removes_only_the_old_sni_pin() {
+            let tmp = tempfile_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let legacy = tmp.join("localhost.pin");
+            let modern = tmp.join("localhost_10_42_42_112_23097.pin");
+            let backup = tmp.join("localhost.pin.bak-demo");
+            let other = tmp.join("gw_example.pin");
+            for f in [&legacy, &modern, &backup, &other] {
+                std::fs::write(f, "ab").unwrap();
+            }
+            let removed = remove_legacy_sni_pins(&tmp, "localhost");
+            assert_eq!(removed, 1);
+            assert!(!legacy.exists(), "legacy per-SNI pin must go");
+            assert!(modern.exists(), "per-endpoint pin must stay");
+            assert!(backup.exists(), "operator backups must stay");
+            assert!(other.exists(), "unrelated pins must stay");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn legacy_cleanup_is_a_noop_when_nothing_to_remove() {
+            let tmp = tempfile_dir();
+            // dir does not exist yet: must not panic or create it
+            assert_eq!(remove_legacy_sni_pins(&tmp, "localhost"), 0);
+            assert!(!tmp.exists());
+            std::fs::create_dir_all(&tmp).unwrap();
+            assert_eq!(remove_legacy_sni_pins(&tmp, "localhost"), 0);
             let _ = std::fs::remove_dir_all(&tmp);
         }
 

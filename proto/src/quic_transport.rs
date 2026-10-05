@@ -264,8 +264,8 @@ pub mod tokio_endpoint {
     ///
     /// This TOFU verifier closes that gap as defense-in-depth: it
     /// computes the SHA-256 fingerprint of the leaf certificate and
-    /// pins it (in `~/.ztlp/quic_pins/<server_name>.pin`) on first
-    /// connection to a given `server_name`. Every subsequent connection
+    /// pins it (in `~/.ztlp/quic_pins/<sni>@<ip>_<port>.pin`, see
+    /// `pin_key_for`) on first connection to a given gateway endpoint. Every subsequent connection
     /// must present a certificate matching the pinned fingerprint or
     /// verification fails outright — same trust model as SSH host-key
     /// pinning and the rhf-phvo/sjy-yrjl iOS fixes: doesn't protect the
@@ -280,6 +280,20 @@ pub mod tokio_endpoint {
         /// which requires `unsafe` in modern Rust and risks races in
         /// a shared test binary).
         pin_dir: std::path::PathBuf,
+    }
+
+    /// TOFU pin identity for a dial: the REMOTE ENDPOINT plus the SNI.
+    ///
+    /// Every ZTLP dial uses the fixed SNI "localhost" (gateways serve a
+    /// self-signed "localhost" cert), so pinning on the SNI alone yielded a
+    /// single global pin: the first gateway ever contacted was pinned and
+    /// every other gateway was rejected as a fingerprint mismatch (found
+    /// live 2026-10-05 with direct-first dialing to a second gateway).
+    /// Keying on `ip:port` + SNI gives each gateway its own pin while the
+    /// on-wire SNI is unchanged. `TofuCertVerifier::pin_path` sanitizes the
+    /// result into one flat filename.
+    pub(crate) fn pin_key_for(remote: SocketAddr, server_name: &str) -> String {
+        format!("{}@{}", server_name, remote)
     }
 
     impl TofuCertVerifier {
@@ -594,7 +608,10 @@ pub mod tokio_endpoint {
             ensure_crypto();
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
+                    remote,
+                    server_name,
+                ))))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -632,7 +649,10 @@ pub mod tokio_endpoint {
             ensure_crypto();
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(server_name)))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
+                    remote,
+                    server_name,
+                ))))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -954,6 +974,50 @@ pub mod tokio_endpoint {
                 "sanitized pin path must not contain '..' components"
             );
 
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── Pin per GATEWAY ENDPOINT, not per SNI string (2026-10-05) ──────
+        //
+        // Every agent/CLI dial passes the fixed SNI "localhost" (gateways
+        // serve a self-signed "localhost" cert). Keying the TOFU pin on the
+        // SNI therefore produced ONE global pin: the first gateway ever
+        // contacted was pinned and every other gateway was rejected as a
+        // "fingerprint mismatch" (MITM-shaped failure). Found live with
+        // direct-first dialing: the AI computer had the demo gateway pinned
+        // under `localhost.pin`, so the ChooseForce gateway's direct dial
+        // failed in 10 ms and fell back to the relay. `pin_key_for` derives
+        // the pin identity from the dialed endpoint instead, so each
+        // gateway gets its own TOFU pin while the wire SNI is unchanged.
+        #[test]
+        fn pin_key_is_per_remote_endpoint_not_per_sni() {
+            let a: SocketAddr = "10.42.42.112:23097".parse().unwrap();
+            let b: SocketAddr = "44.227.148.151:23095".parse().unwrap();
+            let ka = pin_key_for(a, "localhost");
+            let kb = pin_key_for(b, "localhost");
+            assert_ne!(
+                ka, kb,
+                "two gateways behind the same SNI must not share a pin"
+            );
+            // stable for the same endpoint
+            assert_eq!(ka, pin_key_for(a, "localhost"));
+            // the SNI still participates (same ip:port, different SNI → different pin)
+            assert_ne!(ka, pin_key_for(a, "gw.example"));
+        }
+
+        #[test]
+        fn pin_key_sanitizes_into_a_single_safe_filename() {
+            let tmp = tempfile_dir();
+            let v6: SocketAddr = "[fe80::1]:23097".parse().unwrap();
+            let key = pin_key_for(v6, "localhost");
+            let verifier = TofuCertVerifier::with_pin_dir(&key, tmp.clone());
+            let path = verifier.pin_path();
+            assert!(path.starts_with(&tmp));
+            assert_eq!(
+                path.parent().unwrap(),
+                tmp.as_path(),
+                "no nested dirs from ':' or '[]'"
+            );
             let _ = std::fs::remove_dir_all(&tmp);
         }
 

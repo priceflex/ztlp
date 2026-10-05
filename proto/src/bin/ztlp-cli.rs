@@ -16457,7 +16457,7 @@ mod tests {
     fn pick_quic_dial_target_prefers_multi_candidate_winner() {
         use std::net::SocketAddr;
         let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap(); // relay
-        let lan: SocketAddr = "10.170.3.111:23095".parse().unwrap(); // host
+        let lan: SocketAddr = "10.20.31.111:23095".parse().unwrap(); // host
         assert_eq!(pick_quic_dial_target(ns, Some(lan)), lan);
     }
 

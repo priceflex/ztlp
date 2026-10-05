@@ -1054,8 +1054,8 @@ pub mod tokio_endpoint {
         // gateway gets its own TOFU pin while the wire SNI is unchanged.
         #[test]
         fn pin_key_is_per_remote_endpoint_not_per_sni() {
-            let a: SocketAddr = "10.42.42.112:23097".parse().unwrap();
-            let b: SocketAddr = "44.227.148.151:23095".parse().unwrap();
+            let a: SocketAddr = "10.20.30.40:23097".parse().unwrap();
+            let b: SocketAddr = "198.51.100.7:23095".parse().unwrap();
             let ka = pin_key_for(a, "localhost");
             let kb = pin_key_for(b, "localhost");
             assert_ne!(
@@ -1097,7 +1097,7 @@ pub mod tokio_endpoint {
             let tmp = tempfile_dir();
             std::fs::create_dir_all(&tmp).unwrap();
             let legacy = tmp.join("localhost.pin");
-            let modern = tmp.join("localhost_10_42_42_112_23097.pin");
+            let modern = tmp.join("localhost_10_20_30_40_23097.pin");
             let backup = tmp.join("localhost.pin.bak-demo");
             let other = tmp.join("gw_example.pin");
             for f in [&legacy, &modern, &backup, &other] {

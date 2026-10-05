@@ -2322,29 +2322,29 @@ mod tests {
         #[test]
         fn direct_candidates_first_then_relay() {
             let plan = dial_plan(
-                &[sa("10.42.42.112:23097"), sa("204.16.122.24:23097")],
-                Some(sa("44.227.148.151:23095")),
+                &[sa("10.20.30.40:23097"), sa("203.0.113.9:23097")],
+                Some(sa("198.51.100.7:23095")),
                 false,
             );
             assert_eq!(plan.len(), 3);
             assert_eq!(
                 plan[0],
                 DialAttempt {
-                    addr: sa("10.42.42.112:23097"),
+                    addr: sa("10.20.30.40:23097"),
                     via: DialVia::Direct
                 }
             );
             assert_eq!(
                 plan[1],
                 DialAttempt {
-                    addr: sa("204.16.122.24:23097"),
+                    addr: sa("203.0.113.9:23097"),
                     via: DialVia::Direct
                 }
             );
             assert_eq!(
                 plan[2],
                 DialAttempt {
-                    addr: sa("44.227.148.151:23095"),
+                    addr: sa("198.51.100.7:23095"),
                     via: DialVia::Relay
                 }
             );
@@ -2356,8 +2356,8 @@ mod tests {
             // entry. Dialing it "direct" (no CLIENT_ROUTE) can never work;
             // it must collapse into the single Relay attempt.
             let plan = dial_plan(
-                &[sa("10.42.42.112:23097"), sa("44.227.148.151:23095")],
-                Some(sa("44.227.148.151:23095")),
+                &[sa("10.20.30.40:23097"), sa("198.51.100.7:23095")],
+                Some(sa("198.51.100.7:23095")),
                 false,
             );
             assert_eq!(plan.len(), 2);
@@ -2365,7 +2365,7 @@ mod tests {
             assert_eq!(
                 plan[1],
                 DialAttempt {
-                    addr: sa("44.227.148.151:23095"),
+                    addr: sa("198.51.100.7:23095"),
                     via: DialVia::Relay
                 }
             );
@@ -2424,8 +2424,8 @@ mod tests {
         #[test]
         fn cache_hit_with_list_uses_the_whole_list() {
             use super::super::candidates_for_dial;
-            let cached = vec![sa("10.42.42.112:23097"), sa("204.16.122.24:23097")];
-            let got = candidates_for_dial(Some(sa("10.42.42.112:23097")), &cached);
+            let cached = vec![sa("10.20.30.40:23097"), sa("203.0.113.9:23097")];
+            let got = candidates_for_dial(Some(sa("10.20.30.40:23097")), &cached);
             assert_eq!(got, cached);
         }
 
@@ -2889,7 +2889,7 @@ fn conventional_service_name_for_port(port: u16) -> String {
 // else the single SVC `address`. A gateway on the same LAN (or behind the
 // same NAT) was therefore reached via relay → NAT hairpin, which the office
 // edge drops (504 after the 15 s deadline; found live 2026-10-05 with
-// www.chooseforce.ztlp). Now the resolver returns every endpoint the gateway
+// www.app.example.ztlp). Now the resolver returns every endpoint the gateway
 // published, ranked for this client, and `dial_plan` orders the attempts:
 // direct candidates first (each bounded by `DIRECT_ATTEMPT_TIMEOUT`), the
 // relay last with whatever budget remains. `[tunnel] prefer_relay = true`

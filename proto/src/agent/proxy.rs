@@ -1110,24 +1110,21 @@ mod tests {
         #[test]
         fn svc_with_addresses_yields_all_candidates_best_first() {
             let data = cbor_map(&[
-                ("address", "10.42.42.112:23097"),
-                ("addresses", "10.42.42.112:23097,44.227.148.151:23095"),
-                ("zone", "chooseforce.ztlp"),
+                ("address", "10.20.30.40:23097"),
+                ("addresses", "10.20.30.40:23097,198.51.100.7:23095"),
+                ("zone", "app.example.ztlp"),
             ]);
             let c = svc_candidates_from_cbor(&data);
-            assert_eq!(
-                c,
-                vec![sa("10.42.42.112:23097"), sa("44.227.148.151:23095")]
-            );
+            assert_eq!(c, vec![sa("10.20.30.40:23097"), sa("198.51.100.7:23095")]);
         }
 
         #[test]
         fn svc_with_only_address_yields_single_candidate() {
             // Old (Elixir) gateway: no `addresses` key.
-            let data = cbor_map(&[("address", "204.16.122.24:23097")]);
+            let data = cbor_map(&[("address", "203.0.113.9:23097")]);
             assert_eq!(
                 svc_candidates_from_cbor(&data),
-                vec![sa("204.16.122.24:23097")]
+                vec![sa("203.0.113.9:23097")]
             );
         }
 
@@ -1145,28 +1142,28 @@ mod tests {
 
         #[test]
         fn ranking_prefers_lan_over_public_over_nothing_else() {
-            // Client on 10.170.3.0/24 (different VLAN, same office NAT).
+            // Client on 10.20.31.0/24 (different VLAN, same office NAT).
             // Gateway published LAN first already, but publish order must
             // not matter: rank by the client's view.
-            let set = vec![sa("44.227.148.151:23095"), sa("10.42.42.112:23097")];
-            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 170, 3, 207)), 24u8)];
+            let set = vec![sa("198.51.100.7:23095"), sa("10.20.30.40:23097")];
+            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 20, 31, 207)), 24u8)];
             let ranked = rank_candidates_for_client(&set, &subnets);
-            assert_eq!(ranked[0], sa("10.42.42.112:23097"), "RFC1918 beats public");
-            assert_eq!(ranked[1], sa("44.227.148.151:23095"));
+            assert_eq!(ranked[0], sa("10.20.30.40:23097"), "RFC1918 beats public");
+            assert_eq!(ranked[1], sa("198.51.100.7:23095"));
         }
 
         #[test]
         fn ranking_puts_same_subnet_first() {
             let set = vec![
-                sa("10.42.42.112:23097"),
-                sa("10.170.3.50:23097"),
-                sa("44.227.148.151:23095"),
+                sa("10.20.30.40:23097"),
+                sa("10.20.31.50:23097"),
+                sa("198.51.100.7:23095"),
             ];
-            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 170, 3, 207)), 24u8)];
+            let subnets = vec![(IpAddr::V4(Ipv4Addr::new(10, 20, 31, 207)), 24u8)];
             let ranked = rank_candidates_for_client(&set, &subnets);
-            assert_eq!(ranked[0], sa("10.170.3.50:23097"), "same subnet first");
-            assert_eq!(ranked[1], sa("10.42.42.112:23097"));
-            assert_eq!(ranked[2], sa("44.227.148.151:23095"));
+            assert_eq!(ranked[0], sa("10.20.31.50:23097"), "same subnet first");
+            assert_eq!(ranked[1], sa("10.20.30.40:23097"));
+            assert_eq!(ranked[2], sa("198.51.100.7:23095"));
         }
 
         #[test]
@@ -1174,12 +1171,12 @@ mod tests {
             // NsResolution grows a `candidates` field; `addr` stays the
             // best single candidate so existing callers are unchanged.
             let r = NsResolution::from_candidates(
-                "www.chooseforce.ztlp",
-                vec![sa("10.42.42.112:23097"), sa("44.227.148.151:23095")],
+                "www.app.example.ztlp",
+                vec![sa("10.20.30.40:23097"), sa("198.51.100.7:23095")],
                 None,
             )
             .unwrap();
-            assert_eq!(r.addr, sa("10.42.42.112:23097"));
+            assert_eq!(r.addr, sa("10.20.30.40:23097"));
             assert_eq!(r.candidates.len(), 2);
             assert!(NsResolution::from_candidates("x.ztlp", vec![], None).is_err());
         }
@@ -1577,7 +1574,7 @@ mod tests {
             "windows-relay.internal.techrockstars.com".to_string(),
             StaticProxyTargetConfig {
                 ztlp_name: Some("windows.techrockstars.ztlp".to_string()),
-                addr: "10.170.3.111:23095".to_string(),
+                addr: "10.20.31.111:23095".to_string(),
                 node_id: Some(NodeId::from_bytes(
                     hex::decode("b88397923c2518ca6aa400eb79a18c7b")
                         .unwrap()
@@ -1598,7 +1595,7 @@ mod tests {
         assert_eq!(
             resolution,
             ProxyTargetResolution::Static(NsResolution {
-                addr: "10.170.3.111:23095".parse().unwrap(),
+                addr: "10.20.31.111:23095".parse().unwrap(),
                 node_id: Some(NodeId::from_bytes(
                     hex::decode("b88397923c2518ca6aa400eb79a18c7b")
                         .unwrap()
@@ -1606,7 +1603,7 @@ mod tests {
                         .unwrap(),
                 )),
                 ztlp_name: "windows.techrockstars.ztlp".to_string(),
-                candidates: vec!["10.170.3.111:23095".parse().unwrap()],
+                candidates: vec!["10.20.31.111:23095".parse().unwrap()],
             })
         );
     }

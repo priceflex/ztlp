@@ -94,13 +94,21 @@ impl ForwardedProtoStamper {
                     self.buf.extend_from_slice(&input);
 
                     // Not HTTP at all? Release the bytes the moment we can tell.
-                    if !looks_like_http_start(&self.buf) || self.buf.len() > MAX_HEAD {
+                    if !looks_like_http_start(&self.buf) {
                         out.append(&mut self.buf);
                         self.state = State::Passthrough;
                         return out;
                     }
-                    let Some(pos) = find_head_end(&self.buf) else {
-                        return out; // head incomplete: hold
+                    // The cap bounds the HEAD, not the whole buffer: a complete,
+                    // small head followed by body or pipelined bytes in the same
+                    // read must still be stamped (PR #119 review).
+                    let Some(pos) = find_head_end(&self.buf).filter(|p| p + 4 <= MAX_HEAD) else {
+                        if self.buf.len() > MAX_HEAD {
+                            // No head end within the cap: hostile or not HTTP.
+                            out.append(&mut self.buf);
+                            self.state = State::Passthrough;
+                        }
+                        return out; // otherwise: head incomplete, hold
                     };
                     let split = pos + 4;
                     let head: Vec<u8> = self.buf[..split].to_vec();
@@ -432,6 +440,70 @@ mod tests {
         let first = String::from_utf8(s.feed(req)).unwrap();
         assert_eq!(count(&first, "X-Forwarded-Proto: https\r\n"), 1);
         assert_eq!(s.feed(GET), GET, "passthrough after unknowable framing");
+    }
+
+    // CodeRabbit (PR #119): MAX_HEAD was compared with the WHOLE buffer, so a
+    // held partial head plus one big read (the pump reads up to 65 000 bytes)
+    // could cross 64 KiB while the head itself was complete and small. The head
+    // then went out unstamped and the connection fell into passthrough, so a
+    // large https form POST got the Rails 422 this fix exists to prevent. The
+    // cap is for a head that never ends, not for head + body.
+    #[test]
+    fn a_complete_head_is_stamped_even_when_the_buffer_passes_the_head_cap() {
+        // A large-but-legal head: ~1 KiB of cookies, split across two reads.
+        let cookie = format!("Cookie: {}\r\n", "c".repeat(1000));
+        let head_a =
+            format!("POST /upload HTTP/1.1\r\nHost: a\r\nContent-Length: 65000\r\n{cookie}");
+        let head_a = head_a.as_bytes();
+        let head_b = b"Origin: https://a\r\n\r\n";
+        let body = vec![b'x'; 65_000];
+        let mut s = ForwardedProtoStamper::new();
+        // 1st read: only part of the head (held)
+        assert!(s.feed(head_a).is_empty());
+        // 2nd read: rest of the head + a full-size body slice. head_a (~1.1 KB)
+        // + this read (65 021) puts the buffer over MAX_HEAD (65 536).
+        let mut second = head_b.to_vec();
+        second.extend_from_slice(&body);
+        assert!(
+            head_a.len() + second.len() > MAX_HEAD,
+            "sanity: the buffer must really cross the head cap for this test to mean anything"
+        );
+        let out = s.feed(&second);
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(
+            text.matches("X-Forwarded-Proto: https\r\n").count(),
+            1,
+            "head must be stamped despite a large first body read"
+        );
+        assert_eq!(
+            out.len(),
+            head_a.len() + head_b.len() + FORWARDED_PROTO_HEADER.len() + 2 + 65_000,
+            "head + added header + the full body, nothing lost"
+        );
+        // and the connection is NOT stuck in passthrough: the next request is stamped
+        let next = s.feed(GET);
+        assert_eq!(
+            String::from_utf8_lossy(&next)
+                .matches("X-Forwarded-Proto: https\r\n")
+                .count(),
+            1,
+            "keep-alive request after a large POST must still be stamped"
+        );
+    }
+
+    #[test]
+    fn a_head_that_really_exceeds_the_cap_is_released_unchanged_not_held_forever() {
+        let mut s = ForwardedProtoStamper::new();
+        let mut junk = b"GET / HTTP/1.1\r\n".to_vec();
+        junk.extend(std::iter::repeat_n(b'a', MAX_HEAD + 100)); // no blank line ever
+        let out = s.feed(&junk);
+        assert_eq!(
+            out.len(),
+            junk.len(),
+            "an endless head is flushed, not stalled"
+        );
+        // and once released it stays out of the way
+        assert_eq!(s.feed(GET), GET);
     }
 
     #[test]

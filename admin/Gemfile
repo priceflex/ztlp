@@ -1,0 +1,34 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+ruby "~> 3.2.0"
+
+gem "importmap-rails"
+gem "json", "< 3" # json 3.x removed quirks_mode, which Rails 7.1 still passes
+gem "mysql2", "~> 0.5"
+gem "openssl", ">= 3.2" # raw Ed25519 key import (new_raw_private_key) needs openssl gem 3.2+
+gem "propshaft"
+gem "puma", ">= 5.0"
+gem "rails", "~> 7.1.6"
+gem "stimulus-rails"
+gem "tailwindcss-rails"
+gem "turbo-rails"
+gem "tzinfo-data", platforms: %i[windows jruby]
+
+# App
+gem "rack-attack"
+gem "rqrcode"
+gem "solid_queue", "~> 1.1"
+
+group :development, :test do
+  gem "brakeman", require: false
+  gem "debug", platforms: %i[mri windows]
+  gem "rubocop-rails-omakase", require: false
+end
+
+group :test do
+  gem "minitest"
+  gem "mocha"
+  gem "rails-controller-testing"
+end

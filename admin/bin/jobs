@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# solid_queue worker (spec §10.2 "jobs" service). No jobs are defined in slice 1;
+# the process stays idle so the compose shape is final from day one.
+require_relative '../config/environment'
+if defined?(SolidQueue) && ActiveRecord::Base.connection.table_exists?('solid_queue_jobs')
+  exec 'bundle', 'exec', 'rake', 'solid_queue:start'
+else
+  warn 'ztlp-admin jobs: solid_queue not installed yet; idling.'
+  sleep
+end

@@ -1,0 +1,25 @@
+<% content_for :title, "Dashboard - ZTLP Admin" %>
+<h1 class="text-2xl font-semibold">Dashboard</h1>
+<div class="mt-6 grid grid-cols-3 gap-4">
+  <div class="rounded border bg-white p-4">
+    <div class="text-xs uppercase text-slate-500">Administrators</div>
+    <div class="mt-1 text-3xl font-semibold"><%= @admins.count %></div>
+    <%= link_to "Manage", admins_path, class: "text-sm text-[#1f5fa8]" %>
+  </div>
+  <div class="rounded border bg-white p-4">
+    <div class="text-xs uppercase text-slate-500">Zone</div>
+    <div class="mt-1 text-xl font-semibold font-mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></div>
+    <div class="text-xs text-slate-500">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div>
+    <div class="mt-1 text-xs <%= @zone&.authority_configured? ? "text-emerald-700" : "text-amber-700" %>">
+      Zone authority: <%= @zone&.authority_configured? ? "imported" : "not imported (users/groups cannot be published yet)" %>
+    </div>
+  </div>
+  <div class="rounded border bg-white p-4">
+    <div class="text-xs uppercase text-slate-500">Build</div>
+    <div class="mt-1 text-xl font-semibold">v<%= ZtlpAdmin::VERSION %></div>
+    <div class="text-xs text-slate-500">Slice 1: claim, key login, admins, audit</div>
+  </div>
+</div>
+
+<h2 class="mt-10 text-lg font-semibold">Recent activity</h2>
+<%= render "audit_logs/table", logs: @recent_audit %>

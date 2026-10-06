@@ -1,0 +1,17 @@
+{
+  "ignored_warnings": [
+    {
+      "warning_type": "Mass Assignment",
+      "warning_code": 105,
+      "fingerprint": "12ecd405eb5ee0d10c86bc3f8e59b1acbea5709a3b945d1e884a911784896bf9",
+      "check_name": "PermitAttributes",
+      "message": "Potentially dangerous key allowed for mass assignment",
+      "file": "app/controllers/admins_controller.rb",
+      "line": 44,
+      "code": "params.require(:admin).permit(:username, :display_name, :email, :role, :pubkey_hex)",
+      "note": "role is only settable by super_admin (before_action :require_super_admin); roles whitelisted by model validation"
+    }
+  ],
+  "updated": "2026-10-06",
+  "brakeman_version": "8.1.0"
+}

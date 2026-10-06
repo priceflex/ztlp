@@ -1,0 +1,18 @@
+<table class="mt-3 w-full text-sm">
+  <thead><tr class="border-b text-left text-xs uppercase text-slate-500">
+    <th class="py-2 pr-3">When</th><th class="pr-3">Action</th><th class="pr-3">By</th><th class="pr-3">Target</th><th class="pr-3">Status</th><th>Details</th>
+  </tr></thead>
+  <tbody>
+  <% logs.each do |l| %>
+    <tr class="border-b align-top">
+      <td class="py-2 pr-3 whitespace-nowrap text-slate-600"><%= l.created_at.utc.strftime("%Y-%m-%d %H:%M:%S") %></td>
+      <td class="pr-3 font-mono"><%= l.action %></td>
+      <td class="pr-3"><%= l.admin&.username || "-" %></td>
+      <td class="pr-3 text-slate-600"><%= [l.target_type, l.target_id].compact.join(" #") %></td>
+      <td class="pr-3"><span class="rounded px-2 py-0.5 text-xs <%= l.status == "ok" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800" %>"><%= l.status %></span></td>
+      <td class="font-mono text-xs text-slate-600"><%= l.details&.to_json %> <span class="text-slate-400"><%= l.ip %></span></td>
+    </tr>
+  <% end %>
+  <% if logs.empty? %><tr><td colspan="6" class="py-4 text-slate-500">Nothing yet.</td></tr><% end %>
+  </tbody>
+</table>

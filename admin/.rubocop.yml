@@ -1,0 +1,4 @@
+inherit_gem: { rubocop-rails-omakase: rubocop.yml }
+AllCops:
+  SuggestExtensions: false
+  Exclude: ["vendor/**/*", "db/schema.rb", "bin/*", "public/**/*"]

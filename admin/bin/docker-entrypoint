@@ -1,0 +1,38 @@
+#!/bin/bash
+# ZTLP Admin container entrypoint (spec §9, §10.2).
+#  1. Active Record Encryption keys: from env, else from /data/keys.env, else generate + persist (0600).
+#  2. SECRET_KEY_BASE: same treatment.
+#  3. Wait for the DB, then db:prepare (idempotent) for the web service only.
+#  4. exec the command.
+set -euo pipefail
+DATA_DIR="${ADMIN_DATA_DIR:-/data}"
+KEYS_FILE="$DATA_DIR/keys.env"
+
+if [ -f "$KEYS_FILE" ]; then
+  # shellcheck disable=SC1090
+  set -a; . "$KEYS_FILE"; set +a
+  echo "ztlp-admin: loaded keys from $KEYS_FILE (not from env). Back this file up with the database." >&2
+fi
+gen() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+need=0
+for k in ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT SECRET_KEY_BASE; do
+  if [ -z "${!k:-}" ]; then export "$k"="$(gen)"; need=1; fi
+done
+if [ "$need" = 1 ]; then
+  if [ -w "$DATA_DIR" ]; then
+    umask 077
+    { for k in ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT SECRET_KEY_BASE; do echo "$k=${!k}"; done; } > "$KEYS_FILE"
+    echo "ztlp-admin: generated encryption keys -> $KEYS_FILE. LOSING THIS FILE MAKES THE DATABASE UNREADABLE." >&2
+  else
+    echo "ztlp-admin: WARNING keys generated in memory only ($DATA_DIR not writable); they will not survive a restart." >&2
+  fi
+fi
+
+if [ "${1:-}" = "./bin/rails" ] && [ "${2:-}" = "server" ]; then
+  for i in $(seq 1 60); do
+    if ./bin/rails runner 'ActiveRecord::Base.connection.execute("SELECT 1")' >/dev/null 2>&1; then break; fi
+    echo "ztlp-admin: waiting for database ($i)" >&2; sleep 2
+  done
+  ./bin/rails db:prepare
+fi
+exec "$@"

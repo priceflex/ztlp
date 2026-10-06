@@ -1,0 +1,29 @@
+<%= form_with model: admin, class: "mt-6 max-w-xl space-y-4" do |f| %>
+  <% if admin.errors.any? %>
+    <div class="rounded border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-800">
+      <ul><% admin.errors.full_messages.each do |m| %><li><%= m %></li><% end %></ul>
+    </div>
+  <% end %>
+  <div class="grid grid-cols-2 gap-4">
+    <div><%= f.label :username, class: "block text-sm font-medium" %><%= f.text_field :username, required: true, class: "mt-1 w-full rounded border px-3 py-2" %></div>
+    <div><%= f.label :display_name, "Full name", class: "block text-sm font-medium" %><%= f.text_field :display_name, required: true, class: "mt-1 w-full rounded border px-3 py-2" %></div>
+  </div>
+  <div><%= f.label :email, class: "block text-sm font-medium" %><%= f.email_field :email, class: "mt-1 w-full rounded border px-3 py-2" %></div>
+  <div>
+    <%= f.label :role, class: "block text-sm font-medium" %>
+    <%= f.select :role, Admin::ROLES.map { |r| [r.humanize, r] }, {}, class: "mt-1 w-full rounded border px-3 py-2" %>
+    <p class="mt-1 text-xs text-slate-500">super_admin: manage administrators and secrets. admin: everything else. helpdesk: enrollments and device reset. read_only: view.</p>
+  </div>
+  <div>
+    <%= f.label :pubkey_hex, "Ed25519 public key (hex)", class: "block text-sm font-medium" %>
+    <%= f.text_field :pubkey_hex, required: admin.new_record?, readonly: admin.persisted?, pattern: "[0-9a-fA-F]{64}", class: "mt-1 w-full rounded border px-3 py-2 font-mono text-sm #{"bg-slate-100" if admin.persisted?}" %>
+    <p class="mt-1 text-xs text-slate-500">From the person's <code>ztlp keygen</code> identity. <%= "Keys cannot be changed; disable this account and add a new one instead." if admin.persisted? %></p>
+  </div>
+  <% if admin.persisted? %>
+    <label class="flex items-center gap-2 text-sm"><%= check_box_tag "admin[disabled]", "1", admin.disabled? %> Disabled (cannot sign in)</label>
+  <% end %>
+  <div class="flex gap-3">
+    <%= f.submit admin.new_record? ? "Add administrator" : "Save", class: "rounded bg-[#1f5fa8] px-4 py-2 font-medium text-white hover:bg-[#184b86]" %>
+    <%= link_to "Cancel", admins_path, class: "rounded border px-4 py-2" %>
+  </div>
+<% end %>

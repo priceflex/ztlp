@@ -1,0 +1,46 @@
+# ZTLP Admin — production shape (spec §10.2). Copy to the host, set .env, `docker compose up -d`.
+services:
+  db:
+    image: mariadb:11.4.7
+    container_name: ztlp-admin-db
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ztlp_admin
+      MARIADB_USER: ztlp_admin
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes: [ "admin_db:/var/lib/mysql" ]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  web:
+    image: ${ADMIN_IMAGE:-ztlp-admin:dev}
+    container_name: ztlp-admin-web
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment: &env
+      DATABASE_URL: mysql2://ztlp_admin:${DB_PASSWORD}@db/ztlp_admin
+      RAILS_ENV: production
+      RAILS_LOG_TO_STDOUT: "1"
+      FORCE_SSL: ${FORCE_SSL:-false}
+      ADMIN_ALLOWED_HOSTS: ${ADMIN_ALLOWED_HOSTS:-admin.example}
+      ZTLP_ZONE: ${ZTLP_ZONE:-example.ztlp}
+      ZTLP_NS_ADDR: ${ZTLP_NS_ADDR:-127.0.0.1:23096}
+      ZTLP_NS_ADMIN_BASE_URL: ${ZTLP_NS_ADMIN_BASE_URL:-http://127.0.0.1:9103}
+    ports: [ "${ADMIN_BIND:-127.0.0.1}:${ADMIN_PORT:-3000}:3000" ]
+    volumes: [ "admin_data:/data" ]
+  jobs:
+    image: ${ADMIN_IMAGE:-ztlp-admin:dev}
+    container_name: ztlp-admin-jobs
+    restart: unless-stopped
+    command: ["bin/jobs"]
+    depends_on: [ web ]
+    environment: *env
+    volumes: [ "admin_data:/data" ]
+volumes:
+  admin_db: {}
+  admin_data: {}

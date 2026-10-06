@@ -1,0 +1,46 @@
+<% content_for :title, "Claim this ZTLP Admin panel" %>
+<div class="mx-auto max-w-2xl">
+  <h1 class="text-2xl font-semibold">Claim this panel</h1>
+  <p class="mt-2 text-slate-600">No administrator exists yet. The one-time claim code was printed to the container log
+    (<code class="rounded bg-slate-100 px-1">docker compose logs web | grep "Claim code"</code>). Whoever presents it with their
+    ZTLP public key becomes the first administrator (<em>super_admin</em>). No password is involved.</p>
+
+  <%= form_with url: claim_path, scope: :claim, method: :post, class: "mt-6 space-y-4" do |f| %>
+    <div>
+      <%= f.label :claim_code, "Claim code", class: "block text-sm font-medium" %>
+      <%= f.text_field :claim_code, required: true, autocomplete: "off", class: "mt-1 w-full rounded border px-3 py-2 font-mono", placeholder: "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" %>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <%= f.label :username, class: "block text-sm font-medium" %>
+        <%= f.text_field :username, required: true, class: "mt-1 w-full rounded border px-3 py-2", placeholder: "steve" %>
+        <p class="mt-1 text-xs text-slate-500">Lowercase label; becomes <code>&lt;username&gt;.users.&lt;zone&gt;</code>.</p>
+      </div>
+      <div>
+        <%= f.label :display_name, "Full name", class: "block text-sm font-medium" %>
+        <%= f.text_field :display_name, required: true, class: "mt-1 w-full rounded border px-3 py-2" %>
+      </div>
+    </div>
+    <div>
+      <%= f.label :email, class: "block text-sm font-medium" %>
+      <%= f.email_field :email, class: "mt-1 w-full rounded border px-3 py-2" %>
+    </div>
+    <div>
+      <%= f.label :pubkey_hex, "Ed25519 public key (hex)", class: "block text-sm font-medium" %>
+      <%= f.text_field :pubkey_hex, required: true, pattern: "[0-9a-fA-F]{64}", class: "mt-1 w-full rounded border px-3 py-2 font-mono text-sm" %>
+      <p class="mt-1 text-xs text-slate-500">The <code>ed25519_public_key</code> field of your <code>~/.ztlp/identity.json</code> (created by <code>ztlp keygen</code>).</p>
+    </div>
+    <details class="rounded border bg-white p-4">
+      <summary class="cursor-pointer text-sm font-medium">Optional: sign the claim with your key</summary>
+      <p class="mt-2 text-xs text-slate-600">Proves possession of the private key at claim time. Fill the fields above, then run on the machine holding <code>identity.json</code>:</p>
+<pre class="mt-2 overflow-x-auto rounded bg-slate-900 p-3 text-xs text-slate-100">python3 <%= link_to "ztlp-admin-sign.py", "/ztlp-admin-sign.py", class: "underline" %> claim \
+  --code "CODE" --username "steve" --display-name "Steven Price" --email "steve@example.com"</pre>
+      <p class="mt-1 text-xs text-slate-600">Paste its <code>timestamp</code> and <code>signature</code> here.</p>
+      <div class="mt-3 grid grid-cols-3 gap-4">
+        <div><%= f.label :timestamp, class: "block text-xs font-medium" %><%= f.text_field :timestamp, class: "mt-1 w-full rounded border px-2 py-1 font-mono text-xs" %></div>
+        <div class="col-span-2"><%= f.label :signature, class: "block text-xs font-medium" %><%= f.text_field :signature, class: "mt-1 w-full rounded border px-2 py-1 font-mono text-xs" %></div>
+      </div>
+    </details>
+    <%= f.submit "Claim and become administrator", class: "rounded bg-[#1f5fa8] px-4 py-2 font-medium text-white hover:bg-[#184b86]" %>
+  <% end %>
+</div>

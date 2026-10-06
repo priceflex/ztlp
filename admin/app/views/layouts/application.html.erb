@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-50">
+  <head>
+    <title><%= content_for(:title) || "ZTLP Admin" %></title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+    <link rel="icon" href="<%= asset_path("ztlp-logo.png") %>">
+    <%= stylesheet_link_tag "tailwind", "data-turbo-track": "reload" %>
+    <%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
+    <%= javascript_importmap_tags %>
+  </head>
+  <body class="h-full text-slate-800">
+    <header class="bg-[#0f1b2d] text-white">
+      <div class="mx-auto max-w-6xl px-6 py-3 flex items-center gap-4">
+        <%= image_tag "ztlp-logo.png", alt: "ZTLP", class: "h-9" %>
+        <%= link_to "ZTLP Admin", root_path, class: "font-semibold tracking-wide" %>
+        <% if signed_in? %>
+          <nav class="ml-6 flex gap-5 text-sm text-slate-200">
+            <%= link_to "Dashboard", root_path, class: "hover:text-white" %>
+            <%= link_to "Administrators", admins_path, class: "hover:text-white" %>
+            <%= link_to "Audit log", audit_logs_path, class: "hover:text-white" %>
+          </nav>
+          <div class="ml-auto flex items-center gap-4 text-sm">
+            <span class="text-slate-300"><%= current_admin.display_name %> <span class="text-slate-500">(<%= current_admin.role.humanize %>)</span></span>
+            <%= button_to "Sign out", logout_path, method: :delete, class: "rounded bg-slate-700 px-3 py-1 hover:bg-slate-600" %>
+          </div>
+        <% else %>
+          <span class="ml-auto font-mono text-xs text-slate-400"><%= request.host %></span>
+        <% end %>
+      </div>
+    </header>
+    <main class="mx-auto max-w-6xl px-6 py-8">
+      <% if notice %><div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-2 text-emerald-800"><%= notice %></div><% end %>
+      <% if alert %><div class="mb-4 rounded border border-rose-200 bg-rose-50 px-4 py-2 text-rose-800"><%= alert %></div><% end %>
+      <%= yield %>
+    </main>
+  </body>
+</html>

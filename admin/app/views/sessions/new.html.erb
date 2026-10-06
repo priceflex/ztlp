@@ -1,0 +1,30 @@
+<% content_for :title, "Sign in - ZTLP Admin" %>
+<div class="mx-auto max-w-2xl">
+  <h1 class="text-2xl font-semibold">Sign in</h1>
+  <p class="mt-2 text-slate-600">Passwordless. Request a challenge for your key, sign it on your machine, paste the signature.</p>
+
+  <% unless @challenge %>
+    <%= form_with url: auth_challenge_path, method: :post, class: "mt-6 space-y-4" do |f| %>
+      <div>
+        <%= f.label :pubkey_hex, "Ed25519 public key (hex)", class: "block text-sm font-medium" %>
+        <%= f.text_field :pubkey_hex, required: true, pattern: "[0-9a-fA-F]{64}", class: "mt-1 w-full rounded border px-3 py-2 font-mono text-sm" %>
+      </div>
+      <%= f.submit "Request challenge", class: "rounded bg-[#1f5fa8] px-4 py-2 font-medium text-white hover:bg-[#184b86]" %>
+    <% end %>
+  <% else %>
+    <div class="mt-6 rounded border bg-white p-4">
+      <p class="text-sm">Challenge issued; valid for <%= @challenge[:expires_in] %> seconds. Sign this exact message:</p>
+<pre class="mt-2 overflow-x-auto rounded bg-slate-900 p-3 text-xs text-slate-100">python3 /ztlp-admin-sign.py login --host "<%= @challenge[:host] %>" --nonce "<%= @challenge[:nonce] %>"</pre>
+      <p class="mt-2 text-xs text-slate-500">Message = <code>"ztlp-admin-login\n<%= @challenge[:host] %>\n&lt;nonce&gt;"</code>, signed with the seed in <code>identity.json</code>.</p>
+    </div>
+    <%= form_with url: auth_verify_path, method: :post, class: "mt-4 space-y-4" do |f| %>
+      <%= f.hidden_field :pubkey_hex, value: @pubkey_hex %>
+      <%= f.hidden_field :nonce, value: @challenge[:nonce] %>
+      <div>
+        <%= f.label :signature, "Signature (hex)", class: "block text-sm font-medium" %>
+        <%= f.text_field :signature, required: true, pattern: "[0-9a-fA-F]{128}", autocomplete: "off", class: "mt-1 w-full rounded border px-3 py-2 font-mono text-sm" %>
+      </div>
+      <%= f.submit "Sign in", class: "rounded bg-[#1f5fa8] px-4 py-2 font-medium text-white hover:bg-[#184b86]" %>
+    <% end %>
+  <% end %>
+</div>

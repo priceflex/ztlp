@@ -1,0 +1,7 @@
+.git
+vendor/bundle
+tmp/*
+log/*
+storage/*
+node_modules
+.env*

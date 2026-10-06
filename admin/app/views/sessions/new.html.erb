@@ -2,6 +2,13 @@
 <div class="mx-auto max-w-2xl">
   <h1 class="text-2xl font-semibold">Sign in</h1>
   <p class="mt-2 text-slate-600">Passwordless. Request a challenge for your key, sign it on your machine, paste the signature.</p>
+  <% if @gateway&.ok %>
+    <div class="mt-4 rounded border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+      This request arrived through the ZTLP tunnel as <code><%= @gateway.device_name %></code>
+      (subject <code><%= @gateway.subject.presence || "unmapped" %></code>), but no active administrator matches that subject.
+      A super_admin must add an administrator whose username is <code><%= @gateway.subject.presence || "&lt;mapped name&gt;" %></code>, or map this device on the gateway.
+    </div>
+  <% end %>
 
   <% unless @challenge %>
     <%= form_with url: auth_challenge_path, method: :post, class: "mt-6 space-y-4" do |f| %>

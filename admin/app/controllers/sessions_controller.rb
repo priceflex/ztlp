@@ -7,7 +7,9 @@ class SessionsController < ApplicationController
 
   # GET /login
   def new
-    redirect_to root_path if signed_in?
+    return redirect_to(root_path) if signed_in?
+
+    @gateway = Ztlp::GatewayIdentity.verify(request.headers)
   end
 
   # POST /auth/challenge {pubkey_hex}
@@ -65,6 +67,7 @@ class SessionsController < ApplicationController
   def destroy
     audit!("auth.logout") if signed_in?
     reset_session
-    redirect_to login_path, notice: "Signed out."
+    session[:no_sso_until] = 5.minutes.from_now.to_i
+    redirect_to login_path, notice: "Signed out. Tunnel sign-in is paused for 5 minutes."
   end
 end

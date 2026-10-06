@@ -22,7 +22,7 @@
             <%= link_to "Audit log", audit_logs_path, class: "hover:text-white" %>
           </nav>
           <div class="ml-auto flex items-center gap-4 text-sm">
-            <span class="text-slate-300"><%= current_admin.display_name %> <span class="text-slate-500">(<%= current_admin.role.humanize %>)</span></span>
+            <span class="text-slate-300"><%= current_admin.display_name %> <span class="text-slate-500">(<%= current_admin.role.humanize %><%= ", via ZTLP #{session[:device]}" if session[:via] == "ztlp" %>)</span></span>
             <%= button_to "Sign out", logout_path, method: :delete, class: "rounded bg-slate-700 px-3 py-1 hover:bg-slate-600" %>
           </div>
         <% else %>

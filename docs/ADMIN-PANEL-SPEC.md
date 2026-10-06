@@ -13,9 +13,9 @@
 
 | | |
 |---|---|
-| **Document status** | Specification. No implementation exists. |
-| **Version** | 1.0 |
-| **Date** | 2026-10-05 |
+| **Document status** | Specification. Build in progress (Phase 1, slice 1: skeleton + claim; see §11). |
+| **Version** | 1.1 |
+| **Date** | 2026-10-06 |
 | **Reference commit** | `9a42ae5` — every citation to existing code refers to this revision |
 | **Supersedes** | `docs/ADMIN-PANEL-PLAN.md` (initial sketch; corrections listed in §13) |
 | **Audience** | The engineer (human or agent) who builds Phase 1 in a fresh session from this document alone |
@@ -93,6 +93,7 @@ Each row below was verified in code. The final column states the design conseque
 | F17 | The existing `bootstrap/` Rails application has a sound `AdminUser` (lockout, roles), `AuditLog`, `EnrollmentToken` lifecycle, QR generation via `rqrcode`, identity tab views, HMAC API authentication and an AR Encryption pattern. However it uses SQLite and password login, its token minting is **unsigned** (legacy URI, no MAC, no Ruby BLAKE2s), `ZtlpAdmin` shells over SSH to CLI verbs that do not exist (`admin user create`), Tailwind is loaded from a CDN, and the Dockerfile copies `bin/ztlp` from an untracked file. | Research report, Part A (Appendix B) | A new application is built under `admin/`. The models and views listed in §12 are copied; the NS and token layers are not reused. |
 | F18 | Ruby 3.2 with OpenSSL 3.0.13 on the build host provides `OpenSSL::Digest.new("BLAKE2s256")` and `OpenSSL::PKey.generate_key("ED25519")`. | Verified 2026-10-05 | HMAC-BLAKE2s (manual ipad/opad construction) and Ed25519 signing require no additional gems. |
 | F19 | The `ztlp` CLI image is `stevenprice/ztlp-proto:<tag>` (`/usr/local/bin/ztlp`, no entrypoint, Debian bookworm). CI does not build it; it is pushed manually. Release images are `stevenprice/ztlp-{ns,relay,gateway,dashboard}:<git tag>` from `release.yml`; versions are gated by `scripts/verify-image-version.sh` and `image-version-gate.yml`, which are hard-coded to the three Elixir components. | `proto/Dockerfile`, `.github/workflows/release.yml`, `scripts/verify-image-version.sh` | §10 adds `admin` to both the release matrix and the version gate. The CLI binary is optional inside the panel image (diagnostics only). |
+| F20 | **Relay and Rust gateway disagree on zone-secret encoding.** The relay (`HmacSecrets.decode_secret`) hex-decodes a 64-character hex `ZTLP_HMAC_SECRET_<SLUG>` to 32 raw bytes; the Rust `ztlp listen` uses the ASCII bytes verbatim. A 64-hex secret therefore never verifies (`rejected: invalid HMAC` on every V2 frame). Confirmed 2026-10-06 by recomputing the HMAC over a captured 0x0E frame. The Rust V1 frame (0x0A) always carries a zero MAC and is rejected in prod HMAC mode by design. | `relay/lib/ztlp_relay/hmac_secrets.ex:299-306`, `proto/src/bin/ztlp-cli.rs` `resolve_zone_hmac_secret` | Until the Rust side is fixed, the panel generates zone relay secrets as **non-hex** strings (48 alphanumeric characters) so both sides derive the same key. Gateway bundles (§8.1) carry the same value. |
 
 ---
 
@@ -523,6 +524,8 @@ volumes: { admin_db: {}, admin_data: {} }
 
 ### 10.3 Deployment order on the TRS zone (`trs.ztlp`, NS on `defcon-ctf-1`)
 
+The panel runs **on the NS host itself**, co-located with the NS and relay containers (operator decision, 2026-10-06), so `ZTLP_NS_ADDR` is the loopback address and UDP writes never leave the box. It is published as `admin.trs.ztlp` behind a Rust gateway on the same host (`~/ztlp-admin-site/`, already live serving this document; the Rails app replaces the static nginx service behind the same gateway). The gateway's relay secret for `trs.ztlp` is a non-hex string per F20.
+
 1. Set `ZTLP_NS_ADMIN_API_SECRET` on the NS (64 hex characters) and restart it (F6).
 2. Confirm `ZTLP_ENROLLMENT_SECRET` is set on the NS (it is) and copy the same value into the panel's zone row.
 3. Start the panel and claim it.
@@ -547,12 +550,13 @@ volumes: { admin_db: {}, admin_data: {} }
 
 ### Phase 1 — Directory, enrollment and gateways (this build)
 
-1. Token format (Rust + Elixir + shared golden vector) and `setup` client changes, plus the `ztlp admin claim` and `ztlp admin login` CLI commands. Ships as a ZTLP release in its own right and is usable without the panel via `ztlp admin enroll` flags (`--username --full-name --first --last --email --extra k=v --embed-relay-secret`).
-2. `admin/` skeleton: Compose, MariaDB, claim, key login, roles, audit, CI, image gate.
-3. `NsClient` (CBOR, signed write, read, list) with golden tests; zone settings; re-publish and reconcile jobs.
-4. Users, groups and devices CRUD with NS publishing; policy test widget.
-5. Enrollments UI, token minting in Ruby (HMAC-BLAKE2s), QR code, authenticated redeem endpoint, legacy confirm endpoint, expiry sweep.
-6. Gateways: registry, add-gateway bundle generator, policy renderer, SVC liveness from reconcile.
+Build order revised 2026-10-06 so the operator can claim an account and add users before any CLI or token-format work ships:
+
+1. **Slice 1 (in progress).** `admin/` skeleton: Compose, MariaDB, first-admin claim, Ed25519 challenge-response login, roles, audit. Claim and login are served by the **browser forms** in this slice; the signature is produced by the operator with the existing `ztlp` binary (`ztlp sign`-style helper or a one-line script shown on the page) until `ztlp admin claim` / `ztlp admin login` land in slice 4. Deployed live at `admin.trs.ztlp`.
+2. **Slice 2.** `NsClient` (CBOR, signed write, read, list) with golden tests; zone settings including import of the zone-authority seed (§14 decision 1); re-publish and reconcile jobs. Users, groups and devices CRUD with NS publishing; policy test widget.
+3. **Slice 3.** Enrollments UI, token minting in Ruby (HMAC-BLAKE2s) in the **current** token format (no identity flag yet), QR code, legacy confirm endpoint, expiry sweep.
+4. **Slice 4.** Token format change (Rust + Elixir + shared golden vector), `setup` client changes, `ztlp admin claim` / `ztlp admin login` / `ztlp admin enroll` CLI commands, authenticated redeem endpoint. Ships as a ZTLP release.
+5. **Slice 5.** Gateways: registry, add-gateway bundle generator (non-hex relay secret, F20), policy renderer, SVC liveness from reconcile. CI job and image gate (§10.4).
 
 ### Phase 2 — Administrator convenience
 
@@ -597,10 +601,11 @@ The following assumptions in `ADMIN-PANEL-PLAN.md` were found to be incorrect on
 
 | # | Decision | Recommendation |
 |---|---|---|
-| 1 | Zone-authority migration on `trs.ztlp`: import the existing key, or delegate to a new one (§10.3 step 4). | Import the existing key. |
-| 2 | Whether to publish a USER record before any device exists. `public_key` is required; either use the authority key as a placeholder until the first device's signing key arrives, or wait. | Publish on `active` only. |
-| 3 | Relay secret default: embedded by default (lowest friction) or opt-in. | Default on, with the §7.3 guardrails. Confirm. |
-| 4 | Puma and solid_queue in one container or two. | Two services, one image (as specified in §10.2). |
+| 1 | Zone-authority migration on `trs.ztlp`: import the existing key, or delegate to a new one (§10.3 step 4). | **Decided 2026-10-06: import the existing key.** The operator copies `identity.json` to the NS host themselves; the panel imports the seed via `bin/rails zone:import_authority`. Required before slice 2 can write GROUP records. |
+| 2 | Whether to publish a USER record before any device exists. `public_key` is required; either use the authority key as a placeholder until the first device's signing key arrives, or wait. | **Decided: publish on `active` only.** |
+| 3 | Relay secret default: embedded by default (lowest friction) or opt-in. | **Decided: default on**, with the §7.3 guardrails. |
+| 4 | Puma and solid_queue in one container or two. | **Decided: two services, one image** (§10.2). |
+| 5 | Where the panel runs. | **Decided 2026-10-06: on the NS host**, behind a co-located Rust gateway as `admin.trs.ztlp` (§10.3). |
 
 ---
 

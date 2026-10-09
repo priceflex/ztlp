@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.35.16 — 2026-10-08
+
+### Windows: every ZTLP zone now resolves, not just the enrolled one
+
+On Windows the agent only installed an NRPT rule for the zone the device was
+enrolled in (e.g. `.trs.ztlp`). Any name in another zone — `www.chooseforce.ztlp`
+from a `trs.ztlp` device — was "DNS name does not exist" to curl and Chrome,
+even though the agent's own resolver answered it fine (NRPT just never sent
+the query there). Boxes set up by hand had a broad `.ztlp` rule, which hid the
+gap until the first fresh enrollment.
+
+Fix: the service startup plan now always installs a `.ztlp` umbrella rule
+first, then the configured zones (kept because `[dns] zones` may carry
+custom-domain suffixes the umbrella doesn't cover). This mirrors the `ztlp`
+resolver file macOS has always written. Idempotent, so already-enrolled boxes
+pick it up on the next service restart — no re-enrollment, no PowerShell.
+Desktop bumped to 1.2.2 so the installer carries the fixed `ztlp-winsvc.exe`.
+No protocol changes; NS/relay/gateway are version-aligned only.
+
 ## v0.35.8 — 2026-09-02
 
 ### Desktop: fix false "agent not running" in the Setup wizard

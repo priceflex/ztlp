@@ -115,10 +115,36 @@ pub fn windows_startup_plan(i: &WindowsStartupInputs) -> Vec<WindowsAction> {
     }
     plan.push(WindowsAction::SetupNrpt {
         listen: i.dns_listen.clone(),
-        zones: i.zones.clone(),
+        zones: nrpt_zones_with_umbrella(&i.zones),
     });
     plan.push(WindowsAction::TokenGuiReadable(i.token_path.clone()));
     plan
+}
+
+/// NRPT namespace to install for every ZTLP zone at once. The agent's
+/// resolver answers any `*.ztlp` name (it asks the NS for whatever zone the
+/// name is in), so one suffix rule covers every zone a device will ever
+/// dial — including zones it was not enrolled in (e.g. `www.chooseforce.ztlp`
+/// from a `trs.ztlp` device). Mirrors the `ztlp` umbrella resolver file macOS
+/// has always written in `dns_setup::setup_macos_resolver`.
+pub const ZTLP_NRPT_UMBRELLA: &str = "ztlp";
+
+/// Build the NRPT zone list: the `.ztlp` umbrella first, then the configured
+/// zones (deduped, umbrella spellings dropped). Configured zones are kept
+/// because `[dns] zones` may also carry custom-domain suffixes that the
+/// umbrella does not cover.
+pub fn nrpt_zones_with_umbrella(configured: &[String]) -> Vec<String> {
+    let mut out = vec![ZTLP_NRPT_UMBRELLA.to_string()];
+    for z in configured {
+        let z = z.trim().trim_start_matches('.');
+        if z.is_empty() || z.eq_ignore_ascii_case(ZTLP_NRPT_UMBRELLA) {
+            continue;
+        }
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(z)) {
+            out.push(z.to_string());
+        }
+    }
+    out
 }
 
 /// Re-apply the token ACL every 30s while the service runs, so a user who
@@ -529,7 +555,62 @@ mod tests {
             })
             .expect("plan must contain a SetupNrpt action");
         assert_eq!(nrpt.0, "127.0.0.53:5353");
-        assert_eq!(nrpt.1, vec!["defcon.ztlp".to_string()]);
+        assert_eq!(
+            nrpt.1,
+            vec!["ztlp".to_string(), "defcon.ztlp".to_string()],
+            "the `.ztlp` umbrella comes first so every ZTLP zone resolves, \
+             then the configured zones (kept for custom-domain suffixes)"
+        );
+    }
+
+    /// Regression: a freshly enrolled box only had `.trs.ztlp` in NRPT, so
+    /// `www.chooseforce.ztlp` was "DNS name does not exist" to Windows even
+    /// though the agent's resolver answered it. macOS has always written a
+    /// `ztlp` umbrella resolver file (`dns_setup.rs::setup_macos_resolver`);
+    /// Windows must do the same.
+    #[test]
+    fn windows_startup_plan_nrpt_always_includes_ztlp_umbrella() {
+        let mut i = base_inputs();
+        i.zones = vec!["trs.ztlp".into()];
+        let zones = nrpt_zones_of(&windows_startup_plan(&i));
+        assert_eq!(zones[0], "ztlp");
+        assert!(zones.contains(&"trs.ztlp".to_string()));
+    }
+
+    #[test]
+    fn windows_startup_plan_nrpt_umbrella_present_even_with_no_zones() {
+        let mut i = base_inputs();
+        i.zones = Vec::new();
+        assert_eq!(nrpt_zones_of(&windows_startup_plan(&i)), vec!["ztlp"]);
+    }
+
+    #[test]
+    fn windows_startup_plan_nrpt_does_not_duplicate_umbrella() {
+        let mut i = base_inputs();
+        i.zones = vec![".ztlp".into(), "ztlp".into(), "trs.ztlp".into()];
+        assert_eq!(
+            nrpt_zones_of(&windows_startup_plan(&i)),
+            vec!["ztlp", "trs.ztlp"]
+        );
+    }
+
+    #[test]
+    fn windows_startup_plan_nrpt_keeps_custom_domain_suffixes() {
+        let mut i = base_inputs();
+        i.zones = vec!["trs.ztlp".into(), "corp.example.com".into()];
+        assert_eq!(
+            nrpt_zones_of(&windows_startup_plan(&i)),
+            vec!["ztlp", "trs.ztlp", "corp.example.com"]
+        );
+    }
+
+    fn nrpt_zones_of(plan: &[WindowsAction]) -> Vec<String> {
+        plan.iter()
+            .find_map(|a| match a {
+                WindowsAction::SetupNrpt { zones, .. } => Some(zones.clone()),
+                _ => None,
+            })
+            .expect("plan must contain a SetupNrpt action")
     }
 
     #[test]

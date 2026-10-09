@@ -297,6 +297,37 @@ pub mod tokio_endpoint {
         format!("{}@{}", server_name, remote)
     }
 
+    /// TOFU pin identity for a dial, scoped to the SERVICE when the dial goes
+    /// through a relay (ZT-04).
+    ///
+    /// Every service behind a relay is dialed at the same `relay_ip:port`
+    /// with the same SNI, but each gateway serves its own self-signed cert.
+    /// Keying on the endpoint alone therefore gave every relayed service ONE
+    /// shared pin: the first service a device used worked and every other
+    /// one failed with "QUIC certificate fingerprint ... does not match".
+    ///
+    /// `relayed_service` is `Some(service)` for a relayed dial: the pin key
+    /// gains a `#<service>` suffix (lowercased). It is `None` for a direct
+    /// dial, which already has a unique address, so that key is byte-for-byte
+    /// what `pin_key_for` returns and existing pins survive an upgrade.
+    /// The result still goes through `TofuCertVerifier::pin_path`, which
+    /// sanitizes it into one flat filename, so the service name cannot
+    /// traverse out of the pin directory.
+    pub(crate) fn pin_key_for_service(
+        remote: SocketAddr,
+        server_name: &str,
+        relayed_service: Option<&str>,
+    ) -> String {
+        match relayed_service {
+            Some(svc) => format!(
+                "{}#{}",
+                pin_key_for(remote, server_name),
+                svc.trim().to_ascii_lowercase()
+            ),
+            None => pin_key_for(remote, server_name),
+        }
+    }
+
     /// Remove the pin file the pre-2026-10-05 per-SNI scheme wrote for
     /// `sni` (`<sanitized sni>.pin`), if present. Only that exact file:
     /// per-endpoint pins (`<sni>_<ip>_<port>.pin`), operator backups and
@@ -510,11 +541,115 @@ pub mod tokio_endpoint {
     }
 
     fn generate_self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        // ZT-06: reuse the cert persisted in `ZTLP_QUIC_CERT_DIR` when the
+        // operator mounted one (containers: a volume), else a fresh ephemeral
+        // cert exactly as before.
+        match quic_cert_dir_from_env() {
+            Some(dir) => load_or_generate_self_signed_in(&dir),
+            None => generate_ephemeral_self_signed(),
+        }
+    }
+
+    fn generate_ephemeral_self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         (
             vec![cert.cert.into()],
             PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
         )
+    }
+
+    /// Directory holding the gateway's persisted QUIC identity (ZT-06), from
+    /// `ZTLP_QUIC_CERT_DIR`. Unset/blank means "no persistence": a fresh cert
+    /// per bind, the historical behaviour.
+    ///
+    /// Why: clients pin the gateway's self-signed cert on first use (TOFU).
+    /// A fresh cert on every process start meant every container recreate or
+    /// restart invalidated every client's pin, and each affected device had to
+    /// clear its pin by hand before the site would load again.
+    fn quic_cert_dir_from_env() -> Option<std::path::PathBuf> {
+        parse_cert_dir(std::env::var("ZTLP_QUIC_CERT_DIR").ok().as_deref())
+    }
+
+    fn parse_cert_dir(v: Option<&str>) -> Option<std::path::PathBuf> {
+        let v = v?.trim();
+        if v.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(v))
+        }
+    }
+
+    const QUIC_CERT_FILE: &str = "quic-cert.der";
+    const QUIC_KEY_FILE: &str = "quic-key.der";
+
+    /// Load the persisted self-signed cert + key from `dir`, creating and
+    /// saving them on first use. Never fatal: if the directory is unusable the
+    /// caller still gets a working (ephemeral) cert, and a corrupt or
+    /// half-written pair is regenerated rather than crashing the gateway.
+    fn load_or_generate_self_signed_in(
+        dir: &std::path::Path,
+    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let cert_path = dir.join(QUIC_CERT_FILE);
+        let key_path = dir.join(QUIC_KEY_FILE);
+
+        if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+            if !cert_der.is_empty() && !key_der.is_empty() {
+                let key = PrivateKeyDer::Pkcs8(key_der.into());
+                let cert = CertificateDer::from(cert_der);
+                // Refuse a pair rustls cannot actually serve (corrupt file).
+                if rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(vec![cert.clone()], key.clone_key())
+                    .is_ok()
+                {
+                    return (vec![cert], key);
+                }
+                tracing::warn!(
+                    "persisted QUIC cert in {} is unusable; generating a new one",
+                    dir.display()
+                );
+            }
+        }
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_der: CertificateDer<'static> = cert.cert.into();
+        let key_der = cert.key_pair.serialize_der();
+
+        if let Err(e) = persist_quic_identity(dir, cert_der.as_ref(), &key_der) {
+            tracing::warn!(
+                "could not persist the QUIC cert to {} ({e}); clients will have to re-pin after a restart",
+                dir.display()
+            );
+        } else {
+            tracing::info!(
+                "generated and saved a persistent QUIC cert in {}",
+                dir.display()
+            );
+        }
+        (vec![cert_der], PrivateKeyDer::Pkcs8(key_der.into()))
+    }
+
+    fn persist_quic_identity(
+        dir: &std::path::Path,
+        cert_der: &[u8],
+        key_der: &[u8],
+    ) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        // Write to a temp name then rename, so a crash mid-write can never
+        // leave a cert without its key (or vice versa).
+        for (name, bytes) in [(QUIC_KEY_FILE, key_der), (QUIC_CERT_FILE, cert_der)] {
+            let tmp = dir.join(format!("{name}.tmp"));
+            std::fs::write(&tmp, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if name == QUIC_KEY_FILE {
+                    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+                }
+            }
+            std::fs::rename(&tmp, dir.join(name))?;
+        }
+        Ok(())
     }
 
     #[derive(Debug, Clone)]
@@ -666,14 +801,27 @@ pub mod tokio_endpoint {
             server_name: &str,
             std_socket: std::net::UdpSocket,
         ) -> Result<QuicConnection, QuicTransportError> {
+            Self::connect_with_socket_for_service(cfg, remote, server_name, std_socket, None).await
+        }
+
+        /// Same as [`Self::connect_with_socket`], but a RELAYED dial passes
+        /// `relayed_service = Some(service)` so the TOFU pin is scoped to that
+        /// service instead of being shared by every service behind the relay
+        /// (ZT-04, see [`pin_key_for_service`]). Direct dials pass `None`.
+        pub async fn connect_with_socket_for_service(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+            std_socket: std::net::UdpSocket,
+            relayed_service: Option<&str>,
+        ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
             cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(&pin_key_for(
-                    remote,
-                    server_name,
-                ))))
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(
+                    &pin_key_for_service(remote, server_name, relayed_service),
+                )))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();
@@ -1037,6 +1185,171 @@ pub mod tokio_endpoint {
                 "sanitized pin path must not contain '..' components"
             );
 
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── ZT-06: gateway cert survives a restart (2026-10-09) ────────────
+        //
+        // The gateway generated a fresh self-signed cert on every bind, so a
+        // container recreate invalidated every client's TOFU pin and each
+        // device had to clear a pin file by hand. With ZTLP_QUIC_CERT_DIR set
+        // (a mounted volume) the same cert is reused.
+        #[test]
+        fn persisted_quic_cert_is_reused_across_binds() {
+            let dir = tempfile_dir();
+            let (c1, _k1) = load_or_generate_self_signed_in(&dir);
+            let (c2, _k2) = load_or_generate_self_signed_in(&dir);
+            assert_eq!(
+                c1[0].as_ref(),
+                c2[0].as_ref(),
+                "second bind must serve the SAME cert so client pins stay valid"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn without_a_cert_dir_each_bind_still_gets_a_fresh_cert() {
+            // historical behaviour must be unchanged when nothing is mounted
+            let a = generate_ephemeral_self_signed();
+            let b = generate_ephemeral_self_signed();
+            assert_ne!(a.0[0].as_ref(), b.0[0].as_ref());
+        }
+
+        #[test]
+        fn persisted_cert_files_are_written_and_the_key_is_private() {
+            let dir = tempfile_dir();
+            let _ = load_or_generate_self_signed_in(&dir);
+            assert!(dir.join(QUIC_CERT_FILE).is_file());
+            assert!(dir.join(QUIC_KEY_FILE).is_file());
+            assert!(
+                !dir.join(format!("{QUIC_CERT_FILE}.tmp")).exists()
+                    && !dir.join(format!("{QUIC_KEY_FILE}.tmp")).exists(),
+                "no temp files left behind"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(dir.join(QUIC_KEY_FILE))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600, "private key must not be group/world readable");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn corrupt_persisted_cert_is_regenerated_not_fatal() {
+            let dir = tempfile_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(QUIC_CERT_FILE), b"not a certificate").unwrap();
+            std::fs::write(dir.join(QUIC_KEY_FILE), b"not a key").unwrap();
+            let (certs, key) = load_or_generate_self_signed_in(&dir);
+            // must be a pair rustls can actually serve
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs.clone(), key)
+                .expect("regenerated pair must be usable");
+            // and it replaced the garbage, so the NEXT bind is stable again
+            let (again, _) = load_or_generate_self_signed_in(&dir);
+            assert_eq!(certs[0].as_ref(), again[0].as_ref());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn unwritable_cert_dir_falls_back_to_a_working_cert() {
+            // a path under a regular FILE cannot be created as a directory
+            let base = tempfile_dir();
+            std::fs::create_dir_all(&base).unwrap();
+            let blocker = base.join("blocker");
+            std::fs::write(&blocker, b"x").unwrap();
+            let (certs, key) = load_or_generate_self_signed_in(&blocker.join("sub"));
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .expect("must still serve a cert when persistence fails");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn blank_cert_dir_env_means_no_persistence() {
+            // exercised through the parser, not the process environment
+            // (mutating env in a shared test binary races other tests)
+            assert_eq!(parse_cert_dir(None), None);
+            assert_eq!(parse_cert_dir(Some("")), None);
+            assert_eq!(parse_cert_dir(Some("   ")), None);
+            assert_eq!(
+                parse_cert_dir(Some(" /data/quic ")),
+                Some(std::path::PathBuf::from("/data/quic"))
+            );
+        }
+
+        // ── ZT-04: relayed dials must pin per SERVICE (2026-10-09) ──────────
+        //
+        // Every service reached through the relay is dialed at the SAME
+        // `relay_ip:23095` with the SNI "localhost", so `pin_key_for` gave
+        // the admin gateway and the ChooseForce gateway ONE shared pin. Each
+        // has its own self-signed cert, so whichever service a device used
+        // first worked and every other relayed service failed with
+        // "QUIC certificate fingerprint ... does not match the pinned value".
+        // A relayed dial's pin identity therefore includes the service name.
+        #[test]
+        fn relay_pin_key_is_per_service() {
+            let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+            let admin = pin_key_for_service(relay, "localhost", Some("admin"));
+            let www = pin_key_for_service(relay, "localhost", Some("www"));
+            assert_ne!(
+                admin, www,
+                "two services behind one relay must not share a TOFU pin"
+            );
+            assert_eq!(
+                admin,
+                pin_key_for_service(relay, "localhost", Some("admin")),
+                "stable for the same service"
+            );
+        }
+
+        #[test]
+        fn direct_pin_key_is_unchanged_so_upgrade_does_not_churn_pins() {
+            let gw: SocketAddr = "10.20.30.40:23097".parse().unwrap();
+            assert_eq!(
+                pin_key_for_service(gw, "localhost", None),
+                pin_key_for(gw, "localhost"),
+                "a direct dial has its own address, so its key must not change"
+            );
+        }
+
+        #[test]
+        fn relay_pin_key_differs_from_the_unscoped_relay_key() {
+            let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+            assert_ne!(
+                pin_key_for_service(relay, "localhost", Some("admin")),
+                pin_key_for(relay, "localhost"),
+                "the old shared key must not be reused: it may hold another service's cert"
+            );
+        }
+
+        #[test]
+        fn relay_pin_key_service_is_case_insensitive_and_cannot_escape_the_pin_dir() {
+            let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+            assert_eq!(
+                pin_key_for_service(relay, "localhost", Some("WWW")),
+                pin_key_for_service(relay, "localhost", Some("www"))
+            );
+            // the key becomes a filename: a hostile service name must stay inside it
+            let tmp = tempfile_dir();
+            let v = TofuCertVerifier::with_pin_dir(
+                &pin_key_for_service(relay, "localhost", Some("../../etc/passwd")),
+                tmp.clone(),
+            );
+            let p = v.pin_path();
+            assert_eq!(p.parent().unwrap(), tmp.as_path(), "{p:?}");
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            assert!(
+                !name.contains('/') && !name.contains('\\') && !name.contains(".."),
+                "{name}"
+            );
             let _ = std::fs::remove_dir_all(&tmp);
         }
 

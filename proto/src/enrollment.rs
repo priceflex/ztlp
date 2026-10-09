@@ -58,8 +58,28 @@ const FLAG_HAS_GATEWAY: u8 = 0x01;
 /// (or the older binary-only format) are unaffected.
 const FLAG_HAS_CALLBACK: u8 = 0x02;
 
+/// Flag: token carries the relay registration secret (ZT-01).
+///
+/// A relay in prod HMAC mode drops `CLIENT_ROUTE` frames that are not signed
+/// with its registration secret. The token used not to carry it, so a device
+/// that enrolled with nothing but a token 504'd on every relayed site until
+/// someone hand-edited `agent.toml`. The secret now rides in the token, inside
+/// the MAC (like the callback URL), and `ztlp setup` writes it for the user.
+/// Wire position: after the callback URL, before `max_uses`. Flag clear =
+/// zero extra bytes, so tokens minted without it are byte-identical to before.
+const FLAG_HAS_RELAY_SECRET: u8 = 0x08;
+
+/// Flags this build understands. Any other bit set means a newer token format;
+/// reading it anyway would misparse the new field as `max_uses`/`expires_at`,
+/// so it is rejected with a clear message instead.
+const KNOWN_FLAGS: u8 = FLAG_HAS_GATEWAY | FLAG_HAS_CALLBACK | FLAG_HAS_RELAY_SECRET;
+
+/// Upper bound on the embedded relay secret (hex or raw text). Real secrets
+/// are 48-64 bytes; the cap stops a hostile token from bloating the parser.
+pub const MAX_RELAY_SECRET_LEN: usize = 256;
+
 /// An enrollment token that authorizes a device to join a ZTLP zone.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EnrollmentToken {
     pub version: u8,
     pub zone: String,
@@ -76,6 +96,32 @@ pub struct EnrollmentToken {
     /// Optional callback URL for the CLI to confirm enrollment usage
     /// (populated from query-param URI `callback` parameter).
     pub callback_url: Option<String>,
+    /// Relay registration secret the device must sign `CLIENT_ROUTE` with
+    /// (ZT-01, flag `0x08`). Covered by the MAC. Never printed by `Debug`.
+    pub relay_secret: Option<String>,
+}
+
+impl std::fmt::Debug for EnrollmentToken {
+    // Manual impl: `relay_secret` is a credential and tokens get logged.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollmentToken")
+            .field("version", &self.version)
+            .field("zone", &self.zone)
+            .field("ns_addr", &self.ns_addr)
+            .field("relay_addrs", &self.relay_addrs)
+            .field("gateway_addr", &self.gateway_addr)
+            .field("max_uses", &self.max_uses)
+            .field("expires_at", &self.expires_at)
+            .field("nonce", &self.nonce)
+            .field("mac", &self.mac)
+            .field("token_id", &self.token_id)
+            .field("callback_url", &self.callback_url)
+            .field(
+                "relay_secret",
+                &self.relay_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Result of token validation.
@@ -113,6 +159,33 @@ impl EnrollmentToken {
         expires_at: u64,
         secret: &[u8; 32],
     ) -> Self {
+        Self::create_with_relay_secret(
+            zone,
+            ns_addr,
+            relay_addrs,
+            gateway_addr,
+            max_uses,
+            expires_at,
+            secret,
+            None,
+        )
+    }
+
+    /// Like [`Self::create`], additionally embedding the relay registration
+    /// secret (ZT-01) so the enrolling device can sign `CLIENT_ROUTE` frames
+    /// with no manual `agent.toml` edit. `None` produces exactly the legacy
+    /// token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_relay_secret(
+        zone: &str,
+        ns_addr: &str,
+        relay_addrs: &[String],
+        gateway_addr: Option<&str>,
+        max_uses: u16,
+        expires_at: u64,
+        secret: &[u8; 32],
+        relay_secret: Option<&str>,
+    ) -> Self {
         let mut nonce = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut nonce);
 
@@ -128,6 +201,7 @@ impl EnrollmentToken {
             mac: [0u8; 32],
             token_id: None,
             callback_url: None,
+            relay_secret: relay_secret.map(|s| s.trim().to_string()),
         };
 
         // Serialize everything except the MAC field, then compute MAC
@@ -175,6 +249,12 @@ impl EnrollmentToken {
         }
         let flags = data[pos];
         pos += 1;
+        if flags & !KNOWN_FLAGS != 0 {
+            return Err(format!(
+                "unsupported token flags 0x{:02x}: this token was made by a newer ZTLP; update ZTLP and try again",
+                flags & !KNOWN_FLAGS
+            ));
+        }
 
         // Zone
         let zone = read_len_prefixed_string(data, &mut pos)?;
@@ -206,6 +286,21 @@ impl EnrollmentToken {
         // Callback URL (optional) — crf-mpxh fix: covered by HMAC
         let callback_url = if flags & FLAG_HAS_CALLBACK != 0 {
             Some(read_len_prefixed_string(data, &mut pos)?)
+        } else {
+            None
+        };
+
+        // Relay registration secret (optional) — ZT-01, covered by the MAC
+        let relay_secret = if flags & FLAG_HAS_RELAY_SECRET != 0 {
+            let rs = read_len_prefixed_string(data, &mut pos)?;
+            if rs.is_empty() || rs.len() > MAX_RELAY_SECRET_LEN {
+                return Err(format!(
+                    "relay secret length {} is outside 1..={}",
+                    rs.len(),
+                    MAX_RELAY_SECRET_LEN
+                ));
+            }
+            Some(rs)
         } else {
             None
         };
@@ -260,6 +355,7 @@ impl EnrollmentToken {
             mac,
             token_id: None, // Binary tokens don't carry token IDs
             callback_url,   // Parsed from wire format if flag bit 1 set
+            relay_secret,   // Parsed from wire format if flag bit 3 set (ZT-01)
         })
     }
 
@@ -381,6 +477,9 @@ impl EnrollmentToken {
             mac: mac_bytes,
             token_id: Some(token_id),
             callback_url,
+            // Query-param (Bootstrap) tokens never carried one; the signed
+            // binary form is the only carrier (ZT-01).
+            relay_secret: None,
         })
     }
 
@@ -462,6 +561,9 @@ impl EnrollmentToken {
         if self.callback_url.is_some() {
             flags |= FLAG_HAS_CALLBACK;
         }
+        if self.relay_secret.is_some() {
+            flags |= FLAG_HAS_RELAY_SECRET;
+        }
         buf.push(flags);
 
         // Zone
@@ -484,6 +586,11 @@ impl EnrollmentToken {
         // Callback URL (if present) — crf-mpxh fix: covered by HMAC
         if let Some(ref cb) = self.callback_url {
             write_len_prefixed_string(&mut buf, cb);
+        }
+
+        // Relay registration secret (if present) — covered by the MAC (ZT-01)
+        if let Some(ref rs) = self.relay_secret {
+            write_len_prefixed_string(&mut buf, rs);
         }
 
         // Max uses
@@ -757,6 +864,139 @@ pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ZT-01: relay secret carried in the token (flag 0x08) ───────────
+    //
+    // A prod-mode relay drops CLIENT_ROUTE frames that are not signed with
+    // its registration secret, and the token used not to carry that secret,
+    // so a freshly enrolled device 504'd on every relayed site until
+    // someone edited agent.toml by hand. The secret rides inside the signed
+    // token (so it is MAC-covered, like the callback URL) and `ztlp setup`
+    // writes it for the user.
+
+    const RELAY_SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn token_with_relay_secret(secret: Option<&str>) -> EnrollmentToken {
+        EnrollmentToken::create_with_relay_secret(
+            "office.acme.ztlp",
+            "10.0.0.5:23096",
+            &["10.0.0.5:23095".to_string()],
+            None,
+            1,
+            u64::MAX,
+            &test_secret(),
+            secret,
+        )
+    }
+
+    #[test]
+    fn relay_secret_roundtrips_through_the_wire_format() {
+        let t = token_with_relay_secret(Some(RELAY_SECRET));
+        let parsed = EnrollmentToken::deserialize(&t.serialize()).expect("parses");
+        assert_eq!(parsed.relay_secret.as_deref(), Some(RELAY_SECRET));
+        assert_eq!(parsed.validate(&test_secret()), TokenValidation::Valid);
+    }
+
+    #[test]
+    fn relay_secret_roundtrips_through_the_uri() {
+        let t = token_with_relay_secret(Some(RELAY_SECRET));
+        let parsed = EnrollmentToken::from_base64url(&t.to_uri()).expect("parses");
+        assert_eq!(parsed.relay_secret.as_deref(), Some(RELAY_SECRET));
+    }
+
+    #[test]
+    fn token_without_relay_secret_is_byte_identical_to_the_old_format() {
+        // Flag 0x08 unset: nothing may change on the wire, so tokens minted
+        // without a secret still parse on every existing client and the NS.
+        let with_none = token_with_relay_secret(None);
+        let old = EnrollmentToken::create(
+            "office.acme.ztlp",
+            "10.0.0.5:23096",
+            &["10.0.0.5:23095".to_string()],
+            None,
+            1,
+            u64::MAX,
+            &test_secret(),
+        );
+        assert_eq!(with_none.relay_secret, None);
+        assert_eq!(
+            with_none.serialize_without_mac()[1] & FLAG_HAS_RELAY_SECRET,
+            0,
+            "flag must stay clear"
+        );
+        assert_eq!(
+            old.serialize_without_mac().len(),
+            with_none.serialize_without_mac().len(),
+            "no extra bytes when there is no secret"
+        );
+    }
+
+    #[test]
+    fn relay_secret_is_covered_by_the_mac() {
+        let t = token_with_relay_secret(Some(RELAY_SECRET));
+        let mut bytes = t.serialize();
+        // flip one byte of the secret inside the wire bytes
+        let at = bytes
+            .windows(RELAY_SECRET.len())
+            .position(|w| w == RELAY_SECRET.as_bytes())
+            .expect("secret present in the wire bytes");
+        bytes[at] ^= 0x01;
+        let tampered = EnrollmentToken::deserialize(&bytes).expect("still parses");
+        assert_eq!(
+            tampered.validate(&test_secret()),
+            TokenValidation::InvalidMac,
+            "a tampered secret must fail the MAC"
+        );
+    }
+
+    #[test]
+    fn relay_secret_does_not_displace_callback_or_gateway() {
+        let mut t = token_with_relay_secret(Some(RELAY_SECRET));
+        t.gateway_addr = Some("10.0.0.5:23097".into());
+        t.callback_url = Some("https://example.invalid/cb".into());
+        t.mac = hmac_blake2s(&test_secret(), &t.serialize_without_mac());
+        let p = EnrollmentToken::deserialize(&t.serialize()).expect("parses");
+        assert_eq!(p.gateway_addr.as_deref(), Some("10.0.0.5:23097"));
+        assert_eq!(
+            p.callback_url.as_deref(),
+            Some("https://example.invalid/cb")
+        );
+        assert_eq!(p.relay_secret.as_deref(), Some(RELAY_SECRET));
+        assert_eq!(p.max_uses, 1);
+        assert_eq!(p.validate(&test_secret()), TokenValidation::Valid);
+    }
+
+    #[test]
+    fn unknown_flag_bits_are_rejected_not_misparsed() {
+        // An old client handed a token with a flag it does not know must say
+        // so instead of silently reading the new field as max_uses/expiry.
+        let mut bytes = token_with_relay_secret(Some(RELAY_SECRET)).serialize();
+        bytes[1] |= 0x80; // reserved bit
+        let Err(err) = EnrollmentToken::deserialize(&bytes) else {
+            panic!("a token with an unknown flag bit must not parse");
+        };
+        assert!(err.contains("unsupported"), "{err}");
+    }
+
+    #[test]
+    fn oversized_relay_secret_is_rejected_on_parse() {
+        let mut t = token_with_relay_secret(Some(RELAY_SECRET));
+        t.relay_secret = Some("a".repeat(MAX_RELAY_SECRET_LEN + 1));
+        t.mac = hmac_blake2s(&test_secret(), &t.serialize_without_mac());
+        let Err(err) = EnrollmentToken::deserialize(&t.serialize()) else {
+            panic!("an oversized relay secret must not parse");
+        };
+        assert!(err.contains("relay secret"), "{err}");
+    }
+
+    #[test]
+    fn debug_output_never_prints_the_relay_secret() {
+        let t = token_with_relay_secret(Some(RELAY_SECRET));
+        assert!(
+            !format!("{t:?}").contains(RELAY_SECRET),
+            "Debug must redact the relay secret"
+        );
+    }
 
     fn test_secret() -> [u8; 32] {
         let mut s = [0u8; 32];

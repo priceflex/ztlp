@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.35.17 — 2026-10-09
+
+Zero-touch enrollment fixes. A user who installs the service and enrolls with
+a token should have every internal site just work. The first real fresh
+enrollment of a user machine exposed five separate breaks that the hand-built
+dev boxes had been hiding; all are tracked in `docs/ZERO-TOUCH-ENROLLMENT.md`.
+
+- **Browser stuck on the "Checking everyone's name tag" card (ZT-05).** A
+  relayed dial takes about 1.2 s, always longer than the 1 s splash grace. The
+  page's poll reported ready, the reload dialed again, missed the grace again
+  and got the splash again, forever. curl never sees the splash, so every
+  curl-based check passed while a real browser was stuck. A host the tracker
+  already knows is ready now waits for its dial instead of being splashed.
+- **Second relayed site fails with a certificate mismatch (ZT-04).** The QUIC
+  TOFU pin for a relayed dial was keyed on the relay address, shared by every
+  service behind it, so the first gateway used was pinned and every other one
+  was rejected as a MITM. Relayed pins are now scoped to the service. Direct
+  pins keep their key, so existing pins survive the upgrade.
+- **Relay secret now rides in the enrollment token (ZT-01).** Token flag `0x08`,
+  covered by the MAC. `ztlp admin enroll --relay-secret-file <file>` embeds it
+  and `ztlp setup` writes it to `agent.toml`, so a device that only enrolls can
+  sign relay routes. Tokens without it are byte-identical to before. A token
+  with an unknown flag bit is now rejected with "update ZTLP" instead of being
+  misparsed. The NS skips the new field. The secret is redacted from `Debug`.
+- **Gateway cert survives a restart (ZT-06).** Set `ZTLP_QUIC_CERT_DIR` to a
+  mounted volume and the gateway reuses one self-signed cert, so a container
+  recreate no longer invalidates every client's pin. Unset keeps the old
+  behaviour.
+- **Tracker and acceptance check.** `docs/ZERO-TOUCH-ENROLLMENT.md` lists every
+  issue found, its fix and its regression test, plus the check to run on a
+  fresh machine as the real user in a real browser before any agent release.
+
+Desktop bumped to 1.2.3 so the installer carries the fixed `ztlp-winsvc.exe`.
+
 ## v0.35.16 — 2026-10-08
 
 ### Windows: every ZTLP zone now resolves, not just the enrolled one

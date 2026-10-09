@@ -268,7 +268,15 @@ where
     let browser = complete && is_browser_navigation(&bytes);
     let mut handle = tokio::spawn(dial());
 
-    if browser {
+    // ZT-05: the splash exists to cover a COLD tunnel. When the tracker already
+    // says this host:port dialed successfully a moment ago, the path is known
+    // good and a slow dial is just a relayed one (~1.2 s: the dead direct
+    // candidate plus the relay handshake), which is always longer than the 1 s
+    // grace. Splashing again made the page's reload dial, miss the grace and
+    // splash again, forever. For a known-ready host, wait for the dial.
+    let known_ready = tracker.is_ready(key, Instant::now());
+
+    if browser && !known_ready {
         match tokio::time::timeout(cfg.grace, &mut handle).await {
             Ok(joined) => return into_outcome(joined, bytes),
             Err(_elapsed) => {
@@ -607,6 +615,88 @@ Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\nContent-Length: 0\r\n\r\
         assert_eq!(dials, 1, "the splash must not start a second dial");
     }
 
+    /// Regression (zero-touch enrollment tracker, ZT-05): a RELAYED dial costs
+    /// ~1.2 s (750 ms for the unreachable direct candidate + the relay
+    /// handshake), which is always longer than the 1 s grace. The page's poll
+    /// flipped to `ready`, the reload made a fresh dial that again missed the
+    /// grace, got the splash again, and so on forever: the user saw the
+    /// "connecting" card and never the site. When the tracker already says the
+    /// path is ready, a browser navigation must wait for its dial instead of
+    /// being handed the splash again.
+    #[tokio::test(start_paused = true)]
+    async fn ready_host_slow_dial_browser_waits_instead_of_resplashing() {
+        let tracker = Arc::new(ReadyTracker::new());
+        tracker.finish(&key(), true, Instant::now());
+        assert!(tracker.is_ready(&key(), Instant::now()));
+        let (out, got, dials) = drive(
+            &browser_get(),
+            Duration::from_millis(1500), // slower than the 1 s grace
+            true,
+            tracker,
+        )
+        .await;
+        match out {
+            GateOutcome::Proceed { head, tunnel } => {
+                assert_eq!(head, browser_get(), "head must be replayable byte for byte");
+                assert_eq!(tunnel, 7);
+            }
+            other => panic!("ready host must Proceed, not re-splash: {other:?}"),
+        }
+        assert!(
+            got.is_empty(),
+            "no splash bytes for a host already known ready"
+        );
+        assert_eq!(dials, 1);
+    }
+
+    /// The other half of the guarantee: a host that is NOT ready still gets
+    /// the splash on a slow dial (first visit / tunnel down), so the fix
+    /// cannot turn a cold start into a blank spinning tab.
+    #[tokio::test(start_paused = true)]
+    async fn not_ready_host_slow_dial_still_gets_splash() {
+        let (out, got, _dials) = drive(
+            &browser_get(),
+            Duration::from_millis(1500),
+            true,
+            Arc::new(ReadyTracker::new()),
+        )
+        .await;
+        assert!(
+            matches!(out, GateOutcome::Served(Served::Splash)),
+            "{out:?}"
+        );
+        assert!(String::from_utf8_lossy(&got).contains("/.ztlp/ready"));
+    }
+
+    /// A stale `ready` (older than READY_TTL) must not suppress the splash.
+    #[tokio::test(start_paused = true)]
+    async fn expired_ready_does_not_suppress_splash() {
+        let tracker = Arc::new(ReadyTracker::new());
+        let long_ago = Instant::now() - READY_TTL - Duration::from_secs(5);
+        tracker.finish(&key(), true, long_ago);
+        let (out, _got, _d) =
+            drive(&browser_get(), Duration::from_millis(1500), true, tracker).await;
+        assert!(
+            matches!(out, GateOutcome::Served(Served::Splash)),
+            "{out:?}"
+        );
+    }
+
+    /// A stale-but-unexpired `ready` must never turn a dead path into a hang:
+    /// the dial error still comes back so the caller shows its 504 page.
+    #[tokio::test(start_paused = true)]
+    async fn ready_host_with_failing_dial_reports_failure_not_splash() {
+        let tracker = Arc::new(ReadyTracker::new());
+        tracker.finish(&key(), true, Instant::now());
+        let (out, got, _d) =
+            drive(&browser_get(), Duration::from_millis(1500), false, tracker).await;
+        assert!(
+            matches!(out, GateOutcome::DialFailed { .. }),
+            "failing dial must surface as DialFailed: {out:?}"
+        );
+        assert!(got.is_empty(), "no splash for a known-ready host");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn splash_dial_success_marks_ready_after_it_finishes() {
         let tracker = Arc::new(ReadyTracker::new());
@@ -645,20 +735,56 @@ Sec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\nContent-Length: 0\r\n\r\
 
     #[tokio::test(start_paused = true)]
     async fn splash_clears_a_stale_ready_flag() {
+        // Invariant: starting a warm-up wipes any earlier success, so a stale
+        // `ready` can never make the splash page reload instantly into another
+        // splash (a tight reload loop).
+        //
+        // This used to be exercised through the gate (stale ready + slow dial
+        // => splash => cleared). Since ZT-05 a host that is still marked ready
+        // is NOT splashed at all (the gate waits for its dial), so that path
+        // can no longer produce a splash with a stale flag; the guarantee is
+        // pinned on the tracker, which is where it is enforced.
         let tracker = Arc::new(ReadyTracker::new());
-        tracker.begin_warm(&key(), Instant::now());
         tracker.finish(&key(), true, Instant::now());
-        let (_o, _g, _d) = drive(
+        assert!(tracker.is_ready(&key(), Instant::now()));
+        assert!(
+            tracker.begin_warm(&key(), Instant::now()),
+            "a ready (not warming) entry must allow a new warm-up"
+        );
+        assert!(
+            !tracker.is_ready(&key(), Instant::now()),
+            "old success must not trigger a reload loop"
+        );
+    }
+
+    /// End to end, the no-loop guarantee for the ZT-05 scenario: splash (cold)
+    /// -> dial finishes -> ready -> the reload's slow-but-healthy dial must
+    /// come back as a tunnel, not a second splash.
+    #[tokio::test(start_paused = true)]
+    async fn cold_splash_then_ready_reload_completes_without_second_splash() {
+        let tracker = Arc::new(ReadyTracker::new());
+        // 1st load: cold host, slow dial -> splash, warm-up marks ready.
+        let (out1, _g1, _d1) = drive(
             &browser_get(),
-            Duration::from_secs(5),
+            Duration::from_millis(1500),
             true,
             tracker.clone(),
         )
         .await;
         assert!(
-            !tracker.is_ready(&key(), Instant::now()),
-            "old success must not trigger a reload loop"
+            matches!(out1, GateOutcome::Served(Served::Splash)),
+            "{out1:?}"
         );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(tracker.is_ready(&key(), Instant::now()));
+        // The page reloads: same slow dial, host now ready -> real tunnel.
+        let (out2, got2, _d2) =
+            drive(&browser_get(), Duration::from_millis(1500), true, tracker).await;
+        assert!(
+            matches!(out2, GateOutcome::Proceed { .. }),
+            "the reload must reach the site, not another splash: {out2:?}"
+        );
+        assert!(got2.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

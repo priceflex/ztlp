@@ -228,6 +228,13 @@ defmodule ZtlpNs.Enrollment do
         throw({:error, :bad_version})
       end
 
+      # Known flags: 0x01 gateway, 0x02 callback, 0x08 relay secret. A token
+      # with any other bit set is from a newer format; reading it anyway would
+      # misparse the unknown field as max_uses/expires_at, so refuse it.
+      if Bitwise.band(flags, Bitwise.bnot(0x0B)) != 0 do
+        throw({:error, :bad_version})
+      end
+
       # Zone
       <<zone_len::16, zone::binary-size(zone_len), rest2::binary>> = rest
 
@@ -265,8 +272,22 @@ defmodule ZtlpNs.Enrollment do
           rest6
         end
 
+      # Relay registration secret (if flag set — FLAG_HAS_RELAY_SECRET = 0x08,
+      # ZT-01). The Rust CLI embeds it so a device that only enrolls gets a
+      # working relay path. NS has no use for it, we only skip the bytes so
+      # max_uses/expires_at/nonce/mac land in the right place. Without this,
+      # every token carrying a secret would be rejected as malformed. The
+      # secret stays covered by the MAC (split_mac signs everything before it).
+      rest8 =
+        if Bitwise.band(flags, 0x08) != 0 do
+          <<rs_len::16, _rs::binary-size(rs_len), r::binary>> = rest7
+          r
+        else
+          rest7
+        end
+
       # max_uses, expires_at, nonce, mac
-      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest7
+      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest8
 
       {:ok,
        %{

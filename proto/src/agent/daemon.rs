@@ -2423,6 +2423,29 @@ mod tests {
         }
 
         #[test]
+        fn relayed_dial_scopes_the_pin_to_the_service() {
+            // ZT-04: every relayed service shares relay_ip:port, so the pin
+            // must carry the service name.
+            assert_eq!(
+                super::super::relayed_pin_service(DialVia::Relay, "www"),
+                Some("www")
+            );
+            assert_eq!(
+                super::super::relayed_pin_service(DialVia::Relay, "admin"),
+                Some("admin")
+            );
+        }
+
+        #[test]
+        fn direct_dial_keeps_the_unscoped_pin() {
+            assert_eq!(
+                super::super::relayed_pin_service(DialVia::Direct, "www"),
+                None,
+                "a direct dial has its own address; its pin key must not change"
+            );
+        }
+
+        #[test]
         fn direct_candidates_first_then_relay() {
             let plan = dial_plan(
                 &[sa("10.20.30.40:23097"), sa("203.0.113.9:23097")],
@@ -3191,13 +3214,15 @@ async fn connect_one(
         }
     }
 
-    let quic_conn = crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket(
-        crate::quic_transport::QuicEndpointConfig::default(),
-        attempt.addr,
-        "localhost",
-        std_socket,
-    )
-    .await?;
+    let quic_conn =
+        crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket_for_service(
+            crate::quic_transport::QuicEndpointConfig::default(),
+            attempt.addr,
+            "localhost",
+            std_socket,
+            relayed_pin_service(attempt.via, service_name),
+        )
+        .await?;
 
     let handshake_result = crate::quic_transport::noise_stream::run_initiator_handshake(
         &quic_conn,
@@ -3209,6 +3234,19 @@ async fn connect_one(
     .map_err(|e| format!("QUIC Noise handshake failed: {}", e))?;
 
     Ok((quic_conn, handshake_result.session_id))
+}
+
+/// The service name to scope a TOFU QUIC pin to for this dial (ZT-04).
+///
+/// A relayed dial reaches every service at the same `relay_ip:port`, so the
+/// pin must be scoped to the service or the second service a device uses is
+/// rejected as a certificate mismatch. A direct dial has its own address and
+/// keeps the unscoped key (existing pins survive an upgrade).
+fn relayed_pin_service(via: DialVia, service_name: &str) -> Option<&str> {
+    match via {
+        DialVia::Relay => Some(service_name),
+        DialVia::Direct => None,
+    }
 }
 
 /// How an attempt reaches the gateway.

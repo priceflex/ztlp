@@ -27,17 +27,22 @@ defmodule ZtlpNs.EnrollmentTest do
     relay_addrs = Keyword.get(opts, :relay_addrs, [@test_relay])
     gateway_addr = Keyword.get(opts, :gateway_addr, nil)
     callback_url = Keyword.get(opts, :callback_url, nil)
+    relay_secret = Keyword.get(opts, :relay_secret, nil)
     max_uses = Keyword.get(opts, :max_uses, 0)
     expires_at = Keyword.get(opts, :expires_at, System.system_time(:second) + 3600)
 
     nonce = :crypto.strong_rand_bytes(16)
 
     # Mirrors proto/src/enrollment.rs: FLAG_HAS_GATEWAY = 0x01,
-    # FLAG_HAS_CALLBACK = 0x02 (callback is MAC-covered, crf-mpxh CWE-918).
+    # FLAG_HAS_CALLBACK = 0x02 (callback is MAC-covered, crf-mpxh CWE-918),
+    # FLAG_HAS_RELAY_SECRET = 0x08 (relay registration secret, ZT-01).
     flags =
       Bitwise.bor(
-        if(gateway_addr, do: 0x01, else: 0x00),
-        if(callback_url, do: 0x02, else: 0x00)
+        Bitwise.bor(
+          if(gateway_addr, do: 0x01, else: 0x00),
+          if(callback_url, do: 0x02, else: 0x00)
+        ),
+        if(relay_secret, do: 0x08, else: 0x00)
       )
 
     data =
@@ -47,6 +52,7 @@ defmodule ZtlpNs.EnrollmentTest do
         Enum.reduce(relay_addrs, <<>>, fn a, acc -> acc <> enc(a) end) <>
         if(gateway_addr, do: enc(gateway_addr), else: <<>>) <>
         if(callback_url, do: enc(callback_url), else: <<>>) <>
+        if(relay_secret, do: enc(relay_secret), else: <<>>) <>
         <<max_uses::16, expires_at::64>> <> nonce
 
     mac = Enrollment.hmac_blake2s(secret, data)
@@ -156,6 +162,89 @@ defmodule ZtlpNs.EnrollmentTest do
     result = Enrollment.process_enroll(
       enroll_req(tampered, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
     )
+    assert <<0x08, code, _::binary>> = result
+    assert code != 0x00
+    assert Store.lookup(name, :key) == :not_found
+  end
+
+  # ── ZT-01: token carries the relay secret (flag 0x08) ───────────────
+  #
+  # The Rust CLI now embeds the relay registration secret in the signed token
+  # so a device that only enrolls gets a working relay path. If the NS did not
+  # skip the new field, every such token would misparse max_uses/expires_at/
+  # nonce/mac as garbage and be rejected (the same failure the callback flag
+  # caused before it was handled). These pin that it enrolls.
+
+  @relay_secret "Qk7mP2xV9nL4wT8cR3hB6yZ1dF5gJ0sA9eU2iO7pK4tN3vX8"
+
+  test "token with a relay secret (flag 0x08) enrolls successfully", %{secret: s, pfx: p} do
+    token = create_token(s, relay_secret: @relay_secret)
+    name = dev_name(p, "rs")
+    pk = :crypto.strong_rand_bytes(32)
+
+    result = Enrollment.process_enroll(enroll_req(token, pk, :crypto.strong_rand_bytes(16), name))
+    assert <<0x08, 0x00, _::binary>> = result
+    {:ok, record} = Store.lookup(name, :key)
+    assert record.data["public_key"] == Base.encode16(pk, case: :lower)
+  end
+
+  test "relay secret does not displace gateway and callback (flags 0x0B)", %{secret: s, pfx: p} do
+    gw = "10.0.0.5:23097"
+
+    token =
+      create_token(s,
+        gateway_addr: gw,
+        callback_url: "https://launch.example/confirm",
+        relay_secret: @relay_secret
+      )
+
+    name = dev_name(p, "rsall")
+
+    <<0x08, 0x00, config::binary>> =
+      Enrollment.process_enroll(
+        enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+      )
+
+    <<1::8, rlen::16, _relay::binary-size(rlen), gw_count::8, glen::16, gw_addr::binary-size(glen),
+      _::binary>> = config
+
+    assert gw_count == 1
+    assert gw_addr == gw
+  end
+
+  test "relay secret token: MAC still covers the secret (tamper is rejected)", %{secret: s, pfx: p} do
+    token = create_token(s, relay_secret: @relay_secret)
+    # version(1) flags(1) zone(2+len) ns(2+len) relay_count(1) relay(2+len) rs_len(2) ...
+    rs_off =
+      2 + 2 + byte_size(@test_zone) + 2 + byte_size(@test_ns_addr) + 1 + 2 + byte_size(@test_relay) + 2
+
+    <<head::binary-size(rs_off), b, tail::binary>> = token
+    tampered = <<head::binary, Bitwise.bxor(b, 0x01), tail::binary>>
+    name = dev_name(p, "rstamper")
+
+    result =
+      Enrollment.process_enroll(
+        enroll_req(tampered, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+      )
+
+    assert <<0x08, code, _::binary>> = result
+    assert code != 0x00
+    assert Store.lookup(name, :key) == :not_found
+  end
+
+  test "token with an unknown flag bit is rejected, not misparsed", %{secret: s, pfx: p} do
+    token = create_token(s)
+    # set reserved bit 0x80 in the flags byte; MAC is now wrong too, but the
+    # point is the NS must answer with an error, never crash or enroll.
+    <<ver, flags, rest::binary>> = token
+    bad = <<ver, Bitwise.bor(flags, 0x80), rest::binary>>
+    name = dev_name(p, "badflag")
+
+    result =
+      Enrollment.process_enroll(
+        enroll_req(bad, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16), name)
+      )
+
     assert <<0x08, code, _::binary>> = result
     assert code != 0x00
     assert Store.lookup(name, :key) == :not_found

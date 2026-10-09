@@ -1022,6 +1022,14 @@ enum AdminCommands {
         /// Display as QR code in terminal
         #[arg(long)]
         qr: bool,
+
+        /// File holding the relay registration secret to embed in the token.
+        /// The enrolling device then signs relay `CLIENT_ROUTE` frames with it
+        /// and `ztlp setup` writes it to `agent.toml`, so a relay in prod HMAC
+        /// mode works with no manual edit. The token is a credential when this
+        /// is set: keep `--expires` short and `--max-uses` at 1.
+        #[arg(long, value_name = "FILE")]
+        relay_secret_file: Option<PathBuf>,
     },
 
     /// Create a user identity in the ZTLP namespace
@@ -9168,17 +9176,29 @@ async fn setup_join(
                             agent_config_path.display()
                         );
                     } else {
+                        // ZT-01: the token carries the relay secret, so a user
+                        // who only enrolls gets a working relay path. An explicit
+                        // --relay-secret / --relay-secret-file still wins.
+                        let (effective_secret, from_token) = effective_relay_secret(
+                            opts.relay_secret.as_deref(),
+                            token.relay_secret.as_deref(),
+                        );
                         write_agent_config_file(
                             &agent_config_path,
                             &key_path,
                             &token.zone,
                             &token.ns_addr,
                             &relay_addrs,
-                            opts.relay_secret.as_deref(),
+                            effective_secret.as_deref(),
                         )?;
-                        if opts.relay_secret.is_none() {
+                        if from_token {
                             eprintln!(
-                                "  {} no --relay-secret given: agent.toml has no relay_secret. \
+                                "  {} relay secret taken from the enrollment token",
+                                c_green("✓")
+                            );
+                        } else if effective_secret.is_none() {
+                            eprintln!(
+                                "  {} no relay secret (not in the token, no --relay-secret): agent.toml has no relay_secret. \
                                  Fine for dev/staging relays; prod-HMAC relays will reject every route.",
                                 c_yellow("⚠")
                             );
@@ -9847,6 +9867,23 @@ fn resolve_setup_relay_secret(
     Ok(None)
 }
 
+/// Which relay secret `ztlp setup` should persist, and whether it came from
+/// the enrollment token (ZT-01). An explicit `--relay-secret` /
+/// `--relay-secret-file` always wins; otherwise the token's secret is used so
+/// a user who only enrolls ends up with a working relay path.
+fn effective_relay_secret(
+    explicit: Option<&str>,
+    from_token: Option<&str>,
+) -> (Option<String>, bool) {
+    let explicit = explicit.map(str::trim).filter(|s| !s.is_empty());
+    let from_token = from_token.map(str::trim).filter(|s| !s.is_empty());
+    match (explicit, from_token) {
+        (Some(e), _) => (Some(e.to_string()), false),
+        (None, Some(t)) => (Some(t.to_string()), true),
+        (None, None) => (None, false),
+    }
+}
+
 /// Refuse to overwrite an existing enrollment unless `force`.
 ///
 /// Returns `Ok(None)` when there is nothing to protect, `Ok(Some(paths))`
@@ -10207,9 +10244,33 @@ fn cmd_admin_enroll(
     max_uses: u16,
     count: usize,
     show_qr: bool,
+    relay_secret_file: &Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{SystemTime, UNIX_EPOCH};
     use ztlp_proto::enrollment::{parse_duration_secs, EnrollmentToken};
+
+    // Optional relay registration secret to embed (ZT-01).
+    let relay_secret: Option<String> = match relay_secret_file {
+        Some(p) => {
+            let v = std::fs::read_to_string(p)
+                .map_err(|e| format!("cannot read --relay-secret-file {}: {}", p.display(), e))?
+                .trim()
+                .to_string();
+            if v.is_empty() {
+                return Err(format!("--relay-secret-file {} is empty", p.display()).into());
+            }
+            if v.len() > ztlp_proto::enrollment::MAX_RELAY_SECRET_LEN {
+                return Err(format!(
+                    "--relay-secret-file {} is longer than {} bytes",
+                    p.display(),
+                    ztlp_proto::enrollment::MAX_RELAY_SECRET_LEN
+                )
+                .into());
+            }
+            Some(v)
+        }
+        None => None,
+    };
 
     // Load secret
     let secret_file = if let Some(ref p) = secret_path {
@@ -10273,10 +10334,16 @@ fn cmd_admin_enroll(
         }
     );
     eprintln!("  {} {}", c_cyan("Count:"), count);
+    if relay_secret.is_some() {
+        eprintln!(
+            "  {} embeds the relay secret: treat the token as a credential (short expiry, single use)",
+            c_cyan("Note:")
+        );
+    }
     eprintln!();
 
     for i in 0..count {
-        let token = EnrollmentToken::create(
+        let token = EnrollmentToken::create_with_relay_secret(
             zone,
             ns_server,
             relay_addrs,
@@ -10284,6 +10351,7 @@ fn cmd_admin_enroll(
             max_uses,
             expires_at,
             &secret,
+            relay_secret.as_deref(),
         );
 
         let uri = token.to_uri();
@@ -14322,8 +14390,18 @@ async fn main() {
                 max_uses,
                 count,
                 qr,
+                relay_secret_file,
             } => cmd_admin_enroll(
-                zone, secret, ns_server, relay, gateway, expires, *max_uses, *count, *qr,
+                zone,
+                secret,
+                ns_server,
+                relay,
+                gateway,
+                expires,
+                *max_uses,
+                *count,
+                *qr,
+                relay_secret_file,
             ),
             AdminCommands::CreateUser {
                 name,
@@ -15436,6 +15514,71 @@ mod tests {
         assert!(
             AgentConfig::load_from_path(&agent_toml).tls.enabled,
             "ca-init must enable tls in the agent.toml next to its ca dir"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn effective_relay_secret_prefers_explicit_then_token_then_none() {
+        // ZT-01: an explicit flag wins, the token fills the gap, else none.
+        assert_eq!(
+            effective_relay_secret(Some("explicit"), Some("from-token")),
+            (Some("explicit".to_string()), false)
+        );
+        assert_eq!(
+            effective_relay_secret(None, Some("from-token")),
+            (Some("from-token".to_string()), true)
+        );
+        assert_eq!(effective_relay_secret(None, None), (None, false));
+        // blanks do not count as a secret
+        assert_eq!(
+            effective_relay_secret(Some("  "), Some(" tok ")),
+            (Some("tok".to_string()), true)
+        );
+        assert_eq!(effective_relay_secret(Some(""), Some("")), (None, false));
+    }
+
+    /// ZT-01 end to end: mint a token carrying the relay secret, parse it the
+    /// way `ztlp setup` does, write agent.toml, load it with the agent's own
+    /// loader. The user types nothing but the token.
+    #[test]
+    fn enrollment_token_secret_ends_up_in_a_loadable_agent_toml() {
+        use ztlp_proto::agent::config::AgentConfig;
+        use ztlp_proto::enrollment::EnrollmentToken;
+        let relay_secret = "Qk7mP2xV9nL4wT8cR3hB6yZ1dF5gJ0sA9eU2iO7pK4tN3vX8";
+        let token = EnrollmentToken::create_with_relay_secret(
+            "trs.ztlp",
+            "198.51.100.7:23096",
+            &["198.51.100.7:23095".to_string()],
+            None,
+            1,
+            u64::MAX,
+            &[7u8; 32],
+            Some(relay_secret),
+        );
+        let parsed = EnrollmentToken::from_base64url(&token.to_uri()).unwrap();
+
+        let (secret, from_token) = effective_relay_secret(None, parsed.relay_secret.as_deref());
+        assert!(from_token);
+
+        let tmp = fresh_tmp("zt01-e2e");
+        let path = tmp.join("agent.toml");
+        write_agent_config_file(
+            &path,
+            &tmp.join("identity.json"),
+            &parsed.zone,
+            &parsed.ns_addr,
+            &parsed.relay_addrs,
+            secret.as_deref(),
+        )
+        .unwrap();
+
+        let cfg = AgentConfig::load_from_path(&path);
+        // the agent resolves it through the same decoder as the relay, so a
+        // non-hex secret is used as its raw bytes
+        assert_eq!(
+            cfg.tunnel.relay_secret_bytes().unwrap(),
+            relay_secret.as_bytes()
         );
         let _ = fs::remove_dir_all(&tmp);
     }

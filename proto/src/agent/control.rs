@@ -273,8 +273,11 @@ impl SetupProbeCache {
             },
         };
         if self.generation.load(Ordering::SeqCst) == started_gen {
-            let done = now.max(Instant::now());
-            *self.inner.lock().await = Some((zone.to_string(), done, fresh.clone()));
+            // Stamp with the real completion time. (A previous version used
+            // `now.max(Instant::now())`, which let a caller-supplied clock
+            // push the stamp into the future; on a slow CI runner that made
+            // an entry look fresh past its TTL.)
+            *self.inner.lock().await = Some((zone.to_string(), Instant::now(), fresh.clone()));
         }
         fresh
     }
@@ -1857,6 +1860,14 @@ mod tests {
 
         #[tokio::test]
         async fn expired_entry_is_probed_again() {
+            // The cache stamps entries with the REAL completion time
+            // (std::time::Instant, which tokio's paused clock does not
+            // move), so expiry is tested against the real clock: a second
+            // call whose `now` is one full TTL after the first call's
+            // completion must probe again. The margin is 1 s so a slow
+            // runner cannot flake it (the first version of this test
+            // flaked on CI with a 1 ms margin against a caller-supplied
+            // clock).
             let cache = SetupProbeCache::new();
             let runs = Arc::new(AtomicUsize::new(0));
             let r = runs.clone();
@@ -1864,12 +1875,14 @@ mod tests {
                 r.fetch_add(1, Ordering::SeqCst);
                 probes(2)
             };
-            let now = Instant::now();
-            cache.get_or_probe("trs.ztlp", now, probe.clone()).await;
+            cache
+                .get_or_probe("trs.ztlp", Instant::now(), probe.clone())
+                .await;
+            let after_first = Instant::now();
             cache
                 .get_or_probe(
                     "trs.ztlp",
-                    now + SETUP_PROBE_TTL + Duration::from_millis(1),
+                    after_first + SETUP_PROBE_TTL + Duration::from_secs(1),
                     probe,
                 )
                 .await;

@@ -11,17 +11,37 @@ use crate::tunnel;
 
 // ── Connection ──────────────────────────────────────────────────────────
 
+// ZT-10 (2026-10-11, found live on TRSWCRM2): every command here used to be
+// a plain `fn`, which Tauri 2 runs ON THE WINDOW THREAD. `setup_status`
+// waits up to 5 s on the agent, `enroll` up to 120 s, and the Home page polls
+// every 2 s, so the window sat at "ZTLP (Not Responding)" and painted "agent
+// is not running" over a healthy agent. Rule, enforced by
+// tests/commands_off_window_thread.rs: a command that talks to the agent,
+// spawns a process or does tunnel work is `async` and runs the blocking part
+// in `spawn_blocking`. Pure state readers stay sync.
+
+/// Run blocking work off the window thread and off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("background task failed: {e}"))
+}
+
 #[tauri::command]
-pub fn connect(relay: String, zone: String, state: State<'_, AppState>) -> Result<(), String> {
-    let result = tunnel::start_tunnel(&relay, &zone)?;
+pub async fn connect(
+    relay: String,
+    zone: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let result = blocking(move || tunnel::start_tunnel(&relay, &zone)).await??;
     let mut status = state.status.lock().map_err(|e| e.to_string())?;
     *status = result;
     Ok(())
 }
 
 #[tauri::command]
-pub fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    tunnel::stop_tunnel()?;
+pub async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    blocking(tunnel::stop_tunnel).await??;
     let mut status = state.status.lock().map_err(|e| e.to_string())?;
     *status = ConnectionStatus::default();
     Ok(())
@@ -52,8 +72,11 @@ pub struct AttachedStatus {
 }
 
 #[tauri::command]
-pub fn get_attached() -> AttachedStatus {
-    match crate::ipc::ipc_request("tunnels", None) {
+pub async fn get_attached() -> AttachedStatus {
+    let reply = blocking(|| crate::ipc::ipc_request("tunnels", None))
+        .await
+        .unwrap_or_else(|e| Err(e));
+    match reply {
         Ok(v) => {
             let endpoints: Vec<String> = v
                 .as_array()
@@ -93,7 +116,7 @@ pub fn get_identity(state: State<'_, AppState>) -> Option<IdentityInfo> {
 // ── Enrollment ──────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn enroll(
+pub async fn enroll(
     token_uri: String,
     relay_secret: Option<String>,
     state: State<'_, AppState>,
@@ -104,7 +127,10 @@ pub fn enroll(
     let relay_secret = relay_secret
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let result = tunnel::process_enrollment_with_secret(&token_uri, relay_secret)?;
+    // Up to 120 s (NS round trip + ca-init + install-ca-cert): never on the
+    // window thread.
+    let result = blocking(move || tunnel::process_enrollment_with_secret(&token_uri, relay_secret))
+        .await??;
 
     if result.success {
         // Update identity with zone info
@@ -179,9 +205,19 @@ pub fn record_attestation(text: String) -> Result<String, String> {
 
 // ── Services ────────────────────────────────────────────────────────────
 
+// Tauri 2 rule: an async command that borrows `State` must return `Result`
+// (the borrow cannot outlive the invoke message otherwise). These two never
+// fail; the `Err` arm exists only to satisfy that rule.
 #[tauri::command]
-pub fn get_services(state: State<'_, AppState>) -> Vec<ServiceInfo> {
-    if let Ok(response) = crate::ipc::ipc_request("tunnels", None) {
+pub async fn get_services(state: State<'_, AppState>) -> Result<Vec<ServiceInfo>, String> {
+    Ok(get_services_inner(&state).await)
+}
+
+async fn get_services_inner(state: &AppState) -> Vec<ServiceInfo> {
+    let reply = blocking(|| crate::ipc::ipc_request("tunnels", None))
+        .await
+        .unwrap_or_else(|e| Err(e));
+    if let Ok(response) = reply {
         if let Some(tunnels) = response.as_array() {
             let mut result = Vec::new();
             for t in tunnels {
@@ -289,10 +325,11 @@ pub fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), 
 // ── Traffic ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn get_traffic_stats(state: State<'_, AppState>) -> TrafficStats {
-    // Merge live FFI stats with stored state
-    let live = tunnel::get_traffic();
-    if let Ok(mut stored) = state.traffic.lock() {
+pub async fn get_traffic_stats(state: State<'_, AppState>) -> Result<TrafficStats, String> {
+    // Merge live FFI stats with stored state. get_traffic asks the agent
+    // over IPC (up to 500 ms): off the window thread.
+    let live = blocking(tunnel::get_traffic).await.unwrap_or_default();
+    Ok(if let Ok(mut stored) = state.traffic.lock() {
         stored.bytes_sent = stored.bytes_sent.max(live.bytes_sent);
         stored.bytes_received = stored.bytes_received.max(live.bytes_received);
         stored.packets_sent = stored.packets_sent.max(live.packets_sent);
@@ -300,7 +337,7 @@ pub fn get_traffic_stats(state: State<'_, AppState>) -> TrafficStats {
         stored.clone()
     } else {
         live
-    }
+    })
 }
 
 #[cfg(test)]

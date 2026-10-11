@@ -885,6 +885,7 @@ pub async fn run_daemon(
         shutdown_tx: shutdown_tx.clone(),
         // D1.T3: real Bearer token wired in. The T2 gate is now live.
         expected_token: Some(Arc::new(token)),
+        setup_probes: Arc::new(control::SetupProbeCache::new()),
     });
 
     // Write PID file

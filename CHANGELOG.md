@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.35.18 — 2026-10-11
+
+Desktop app freeze (ZT-10, ZT-11 in `docs/ZERO-TOUCH-ENROLLMENT.md`). Found
+live on a freshly enrolled box: the window sat at "ZTLP (Not Responding)"
+and the Setup page said "ZTLP agent is not running" while the agent was
+healthy and answering in milliseconds.
+
+- **Desktop: commands no longer run on the window thread.** Every Tauri
+  command was a plain `fn`, which Tauri 2 runs on the main thread; waiting on
+  the agent (up to 5 s for `setup_status`, up to 120 s for `enroll`) froze
+  the window, and the 2 s Home poll kept it frozen. Commands that talk to the
+  agent, spawn a process or do tunnel work are now `async` and run their
+  blocking part in `spawn_blocking`. A test fails the build if one is added
+  back as a plain `fn`.
+- **Agent: `setup_status` answers in microseconds.** It spawned `powershell`,
+  `certutil` and `icacls` inline on the control-plane runtime on every poll
+  (~0.9 s on a quiet box, seconds under endpoint security), queuing every
+  other control command behind them. The probes now run on a blocking thread
+  and are cached for 5 s; enrolment invalidates the cache so a setup step is
+  visible on the next poll.
+
+Desktop bumped to 1.2.4.
+
 ## v0.35.17 — 2026-10-09
 
 Zero-touch enrollment fixes. A user who installs the service and enrolls with

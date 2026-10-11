@@ -67,6 +67,7 @@ fn does_io(body: &str) -> bool {
     [
         "ipc::",
         "ipc_request",
+        "ipc_off_thread",
         "tunnel::",
         "Command::new",
         ".output()",
@@ -128,6 +129,7 @@ fn every_io_command_is_async_and_offloads_to_spawn_blocking() {
             // helpers are pinned below to really call spawn_blocking
             let offloads = body.contains("spawn_blocking")
                 || body.contains("blocking(")
+                || body.contains("ipc_off_thread(")
                 || body.contains("off_window_thread(");
             if !is_async {
                 violations.push(format!(
@@ -140,10 +142,16 @@ fn every_io_command_is_async_and_offloads_to_spawn_blocking() {
             }
         }
     }
-    // 7 in commands.rs (connect, disconnect, get_attached, enroll,
-    // get_services, get_traffic_stats, save_config? no: pure) + 7 in
-    // setup.rs minus pure readers. Pin the floor so a refactor that hides
-    // I/O behind a name the scanner does not know gets noticed.
+    // Floor = the I/O commands the scanner recognises today:
+    //   commands.rs (6): connect, disconnect, get_attached, enroll,
+    //                    get_services, get_traffic_stats
+    //   setup.rs    (5): setup_status, setup_run_ca_init, setup_install_ca,
+    //                    setup_install_dns, setup_test_browse
+    // (setup_install_service and setup_create_identity shell out through
+    // helpers the scanner does not follow, so they are not counted.) Pure
+    // state readers are excluded. If the count drops below 11 a refactor
+    // has hidden I/O behind a name the scanner does not know: extend
+    // `does_io` rather than lowering the floor.
     assert!(
         checked >= 11,
         "expected to find the I/O commands, found {checked}"
@@ -161,6 +169,11 @@ fn the_offload_helpers_really_use_spawn_blocking() {
     assert!(
         b.contains("spawn_blocking"),
         "commands::blocking must use spawn_blocking"
+    );
+    let i = fn_body(&c, "ipc_off_thread").expect("commands.rs has `ipc_off_thread`");
+    assert!(
+        i.contains("blocking("),
+        "commands::ipc_off_thread must go through `blocking`"
     );
     let s = src("setup.rs");
     let o = fn_body(&s, "off_window_thread").expect("setup.rs has `off_window_thread`");

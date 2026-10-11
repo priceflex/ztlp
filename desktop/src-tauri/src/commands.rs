@@ -20,6 +20,21 @@ use crate::tunnel;
 // spawns a process or does tunnel work is `async` and runs the blocking part
 // in `spawn_blocking`. Pure state readers stay sync.
 
+/// An IPC request to the agent, off the window thread. A join failure of the
+/// blocking thread is rare and distinct from "agent unreachable", so it is
+/// logged before being folded into the same fallback the callers already
+/// handle (review nit on PR #122: otherwise it would paint "agent is not
+/// running" over a healthy agent, the very symptom this file fixes).
+async fn ipc_off_thread(cmd: &'static str) -> Result<serde_json::Value, String> {
+    match blocking(move || crate::ipc::ipc_request(cmd, None)).await {
+        Ok(reply) => reply,
+        Err(join) => {
+            eprintln!("[ztlp-desktop] {cmd}: blocking thread failed to join: {join}");
+            Err(join)
+        }
+    }
+}
+
 /// Run blocking work off the window thread and off the async runtime.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f)
@@ -73,9 +88,7 @@ pub struct AttachedStatus {
 
 #[tauri::command]
 pub async fn get_attached() -> AttachedStatus {
-    let reply = blocking(|| crate::ipc::ipc_request("tunnels", None))
-        .await
-        .unwrap_or_else(|e| Err(e));
+    let reply = ipc_off_thread("tunnels").await;
     match reply {
         Ok(v) => {
             let endpoints: Vec<String> = v
@@ -214,9 +227,7 @@ pub async fn get_services(state: State<'_, AppState>) -> Result<Vec<ServiceInfo>
 }
 
 async fn get_services_inner(state: &AppState) -> Vec<ServiceInfo> {
-    let reply = blocking(|| crate::ipc::ipc_request("tunnels", None))
-        .await
-        .unwrap_or_else(|e| Err(e));
+    let reply = ipc_off_thread("tunnels").await;
     if let Ok(response) = reply {
         if let Some(tunnels) = response.as_array() {
             let mut result = Vec::new();

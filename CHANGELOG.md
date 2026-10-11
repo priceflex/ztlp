@@ -14,12 +14,13 @@ healthy and answering in milliseconds.
   agent, spawn a process or do tunnel work are now `async` and run their
   blocking part in `spawn_blocking`. A test fails the build if one is added
   back as a plain `fn`.
-- **Agent: `setup_status` answers in microseconds.** It spawned `powershell`,
+- **Agent: cached `setup_status` answers return in microseconds.** It spawned `powershell`,
   `certutil` and `icacls` inline on the control-plane runtime on every poll
   (~0.9 s on a quiet box, seconds under endpoint security), queuing every
-  other control command behind them. The probes now run on a blocking thread
-  and are cached for 5 s; enrolment invalidates the cache so a setup step is
-  visible on the next poll.
+  other control command behind them. The probes now run on a blocking thread,
+  one at a time, and are cached for 5 s from when the probe finishes; a poll
+  that misses the cache still waits for that one probe. Enrolment invalidates
+  the cache so a setup step is visible on the next poll.
 
 Desktop bumped to 1.2.4.
 

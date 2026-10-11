@@ -201,7 +201,15 @@ pub const SETUP_PROBE_TTL: Duration = Duration::from_secs(5);
 /// the control-plane runtime) and the result is reused for
 /// [`SETUP_PROBE_TTL`]. Keyed by zone, since enrolling changes the answer.
 pub struct SetupProbeCache {
+    /// (zone, stamped when the probe FINISHED, result, generation it was
+    /// probed under).
     inner: Mutex<Option<(String, Instant, SetupProbes)>>,
+    /// Single-flight: held for the whole probe so concurrent polls on a cold
+    /// cache wait for the one run instead of each spawning their own.
+    probe_lock: Mutex<()>,
+    /// Bumped by `invalidate`. A probe that started under an older
+    /// generation must not write its (now stale) result back.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Default for SetupProbeCache {
@@ -214,23 +222,47 @@ impl SetupProbeCache {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            probe_lock: Mutex::new(()),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    async fn fresh_hit(&self, zone: &str, now: Instant) -> Option<SetupProbes> {
+        let guard = self.inner.lock().await;
+        match guard.as_ref() {
+            Some((z, at, p))
+                if z == zone && now.saturating_duration_since(*at) < SETUP_PROBE_TTL =>
+            {
+                Some(p.clone())
+            }
+            _ => None,
         }
     }
 
     /// Return the cached probes for `zone` if fresh at `now`, else run
-    /// `probe` on a blocking thread, store and return its result.
+    /// `probe` on a blocking thread (one at a time), store and return it.
+    ///
+    /// Review findings folded in (PR #122): the entry is stamped when the
+    /// probe finishes, not when it starts, so a probe slower than the TTL
+    /// is still a hit afterwards; concurrent cold polls share one run; and
+    /// an `invalidate` during the run wins over the run's stale result.
     pub async fn get_or_probe<F>(&self, zone: &str, now: Instant, probe: F) -> SetupProbes
     where
         F: FnOnce() -> SetupProbes + Send + 'static,
     {
-        {
-            let guard = self.inner.lock().await;
-            if let Some((z, at, p)) = guard.as_ref() {
-                if z == zone && now.saturating_duration_since(*at) < SETUP_PROBE_TTL {
-                    return p.clone();
-                }
-            }
+        use std::sync::atomic::Ordering;
+        if let Some(hit) = self.fresh_hit(zone, now).await {
+            return hit;
         }
+        let _single = self.probe_lock.lock().await;
+        // Another poll may have filled the cache while we waited for the
+        // lock. Judge freshness from the caller's `now` (never earlier than
+        // it) so a caller that already decided its view is stale is not
+        // handed the entry it just rejected.
+        if let Some(hit) = self.fresh_hit(zone, now.max(Instant::now())).await {
+            return hit;
+        }
+        let started_gen = self.generation.load(Ordering::SeqCst);
         // Off the runtime: these spawn processes and can take seconds.
         let fresh = match tokio::task::spawn_blocking(probe).await {
             Ok(p) => p,
@@ -240,13 +272,19 @@ impl SetupProbeCache {
                 token_shared_with_gui: None,
             },
         };
-        *self.inner.lock().await = Some((zone.to_string(), now, fresh.clone()));
+        if self.generation.load(Ordering::SeqCst) == started_gen {
+            let done = now.max(Instant::now());
+            *self.inner.lock().await = Some((zone.to_string(), done, fresh.clone()));
+        }
         fresh
     }
 
     /// Drop the cached answer so the next poll probes again. Called after
-    /// any step that changes trust, DNS or the token ACL.
+    /// any step that changes trust, DNS or the token ACL. Also outruns any
+    /// probe already in flight: its result will not be stored.
     pub async fn invalidate(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.inner.lock().await = None;
     }
 }
@@ -1901,6 +1939,100 @@ mod tests {
                 "the ticker finished before the slow probe, so the runtime was not blocked"
             );
             slow.await.unwrap();
+        }
+
+        // ── CodeRabbit findings on PR #122 (all confirmed against the code) ──
+
+        #[tokio::test(start_paused = true)]
+        async fn a_probe_slower_than_the_ttl_is_still_cached_afterwards() {
+            // The entry used to be stamped with the time the probe STARTED,
+            // so a probe slower than the TTL was already expired when it was
+            // written and every later poll missed the cache forever.
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let slow = move || {
+                // slower than SETUP_PROBE_TTL (real clock: spawn_blocking)
+                std::thread::sleep(SETUP_PROBE_TTL + Duration::from_millis(200));
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(6)
+            };
+            cache.get_or_probe("trs.ztlp", Instant::now(), slow).await;
+            let r2 = runs.clone();
+            cache
+                .get_or_probe("trs.ztlp", Instant::now(), move || {
+                    r2.fetch_add(1, Ordering::SeqCst);
+                    probes(6)
+                })
+                .await;
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "the poll right after a slow probe must be a cache hit"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_polls_on_a_cold_cache_run_one_probe_not_many() {
+            // Desktop polls every 2 s; a slow host used to get a new
+            // powershell/certutil/icacls run per poll, all overlapping.
+            let cache = Arc::new(SetupProbeCache::new());
+            let runs = Arc::new(AtomicUsize::new(0));
+            let mut tasks = Vec::new();
+            for _ in 0..4 {
+                let c = cache.clone();
+                let r = runs.clone();
+                tasks.push(tokio::spawn(async move {
+                    c.get_or_probe("trs.ztlp", Instant::now(), move || {
+                        std::thread::sleep(Duration::from_millis(150));
+                        r.fetch_add(1, Ordering::SeqCst);
+                        probes(7)
+                    })
+                    .await
+                }));
+            }
+            let mut results = Vec::new();
+            for t in tasks {
+                results.push(t.await.unwrap());
+            }
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "single-flight: one probe");
+            assert!(
+                results.iter().all(|r| *r == probes(7)),
+                "all callers got that result"
+            );
+        }
+
+        #[tokio::test]
+        async fn invalidate_during_a_probe_is_not_overwritten_by_the_stale_result() {
+            // enroll() invalidates; a probe that was already running must not
+            // write its pre-enrollment answer back afterwards
+            let cache = Arc::new(SetupProbeCache::new());
+            let c = cache.clone();
+            let inflight = tokio::spawn(async move {
+                c.get_or_probe("trs.ztlp", Instant::now(), || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    probes(8) // "old" answer
+                })
+                .await
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cache.invalidate().await;
+            inflight.await.unwrap();
+            // the next poll must probe again, not get the stale answer
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let got = cache
+                .get_or_probe("trs.ztlp", Instant::now(), move || {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    probes(9)
+                })
+                .await;
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "stale result must not have been cached"
+            );
+            assert_eq!(got, probes(9));
         }
 
         #[test]

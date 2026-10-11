@@ -94,8 +94,51 @@ fn ztlp_cmd() -> Command {
 /// accepting a tunnel connection) must not permanently flip the wizard to
 /// "agent not running" when the daemon is in fact up. A genuinely-down
 /// daemon still fails both attempts fast (OS RST) and returns the default.
+/// ZT-10: run a setup step on a blocking thread. Tauri 2 runs a plain `fn`
+/// command on the window thread; every step here spawns `ztlp.exe` /
+/// `certutil` / `powershell` or waits on the agent, which froze the window
+/// ("ZTLP (Not Responding)", found live 2026-10-11) and, because the Home
+/// page polls every 2 s, kept it frozen. The join error is folded into the
+/// step's own `Result`, or into the `Default` for infallible steps.
+async fn off_window_thread<T, F>(f: F) -> T
+where
+    T: Send + 'static + OffThreadFallback,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(v) => v,
+        Err(e) => T::join_failed(format!("background task failed: {e}")),
+    }
+}
+
+/// What a command returns when its blocking thread could not be joined.
+trait OffThreadFallback {
+    fn join_failed(msg: String) -> Self;
+}
+
+impl<T> OffThreadFallback for Result<T, String> {
+    fn join_failed(msg: String) -> Self {
+        Err(msg)
+    }
+}
+
+impl OffThreadFallback for SetupStatusUi {
+    fn join_failed(msg: String) -> Self {
+        SetupStatusUi {
+            daemon_running: false,
+            daemon_error: Some(msg),
+            ..Default::default()
+        }
+    }
+}
+
 #[tauri::command]
-pub fn setup_status() -> SetupStatusUi {
+pub async fn setup_status() -> SetupStatusUi {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(setup_status_sync).await
+}
+
+fn setup_status_sync() -> SetupStatusUi {
     let mut last_err = String::new();
     for attempt in 0..2 {
         match ipc::ipc_request("setup_status", None) {
@@ -128,7 +171,12 @@ pub fn setup_status() -> SetupStatusUi {
 /// stdout/stderr blob so the UI can show progress text in a collapsible
 /// pane.
 #[tauri::command]
-pub fn setup_run_ca_init(zone: String) -> Result<String, String> {
+pub async fn setup_run_ca_init(zone: String) -> Result<String, String> {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(move || setup_run_ca_init_sync(zone)).await
+}
+
+fn setup_run_ca_init_sync(zone: String) -> Result<String, String> {
     if zone.trim().is_empty() {
         return Err("zone is required (enroll first)".into());
     }
@@ -162,7 +210,12 @@ pub fn setup_run_ca_init(zone: String) -> Result<String, String> {
 /// (systemd unit / LaunchDaemon), which the wizard's advanced/Settings
 /// panel already exposes without needing a Tauri-side elevation helper.
 #[tauri::command]
-pub fn setup_install_service() -> Result<String, String> {
+pub async fn setup_install_service() -> Result<String, String> {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(setup_install_service_sync).await
+}
+
+fn setup_install_service_sync() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         runas_ztlp(&["agent", "install"])
@@ -186,7 +239,12 @@ pub fn setup_install_service() -> Result<String, String> {
 /// underlying `install_ca_cert` in `ca_trust.rs` handles macOS keychain
 /// / Linux NSS as the current user.
 #[tauri::command]
-pub fn setup_install_ca() -> Result<String, String> {
+pub async fn setup_install_ca() -> Result<String, String> {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(setup_install_ca_sync).await
+}
+
+fn setup_install_ca_sync() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         // D4 (Phase D plan, Windows Service Parity): the ZtlpAgent SCM
@@ -224,7 +282,7 @@ pub fn setup_install_ca() -> Result<String, String> {
         // *current user's* home FIRST, then passing it explicitly via
         // `--cert` so the elevated process reads the right file regardless
         // of whose HOME it runs under.
-        let ca_path = setup_status().ca_root_pem_path;
+        let ca_path = setup_status_sync().ca_root_pem_path;
         if ca_path.is_empty() {
             return Err("could not resolve CA cert path from daemon (run ca-init first)".into());
         }
@@ -268,7 +326,12 @@ pub fn setup_install_ca() -> Result<String, String> {
 /// handled by the daemon's `dns_setup.rs` and doesn't need a wizard step —
 /// this branch shells out via pkexec/sudo as before (unchanged by D4).
 #[tauri::command]
-pub fn setup_install_dns(zone: String) -> Result<String, String> {
+pub async fn setup_install_dns(zone: String) -> Result<String, String> {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(move || setup_install_dns_sync(zone)).await
+}
+
+fn setup_install_dns_sync(zone: String) -> Result<String, String> {
     let z = zone.trim();
     if z.is_empty() {
         return Err("zone is required (enroll first)".into());
@@ -351,7 +414,12 @@ fn which(bin: &str) -> bool {
 /// chain, not the system trust integration (which the UI also reports
 /// separately as `ca_installed_system_trust`).
 #[tauri::command]
-pub fn setup_test_browse(hostname: String) -> Result<String, String> {
+pub async fn setup_test_browse(hostname: String) -> Result<String, String> {
+    // ZT-10: spawns processes / waits on the agent; never on the window thread.
+    off_window_thread(move || setup_test_browse_sync(hostname)).await
+}
+
+fn setup_test_browse_sync(hostname: String) -> Result<String, String> {
     let h = hostname.trim();
     if h.is_empty() {
         return Err("hostname is required".into());
@@ -359,7 +427,7 @@ pub fn setup_test_browse(hostname: String) -> Result<String, String> {
 
     // Get the CA path from the daemon's setup_status response so the
     // test always uses the right per-zone CA, not a hard-coded path.
-    let status = setup_status();
+    let status = setup_status_sync();
     if status.ca_root_pem_path.is_empty() {
         return Err("could not resolve CA path from daemon".into());
     }
@@ -476,7 +544,18 @@ const VALID_ROLES: [&str; 3] = ["admin", "tech", "user"];
 /// only the user identity is created (the device link can be done later).
 /// `ns_server` is optional; the CLI resolves it from config when omitted.
 #[tauri::command]
-pub fn setup_create_identity(
+pub async fn setup_create_identity(
+    name: String,
+    role: String,
+    device_name: String,
+    ns_server: String,
+) -> Result<IdentityCreateResult, String> {
+    // ZT-10: two `ztlp admin` subprocesses with NS round trips; never on
+    // the window thread.
+    off_window_thread(move || setup_create_identity_sync(name, role, device_name, ns_server)).await
+}
+
+fn setup_create_identity_sync(
     name: String,
     role: String,
     device_name: String,
@@ -690,7 +769,7 @@ mod tests {
         // The default IPC address is 127.100.255.1:4433, which is not
         // expected to be listening during `cargo test`. We assert that
         // we get the daemon-unreachable default back, not a panic.
-        let s = setup_status();
+        let s = setup_status_sync();
         assert!(
             !s.daemon_running,
             "expected daemon_running=false during unit tests (no daemon listening)"
@@ -703,18 +782,18 @@ mod tests {
     /// guard the wizard has.
     #[test]
     fn setup_run_ca_init_rejects_empty_zone() {
-        let r = setup_run_ca_init(String::new());
+        let r = setup_run_ca_init_sync(String::new());
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("zone is required"));
 
-        let r2 = setup_run_ca_init("   \t  ".to_string());
+        let r2 = setup_run_ca_init_sync("   \t  ".to_string());
         assert!(r2.is_err());
     }
 
     /// `setup_install_dns` with empty zone errors fast.
     #[test]
     fn setup_install_dns_rejects_empty_zone() {
-        let r = setup_install_dns(String::new());
+        let r = setup_install_dns_sync(String::new());
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("zone is required"));
     }
@@ -722,7 +801,7 @@ mod tests {
     /// `setup_test_browse` with empty hostname errors fast (no spawn).
     #[test]
     fn setup_test_browse_rejects_empty_hostname() {
-        let r = setup_test_browse(String::new());
+        let r = setup_test_browse_sync(String::new());
         assert!(r.is_err());
     }
 
@@ -773,7 +852,7 @@ mod tests {
     /// An empty identity name must be rejected before any spawn.
     #[test]
     fn setup_create_identity_rejects_empty_name() {
-        let r = setup_create_identity(
+        let r = setup_create_identity_sync(
             String::new(),
             "admin".to_string(),
             String::new(),
@@ -786,7 +865,7 @@ mod tests {
     /// A whitespace-only name must be rejected the same way.
     #[test]
     fn setup_create_identity_rejects_whitespace_name() {
-        let r = setup_create_identity(
+        let r = setup_create_identity_sync(
             "   \t  ".to_string(),
             "admin".to_string(),
             String::new(),
@@ -830,7 +909,7 @@ mod tests {
     /// UserRole). Prevents the UI from passing a garbage role to the CLI.
     #[test]
     fn setup_create_identity_rejects_bad_role() {
-        let r = setup_create_identity(
+        let r = setup_create_identity_sync(
             "steve@trs.ztlp".to_string(),
             "superuser".to_string(),
             String::new(),

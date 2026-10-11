@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -180,6 +180,118 @@ pub struct DnsCacheEntry {
 // ─── Control socket server ──────────────────────────────────────────────────
 
 /// Agent state shared between the control socket and other components.
+/// Results of the slow, process-spawning `setup_status` probes (ZT-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupProbes {
+    pub ca_installed_system_trust: Option<bool>,
+    pub dns_configured: Option<bool>,
+    pub token_shared_with_gui: Option<bool>,
+}
+
+/// How long a probe result is reused. The desktop polls every 2 s; without
+/// a cache every poll spawned powershell + certutil + icacls (~0.9 s on a
+/// quiet box, several seconds under endpoint security), queued every other
+/// control command behind them, and tripped the desktop's 5 s budget so a
+/// healthy agent was painted "not running". Setup steps that change the
+/// answer call [`SetupProbeCache::invalidate`], so the TTL only bounds how
+/// stale an answer can be when nothing changed.
+pub const SETUP_PROBE_TTL: Duration = Duration::from_secs(5);
+
+/// Cache for [`SetupProbes`]: the probes run on a blocking thread (never on
+/// the control-plane runtime) and the result is reused for
+/// [`SETUP_PROBE_TTL`]. Keyed by zone, since enrolling changes the answer.
+pub struct SetupProbeCache {
+    /// (zone, stamped when the probe FINISHED, result, generation it was
+    /// probed under).
+    inner: Mutex<Option<(String, Instant, SetupProbes)>>,
+    /// Single-flight: held for the whole probe so concurrent polls on a cold
+    /// cache wait for the one run instead of each spawning their own.
+    probe_lock: Mutex<()>,
+    /// Bumped by `invalidate`. A probe that started under an older
+    /// generation must not write its (now stale) result back.
+    generation: std::sync::atomic::AtomicU64,
+}
+
+impl Default for SetupProbeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SetupProbeCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+            probe_lock: Mutex::new(()),
+            generation: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    async fn fresh_hit(&self, zone: &str, now: Instant) -> Option<SetupProbes> {
+        let guard = self.inner.lock().await;
+        match guard.as_ref() {
+            Some((z, at, p))
+                if z == zone && now.saturating_duration_since(*at) < SETUP_PROBE_TTL =>
+            {
+                Some(p.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Return the cached probes for `zone` if fresh at `now`, else run
+    /// `probe` on a blocking thread (one at a time), store and return it.
+    ///
+    /// Review findings folded in (PR #122): the entry is stamped when the
+    /// probe finishes, not when it starts, so a probe slower than the TTL
+    /// is still a hit afterwards; concurrent cold polls share one run; and
+    /// an `invalidate` during the run wins over the run's stale result.
+    pub async fn get_or_probe<F>(&self, zone: &str, now: Instant, probe: F) -> SetupProbes
+    where
+        F: FnOnce() -> SetupProbes + Send + 'static,
+    {
+        use std::sync::atomic::Ordering;
+        if let Some(hit) = self.fresh_hit(zone, now).await {
+            return hit;
+        }
+        let _single = self.probe_lock.lock().await;
+        // Another poll may have filled the cache while we waited for the
+        // lock. Judge freshness from the caller's `now` (never earlier than
+        // it) so a caller that already decided its view is stale is not
+        // handed the entry it just rejected.
+        if let Some(hit) = self.fresh_hit(zone, now.max(Instant::now())).await {
+            return hit;
+        }
+        let started_gen = self.generation.load(Ordering::SeqCst);
+        // Off the runtime: these spawn processes and can take seconds.
+        let fresh = match tokio::task::spawn_blocking(probe).await {
+            Ok(p) => p,
+            Err(_) => SetupProbes {
+                ca_installed_system_trust: None,
+                dns_configured: None,
+                token_shared_with_gui: None,
+            },
+        };
+        if self.generation.load(Ordering::SeqCst) == started_gen {
+            // Stamp with the real completion time. (A previous version used
+            // `now.max(Instant::now())`, which let a caller-supplied clock
+            // push the stamp into the future; on a slow CI runner that made
+            // an entry look fresh past its TTL.)
+            *self.inner.lock().await = Some((zone.to_string(), Instant::now(), fresh.clone()));
+        }
+        fresh
+    }
+
+    /// Drop the cached answer so the next poll probes again. Called after
+    /// any step that changes trust, DNS or the token ACL. Also outruns any
+    /// probe already in flight: its result will not be stored.
+    pub async fn invalidate(&self) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.inner.lock().await = None;
+    }
+}
+
 pub struct AgentState {
     pub dns_state: Arc<Mutex<DnsResolverState>>,
     pub tunnel_pool: Arc<Mutex<super::tunnel_pool::TunnelPool>>,
@@ -198,6 +310,8 @@ pub struct AgentState {
     /// Held behind `Arc` because `AgentState` is shared across all the
     /// short-lived per-connection tasks the control socket spawns.
     pub expected_token: Option<Arc<String>>,
+    /// Cache for the process-spawning `setup_status` probes (ZT-11).
+    pub setup_probes: Arc<SetupProbeCache>,
 }
 
 /// Constant-time byte-slice equality.
@@ -453,7 +567,12 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
         "flush_dns" => cmd_flush_dns(state).await,
         "shutdown" => cmd_shutdown(state).await,
         "setup_status" => cmd_setup_status(state).await,
-        "enroll" => cmd_enroll(&cmd).await,
+        "enroll" => {
+            let resp = cmd_enroll(&cmd).await;
+            // enrollment rewrites zone, CA and DNS: next poll must re-probe
+            state.setup_probes.invalidate().await;
+            resp
+        }
         other => ControlResponse::err(format!("unknown command: {}", other)),
     }
 }
@@ -913,6 +1032,66 @@ pub fn build_post_enroll_tls_plan_with(
 ///   [...]` under a `[dns]` section — the first entry is used.
 ///
 /// Returns `None` if neither file exists or neither yields a zone.
+/// The process-spawning part of `setup_status`. Runs on a blocking thread
+/// via [`SetupProbeCache`]; never call it from an async context directly.
+fn run_setup_probes(zone: &str) -> SetupProbes {
+    // Windows-only: cert in machine root + NRPT rule present.
+    #[cfg(target_os = "windows")]
+    let (ca_installed_system_trust, dns_configured) = {
+        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        let dns = if !zone.is_empty() {
+            let api = crate::agent::dns_setup_windows::default_nrpt_api();
+            match api.list_rules() {
+                Ok(rules) => Some(rules.iter().any(|r| {
+                    // The rule must target this zone AND carry a usable
+                    // NameServers list: Windows NRPT silently stores an
+                    // EMPTY list when handed a host:port string (real bug,
+                    // 2026-08-30, DESKTOP-CBSQDNE — Chrome got
+                    // DNS_PROBE_FINISHED_NXDOMAIN because the rule
+                    // "existed" but pointed nowhere). A rule with no usable
+                    // server must count as NOT configured so the wizard
+                    // re-runs dns-setup instead of showing a false green
+                    // checkmark.
+                    r.namespace
+                        .trim_start_matches('.')
+                        .eq_ignore_ascii_case(zone)
+                        && !r.name_servers.is_empty()
+                        && r.name_servers.iter().all(|s| !s.contains(':'))
+                })),
+                Err(_) => Some(false),
+            }
+        } else {
+            Some(false)
+        };
+        (ca, dns)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (ca_installed_system_trust, dns_configured) = {
+        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        let dns = if !zone.is_empty() {
+            Some(crate::agent::dns_setup::is_dns_configured())
+        } else {
+            Some(false)
+        };
+        (ca, dns)
+    };
+
+    let token_path = crate::agent::config::default_token_path();
+    // PR #112 review fix: windows_daemon::token_shared_with_gui is compiled
+    // on Windows and on non-macOS only, so calling it unconditionally broke
+    // the macOS build (E0425). Pick the platform's own implementation.
+    #[cfg(target_os = "macos")]
+    let token_shared_with_gui = crate::agent::macos_daemon::token_shared_with_gui(&token_path);
+    #[cfg(not(target_os = "macos"))]
+    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path);
+
+    SetupProbes {
+        ca_installed_system_trust,
+        dns_configured,
+        token_shared_with_gui,
+    }
+}
+
 fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
     let ztlp_dir = home.join(".ztlp");
 
@@ -950,7 +1129,7 @@ fn read_zone_from_config(home: &std::path::Path) -> Option<String> {
 /// checkmarks update.
 ///
 /// Daemon-running is implicitly `true` (we ARE the daemon answering).
-async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
+async fn cmd_setup_status(state: &AgentState) -> ControlResponse {
     let home = crate::agent::config::ztlp_state_dir();
     if home == std::path::PathBuf::from(".") {
         return ControlResponse::err("cannot resolve home directory");
@@ -993,55 +1172,20 @@ async fn cmd_setup_status(_state: &AgentState) -> ControlResponse {
             .map(|s| s.contains("-----BEGIN CERTIFICATE-----"))
             .unwrap_or(false);
 
-    // Windows-only: cert in machine root + NRPT rule present.
-    #[cfg(target_os = "windows")]
-    let (ca_installed_system_trust, dns_configured) = {
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
-        let dns = if !zone.is_empty() {
-            let api = crate::agent::dns_setup_windows::default_nrpt_api();
-            match api.list_rules() {
-                Ok(rules) => Some(rules.iter().any(|r| {
-                    // The rule must target this zone AND carry a usable
-                    // NameServers list: Windows NRPT silently stores an
-                    // EMPTY list when handed a host:port string (real bug,
-                    // 2026-08-30, DESKTOP-CBSQDNE — Chrome got
-                    // DNS_PROBE_FINISHED_NXDOMAIN because the rule
-                    // "existed" but pointed nowhere). A rule with no usable
-                    // server must count as NOT configured so the wizard
-                    // re-runs dns-setup instead of showing a false green
-                    // checkmark.
-                    r.namespace
-                        .trim_start_matches('.')
-                        .eq_ignore_ascii_case(&zone)
-                        && !r.name_servers.is_empty()
-                        && r.name_servers.iter().all(|s| !s.contains(':'))
-                })),
-                Err(_) => Some(false),
-            }
-        } else {
-            Some(false)
-        };
-        (ca, dns)
-    };
-    #[cfg(not(target_os = "windows"))]
-    let (ca_installed_system_trust, dns_configured) = {
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
-        let dns = if !zone.is_empty() {
-            Some(crate::agent::dns_setup::is_dns_configured())
-        } else {
-            Some(false)
-        };
-        (ca, dns)
-    };
-
-    let token_path = crate::agent::config::default_token_path();
-    // PR #112 review fix: windows_daemon::token_shared_with_gui is compiled
-    // on Windows and on non-macOS only, so calling it unconditionally broke
-    // the macOS build (E0425). Pick the platform's own implementation.
-    #[cfg(target_os = "macos")]
-    let token_shared_with_gui = crate::agent::macos_daemon::token_shared_with_gui(&token_path);
-    #[cfg(not(target_os = "macos"))]
-    let token_shared_with_gui = crate::agent::windows_daemon::token_shared_with_gui(&token_path);
+    // The remaining probes spawn processes (certutil / powershell / icacls):
+    // slow, and slower still under endpoint security. They run on a
+    // blocking thread through the cache (ZT-11) so this handler, and every
+    // other control command, answers in microseconds between refreshes.
+    let zone_for_probe = zone.clone();
+    let probes = state
+        .setup_probes
+        .get_or_probe(&zone, Instant::now(), move || {
+            run_setup_probes(&zone_for_probe)
+        })
+        .await;
+    let ca_installed_system_trust = probes.ca_installed_system_trust;
+    let dns_configured = probes.dns_configured;
+    let token_shared_with_gui = probes.token_shared_with_gui;
 
     let status = SetupStatus {
         identity_present,
@@ -1224,6 +1368,7 @@ impl AgentState {
             dns_listen: "127.0.0.53:53".to_string(),
             shutdown_tx,
             expected_token,
+            setup_probes: Arc::new(SetupProbeCache::new()),
         }
     }
 }
@@ -1663,5 +1808,253 @@ mod tests {
         let err = build_post_enroll_tls_plan(&home).unwrap_err();
         assert!(err.contains("zone"), "{err}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // ── ZT-11: setup_status must not block the control plane (2026-10-11) ──
+    //
+    // Live on TRSWCRM2: the desktop app sat at "ZTLP (Not Responding)" with
+    // the Setup page claiming "ZTLP agent is not running" while the agent
+    // was fine and answering TCP in 6 ms. `setup_status` shells out
+    // (powershell for NRPT, certutil for the trust store, icacls for the
+    // token ACL): ~0.9 s on a quiet box, and far more under ThreatLocker /
+    // Defender inspecting every spawned process. Two things went wrong:
+    //
+    //  1. The spawns ran INSIDE the async control handler, so every other
+    //     control command queued behind them.
+    //  2. The desktop asks every 2 s and gives up after 5 s, so a slow
+    //     answer is painted as "agent not running".
+    //
+    // Fix: the slow probes run on a blocking thread and the result is
+    // cached for a few seconds, so polls are answered in microseconds.
+    mod setup_probe_cache {
+        use super::super::{SetupProbeCache, SetupProbes, SETUP_PROBE_TTL};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        fn probes(n: u8) -> SetupProbes {
+            SetupProbes {
+                ca_installed_system_trust: Some(n % 2 == 0),
+                dns_configured: Some(n % 3 == 0),
+                token_shared_with_gui: Some(n % 5 == 0),
+            }
+        }
+
+        #[tokio::test]
+        async fn second_call_within_ttl_is_served_from_cache_without_probing() {
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let probe = move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(1)
+            };
+            let now = Instant::now();
+            let a = cache.get_or_probe("trs.ztlp", now, probe.clone()).await;
+            let b = cache
+                .get_or_probe("trs.ztlp", now + Duration::from_secs(1), probe)
+                .await;
+            assert_eq!(a, b);
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "one probe, one cached hit");
+        }
+
+        #[tokio::test]
+        async fn expired_entry_is_probed_again() {
+            // The cache stamps entries with the REAL completion time
+            // (std::time::Instant, which tokio's paused clock does not
+            // move), so expiry is tested against the real clock: a second
+            // call whose `now` is one full TTL after the first call's
+            // completion must probe again. The margin is 1 s so a slow
+            // runner cannot flake it (the first version of this test
+            // flaked on CI with a 1 ms margin against a caller-supplied
+            // clock).
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let probe = move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(2)
+            };
+            cache
+                .get_or_probe("trs.ztlp", Instant::now(), probe.clone())
+                .await;
+            let after_first = Instant::now();
+            cache
+                .get_or_probe(
+                    "trs.ztlp",
+                    after_first + SETUP_PROBE_TTL + Duration::from_secs(1),
+                    probe,
+                )
+                .await;
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn a_zone_change_invalidates_the_cache() {
+            // enrolling changes the zone; the DNS answer for the old zone
+            // must never be served for the new one
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let probe = move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(3)
+            };
+            let now = Instant::now();
+            cache.get_or_probe("", now, probe.clone()).await;
+            cache.get_or_probe("trs.ztlp", now, probe).await;
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn invalidate_forces_a_fresh_probe() {
+            // a setup step (CA install, DNS install) must be visible on the
+            // very next poll, not after the TTL
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let probe = move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(4)
+            };
+            let now = Instant::now();
+            cache.get_or_probe("trs.ztlp", now, probe.clone()).await;
+            cache.invalidate().await;
+            cache.get_or_probe("trs.ztlp", now, probe).await;
+            assert_eq!(runs.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test]
+        async fn slow_probe_does_not_block_other_control_work() {
+            // the probe runs on a blocking thread: while it is busy, a
+            // concurrent task on the runtime must keep making progress
+            let cache = Arc::new(SetupProbeCache::new());
+            let c = cache.clone();
+            let slow = tokio::spawn(async move {
+                c.get_or_probe("trs.ztlp", Instant::now(), || {
+                    std::thread::sleep(Duration::from_millis(400));
+                    probes(5)
+                })
+                .await
+            });
+            let started = Instant::now();
+            let ticks = tokio::spawn(async {
+                let mut n = 0;
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    n += 1;
+                }
+                n
+            });
+            assert_eq!(ticks.await.unwrap(), 20);
+            assert!(
+                started.elapsed() < Duration::from_millis(390),
+                "the ticker finished before the slow probe, so the runtime was not blocked"
+            );
+            slow.await.unwrap();
+        }
+
+        // ── CodeRabbit findings on PR #122 (all confirmed against the code) ──
+
+        #[tokio::test(start_paused = true)]
+        async fn a_probe_slower_than_the_ttl_is_still_cached_afterwards() {
+            // The entry used to be stamped with the time the probe STARTED,
+            // so a probe slower than the TTL was already expired when it was
+            // written and every later poll missed the cache forever.
+            let cache = SetupProbeCache::new();
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let slow = move || {
+                // slower than SETUP_PROBE_TTL (real clock: spawn_blocking)
+                std::thread::sleep(SETUP_PROBE_TTL + Duration::from_millis(200));
+                r.fetch_add(1, Ordering::SeqCst);
+                probes(6)
+            };
+            cache.get_or_probe("trs.ztlp", Instant::now(), slow).await;
+            let r2 = runs.clone();
+            cache
+                .get_or_probe("trs.ztlp", Instant::now(), move || {
+                    r2.fetch_add(1, Ordering::SeqCst);
+                    probes(6)
+                })
+                .await;
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "the poll right after a slow probe must be a cache hit"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_polls_on_a_cold_cache_run_one_probe_not_many() {
+            // Desktop polls every 2 s; a slow host used to get a new
+            // powershell/certutil/icacls run per poll, all overlapping.
+            let cache = Arc::new(SetupProbeCache::new());
+            let runs = Arc::new(AtomicUsize::new(0));
+            let mut tasks = Vec::new();
+            for _ in 0..4 {
+                let c = cache.clone();
+                let r = runs.clone();
+                tasks.push(tokio::spawn(async move {
+                    c.get_or_probe("trs.ztlp", Instant::now(), move || {
+                        std::thread::sleep(Duration::from_millis(150));
+                        r.fetch_add(1, Ordering::SeqCst);
+                        probes(7)
+                    })
+                    .await
+                }));
+            }
+            let mut results = Vec::new();
+            for t in tasks {
+                results.push(t.await.unwrap());
+            }
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "single-flight: one probe");
+            assert!(
+                results.iter().all(|r| *r == probes(7)),
+                "all callers got that result"
+            );
+        }
+
+        #[tokio::test]
+        async fn invalidate_during_a_probe_is_not_overwritten_by_the_stale_result() {
+            // enroll() invalidates; a probe that was already running must not
+            // write its pre-enrollment answer back afterwards
+            let cache = Arc::new(SetupProbeCache::new());
+            let c = cache.clone();
+            let inflight = tokio::spawn(async move {
+                c.get_or_probe("trs.ztlp", Instant::now(), || {
+                    std::thread::sleep(Duration::from_millis(200));
+                    probes(8) // "old" answer
+                })
+                .await
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cache.invalidate().await;
+            inflight.await.unwrap();
+            // the next poll must probe again, not get the stale answer
+            let runs = Arc::new(AtomicUsize::new(0));
+            let r = runs.clone();
+            let got = cache
+                .get_or_probe("trs.ztlp", Instant::now(), move || {
+                    r.fetch_add(1, Ordering::SeqCst);
+                    probes(9)
+                })
+                .await;
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "stale result must not have been cached"
+            );
+            assert_eq!(got, probes(9));
+        }
+
+        #[test]
+        fn ttl_is_short_enough_that_a_setup_step_is_seen_promptly() {
+            // the desktop polls every 2 s; the TTL must keep the answer
+            // fresh enough that a user never waits long after a setup step,
+            // and long enough that polls do not re-spawn processes
+            assert!(SETUP_PROBE_TTL >= Duration::from_secs(2));
+            assert!(SETUP_PROBE_TTL <= Duration::from_secs(10));
+        }
     }
 }

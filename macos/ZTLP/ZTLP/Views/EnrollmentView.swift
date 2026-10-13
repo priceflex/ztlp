@@ -113,13 +113,13 @@ struct EnrollmentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 tokenRow(label: "Zone", value: tokenInfo.zone, systemImage: "globe")
                 tokenRow(label: "Name Service", value: tokenInfo.nsAddress, systemImage: "server.rack")
-                if !tokenInfo.relayAddresses.isEmpty {
-                    tokenRow(
-                        label: "Relays",
-                        value: tokenInfo.relayAddresses.joined(separator: ", "),
-                        systemImage: "antenna.radiowaves.left.and.right"
-                    )
-                }
+                tokenRow(
+                    label: "Relay",
+                    value: tokenInfo.relayAddresses.isEmpty
+                        ? "None in this token"
+                        : tokenInfo.relayAddresses.joined(separator: ", "),
+                    systemImage: "antenna.radiowaves.left.and.right"
+                )
                 if let gateway = tokenInfo.gatewayAddress {
                     tokenRow(label: "Gateway", value: gateway, systemImage: "door.left.hand.open")
                 }
@@ -129,18 +129,37 @@ struct EnrollmentView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             .frame(maxWidth: 450)
 
-            // Task 6a / plan §4a option B: relay CLIENT_ROUTE HMAC secret.
-            // Only needed against a relay running ZTLP_RELAY_HMAC_MODE=prod
-            // — optional, so leave it blank if your admin didn't give you one.
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Relay secret (optional, from your admin)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                SecureField("Only needed for some networks", text: $viewModel.relaySecret)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.callout.monospaced())
+            // Relay: comes from the token. Show it; offer manual entry ONLY
+            // when the token has none (old or hand-made tokens).
+            if tokenInfo.relayAddresses.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Relay address (this token has none; ask your admin, e.g. 44.230.7.100:23095)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("host:port", text: $viewModel.relayOverride)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout.monospaced())
+                }
+                .frame(maxWidth: 450)
             }
-            .frame(maxWidth: 450)
+
+            // Relay secret: ZT-01 tokens carry it. Only ask when missing.
+            if tokenInfo.hasRelaySecret {
+                Label("Relay secret included in this token", systemImage: "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(Color.ztlpGreen)
+                    .frame(maxWidth: 450, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Relay secret (this token has none; only needed if your admin gave you one)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    SecureField("Leave blank if you don't have one", text: $viewModel.relaySecret)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.callout.monospaced())
+                }
+                .frame(maxWidth: 450)
+            }
 
             Spacer()
 

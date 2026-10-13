@@ -410,3 +410,87 @@ final class FreezeFixTests: XCTestCase {
         XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: Date(timeIntervalSince1970: 2_000), now: now))
     }
 }
+
+// MARK: - 2026-10-13 field fixes (enrollment relay, binary token parse)
+
+@MainActor
+final class EnrollmentFieldFixTests: XCTestCase {
+
+    /// Binary token exactly as `ztlp admin enroll --relay ... --relay-secret-file ...`
+    /// writes it: version, flags, zone, ns, relays, [gateway], [callback],
+    /// [relay secret], max_uses, expires, nonce, mac.
+    private func binaryToken(relays: [String], gateway: String? = nil, callback: String? = nil,
+                             relaySecret: String? = nil, expiresIn: TimeInterval = 3600) -> String {
+        var d = Data([0x01])
+        var flags: UInt8 = 0
+        if gateway != nil { flags |= 0x01 }
+        if callback != nil { flags |= 0x02 }
+        if relaySecret != nil { flags |= 0x08 }
+        d.append(flags)
+        func lp(_ s: String) {
+            let b = Data(s.utf8)
+            d.append(UInt8(b.count >> 8)); d.append(UInt8(b.count % 256)); d.append(b)
+        }
+        lp("trs.ztlp"); lp("44.227.148.151:23096")
+        d.append(UInt8(relays.count)); relays.forEach(lp)
+        if let g = gateway { lp(g) }
+        if let c = callback { lp(c) }
+        if let r = relaySecret { lp(r) }
+        d.append(contentsOf: [0x00, 0x01])                       // max_uses = 1
+        let exp = UInt64(Date().addingTimeInterval(expiresIn).timeIntervalSince1970)
+        for i in (0..<8).reversed() { d.append(UInt8((exp >> (UInt64(i) * 8)) % 256)) }
+        d.append(Data(repeating: 0xAB, count: 16))               // nonce
+        d.append(Data(repeating: 0xCD, count: 32))               // mac (NS verifies)
+        let b64 = d.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "ztlp://enroll/" + b64
+    }
+
+    private func parsed(_ uri: String) -> EnrollmentTokenInfo? {
+        let vm = EnrollmentViewModel(configuration: ZTLPConfiguration(suiteName: "ztlp.tests.\(UUID().uuidString)"))
+        vm.handleManualEntry(uri)
+        if case .tokenParsed(let info) = vm.state { return info }
+        return nil
+    }
+
+    func testProdTokenWithRelayAndSecretParses() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["44.230.7.100:23095"], relaySecret: "abcdef0123")))
+        XCTAssertEqual(info.zone, "trs.ztlp")
+        XCTAssertEqual(info.nsAddress, "44.227.148.151:23096")
+        XCTAssertEqual(info.relayAddresses, ["44.230.7.100:23095"])
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertFalse(info.isExpired, "expiry must be read at the right offset after the secret")
+    }
+
+    func testCallbackAndSecretDoNotShiftExpiry() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], gateway: "5.6.7.8:23097",
+                                                    callback: "https://ztlp.net/cb", relaySecret: "s3cret")))
+        XCTAssertEqual(info.gatewayAddress, "5.6.7.8:23097")
+        XCTAssertEqual(info.callbackURL, "https://ztlp.net/cb")
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertFalse(info.isExpired)
+        XCTAssertEqual(info.maxUses, 1)
+    }
+
+    func testTokenWithoutRelayParsesAndShowsNoRelay() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: [])))
+        XCTAssertTrue(info.relayAddresses.isEmpty)
+        XCTAssertFalse(info.hasRelaySecret)
+    }
+
+    func testRelayOverrideOnlySentWhenTokenHasNone() throws {
+        let withRelay = try XCTUnwrap(parsed(binaryToken(relays: ["44.230.7.100:23095"])))
+        let noRelay = try XCTUnwrap(parsed(binaryToken(relays: [])))
+        XCTAssertNil(EnrollmentViewModel.relayOverrideToSend(token: withRelay, typed: "9.9.9.9:23095"))
+        XCTAssertNil(EnrollmentViewModel.relayOverrideToSend(token: noRelay, typed: "   "))
+        XCTAssertEqual(EnrollmentViewModel.relayOverrideToSend(token: noRelay, typed: " 9.9.9.9:23095 "), "9.9.9.9:23095")
+    }
+
+    func testLoginItemsInstructionsNameTheSwitch() {
+        let s = TunnelViewModel.loginItemsInstructions
+        XCTAssertTrue(s.contains("Allow in the Background"))
+        XCTAssertTrue(s.contains("ZTLP"))
+        XCTAssertTrue(s.lowercased().contains("switch on"))
+    }
+}

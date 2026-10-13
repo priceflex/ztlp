@@ -54,7 +54,8 @@ struct MainWindow: View {
                 SettingsView(
                     viewModel: settingsViewModel,
                     enrollmentViewModel: enrollmentViewModel,
-                    configuration: configuration
+                    configuration: configuration,
+                    tunnelVM: tunnelViewModel
                 )
             }
             .frame(minWidth: 520, minHeight: 480)

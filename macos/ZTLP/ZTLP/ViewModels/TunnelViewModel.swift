@@ -30,6 +30,7 @@ struct DaemonSnapshot: Equatable {
     var version: String = ""
     var dnsListen: String = ""
     var nsServer: String = ""
+    var relay: String = ""
     var vipAllocated: Int = 0
     var uptimeSecs: Int = 0
     var zone: String = ""
@@ -311,15 +312,27 @@ final class TunnelViewModel: ObservableObject {
     /// Row 1 action: install (SMAppService register) the root service.
     /// There is no "connect" — once the service is Running, DNS connects
     /// on demand when the user opens a zone hostname.
+    ///
+    /// Field fixes 2026-10-13 (Steven, fresh Mac):
+    ///  - "Install does nothing": the old guard silently returned while a
+    ///    launch-time auto-start was still waiting (up to 30 s). Now the
+    ///    button shows `installInFlight` progress and a second click is a
+    ///    visible no-op, not a silent one.
+    ///  - "Had to uninstall + reinstall": a stale SMAppService/BTM entry
+    ///    (previous build or an approval granted after register) reports
+    ///    .enabled but launchd never spawns the new binary. If the daemon
+    ///    does not answer within `staleRegistrationTimeout`, we unregister +
+    ///    register ONCE automatically — exactly what fixed it by hand.
     func installService() {
-        guard !transitionInFlight else { return }
+        guard !installInFlight else { return }
         lastError = nil
+        installInFlight = true
         transitionInFlight = true
         status = .connecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
         Task {
-            defer { transitionInFlight = false }
+            defer { transitionInFlight = false; installInFlight = false }
 
             if await Self.daemonReachable() {
                 await pollOnceUnlocked()
@@ -329,49 +342,78 @@ final class TunnelViewModel: ObservableObject {
             await installer.registerAsync()
             serviceState = installer.state
 
-            switch installer.state {
-            case .requiresApproval:
-                // macOS wants a human click in System Settings — the one
-                // system prompt Steven accepted (UAC equivalent).
-                installer.openLoginItemsSettings()
-                status = .disconnected
-                lastError = "Approve “ZTLP” under System Settings › General › Login Items & Extensions. This page updates by itself."
+            if await handleNonRunningState() { return }
+
+            // Registered and approved. A fresh daemon answers in ~1 s.
+            if await Self.waitForDaemonWithBackoff(timeout: Self.staleRegistrationTimeout) {
+                await pollOnceUnlocked()
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
                 return
-            case .failed(let msg):
-                status = .disconnected
-                lastError = "Could not install the ZTLP service: \(msg)"
-                NSSound.beep()
-                return
-            case .notFound:
-                status = .disconnected
-                lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
-                NSSound.beep()
-                return
-            case .notRegistered:
-                if let err = installer.lastError {
-                    status = .disconnected
-                    lastError = "Could not install the ZTLP service: \(err)"
-                    NSSound.beep()
-                    return
-                }
-            case .running:
-                break
             }
 
-            // B4(c): retry with backoff instead of one 15s window. A fresh
-            // daemon now comes up in unenrolled standby within ~1s, but a
-            // slow first launchd spawn (notarization check, first run) can
-            // take longer.
+            // Stale registration: re-register once (the manual fix).
+            await installer.unregisterAsync()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await installer.registerAsync()
+            serviceState = installer.state
+            if await handleNonRunningState() { return }
+
             if await Self.waitForDaemonWithBackoff(timeout: Self.readyTimeout) {
                 await pollOnceUnlocked()
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
             } else {
                 status = .disconnected
-                lastError = "The ZTLP service was installed but did not answer within \(Int(Self.readyTimeout))s. It may still be starting — this page keeps checking."
+                lastError = "The ZTLP service is installed but is not answering. Open Settings › Service and press Uninstall Service, then Install again. If that fails, restart the Mac."
                 NSSound.beep()
             }
         }
     }
+
+    /// Handles every installer state except a clean `.running`. Returns true
+    /// when installService should stop here.
+    private func handleNonRunningState() async -> Bool {
+        switch installer.state {
+        case .requiresApproval:
+            // macOS wants a human click in System Settings. Open it and tell
+            // the user EXACTLY which switch; the poll flips the row when done.
+            installer.openLoginItemsSettings()
+            status = .disconnected
+            lastError = Self.loginItemsInstructions
+            return true
+        case .failed(let msg):
+            status = .disconnected
+            lastError = "Could not install the ZTLP service: \(msg)"
+            NSSound.beep()
+            return true
+        case .notFound:
+            status = .disconnected
+            lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
+            NSSound.beep()
+            return true
+        case .notRegistered:
+            status = .disconnected
+            lastError = "Could not install the ZTLP service: \(installer.lastError ?? "macOS did not register it")"
+            NSSound.beep()
+            return true
+        case .running:
+            return false
+        }
+    }
+
+    /// Shown on Home and in Settings whenever macOS is waiting for approval.
+    nonisolated static let loginItemsInstructions =
+        "macOS needs your OK to run ZTLP in the background. In the System Settings window that just opened (General › Login Items & Extensions), find ZTLP under “Allow in the Background” and turn its switch ON. Enter your Mac password if asked, then come back here. This page updates by itself."
+
+    /// How long a just-registered daemon may stay silent before we treat the
+    /// registration as stale and re-register once.
+    static let staleRegistrationTimeout: TimeInterval = 10
+
+    /// Drives the Install button's spinner.
+    @Published private(set) var installInFlight = false
+
+    /// Re-entered when the user comes back from System Settings (approval
+    /// granted): finish the install without another click.
+    private var wasAwaitingApproval = false
 
     /// Backwards-compatible name used by older callers.
     func connect() { installService() }
@@ -546,6 +588,20 @@ final class TunnelViewModel: ObservableObject {
         installer.refreshState()
         serviceState = installer.state
 
+        // Approval just granted in System Settings: finish the install for
+        // the user (wait for the daemon, re-register once if stale).
+        if case .requiresApproval = installer.state {
+            wasAwaitingApproval = true
+            if lastError == nil { lastError = Self.loginItemsInstructions }
+        } else if wasAwaitingApproval, case .running = installer.state {
+            wasAwaitingApproval = false
+            if lastError == Self.loginItemsInstructions { lastError = nil }
+            if !installInFlight, await !Self.daemonReachable() {
+                installService()
+                return
+            }
+        }
+
         if await Self.daemonReachable() {
             missedPolls = 0
             daemonIsReachable = true
@@ -589,6 +645,7 @@ final class TunnelViewModel: ObservableObject {
             snap.version = o["version"]?.stringValue ?? snap.version
             snap.dnsListen = o["dns_listen"]?.stringValue ?? snap.dnsListen
             snap.nsServer = o["ns_server"]?.stringValue ?? snap.nsServer
+            snap.relay = o["relay"]?.stringValue ?? snap.relay
             snap.vipAllocated = o["vip_allocated"]?.intValue ?? snap.vipAllocated
             snap.uptimeSecs = o["uptime_secs"]?.intValue ?? snap.uptimeSecs
         }

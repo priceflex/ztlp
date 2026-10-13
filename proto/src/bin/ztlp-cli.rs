@@ -719,6 +719,11 @@ enum Commands {
         /// Read the relay secret from a file instead (contents trimmed).
         #[arg(long)]
         relay_secret_file: Option<PathBuf>,
+
+        /// Relay address (host:port) to use when the enrollment token and the
+        /// NS carry none. Normally not needed: the token sets it.
+        #[arg(long)]
+        relay: Option<String>,
     },
 
     /// Admin operations — manage zones and enrollment tokens
@@ -9154,7 +9159,9 @@ async fn setup_join(
                     eprintln!("  {} Enrolled as {}", c_green("✓"), c_bold(&full_name));
 
                     // Parse config from response
-                    let (relay_addrs, gateway_addrs) = parse_enroll_config(config)?;
+                    let (ns_relays, gateway_addrs) = parse_enroll_config(config)?;
+                    let relay_addrs =
+                        effective_relays(opts.relay.as_deref(), &ns_relays, &token.relay_addrs);
 
                     // Write config file
                     write_config_file(
@@ -9849,6 +9856,8 @@ struct SetupOpts {
     /// Relay CLIENT_ROUTE HMAC secret to persist in agent.toml (as given —
     /// 64-hex, `base64:`, or raw; the agent decodes it at load time).
     relay_secret: Option<String>,
+    /// `--relay` override (empty token/NS relays).
+    relay: Option<String>,
 }
 
 /// Resolve `--relay-secret` / `--relay-secret-file` for `ztlp setup`.
@@ -9865,6 +9874,21 @@ fn resolve_setup_relay_secret(
         return Ok(Some(c.trim().to_string()));
     }
     Ok(None)
+}
+
+/// Relay list to persist after enrollment. Precedence: explicit `--relay`,
+/// then the NS enroll response, then the token's own relays. The last step
+/// is the fix for the Mac field report (2026-10-13): when the NS answered
+/// with no relays, agent.toml got `relays = []` even though the token
+/// carried one.
+fn effective_relays(override_relay: Option<&str>, from_ns: &[String], from_token: &[String]) -> Vec<String> {
+    if let Some(r) = override_relay.map(str::trim).filter(|s| !s.is_empty()) {
+        return vec![r.to_string()];
+    }
+    if !from_ns.is_empty() {
+        return from_ns.to_vec();
+    }
+    from_token.to_vec()
 }
 
 /// Which relay secret `ztlp setup` should persist, and whether it came from
@@ -14364,12 +14388,14 @@ async fn main() {
             force,
             relay_secret,
             relay_secret_file,
+            relay,
         } => match resolve_setup_relay_secret(relay_secret, relay_secret_file) {
             Err(e) => Err(e),
             Ok(relay_secret) => {
                 let opts = SetupOpts {
                     force: *force,
                     relay_secret,
+                    relay: relay.clone(),
                 };
                 cmd_setup(token, name, *r#type, owner, *bind_user, *yes, &opts).await
             }
@@ -15516,6 +15542,23 @@ mod tests {
             "ca-init must enable tls in the agent.toml next to its ca dir"
         );
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn effective_relays_prefers_override_then_ns_then_token() {
+        let ns = vec!["10.0.0.1:23095".to_string()];
+        let tok = vec!["44.230.7.100:23095".to_string()];
+        // explicit --relay wins over everything
+        assert_eq!(effective_relays(Some(" 1.2.3.4:23095 "), &ns, &tok), vec!["1.2.3.4:23095".to_string()]);
+        // NS enroll response next
+        assert_eq!(effective_relays(None, &ns, &tok), ns);
+        // NS returned none: the token's relay must NOT be dropped (Mac field
+        // report 2026-10-13: agent.toml ended up with relays = [])
+        assert_eq!(effective_relays(None, &[], &tok), tok);
+        // blank override is ignored
+        assert_eq!(effective_relays(Some("  "), &[], &tok), tok);
+        // nothing anywhere
+        assert!(effective_relays(None, &[], &[]).is_empty());
     }
 
     #[test]

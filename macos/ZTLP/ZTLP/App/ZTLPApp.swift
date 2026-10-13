@@ -63,7 +63,8 @@ struct ZTLPApp: App {
             SettingsView(
                 viewModel: settingsVM,
                 enrollmentViewModel: enrollmentVM,
-                configuration: configuration
+                configuration: configuration,
+                tunnelVM: tunnelVM
             )
         }
     }

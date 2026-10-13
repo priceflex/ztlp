@@ -151,13 +151,24 @@ struct HomeView: View {
         if case .needsAction(_, let action) = state {
             switch action {
             case .installService:
-                Button("Install") { viewModel.installService() }
+                Button {
+                    viewModel.installService()
+                } label: {
+                    if viewModel.installInFlight {
+                        HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Installing…") }
+                    } else {
+                        Text("Install")
+                    }
+                }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.ztlpBlue)
+                    .disabled(viewModel.installInFlight)
                     .accessibilityIdentifier("home.action.install")
             case .openLoginItems:
                 Button("Open Login Items") { AgentServiceInstaller.shared.openLoginItemsSettings() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color.ztlpBlue)
+                    .help(TunnelViewModel.loginItemsInstructions)
                     .accessibilityIdentifier("home.action.login-items")
             case .enroll:
                 Button("Enroll") { showEnrollment = true }

@@ -83,12 +83,14 @@ enum AgentControlClient {
         name: String? = nil,
         enrollmentURI: String? = nil,
         relaySecret: String? = nil,
+        relay: String? = nil,
         timeout: TimeInterval = 30
     ) async throws -> AgentControlResponse {
         var payload: [String: Any] = ["cmd": cmd]
         if let name { payload["name"] = name }
         if let enrollmentURI { payload["enrollment_uri"] = enrollmentURI }
         if let relaySecret { payload["relay_secret"] = relaySecret }
+        if let relay { payload["relay"] = relay }
         if let token = readDaemonToken() { payload["token"] = token }
 
         let requestData = try JSONSerialization.data(withJSONObject: payload)

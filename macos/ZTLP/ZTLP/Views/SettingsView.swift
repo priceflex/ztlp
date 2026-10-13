@@ -13,6 +13,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject var enrollmentViewModel: EnrollmentViewModel
     @ObservedObject var configuration: ZTLPConfiguration
+    @ObservedObject var tunnelVM: TunnelViewModel
 
     // Task 5.5: root LaunchDaemon control (SMAppService). Shared singleton —
     // observing it here keeps the row in sync with anything else in the app
@@ -68,24 +69,29 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         Section("General") {
-            // The one thing you usually need to change to connect: which ZTLP
-            // service to reach. This is the NS service name (e.g. "beta" or
-            // "beta.techrockstars.ztlp"). Mirrors the Windows client's
-            // "connect to a service by name" model.
-            HStack {
-                Label("Service", systemImage: "network")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                TextField("beta", text: $configuration.serviceName)
-                    .multilineTextAlignment(.trailing)
-                    .font(.callout.monospaced())
-                    .textFieldStyle(.plain)
-                    .frame(maxWidth: 250)
-            }
+            // 2026-10-13: the old editable "Service: beta" field was a
+            // leftover from the connect-to-one-service VPN model. With the
+            // .ztlp resolver every name works, so General now SHOWS what this
+            // Mac is enrolled into (read-only, from the daemon) instead.
+            enrollmentInfoRow("Zone", value: tunnelVM.daemon?.zone, systemImage: "globe")
+            enrollmentInfoRow("Name server", value: tunnelVM.daemon?.nsServer, systemImage: "server.rack")
+            enrollmentInfoRow("Relay", value: tunnelVM.daemon?.relay, systemImage: "antenna.radiowaves.left.and.right")
 
             Toggle(isOn: $configuration.autoConnect) {
-                Label("Connect on Launch", systemImage: "bolt.fill")
+                Label("Start service on launch", systemImage: "bolt.fill")
             }
+        }
+    }
+
+    private func enrollmentInfoRow(_ title: String, value: String?, systemImage: String) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text((value?.isEmpty == false) ? value! : "Not enrolled")
+                .font(.callout.monospaced())
+                .foregroundStyle((value?.isEmpty == false) ? .primary : .tertiary)
+                .textSelection(.enabled)
         }
     }
 
@@ -109,9 +115,10 @@ struct SettingsView: View {
 
             if case .requiresApproval = serviceInstaller.state {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("macOS needs your approval to run the background service.")
+                    Text(TunnelViewModel.loginItemsInstructions)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Button("Open Login Items & Extensions…") {
                         serviceInstaller.openLoginItemsSettings()
                     }

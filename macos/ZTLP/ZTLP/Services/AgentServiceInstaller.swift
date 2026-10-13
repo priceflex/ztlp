@@ -51,7 +51,7 @@ final class AgentServiceInstaller: ObservableObject {
     static let shared = AgentServiceInstaller()
 
     /// Must match Contents/Library/LaunchDaemons/<this>.plist exactly.
-    static let plistName = "org.ztlp.agent.plist"
+    nonisolated static let plistName = "org.ztlp.agent.plist"
 
     @Published private(set) var state: AgentServiceState = .notRegistered
     @Published private(set) var lastError: String?
@@ -112,5 +112,42 @@ final class AgentServiceInstaller: ObservableObject {
     /// has no programmatic "approve" — this is the documented Apple flow.
     func openLoginItemsSettings() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+
+    // MARK: - Off-main variants (v0.35.18 freeze fix)
+    //
+    // `SMAppService.register()` / `.unregister()` are synchronous XPC calls
+    // into launchd/BTM. The first register can take seconds (background-item
+    // approval, notarization check), and they ran on the main actor from
+    // button handlers and installService(), freezing the window. These hop
+    // the blocking call to a global queue and publish state back on main.
+
+    @Published private(set) var operationInFlight = false
+
+    nonisolated private static func runOffMain(_ body: @escaping @Sendable () throws -> Void) async -> String? {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try body(); cont.resume(returning: nil) }
+                catch { cont.resume(returning: error.localizedDescription) }
+            }
+        }
+    }
+
+    func registerAsync() async {
+        guard !operationInFlight else { return }
+        operationInFlight = true
+        defer { operationInFlight = false }
+        let plist = Self.plistName
+        lastError = await Self.runOffMain { try SMAppService.daemon(plistName: plist).register() }
+        refreshState()
+    }
+
+    func unregisterAsync() async {
+        guard !operationInFlight else { return }
+        operationInFlight = true
+        defer { operationInFlight = false }
+        let plist = Self.plistName
+        lastError = await Self.runOffMain { try SMAppService.daemon(plistName: plist).unregister() }
+        refreshState()
     }
 }

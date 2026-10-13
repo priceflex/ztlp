@@ -130,16 +130,21 @@ struct SettingsView: View {
                 switch serviceInstaller.state {
                 case .notRegistered, .notFound, .failed:
                     Button("Install Service") {
-                        serviceInstaller.register()
+                        Task { await serviceInstaller.registerAsync() }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color.ztlpBlue)
                     .controlSize(.small)
+                    .disabled(serviceInstaller.operationInFlight)
                 case .requiresApproval, .running:
                     Button("Uninstall Service", role: .destructive) {
-                        serviceInstaller.unregister()
+                        Task { await serviceInstaller.unregisterAsync() }
                     }
                     .controlSize(.small)
+                    .disabled(serviceInstaller.operationInFlight)
+                }
+                if serviceInstaller.operationInFlight {
+                    ProgressView().controlSize(.small)
                 }
 
                 Spacer()

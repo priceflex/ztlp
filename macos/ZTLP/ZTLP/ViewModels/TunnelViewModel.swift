@@ -326,7 +326,7 @@ final class TunnelViewModel: ObservableObject {
                 return
             }
 
-            installer.register()
+            await installer.registerAsync()
             serviceState = installer.state
 
             switch installer.state {
@@ -389,7 +389,7 @@ final class TunnelViewModel: ObservableObject {
         Task {
             defer { transitionInFlight = false }
 
-            installer.unregister()
+            await installer.unregisterAsync()
             serviceState = installer.state
             if case .failed(let msg) = installer.state {
                 lastError = "Could not stop the ZTLP service: \(msg)"
@@ -430,17 +430,16 @@ final class TunnelViewModel: ObservableObject {
         guard !trustInFlight, let pem = daemon?.caRootPemPath, !pem.isEmpty else { return }
         trustInFlight = true
         lastError = nil
-        Task.detached { [weak self] in
-            let result = Self.runTrustCommand(pemPath: pem)
-            await MainActor.run {
-                guard let self else { return }
-                self.trustInFlight = false
-                if let err = result {
-                    self.lastError = err
-                    NSSound.beep()
-                }
-                Task { await self.pollOnce() }
+        Task { [weak self] in
+            let result = await Self.runTrustCommand(pemPath: pem)
+            guard let self else { return }
+            self.trustInFlight = false
+            self.trustCache = nil   // re-evaluate on the next poll
+            if let err = result {
+                self.lastError = err
+                NSSound.beep()
             }
+            await self.pollOnce()
         }
     }
 
@@ -453,34 +452,59 @@ final class TunnelViewModel: ObservableObject {
         (NSHomeDirectory() as NSString).appendingPathComponent("Library/Keychains/login.keychain-db")
     }
 
-    /// Runs /usr/bin/security as the current user. nil on success.
-    nonisolated private static func runTrustCommand(pemPath: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = trustCommandArgs(pemPath: pemPath, loginKeychain: loginKeychainPath())
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = Pipe()
-        do { try p.run() } catch { return "Could not run the trust command: \(error.localizedDescription)" }
-        p.waitUntilExit()
-        if p.terminationStatus == 0 { return nil }
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return "Could not trust the ZTLP certificate (exit \(p.terminationStatus)): \(err)"
+    /// Runs /usr/bin/security as the current user, off the main thread.
+    /// nil on success. The trust write may show the login-keychain prompt,
+    /// so it gets a long watchdog (the user may be typing a password).
+    nonisolated private static func runTrustCommand(pemPath: String) async -> String? {
+        let r = await BackgroundProcess.run(
+            "/usr/bin/security",
+            trustCommandArgs(pemPath: pemPath, loginKeychain: loginKeychainPath()),
+            timeout: 120
+        )
+        if r.ok { return nil }
+        if r.timedOut { return "Trusting the ZTLP certificate timed out. Try again." }
+        if r.status == -1 { return "Could not run the trust command: \(r.stderr)" }
+        return "Could not trust the ZTLP certificate (exit \(r.status)): \(r.stderr)"
     }
 
     /// `security verify-cert -c <root.pem>` as the current user: succeeds
     /// only when the root is trusted in a domain this user's session sees
     /// (user, admin or system).
-    nonisolated static func rootIsTrustedForThisUser(pemPath: String) -> Bool {
+    ///
+    /// v0.35.18 freeze fix: this used to run `Process` + `waitUntilExit()`
+    /// synchronously from the @MainActor poll every 2 s, which beachballed
+    /// the menu bar. Now it runs off-main via BackgroundProcess and the
+    /// result is cached per PEM (path + mtime) for `trustCacheTTL`, the same
+    /// idea as the agent's 5 s setup_status probe cache (ZT-11). trustHTTPS()
+    /// clears the cache so the row flips right after the user grants trust.
+    nonisolated static func rootIsTrustedForThisUser(pemPath: String) async -> Bool {
         guard !pemPath.isEmpty, FileManager.default.fileExists(atPath: pemPath) else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["verify-cert", "-c", pemPath]
-        p.standardOutput = Pipe(); p.standardError = Pipe()
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
+        return await BackgroundProcess.run("/usr/bin/security", ["verify-cert", "-c", pemPath], timeout: 10).ok
+    }
+
+    struct TrustCacheEntry: Equatable {
+        let pemPath: String
+        let pemModified: Date?
+        let trusted: Bool
+        let checkedAt: Date
+    }
+    nonisolated static let trustCacheTTL: TimeInterval = 30
+    private var trustCache: TrustCacheEntry?
+
+    /// Pure, unit-tested: may a cached answer be reused?
+    nonisolated static func trustCacheIsFresh(_ entry: TrustCacheEntry?, pemPath: String, pemModified: Date?, now: Date) -> Bool {
+        guard let e = entry else { return false }
+        return e.pemPath == pemPath && e.pemModified == pemModified && now.timeIntervalSince(e.checkedAt) < trustCacheTTL
+    }
+
+    private func cachedRootTrust(pemPath: String) async -> Bool {
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: pemPath))?[.modificationDate] as? Date
+        if Self.trustCacheIsFresh(trustCache, pemPath: pemPath, pemModified: mtime, now: Date()), let c = trustCache {
+            return c.trusted
+        }
+        let trusted = await Self.rootIsTrustedForThisUser(pemPath: pemPath)
+        trustCache = TrustCacheEntry(pemPath: pemPath, pemModified: mtime, trusted: trusted, checkedAt: Date())
+        return trusted
     }
 
     /// Row 2 action is handled by EnrollmentView (sheet). After the sheet
@@ -579,7 +603,13 @@ final class TunnelViewModel: ObservableObject {
             // cannot see user-domain trust settings (probe 2026-09-20: the
             // user-domain write is the one that works without admin).
             let daemonView = o["ca_installed_system_trust"]?.boolValue ?? false
-            snap.caInstalled = daemonView || (snap.caInitialized && Self.rootIsTrustedForThisUser(pemPath: snap.caRootPemPath))
+            if daemonView {
+                snap.caInstalled = true
+            } else if snap.caInitialized {
+                snap.caInstalled = await cachedRootTrust(pemPath: snap.caRootPemPath)
+            } else {
+                snap.caInstalled = false
+            }
             snap.dnsConfigured = o["dns_configured"]?.boolValue ?? false
         }
 

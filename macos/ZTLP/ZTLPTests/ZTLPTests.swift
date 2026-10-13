@@ -222,9 +222,11 @@ final class ZTLPTests: XCTestCase {
         XCTAssertTrue(TunnelViewModel.loginKeychainPath().hasSuffix("/Library/Keychains/login.keychain-db"))
     }
 
-    func testRootTrustedCheckIsFalseForMissingFile() {
-        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: ""))
-        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: "/nonexistent/root.pem"))
+    func testRootTrustedCheckIsFalseForMissingFile() async {
+        let empty = await TunnelViewModel.rootIsTrustedForThisUser(pemPath: "")
+        let missing = await TunnelViewModel.rootIsTrustedForThisUser(pemPath: "/nonexistent/root.pem")
+        XCTAssertFalse(empty)
+        XCTAssertFalse(missing)
     }
 
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {
@@ -334,5 +336,77 @@ final class ZTLPTests: XCTestCase {
             tags: []
         )
         XCTAssertEqual(service.endpoint, "host.ztlp:443")
+    }
+}
+
+// MARK: - v0.35.18 UI-freeze fix (parity with Windows ZT-10/ZT-11)
+
+final class FreezeFixTests: XCTestCase {
+
+    /// The child process runs off the main thread and the awaiting task
+    /// gets its exit status + output.
+    func testBackgroundProcessReturnsStatusAndOutput() async {
+        let ok = await BackgroundProcess.run("/bin/echo", ["hello"], timeout: 5)
+        XCTAssertTrue(ok.ok)
+        XCTAssertEqual(ok.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "hello")
+
+        let bad = await BackgroundProcess.run("/usr/bin/false", [], timeout: 5)
+        XCTAssertFalse(bad.ok)
+        XCTAssertEqual(bad.status, 1)
+    }
+
+    /// A missing executable is an error result, never a crash or a hang.
+    func testBackgroundProcessMissingExecutable() async {
+        let r = await BackgroundProcess.run("/nonexistent/ztlp-no-such-tool", [], timeout: 5)
+        XCTAssertFalse(r.ok)
+        XCTAssertEqual(r.status, -1)
+    }
+
+    /// The watchdog kills a wedged child so a poll can never hang forever.
+    func testBackgroundProcessWatchdogKillsWedgedChild() async {
+        let start = Date()
+        let r = await BackgroundProcess.run("/bin/sleep", ["30"], timeout: 1)
+        XCTAssertTrue(r.timedOut)
+        XCTAssertFalse(r.ok)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    /// The core freeze guarantee: while a slow child runs, the main thread
+    /// keeps servicing work. Before the fix, the 2 s poll ran Process +
+    /// waitUntilExit() on the main actor and nothing else could run.
+    @MainActor
+    func testMainThreadStaysResponsiveDuringSlowChild() async {
+        let slow = Task { await BackgroundProcess.run("/bin/sleep", ["2"], timeout: 5) }
+        var ticks = 0
+        let start = Date()
+        while Date().timeIntervalSince(start) < 1.0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)   // yields the main actor
+            ticks += 1
+        }
+        XCTAssertGreaterThan(ticks, 10, "main actor was blocked while the child ran")
+        _ = await slow.value
+    }
+
+    /// Control-socket calls with no daemon listening fail fast and off-main.
+    @MainActor
+    func testControlClientFailsFastWithNoDaemon() async {
+        let start = Date()
+        _ = try? await AgentControlClient.send(cmd: "status", timeout: 2)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
+
+    func testTrustCacheFreshness() {
+        let now = Date()
+        let mtime = Date(timeIntervalSince1970: 1_000)
+        let e = TunnelViewModel.TrustCacheEntry(pemPath: "/a.pem", pemModified: mtime, trusted: true, checkedAt: now)
+
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(nil, pemPath: "/a.pem", pemModified: mtime, now: now))
+        XCTAssertTrue(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: mtime, now: now.addingTimeInterval(5)))
+        // expired
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: mtime,
+                                                         now: now.addingTimeInterval(TunnelViewModel.trustCacheTTL + 1)))
+        // different PEM, or the CA was re-generated (mtime changed)
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/b.pem", pemModified: mtime, now: now))
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: Date(timeIntervalSince1970: 2_000), now: now))
     }
 }

@@ -92,7 +92,7 @@ final class SettingsViewModel: ObservableObject {
     /// /Library/Application Support/ZTLP (root-owned; see
     /// AgentServiceInstaller.unregister for why that stays a separate step).
     func factoryReset() async {
-        AgentServiceInstaller.shared.unregister()
+        await AgentServiceInstaller.shared.unregisterAsync()
         try? KeychainService.shared.deleteIdentity()
         if let path = defaultIdentityPath() {
             try? FileManager.default.removeItem(atPath: path)

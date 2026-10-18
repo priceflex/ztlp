@@ -728,7 +728,12 @@ pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, St
         args.push(secret.to_string());
     }
 
-    if let Some(relay) = cmd.relay.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(relay) = cmd
+        .relay
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         args.push("--relay".to_string());
         args.push(relay.to_string());
     }
@@ -1651,7 +1656,11 @@ mod tests {
         let mut c = cmd(Some("ztlp://enroll/abc"), None, None);
         c.relay = Some(" 44.230.7.100:23095 ".into());
         let plan = build_enroll_exec_plan(&c).unwrap();
-        let i = plan.args.iter().position(|a| a == "--relay").expect("--relay present");
+        let i = plan
+            .args
+            .iter()
+            .position(|a| a == "--relay")
+            .expect("--relay present");
         assert_eq!(plan.args[i + 1], "44.230.7.100:23095");
     }
 
@@ -1873,13 +1882,15 @@ mod tests {
         #[test]
         fn first_relay_from_array() {
             let cfg: AgentConfig =
-                toml::from_str("[tunnel]\nrelays = [\"44.230.7.100:23095\", \"1.2.3.4:23095\"]\n").unwrap();
+                toml::from_str("[tunnel]\nrelays = [\"44.230.7.100:23095\", \"1.2.3.4:23095\"]\n")
+                    .unwrap();
             assert_eq!(first_relay(&cfg), "44.230.7.100:23095");
         }
 
         #[test]
         fn first_relay_from_single_string() {
-            let cfg: AgentConfig = toml::from_str("[tunnel]\nrelay = \"44.230.7.100:23095\"\n").unwrap();
+            let cfg: AgentConfig =
+                toml::from_str("[tunnel]\nrelay = \"44.230.7.100:23095\"\n").unwrap();
             assert_eq!(first_relay(&cfg), "44.230.7.100:23095");
         }
 
@@ -1892,8 +1903,14 @@ mod tests {
         #[test]
         fn status_json_carries_relay_field() {
             let s = super::super::StatusInfo {
-                pid: 1, uptime_secs: 0, version: "x".into(), dns_listen: "".into(),
-                vip_allocated: 0, vip_capacity: 0, ns_server: "".into(), domain_mappings: 0,
+                pid: 1,
+                uptime_secs: 0,
+                version: "x".into(),
+                dns_listen: "".into(),
+                vip_allocated: 0,
+                vip_capacity: 0,
+                ns_server: "".into(),
+                domain_mappings: 0,
                 relay: "44.230.7.100:23095".into(),
             };
             let v = serde_json::to_value(s).unwrap();

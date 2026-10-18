@@ -9923,7 +9923,11 @@ fn resolve_setup_relay_secret(
 /// is the fix for the Mac field report (2026-10-13): when the NS answered
 /// with no relays, agent.toml got `relays = []` even though the token
 /// carried one.
-fn effective_relays(override_relay: Option<&str>, from_ns: &[String], from_token: &[String]) -> Vec<String> {
+fn effective_relays(
+    override_relay: Option<&str>,
+    from_ns: &[String],
+    from_token: &[String],
+) -> Vec<String> {
     if let Some(r) = override_relay.map(str::trim).filter(|s| !s.is_empty()) {
         return vec![r.to_string()];
     }
@@ -15591,7 +15595,10 @@ mod tests {
         let ns = vec!["10.0.0.1:23095".to_string()];
         let tok = vec!["44.230.7.100:23095".to_string()];
         // explicit --relay wins over everything
-        assert_eq!(effective_relays(Some(" 1.2.3.4:23095 "), &ns, &tok), vec!["1.2.3.4:23095".to_string()]);
+        assert_eq!(
+            effective_relays(Some(" 1.2.3.4:23095 "), &ns, &tok),
+            vec!["1.2.3.4:23095".to_string()]
+        );
         // NS enroll response next
         assert_eq!(effective_relays(None, &ns, &tok), ns);
         // NS returned none: the token's relay must NOT be dropped (Mac field

@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.35.19 — 2026-10-18
+
+Enrolled devices no longer drop out of the name server after 24 hours
+(ZT-12 in `docs/ZERO-TOUCH-ENROLLMENT.md`). Found live: an enrolled Mac lost
+its KEY record every day, so the gateway could not stamp a device name and an
+identity-gated app behind it showed "no registered device name".
+
+- **NS: enrolled devices live for a sliding year.** KEY records written by
+  the ENROLL path get `RecordDefaults.enrolled_device_ttl/0` (one year,
+  override with `ZTLP_NS_ENROLLED_DEVICE_TTL` in seconds). Gateway
+  self-registration and SVC records keep their 24 h default.
+- **NS: enrolled devices can check in.** The ENROLL request may carry the
+  device's Ed25519 signing key (`<<32::16, key::32>>` after the address); it
+  is stored as `signing_public_key`. A signed KEY registration by exactly that
+  key, with `public_key`, `node_id` and `signing_public_key` unchanged, is
+  accepted and restarts the year. A brand-new name never gets the one-year
+  TTL this way.
+- **Agent (macOS, Windows, Linux): hourly check-in.** The daemon now runs the
+  check-in loop (`[renewal] check_interval`, default `1h`, minimum 60 s):
+  look up its own record by tunnel key, then re-register it. A device that
+  is on stays registered indefinitely; one that is off for more than a year
+  has expired and must be re-enrolled. The log says which case applies.
+- **CLI: `ztlp setup` sends the signing key.** Against an NS older than
+  v0.35.19 (which rejects the longer request before checking the token) it
+  retries once with the legacy request, so enrolling still works there.
+
+Upgrade note: devices enrolled before v0.35.19 have no signing key on record
+and cannot renew; re-enroll them once after the NS is on v0.35.19. Desktop
+bumped to 1.2.5.
+
 ## v0.35.18 — 2026-10-11
 
 Desktop app freeze (ZT-10, ZT-11 in `docs/ZERO-TOUCH-ENROLLMENT.md`). Found

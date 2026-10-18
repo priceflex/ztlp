@@ -597,12 +597,21 @@ defmodule ZtlpNs.Server do
       # We store the registrant's pubkey as metadata in the data map.
       server_priv = get_registration_key()
 
+      # An enrolled device checking in (signed by its enrolled signing key,
+      # tunnel key unchanged) gets the sliding one-year TTL; everything else
+      # (gateway self-registration, new names) keeps the per-type default.
+      # Decided BEFORE the insert, while the existing record is still there.
+      ttl =
+        if RegistrationAuth.enrolled_refresh?(pubkey, name, type, data),
+          do: ZtlpNs.RecordDefaults.enrolled_device_ttl(),
+          else: default_ttl(type)
+
       record = %Record{
         name: name,
         type: type,
         data: Map.put(data, "registered_by", Base.encode16(pubkey, case: :lower)),
         created_at: System.system_time(:second),
-        ttl: default_ttl(type),
+        ttl: ttl,
         serial: System.system_time(:second),
         signature: nil,
         signer_public_key: nil

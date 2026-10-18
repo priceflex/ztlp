@@ -42,6 +42,7 @@ pub mod local_tls;
 // daemon.rs behind cfg!(target_os = "macos").
 #[cfg(unix)]
 pub mod macos_daemon;
+pub mod ns_checkin;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;

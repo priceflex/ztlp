@@ -26,7 +26,15 @@ defmodule ZtlpNs.Enrollment do
         pubkey::binary-size(32),
         node_id::binary-size(16),
         name_len::16, name::binary-size(name_len),
-        addr_len::16, addr::binary-size(addr_len)>>
+        addr_len::16, addr::binary-size(addr_len),
+        # optional (v0.35.19+): the device's Ed25519 signing pubkey
+        sk_len::16, signing_pubkey::binary-size(sk_len)>>
+
+  The optional trailing signing key (exactly 32 bytes) is stored in the KEY
+  record as `signing_public_key`. It is what lets the device's agent check
+  in later (a signed refresh, see `ZtlpNs.RegistrationAuth`), which restarts
+  the record's one-year lifetime (`ZtlpNs.RecordDefaults.enrolled_device_ttl/0`).
+  Enrollments without it still get the one-year TTL but cannot be refreshed.
 
   ### ENROLL response (0x08): NS → client
 
@@ -78,8 +86,25 @@ defmodule ZtlpNs.Enrollment do
   def process_enroll(
         <<token_len::16, token_bin::binary-size(token_len), pubkey::binary-size(32),
           node_id::binary-size(16), name_len::16, name::binary-size(name_len), addr_len::16,
+          addr::binary-size(addr_len), 32::16, signing_pubkey::binary-size(32)>>
+      ) do
+    do_process_enroll(token_bin, pubkey, node_id, name, addr, signing_pubkey)
+  end
+
+  def process_enroll(
+        <<token_len::16, token_bin::binary-size(token_len), pubkey::binary-size(32),
+          node_id::binary-size(16), name_len::16, name::binary-size(name_len), addr_len::16,
           addr::binary-size(addr_len)>>
       ) do
+    do_process_enroll(token_bin, pubkey, node_id, name, addr, nil)
+  end
+
+  # Catch-all for malformed requests (including a signing-key extension that
+  # is not exactly 32 bytes). Parsing fails before the token is validated, so
+  # a malformed request never consumes a single-use token.
+  def process_enroll(_), do: <<0x08, 0x06>>
+
+  defp do_process_enroll(token_bin, pubkey, node_id, name, addr, signing_pubkey) do
     # Get zone enrollment secret
     case get_zone_secret() do
       nil ->
@@ -89,8 +114,8 @@ defmodule ZtlpNs.Enrollment do
       secret ->
         case validate_token(token_bin, secret) do
           {:ok, token} ->
-            addr_str = if addr_len > 0, do: addr, else: nil
-            register_device(token, pubkey, node_id, name, addr_str)
+            addr_str = if byte_size(addr) > 0, do: addr, else: nil
+            register_device(token, pubkey, node_id, name, addr_str, signing_pubkey)
 
           {:error, :expired} ->
             <<0x08, 0x01>>
@@ -106,9 +131,6 @@ defmodule ZtlpNs.Enrollment do
         end
     end
   end
-
-  # Catch-all for malformed requests
-  def process_enroll(_), do: <<0x08, 0x06>>
 
   @doc "Set the zone enrollment secret (32 bytes)."
   @spec set_zone_secret(binary()) :: :ok
@@ -321,7 +343,7 @@ defmodule ZtlpNs.Enrollment do
 
   # ── Device Registration ────────────────────────────────────────────
 
-  defp register_device(token, pubkey, node_id, name, addr_str) do
+  defp register_device(token, pubkey, node_id, name, addr_str, signing_pubkey) do
     # Verify name is within the token's zone
     zone = token.zone
 
@@ -338,40 +360,50 @@ defmodule ZtlpNs.Enrollment do
 
           if existing_pubkey == pubkey_hex do
             # Same device re-enrolling — update
-            do_register(token, pubkey, node_id, name, addr_str)
+            do_register(token, pubkey, node_id, name, addr_str, signing_pubkey)
           else
             # Different device — name taken
             <<0x08, 0x05>>
           end
 
         :not_found ->
-          do_register(token, pubkey, node_id, name, addr_str)
+          do_register(token, pubkey, node_id, name, addr_str, signing_pubkey)
 
         {:error, :revoked} ->
           # Name was revoked — allow re-registration
-          do_register(token, pubkey, node_id, name, addr_str)
+          do_register(token, pubkey, node_id, name, addr_str, signing_pubkey)
       end
     end
   end
 
-  defp do_register(token, pubkey, node_id, name, addr_str) do
+  defp do_register(token, pubkey, node_id, name, addr_str, signing_pubkey) do
     pubkey_hex = Base.encode16(pubkey, case: :lower)
     node_id_hex = Base.encode16(node_id, case: :lower)
 
     # Get or generate the NS signing key
     priv = get_registration_key()
 
-    # Create KEY record
+    key_data = %{
+      "algorithm" => "Ed25519",
+      "node_id" => node_id_hex,
+      "public_key" => pubkey_hex
+    }
+
+    # v0.35.19: remember the device's Ed25519 signing key so its agent's
+    # hourly check-in (a signed refresh) can be authorized later.
+    key_data =
+      if signing_pubkey,
+        do: Map.put(key_data, "signing_public_key", Base.encode16(signing_pubkey, case: :lower)),
+        else: key_data
+
+    # Create KEY record. Enrolled devices live for a sliding year
+    # (RecordDefaults.enrolled_device_ttl/0); every check-in restarts it.
     key_record = %Record{
       name: name,
       type: :key,
-      data: %{
-        "algorithm" => "Ed25519",
-        "node_id" => node_id_hex,
-        "public_key" => pubkey_hex
-      },
+      data: key_data,
       created_at: System.system_time(:second),
-      ttl: ZtlpNs.RecordDefaults.default_ttl(:key),
+      ttl: ZtlpNs.RecordDefaults.enrolled_device_ttl(),
       serial: System.system_time(:second),
       signature: nil,
       signer_public_key: nil

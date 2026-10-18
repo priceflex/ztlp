@@ -628,6 +628,23 @@ pub async fn run_daemon(
         identity.node_id
     );
 
+    // v0.35.19: hourly NS check-in. Keeps this enrolled device's KEY record
+    // alive for a sliding year (each accepted check-in restarts the window),
+    // so the gateway can always resolve its device name. Same code on
+    // macOS, Windows and Linux (all three daemons run through here).
+    if let Some((ns_servers, interval)) = super::ns_checkin::checkin_plan(config) {
+        info!(
+            "NS check-in every {:?} via {}",
+            interval,
+            ns_servers.join(", ")
+        );
+        tokio::spawn(super::ns_checkin::run_checkin_loop(
+            std::sync::Arc::new(identity.clone()),
+            ns_servers,
+            interval,
+        ));
+    }
+
     // Initialize VIP pool
     let vip_pool = VipPool::new(&config.dns.vip_range)
         .map_err(|e| format!("invalid VIP range '{}': {}", config.dns.vip_range, e))?;

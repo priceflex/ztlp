@@ -31,4 +31,29 @@ defmodule ZtlpNs.RecordDefaults do
   def default_ttl(:user), do: 86_400      # 24 hours
   def default_ttl(:group), do: 86_400     # 24 hours
   def default_ttl(_), do: 3_600           # Default fallback for unknown types
+
+  @enrolled_device_ttl 31_536_000
+
+  @doc """
+  TTL in seconds for an ENROLLED client device's KEY record.
+
+  Written by the 0x07 ENROLL path and re-applied every time the device's
+  agent checks in (a signed refresh by the device's own enrolled signing key,
+  see `ZtlpNs.RegistrationAuth.enrolled_refresh?/4`). Each check-in restarts
+  the window, so a machine that is on stays registered indefinitely, and one
+  that stays off for longer than this has expired and must re-enroll.
+
+  Default one year (31_536_000 s). Override with
+  `ZTLP_NS_ENROLLED_DEVICE_TTL` (positive integer seconds); anything else
+  falls back to the default.
+  """
+  @spec enrolled_device_ttl() :: pos_integer()
+  def enrolled_device_ttl do
+    with raw when is_binary(raw) <- System.get_env("ZTLP_NS_ENROLLED_DEVICE_TTL"),
+         {n, ""} when n > 0 <- Integer.parse(String.trim(raw)) do
+      n
+    else
+      _ -> @enrolled_device_ttl
+    end
+  end
 end

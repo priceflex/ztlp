@@ -287,13 +287,17 @@ pub struct RenewalConfig {
     /// Enable automatic credential renewal.
     pub enabled: bool,
 
-    /// Check interval (e.g., "1h").
+    /// How often the agent checks in with the NS (e.g., "1h", the default;
+    /// minimum 60 s). Each accepted check-in restarts the enrolled device's
+    /// one-year registration (see `agent::ns_checkin`).
     pub check_interval: String,
 
     /// Certificate renewal threshold (fraction of lifetime).
     pub cert_threshold: f64,
 
-    /// NS record refresh at fraction of TTL.
+    /// NS record refresh at fraction of TTL. Not used by the check-in loop,
+    /// which checks in every `check_interval`; kept so existing agent.toml
+    /// files still parse.
     pub ns_refresh_threshold: f64,
 
     /// Jitter ratio for NS refresh (prevents thundering herd).

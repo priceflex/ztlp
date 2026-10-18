@@ -52,4 +52,36 @@ defmodule ZtlpNs.RecordDefaultsTest do
           "so half-TTL client refreshes never collide with anti-flood cooldown"
     end
   end
+
+  describe "enrolled_device_ttl/0" do
+    # Enrolled client devices (KEY records written by the 0x07 ENROLL path
+    # and refreshed by the agent's hourly check-in) live for a sliding year:
+    # every successful check-in restarts the window, and a machine that stays
+    # off for more than a year must be re-enrolled.
+    setup do
+      on_exit(fn -> System.delete_env("ZTLP_NS_ENROLLED_DEVICE_TTL") end)
+      System.delete_env("ZTLP_NS_ENROLLED_DEVICE_TTL")
+      :ok
+    end
+
+    test "defaults to one year (365 days)" do
+      assert RecordDefaults.enrolled_device_ttl() == 31_536_000
+    end
+
+    test "ZTLP_NS_ENROLLED_DEVICE_TTL overrides the default" do
+      System.put_env("ZTLP_NS_ENROLLED_DEVICE_TTL", "7200")
+      assert RecordDefaults.enrolled_device_ttl() == 7_200
+    end
+
+    test "invalid or non-positive overrides fall back to one year" do
+      for bad <- ["", "abc", "0", "-5", "12h"] do
+        System.put_env("ZTLP_NS_ENROLLED_DEVICE_TTL", bad)
+        assert RecordDefaults.enrolled_device_ttl() == 31_536_000, "override #{inspect(bad)}"
+      end
+    end
+
+    test "never shorter than the generic KEY TTL" do
+      assert RecordDefaults.enrolled_device_ttl() >= RecordDefaults.default_ttl(:key)
+    end
+  end
 end

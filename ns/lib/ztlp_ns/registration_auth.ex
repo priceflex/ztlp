@@ -225,6 +225,57 @@ defmodule ZtlpNs.RegistrationAuth do
   def check_key_overwrite(_pubkey, _name, _type, _data), do: :ok
 
   @doc """
+  Is this KEY registration an ENROLLED device checking in?
+
+  True only when a live KEY record for `name` already exists that was written
+  by the ENROLL path with a `signing_public_key`, the registrant signed with
+  exactly that key, and the new data keeps the record's tunnel key
+  (`public_key`), `node_id` and `signing_public_key` unchanged. Such a
+  check-in is authorized as self-registration and gets the enrolled-device
+  TTL (`ZtlpNs.RecordDefaults.enrolled_device_ttl/0`), restarting the
+  device's one-year window. A brand-new name never qualifies, so nobody can
+  claim a fresh name for a year by adding a `signing_public_key` field.
+  """
+  @spec enrolled_refresh?(binary(), String.t(), atom(), map()) :: boolean()
+  def enrolled_refresh?(pubkey, name, :key, data) when is_binary(pubkey) do
+    pubkey_hex = Base.encode16(pubkey, case: :lower)
+
+    case Store.lookup(name, :key) do
+      {:ok, existing} -> enrolled_refresh_match?(existing, pubkey_hex, data)
+      _ -> false
+    end
+  end
+
+  def enrolled_refresh?(_pubkey, _name, _type, _data), do: false
+
+  defp enrolled_refresh_match?(existing, pubkey_hex, data) do
+    enrolled_signer = field(existing.data, "signing_public_key")
+
+    is_binary(enrolled_signer) and
+      String.downcase(enrolled_signer) == pubkey_hex and
+      same_field?(existing.data, data, "signing_public_key") and
+      same_field?(existing.data, data, "public_key") and
+      same_field?(existing.data, data, "node_id")
+  end
+
+  defp field(map, key) do
+    case Map.get(map, key) || Map.get(map, atom_key(key)) do
+      v when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp atom_key("signing_public_key"), do: :signing_public_key
+  defp atom_key("public_key"), do: :public_key
+  defp atom_key("node_id"), do: :node_id
+
+  defp same_field?(old, new, key) do
+    a = field(old, key)
+    b = field(new, key)
+    is_binary(a) and is_binary(b) and String.downcase(a) == String.downcase(b)
+  end
+
+  @doc """
   Check if a NodeID from record data has been revoked.
 
   Extracts the node_id from the record data map and checks the
@@ -281,10 +332,11 @@ defmodule ZtlpNs.RegistrationAuth do
         # Existing KEY record: registrant must own it (check against stored data)
         existing_pubkey = Map.get(existing.data, "public_key") || Map.get(existing.data, :public_key)
 
-        if existing_pubkey == pubkey_hex do
-          :ok
-        else
-          {:error, :not_key_owner}
+        cond do
+          existing_pubkey == pubkey_hex -> :ok
+          # Enrolled device checking in with its enrolled signing key.
+          enrolled_refresh_match?(existing, pubkey_hex, data) -> :ok
+          true -> {:error, :not_key_owner}
         end
 
       _ ->

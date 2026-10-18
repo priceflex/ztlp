@@ -9135,18 +9135,39 @@ async fn setup_join(
         );
     }
 
+    // v0.35.19: send the identity's Ed25519 signing key too, so the NS can
+    // authorize this device's hourly check-in (sliding one-year lifetime).
+    let signing_pubkey = identity.signing_key().verifying_key().to_bytes();
     let enroll_body = build_enroll_packet(
         &token_bin,
         pubkey_bytes,
         node_id_bytes,
         &full_name,
         addr_str,
+        Some(&signing_pubkey),
     );
     let packet = [&[0x07u8][..], &enroll_body].concat();
     sock.send_to(&packet, ns_addr).await?;
 
     let mut buf = vec![0u8; 65535];
-    match timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await {
+    let mut reply = timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await;
+    if let Ok(Ok((len, _))) = &reply {
+        if should_retry_enroll_without_signing_key(&buf[..*len]) {
+            // Older NS: enroll with the legacy request (no automatic renewal).
+            let legacy_body = build_enroll_packet(
+                &token_bin,
+                pubkey_bytes,
+                node_id_bytes,
+                &full_name,
+                addr_str,
+                None,
+            );
+            let legacy = [&[0x07u8][..], &legacy_body].concat();
+            sock.send_to(&legacy, ns_addr).await?;
+            reply = timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await;
+        }
+    }
+    match reply {
         Ok(Ok((len, _))) => {
             let resp = &buf[..len];
             match resp {
@@ -9670,12 +9691,19 @@ fn extract_json_number_field(body: &str, field: &str) -> Option<u64> {
 }
 
 /// Build the 0x07 ENROLL request body (without the 0x07 prefix).
+///
+/// `signing_pubkey` (v0.35.19+) appends `<<32::16, ed25519_pubkey::32>>`
+/// after the address. The NS stores it in the enrolled KEY record as
+/// `signing_public_key`, which is what authorizes the agent's hourly
+/// check-in and keeps the device registered for a sliding year. `None`
+/// produces the exact pre-v0.35.19 wire format.
 fn build_enroll_packet(
     token: &[u8],
     pubkey: &[u8],
     node_id: &[u8; 16],
     name: &str,
     addr: &str,
+    signing_pubkey: Option<&[u8; 32]>,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
 
@@ -9702,7 +9730,21 @@ fn build_enroll_packet(
     buf.extend_from_slice(&(addr_bytes.len() as u16).to_be_bytes());
     buf.extend_from_slice(addr_bytes);
 
+    // Optional Ed25519 signing pubkey (v0.35.19 extension)
+    if let Some(sk) = signing_pubkey {
+        buf.extend_from_slice(&(sk.len() as u16).to_be_bytes());
+        buf.extend_from_slice(sk);
+    }
+
     buf
+}
+
+/// An NS older than v0.35.19 does not know the signing-key extension and
+/// answers the longer ENROLL request with 0x08 0x06 (invalid format). It
+/// does so while PARSING, before the token is validated, so the token is
+/// not consumed and the legacy request can be sent once more.
+fn should_retry_enroll_without_signing_key(resp: &[u8]) -> bool {
+    resp == [0x08, 0x06]
 }
 
 /// Parse the config section of an ENROLL response.
@@ -16205,6 +16247,50 @@ mod tests {
         let ns = None;
         let resolved_addr = None;
         assert!(!relay_path_active(&relay, &ns, resolved_addr));
+    }
+
+    // ── v0.35.19 enrolled-device signing key in the ENROLL request ─────────
+    // The enrolled KEY record must remember the device's Ed25519 signing key
+    // so the agent's hourly check-in can be authorized (sliding 1-year TTL).
+
+    #[test]
+    fn build_enroll_packet_without_signing_key_is_the_legacy_wire_format() {
+        let pk = [7u8; 32];
+        let nid = [9u8; 16];
+        let pkt = build_enroll_packet(b"TOK", &pk, &nid, "a.trs.ztlp", "", None);
+        let expected_len = 2 + 3 + 32 + 16 + 2 + "a.trs.ztlp".len() + 2;
+        assert_eq!(pkt.len(), expected_len);
+        assert_eq!(
+            &pkt[pkt.len() - 2..],
+            &[0, 0],
+            "ends with the empty address"
+        );
+    }
+
+    #[test]
+    fn build_enroll_packet_appends_the_signing_key_extension() {
+        let pk = [7u8; 32];
+        let nid = [9u8; 16];
+        let sk = [0xABu8; 32];
+        let legacy = build_enroll_packet(b"TOK", &pk, &nid, "a.trs.ztlp", "", None);
+        let pkt = build_enroll_packet(b"TOK", &pk, &nid, "a.trs.ztlp", "", Some(&sk));
+        assert_eq!(&pkt[..legacy.len()], legacy.as_slice());
+        assert_eq!(&pkt[legacy.len()..legacy.len() + 2], &[0x00, 0x20]);
+        assert_eq!(&pkt[legacy.len() + 2..], &sk);
+    }
+
+    #[test]
+    fn enroll_retries_legacy_only_on_invalid_format() {
+        // An NS older than v0.35.19 rejects the extended request as malformed
+        // (0x08 0x06) BEFORE validating the token, so resending the legacy
+        // request cannot burn a single-use token.
+        assert!(should_retry_enroll_without_signing_key(&[0x08, 0x06]));
+        assert!(!should_retry_enroll_without_signing_key(&[
+            0x08, 0x00, 1, 0
+        ]));
+        assert!(!should_retry_enroll_without_signing_key(&[0x08, 0x02]));
+        assert!(!should_retry_enroll_without_signing_key(&[0x08, 0x03]));
+        assert!(!should_retry_enroll_without_signing_key(&[]));
     }
 
     /// T3 (v0.32.1) — KEY-record CBOR sent by `ns register` must include

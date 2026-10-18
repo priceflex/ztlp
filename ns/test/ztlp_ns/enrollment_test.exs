@@ -69,6 +69,14 @@ defmodule ZtlpNs.EnrollmentTest do
 
   defp dev_name(pfx, label), do: "#{pfx}-#{label}.#{@test_zone}"
 
+  # v0.35.19 ENROLL extension: the client appends its Ed25519 signing pubkey
+  # (sk_len::16, sk::binary-size(32)) after the address so the NS can later
+  # accept that device's own signed hourly check-in (refresh).
+  defp enroll_req_signed(token, pubkey, node_id, name, signing_pub, addr \\ "") do
+    enroll_req(token, pubkey, node_id, name, addr) <>
+      <<byte_size(signing_pub)::16, signing_pub::binary>>
+  end
+
   # ── Tests ──────────────────────────────────────────────────────────
 
   test "successful enrollment creates KEY record", %{secret: s, pfx: p} do
@@ -83,6 +91,78 @@ defmodule ZtlpNs.EnrollmentTest do
     {:ok, record} = Store.lookup(name, :key)
     assert record.data["public_key"] == Base.encode16(pk, case: :lower)
     assert record.data["node_id"] == Base.encode16(nid, case: :lower)
+  end
+
+  describe "enrolled device lifetime (sliding one-year window)" do
+    test "enrolled KEY record gets the one-year enrolled-device TTL", %{secret: s, pfx: p} do
+      name = dev_name(p, "ttl")
+
+      assert <<0x08, 0x00, _::binary>> =
+               Enrollment.process_enroll(
+                 enroll_req(create_token(s), :crypto.strong_rand_bytes(32),
+                   :crypto.strong_rand_bytes(16), name)
+               )
+
+      {:ok, record} = Store.lookup(name, :key)
+      assert record.ttl == ZtlpNs.RecordDefaults.enrolled_device_ttl()
+      assert record.ttl == 31_536_000
+    end
+
+    test "enrollment with the signing-key extension stores signing_public_key",
+         %{secret: s, pfx: p} do
+      name = dev_name(p, "sk")
+      pk = :crypto.strong_rand_bytes(32)
+      {spub, _spriv} = ZtlpNs.Crypto.generate_keypair()
+
+      assert <<0x08, 0x00, _::binary>> =
+               Enrollment.process_enroll(
+                 enroll_req_signed(create_token(s), pk, :crypto.strong_rand_bytes(16), name, spub)
+               )
+
+      {:ok, record} = Store.lookup(name, :key)
+      assert record.data["public_key"] == Base.encode16(pk, case: :lower)
+      assert record.data["signing_public_key"] == Base.encode16(spub, case: :lower)
+      assert record.ttl == 31_536_000
+    end
+
+    test "legacy enrollment (no extension) stores no signing_public_key", %{secret: s, pfx: p} do
+      name = dev_name(p, "legacy")
+
+      Enrollment.process_enroll(
+        enroll_req(create_token(s), :crypto.strong_rand_bytes(32),
+          :crypto.strong_rand_bytes(16), name)
+      )
+
+      {:ok, record} = Store.lookup(name, :key)
+      refute Map.has_key?(record.data, "signing_public_key")
+    end
+
+    test "a malformed extension (not 32 bytes) is rejected without burning the token",
+         %{secret: s, pfx: p} do
+      token = create_token(s, max_uses: 1)
+      name = dev_name(p, "badext")
+      pk = :crypto.strong_rand_bytes(32)
+      nid = :crypto.strong_rand_bytes(16)
+
+      assert <<0x08, 0x06>> =
+               Enrollment.process_enroll(enroll_req_signed(token, pk, nid, name, <<1, 2, 3>>))
+
+      assert :not_found = Store.lookup(name, :key)
+      # Token still has its single use left.
+      assert <<0x08, 0x00, _::binary>> = Enrollment.process_enroll(enroll_req(token, pk, nid, name))
+    end
+
+    test "SVC records written at enrollment keep the short default TTL", %{secret: s, pfx: p} do
+      name = dev_name(p, "svcttl")
+
+      Enrollment.process_enroll(
+        enroll_req(create_token(s), :crypto.strong_rand_bytes(32),
+          :crypto.strong_rand_bytes(16), name, "10.0.0.50:23095")
+      )
+
+      {:ok, svc} = Store.lookup(name, :svc)
+      assert svc.ttl == ZtlpNs.RecordDefaults.default_ttl(:svc)
+    end
   end
 
   test "successful enrollment creates SVC record when address provided", %{secret: s, pfx: p} do

@@ -121,9 +121,9 @@ defmodule ZtlpRelay.UdpListenerTest do
     #         8 timestamp (i64 BE) | 32 hmac
     defp build_client_route(node_id, service_name, timestamp, hmac) do
       svc_len = byte_size(service_name)
+
       <<0x5A, 0x37, 0x0B, node_id::binary-size(16), svc_len::8,
-        service_name::binary-size(svc_len), timestamp::64-signed,
-        hmac::binary-size(32)>>
+        service_name::binary-size(svc_len), timestamp::64-signed, hmac::binary-size(32)>>
     end
 
     setup do
@@ -172,7 +172,8 @@ defmodule ZtlpRelay.UdpListenerTest do
       gw_addr = {{10, 0, 0, 99}, 23097}
       service_name = "gw-route-test"
       ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, gw_node_id, service_name, 60)
-      Process.sleep(20) # cast is async
+      # cast is async
+      Process.sleep(20)
 
       # Send the CLIENT_ROUTE packet
       client_node_id = :crypto.strong_rand_bytes(16)
@@ -309,8 +310,8 @@ defmodule ZtlpRelay.UdpListenerTest do
     # way in and routes replies by DCID on the way out.
 
     defp quic_long(dcid, scid, payload \\ <<1, 2, 3, 4>>) do
-      <<0xC3, 0x00, 0x00, 0x00, 0x01, byte_size(dcid)::8, dcid::binary,
-        byte_size(scid)::8, scid::binary, payload::binary>>
+      <<0xC3, 0x00, 0x00, 0x00, 0x01, byte_size(dcid)::8, dcid::binary, byte_size(scid)::8,
+        scid::binary, payload::binary>>
     end
 
     defp quic_short(dcid, payload \\ <<9, 9, 9, 9, 9, 9>>) do
@@ -344,7 +345,14 @@ defmodule ZtlpRelay.UdpListenerTest do
       relay = {{127, 0, 0, 1}, UdpListener.get_port()}
       {gw_sock, {_, gw_port} = gw_addr} = open_passive()
       service_name = "gw-cid-demux"
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, :crypto.strong_rand_bytes(16), service_name, 60)
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw_addr,
+        :crypto.strong_rand_bytes(16),
+        service_name,
+        60
+      )
+
       Process.sleep(20)
 
       {sock_a, _} = route_client(service_name)
@@ -355,8 +363,20 @@ defmodule ZtlpRelay.UdpListenerTest do
       cid_b = :crypto.strong_rand_bytes(8)
 
       # Clients send their Initials; the relay forwards them to the gateway.
-      :gen_udp.send(sock_a, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_a))
-      :gen_udp.send(sock_b, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_b))
+      :gen_udp.send(
+        sock_a,
+        elem(relay, 0),
+        elem(relay, 1),
+        quic_long(:crypto.strong_rand_bytes(8), cid_a)
+      )
+
+      :gen_udp.send(
+        sock_b,
+        elem(relay, 0),
+        elem(relay, 1),
+        quic_long(:crypto.strong_rand_bytes(8), cid_b)
+      )
+
       assert {:ok, _} = recv(gw_sock)
       assert {:ok, _} = recv(gw_sock)
 
@@ -388,23 +408,104 @@ defmodule ZtlpRelay.UdpListenerTest do
       for s <- [sock_a, sock_b, gw_sock], do: :gen_udp.close(s)
     end
 
+    test "after quinn switches connection IDs, replies still route by the client's CID prefix" do
+      # ZTLP clients (>= this release) issue every CID of one endpoint with
+      # the same random 4-byte prefix. The gateway switches to a CID the
+      # relay never saw (issued inside encrypted NEW_CONNECTION_ID), but the
+      # prefix is the one learned from the client's Initial.
+      relay = {{127, 0, 0, 1}, UdpListener.get_port()}
+      {gw_sock, gw_addr} = open_passive()
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw_addr,
+        :crypto.strong_rand_bytes(16),
+        "gw-cid-prefix",
+        60
+      )
+
+      Process.sleep(20)
+
+      {sock_a, _} = route_client("gw-cid-prefix")
+      {sock_b, _} = route_client("gw-cid-prefix")
+      Process.sleep(80)
+
+      prefix_a = :crypto.strong_rand_bytes(4)
+      prefix_b = :crypto.strong_rand_bytes(4)
+      initial_a = prefix_a <> :crypto.strong_rand_bytes(4)
+      initial_b = prefix_b <> :crypto.strong_rand_bytes(4)
+
+      :gen_udp.send(
+        sock_a,
+        elem(relay, 0),
+        elem(relay, 1),
+        quic_long(:crypto.strong_rand_bytes(8), initial_a)
+      )
+
+      :gen_udp.send(
+        sock_b,
+        elem(relay, 0),
+        elem(relay, 1),
+        quic_long(:crypto.strong_rand_bytes(8), initial_b)
+      )
+
+      assert {:ok, _} = recv(gw_sock)
+      assert {:ok, _} = recv(gw_sock)
+
+      switched_a = <<0x1B>> <> prefix_a <> :crypto.strong_rand_bytes(4) <> <<5, 5, 5>>
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), switched_a)
+      assert {:ok, {_, _, ^switched_a}} = recv(sock_a)
+      assert {:error, :timeout} = :gen_udp.recv(sock_b, 0, 100)
+
+      switched_b = <<0x43>> <> prefix_b <> :crypto.strong_rand_bytes(4) <> <<6, 6, 6>>
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), switched_b)
+      assert {:ok, {_, _, ^switched_b}} = recv(sock_b)
+      assert {:error, :timeout} = :gen_udp.recv(sock_a, 0, 100)
+
+      for s <- [sock_a, sock_b, gw_sock], do: :gen_udp.close(s)
+    end
+
     test "a connection ID learned for one gateway does not route another gateway's packets" do
       relay = {{127, 0, 0, 1}, UdpListener.get_port()}
       {gw1_sock, gw1_addr} = open_passive()
       {gw2_sock, gw2_addr} = open_passive()
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw1_addr, :crypto.strong_rand_bytes(16), "gw-cid-t1", 60)
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw2_addr, :crypto.strong_rand_bytes(16), "gw-cid-t2", 60)
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw1_addr,
+        :crypto.strong_rand_bytes(16),
+        "gw-cid-t1",
+        60
+      )
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw2_addr,
+        :crypto.strong_rand_bytes(16),
+        "gw-cid-t2",
+        60
+      )
+
       Process.sleep(20)
 
       {sock_a, _} = route_client("gw-cid-t1")
       Process.sleep(80)
       cid_a = :crypto.strong_rand_bytes(8)
-      :gen_udp.send(sock_a, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_a))
+
+      :gen_udp.send(
+        sock_a,
+        elem(relay, 0),
+        elem(relay, 1),
+        quic_long(:crypto.strong_rand_bytes(8), cid_a)
+      )
+
       assert {:ok, _} = recv(gw1_sock)
       drain(sock_a)
 
       # gateway 2 has no clients; a packet carrying A's CID must not reach A.
       :gen_udp.send(gw2_sock, elem(relay, 0), elem(relay, 1), quic_short(cid_a))
+      assert {:error, :timeout} = :gen_udp.recv(sock_a, 0, 150)
+
+      # ...nor a packet carrying A's prefix with a switched tail.
+      switched = binary_part(cid_a, 0, 4) <> :crypto.strong_rand_bytes(4)
+      :gen_udp.send(gw2_sock, elem(relay, 0), elem(relay, 1), quic_short(switched))
       assert {:error, :timeout} = :gen_udp.recv(sock_a, 0, 150)
 
       for s <- [sock_a, gw1_sock, gw2_sock], do: :gen_udp.close(s)
@@ -418,18 +519,25 @@ defmodule ZtlpRelay.UdpListenerTest do
       old = System.monotonic_time(:millisecond) - 10 * 60 * 1_000
       gw = {{10, 0, 0, 1}, 23097}
       key = {:cid, gw, <<1, 2, 3, 4, 5, 6, 7, 8>>}
+      pkey = {:cidp, gw, <<1, 2, 3, 4>>}
       :ets.insert(:ztlp_forwarded_quic_tuples, {key, {{{127, 0, 0, 1}, 60_003}, old}})
+      :ets.insert(:ztlp_forwarded_quic_tuples, {pkey, {{{127, 0, 0, 1}, 60_003}, old}})
 
       send(ZtlpRelay.UdpListener, :sweep_client_routes)
 
       Enum.reduce_while(1..50, nil, fn _, _ ->
         case :ets.lookup(:ztlp_forwarded_quic_tuples, key) do
-          [] -> {:halt, :gone}
-          _ -> Process.sleep(20); {:cont, nil}
+          [] ->
+            {:halt, :gone}
+
+          _ ->
+            Process.sleep(20)
+            {:cont, nil}
         end
       end)
 
       assert :ets.lookup(:ztlp_forwarded_quic_tuples, key) == []
+      assert :ets.lookup(:ztlp_forwarded_quic_tuples, pkey) == []
     end
 
     test "v0.29.3: CLIENT_ROUTE to DIFFERENT gateway does NOT purge same-IP entries" do
@@ -438,8 +546,21 @@ defmodule ZtlpRelay.UdpListenerTest do
       # Two distinct gateways
       gw1 = {{10, 0, 0, 99}, 23097}
       gw2 = {{10, 0, 0, 100}, 23097}
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw1, :crypto.strong_rand_bytes(16), "gw-keep-1", 60)
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw2, :crypto.strong_rand_bytes(16), "gw-keep-2", 60)
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw1,
+        :crypto.strong_rand_bytes(16),
+        "gw-keep-1",
+        60
+      )
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw2,
+        :crypto.strong_rand_bytes(16),
+        "gw-keep-2",
+        60
+      )
+
       Process.sleep(20)
 
       ts = System.system_time(:second)
@@ -505,8 +626,12 @@ defmodule ZtlpRelay.UdpListenerTest do
       # on scheduler timing.
       Enum.reduce_while(1..50, nil, fn _, _ ->
         case :ets.lookup(:ztlp_forwarded_quic_tuples, stale_key) do
-          [] -> {:halt, :gone}
-          _ -> Process.sleep(20); {:cont, nil}
+          [] ->
+            {:halt, :gone}
+
+          _ ->
+            Process.sleep(20)
+            {:cont, nil}
         end
       end)
 
@@ -592,7 +717,14 @@ defmodule ZtlpRelay.UdpListenerTest do
       gw_node_id = :crypto.strong_rand_bytes(16)
       gw_addr = {{174, 79, 254, 16}, 23095}
       registered_service = "z2ls-bill-008247"
-      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, gw_node_id, registered_service, 60)
+
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(
+        gw_addr,
+        gw_node_id,
+        registered_service,
+        60
+      )
+
       Process.sleep(20)
 
       # Operator dials `--service ssh` → CLIENT_ROUTE carries service="ssh"

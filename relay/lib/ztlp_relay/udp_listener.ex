@@ -336,6 +336,11 @@ defmodule ZtlpRelay.UdpListener do
               {{:cid, :_, :_}, {:_, :"$1"}},
               [{:<, :"$1", cutoff}],
               [true]
+            },
+            {
+              {{:cidp, :_, :_}, {:_, :"$1"}},
+              [{:<, :"$1", cutoff}],
+              [true]
             }
           ]
         )
@@ -533,16 +538,17 @@ defmodule ZtlpRelay.UdpListener do
   # the zone secret can point the relay anywhere.
   @doc false
   @spec relay_control_frame?(binary()) :: boolean()
-  def relay_control_frame?(<<0x5A, 0x37, type, _::binary>>) when type in [0x0A, 0x0B, 0x0D, 0x0E, 0x0F],
-    do: true
+  def relay_control_frame?(<<0x5A, 0x37, type, _::binary>>)
+      when type in [0x0A, 0x0B, 0x0D, 0x0E, 0x0F],
+      do: true
 
   def relay_control_frame?(_), do: false
 
   defp handle_gateway_register_addr(<<addr_len::8, rest::binary>>, sender)
        when addr_len >= 1 and addr_len <= 64 do
     case rest do
-      <<addr::binary-size(addr_len), node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
-        timestamp::64, hmac::binary-size(32)>> ->
+      <<addr::binary-size(addr_len), node_id::binary-size(16), service_raw::binary-size(16),
+        ttl::32, timestamp::64, hmac::binary-size(32)>> ->
         service_name =
           service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
 
@@ -574,12 +580,16 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       _ ->
-        Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (body too short)")
+        Logger.warning(
+          "[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (body too short)"
+        )
     end
   end
 
   defp handle_gateway_register_addr(_data, sender) do
-    Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (addr_len out of range)")
+    Logger.warning(
+      "[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (addr_len out of range)"
+    )
   end
 
   # ":port"  -> {sender_ip, port}
@@ -870,7 +880,9 @@ defmodule ZtlpRelay.UdpListener do
   # zone-keyed lookup ("gw:<zone>") missed.
   defp pick_fallback_gateway(service_name, node_id) do
     case GatewayForwarder.pick_gateway_for_service(service_name) do
-      {:ok, _} = ok -> ok
+      {:ok, _} = ok ->
+        ok
+
       :error ->
         case node_id do
           <<0::128>> -> :error
@@ -1125,6 +1137,10 @@ defmodule ZtlpRelay.UdpListener do
   # RFC 9000 range (short headers do not carry the length).
   @quic_cid_lengths [8, 16, 20, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 1, 2, 3]
 
+  # Must match proto/src/quic_transport.rs RELAY_CID_LEN / RELAY_CID_PREFIX_LEN.
+  @routable_cid_len 8
+  @cid_prefix_len 4
+
   defp learn_quic_cid(
          <<1::1, _::7, _version::32, dcid_len, _dcid::binary-size(dcid_len), scid_len,
            scid::binary-size(scid_len), _::binary>>,
@@ -1134,12 +1150,28 @@ defmodule ZtlpRelay.UdpListener do
        )
        when dcid_len <= 20 and scid_len > 0 and scid_len <= 20 do
     :ets.insert(:ztlp_forwarded_quic_tuples, {{:cid, gateway, scid}, {client, now_ms}})
+
+    # ZTLP clients stamp every CID of an endpoint with the same random
+    # @cid_prefix_len-byte prefix (proto RelayRoutableCidGenerator), so the
+    # prefix keeps routing after the gateway switches to a CID we never saw.
+    if scid_len == @routable_cid_len do
+      <<prefix::binary-size(@cid_prefix_len), _::binary>> = scid
+      :ets.insert(:ztlp_forwarded_quic_tuples, {{:cidp, gateway, prefix}, {client, now_ms}})
+    end
+
     :ok
   end
 
   defp learn_quic_cid(_data, _client, _gateway, _now_ms), do: :ok
 
   defp quic_cid_route(data, gateway) do
+    case quic_exact_cid_route(data, gateway) do
+      {:ok, _} = hit -> hit
+      :error -> quic_cid_prefix_route(data, gateway)
+    end
+  end
+
+  defp quic_exact_cid_route(data, gateway) do
     case data do
       <<1::1, _::7, _version::32, dcid_len, dcid::binary-size(dcid_len), _::binary>>
       when dcid_len > 0 and dcid_len <= 20 ->
@@ -1162,9 +1194,26 @@ defmodule ZtlpRelay.UdpListener do
     end
   end
 
-  defp cid_lookup(gateway, dcid) do
-    key = {:cid, gateway, dcid}
+  defp quic_cid_prefix_route(data, gateway) do
+    prefix =
+      case data do
+        <<1::1, _::7, _version::32, @routable_cid_len, prefix::binary-size(@cid_prefix_len),
+          _::binary>> ->
+          prefix
 
+        <<0::1, _::7, prefix::binary-size(@cid_prefix_len), _::binary>> ->
+          prefix
+
+        _ ->
+          nil
+      end
+
+    if prefix, do: table_route_lookup({:cidp, gateway, prefix}), else: :error
+  end
+
+  defp cid_lookup(gateway, dcid), do: table_route_lookup({:cid, gateway, dcid})
+
+  defp table_route_lookup(key) do
     case :ets.lookup(:ztlp_forwarded_quic_tuples, key) do
       [{^key, {client, _last_seen}}] ->
         :ets.update_element(

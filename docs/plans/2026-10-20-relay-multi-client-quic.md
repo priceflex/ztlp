@@ -49,6 +49,20 @@ Net: the relay carries one QUIC flow per gateway at a time. Logs: bursts of N
   forward on the office firewall. Note agents rank other-RFC1918 (200) above public (160),
   so remote clients still spend 750 ms on the LAN candidate per dial until the agent changes.
 
+## Complete fix (implemented)
+- proto `quic_transport::RelayRoutableCidGenerator` + `client_endpoint_config()`: every
+  client endpoint (all 4 constructors) issues 8-byte CIDs = 4-byte random per-endpoint
+  prefix + 4 random bytes. Gateways (servers) unchanged.
+- relay learns `{:cidp, gateway, prefix}` from 8-byte Initial SCIDs; reverse order: exact
+  CID -> prefix -> legacy most-recent. Sweeper clears `:cidp` entries.
+- A/B, real binaries, unmodified v0.35.18 gateway, 5 concurrent connections from one IP:
+  | relay \ clients | v0.35.18 | this branch |
+  |---|---|---|
+  | v0.35.19 (prod today) | 5/25 | 4/20 (no regression) |
+  | this branch | 29/30 | 40/40; 120/120 with 12 concurrent |
+  Direct (no relay) baseline 40/40. Harness: relay_ab.py (see skill ztlp-architecture-and-debugging).
+- Deploy order is free (each side is backward compatible); full benefit needs both.
+
 ## Out of scope / follow-ups
 - Agent: one QUIC connection per gateway with a stream per TCP connection, and remember a
   failed direct candidate (removes ~1 s setup per browser connection).

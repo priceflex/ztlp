@@ -31,6 +31,24 @@ Net: the relay carries one QUIC flow per gateway at a time. Logs: bursts of N
 - a CID learned for gateway A does not route packets from gateway B
 - sweeper drops idle `{:cid, ...}` entries
 
+## Findings from the end-to-end A/B (real v0.35.18 gateway + 5 concurrent clients, one IP)
+- Old relay: 5/25 requests succeed (1 of 5 connections per round) — the production symptom.
+- Direct to gateway (no relay): 40/40, 2-10 ms.
+- This branch: 23/25. Remaining stalls: quinn 0.11 servers switch to a new client-issued
+  connection ID as soon as the client's first NEW_CONNECTION_ID arrives
+  (quinn-proto connection/mod.rs "switch immediately to enable clientside stateless resets").
+  That ID travels encrypted, so a relay cannot learn it; after the switch replies fall back
+  to "most recent client". Also: quinn greases the fixed bit, so short headers must be
+  matched on the first bit only.
+- Complete relay fix therefore needs the CLIENT to make its connection IDs routable: a
+  custom quinn ConnectionIdGenerator giving every CID of one client endpoint the same
+  random 4-byte prefix; the relay learns prefix -> client from the Initial SCID and routes
+  by DCID prefix (the QUIC-LB idea, applied to clients). Agent + CLI release required.
+- Alternative that avoids the relay for remote clients: gateway advertises the office public
+  address (needs a new listen flag; `--stun-server` is unused in cmd_listen) plus a UDP 23097
+  forward on the office firewall. Note agents rank other-RFC1918 (200) above public (160),
+  so remote clients still spend 750 ms on the LAN candidate per dial until the agent changes.
+
 ## Out of scope / follow-ups
 - Agent: one QUIC connection per gateway with a stream per TCP connection, and remember a
   failed direct candidate (removes ~1 s setup per browser connection).

@@ -266,54 +266,170 @@ defmodule ZtlpRelay.UdpListenerTest do
     #   3. The periodic sweeper removes {:client_map, _} entries whose
     #      `inserted_at` is older than the TTL.
 
-    test "v0.29.3: new CLIENT_ROUTE purges prior entries from same client_ip → same gateway" do
+    # 2026-10-20: the v0.29.3 same-IP purge is gone. The agent opens one QUIC
+    # connection per browser TCP connection, so a page load sends several
+    # CLIENT_ROUTEs from one IP to one gateway at once; purging made them
+    # delete each other's routes. Idle entries are still removed by the sweeper.
+    test "concurrent CLIENT_ROUTEs from one client IP to one gateway are all kept" do
       port = UdpListener.get_port()
       gw_node_id = :crypto.strong_rand_bytes(16)
       gw_addr = {{10, 0, 0, 99}, 23097}
-      service_name = "gw-purge-test"
+      service_name = "gw-concurrent-test"
       ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, gw_node_id, service_name, 60)
       Process.sleep(20)
 
-      # First CLIENT_ROUTE from ephemeral port A
-      {:ok, client_a} = :gen_udp.open(0, [:binary])
-      {:ok, port_a} = :inet.port(client_a)
-      sender_a = {{127, 0, 0, 1}, port_a}
       ts = System.system_time(:second)
-      pkt_a = build_client_route(:crypto.strong_rand_bytes(16), service_name, ts, <<0::256>>)
-      :gen_udp.send(client_a, {127, 0, 0, 1}, port, pkt_a)
-      Process.sleep(50)
 
-      assert [{{:client_map, ^sender_a}, {^gw_addr, _}}] =
-               :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender_a})
+      clients =
+        for _ <- 1..5 do
+          {:ok, sock} = :gen_udp.open(0, [:binary])
+          {:ok, p} = :inet.port(sock)
+          pkt = build_client_route(:crypto.strong_rand_bytes(16), service_name, ts, <<0::256>>)
+          :gen_udp.send(sock, {127, 0, 0, 1}, port, pkt)
+          {sock, {{127, 0, 0, 1}, p}}
+        end
 
-      # Second CLIENT_ROUTE from a DIFFERENT ephemeral port — simulates the
-      # user's next `ztlp connect` invocation. The first entry MUST be gone
-      # (or at least one of {sender_a, sender_b} must remain — the fix only
-      # purges entries that are different from the current sender).
-      {:ok, client_b} = :gen_udp.open(0, [:binary])
-      {:ok, port_b} = :inet.port(client_b)
-      sender_b = {{127, 0, 0, 1}, port_b}
-      pkt_b = build_client_route(:crypto.strong_rand_bytes(16), service_name, ts, <<0::256>>)
-      :gen_udp.send(client_b, {127, 0, 0, 1}, port, pkt_b)
-      Process.sleep(50)
+      Process.sleep(80)
 
-      # Only the most-recent sender's entry survives.
-      all_entries = :ets.match_object(:ztlp_forwarded_quic_tuples, {{:client_map, :_}, :_})
+      for {_sock, sender} <- clients do
+        assert [{{:client_map, ^sender}, {^gw_addr, _}}] =
+                 :ets.lookup(:ztlp_forwarded_quic_tuples, {:client_map, sender}),
+               "route for #{inspect(sender)} must survive the other concurrent routes"
+      end
 
-      assert Enum.any?(all_entries, fn
-               {{:client_map, ^sender_b}, _} -> true
-               _ -> false
-             end),
-             "fresh sender_b mapping should be present"
+      for {sock, _} <- clients, do: :gen_udp.close(sock)
+    end
 
-      refute Enum.any?(all_entries, fn
-               {{:client_map, ^sender_a}, _} -> true
-               _ -> false
-             end),
-             "stale sender_a mapping should have been purged"
+    # ------------------------------------------------------------------
+    # 2026-10-20: gateway -> client demux by QUIC connection ID
+    # ------------------------------------------------------------------
+    # Every reply from a gateway arrives from the same gateway address. The
+    # client's QUIC SCID (seen in its long-header packets) is the DCID the
+    # gateway puts on every reply, so the relay learns SCID -> client on the
+    # way in and routes replies by DCID on the way out.
 
-      :gen_udp.close(client_a)
-      :gen_udp.close(client_b)
+    defp quic_long(dcid, scid, payload \\ <<1, 2, 3, 4>>) do
+      <<0xC3, 0x00, 0x00, 0x00, 0x01, byte_size(dcid)::8, dcid::binary,
+        byte_size(scid)::8, scid::binary, payload::binary>>
+    end
+
+    defp quic_short(dcid, payload \\ <<9, 9, 9, 9, 9, 9>>) do
+      <<0x43, dcid::binary, payload::binary>>
+    end
+
+    defp open_passive do
+      {:ok, sock} = :gen_udp.open(0, [:binary, active: false])
+      {:ok, p} = :inet.port(sock)
+      {sock, {{127, 0, 0, 1}, p}}
+    end
+
+    defp route_client(service_name) do
+      {sock, sender} = open_passive()
+      ts = System.system_time(:second)
+      pkt = build_client_route(:crypto.strong_rand_bytes(16), service_name, ts, <<0::256>>)
+      :gen_udp.send(sock, {127, 0, 0, 1}, UdpListener.get_port(), pkt)
+      {sock, sender}
+    end
+
+    defp recv(sock), do: :gen_udp.recv(sock, 0, 300)
+
+    defp drain(sock) do
+      case :gen_udp.recv(sock, 0, 50) do
+        {:ok, _} -> drain(sock)
+        _ -> :ok
+      end
+    end
+
+    test "gateway replies reach the client whose QUIC connection ID they carry" do
+      relay = {{127, 0, 0, 1}, UdpListener.get_port()}
+      {gw_sock, {_, gw_port} = gw_addr} = open_passive()
+      service_name = "gw-cid-demux"
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw_addr, :crypto.strong_rand_bytes(16), service_name, 60)
+      Process.sleep(20)
+
+      {sock_a, _} = route_client(service_name)
+      {sock_b, _} = route_client(service_name)
+      Process.sleep(80)
+
+      cid_a = :crypto.strong_rand_bytes(8)
+      cid_b = :crypto.strong_rand_bytes(8)
+
+      # Clients send their Initials; the relay forwards them to the gateway.
+      :gen_udp.send(sock_a, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_a))
+      :gen_udp.send(sock_b, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_b))
+      assert {:ok, _} = recv(gw_sock)
+      assert {:ok, _} = recv(gw_sock)
+
+      # B connected last, so the old "most recent" rule would send A's
+      # replies to B. They must reach A.
+      reply_a = quic_short(cid_a)
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), reply_a)
+      assert {:ok, {_, _, ^reply_a}} = recv(sock_a)
+      assert {:error, :timeout} = :gen_udp.recv(sock_b, 0, 100)
+
+      reply_b = quic_short(cid_b)
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), reply_b)
+      assert {:ok, {_, _, ^reply_b}} = recv(sock_b)
+      assert {:error, :timeout} = :gen_udp.recv(sock_a, 0, 100)
+
+      # Long-header replies (handshake) are routed the same way.
+      long_a = quic_long(cid_a, :crypto.strong_rand_bytes(8))
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), long_a)
+      assert {:ok, {_, _, ^long_a}} = recv(sock_a)
+
+      # quinn greases the QUIC fixed bit (RFC 9287): short headers arrive
+      # with 0x40 clear (e.g. first byte 0x2E). Must still route by DCID.
+      greased_a = <<0x2E, cid_a::binary, 7, 7, 7, 7>>
+      :gen_udp.send(gw_sock, elem(relay, 0), elem(relay, 1), greased_a)
+      assert {:ok, {_, _, ^greased_a}} = recv(sock_a)
+      assert {:error, :timeout} = :gen_udp.recv(sock_b, 0, 100)
+
+      _ = gw_port
+      for s <- [sock_a, sock_b, gw_sock], do: :gen_udp.close(s)
+    end
+
+    test "a connection ID learned for one gateway does not route another gateway's packets" do
+      relay = {{127, 0, 0, 1}, UdpListener.get_port()}
+      {gw1_sock, gw1_addr} = open_passive()
+      {gw2_sock, gw2_addr} = open_passive()
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw1_addr, :crypto.strong_rand_bytes(16), "gw-cid-t1", 60)
+      ZtlpRelay.GatewayForwarder.register_dynamic_gateway(gw2_addr, :crypto.strong_rand_bytes(16), "gw-cid-t2", 60)
+      Process.sleep(20)
+
+      {sock_a, _} = route_client("gw-cid-t1")
+      Process.sleep(80)
+      cid_a = :crypto.strong_rand_bytes(8)
+      :gen_udp.send(sock_a, elem(relay, 0), elem(relay, 1), quic_long(:crypto.strong_rand_bytes(8), cid_a))
+      assert {:ok, _} = recv(gw1_sock)
+      drain(sock_a)
+
+      # gateway 2 has no clients; a packet carrying A's CID must not reach A.
+      :gen_udp.send(gw2_sock, elem(relay, 0), elem(relay, 1), quic_short(cid_a))
+      assert {:error, :timeout} = :gen_udp.recv(sock_a, 0, 150)
+
+      for s <- [sock_a, gw1_sock, gw2_sock], do: :gen_udp.close(s)
+    end
+
+    test "sweeper drops idle connection-ID entries" do
+      if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
+        :ets.new(:ztlp_forwarded_quic_tuples, [:named_table, :public, :set])
+      end
+
+      old = System.monotonic_time(:millisecond) - 10 * 60 * 1_000
+      gw = {{10, 0, 0, 1}, 23097}
+      key = {:cid, gw, <<1, 2, 3, 4, 5, 6, 7, 8>>}
+      :ets.insert(:ztlp_forwarded_quic_tuples, {key, {{{127, 0, 0, 1}, 60_003}, old}})
+
+      send(ZtlpRelay.UdpListener, :sweep_client_routes)
+
+      Enum.reduce_while(1..50, nil, fn _, _ ->
+        case :ets.lookup(:ztlp_forwarded_quic_tuples, key) do
+          [] -> {:halt, :gone}
+          _ -> Process.sleep(20); {:cont, nil}
+        end
+      end)
+
+      assert :ets.lookup(:ztlp_forwarded_quic_tuples, key) == []
     end
 
     test "v0.29.3: CLIENT_ROUTE to DIFFERENT gateway does NOT purge same-IP entries" do

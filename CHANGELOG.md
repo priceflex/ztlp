@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.35.20 — 2026-10-20
+
+Remote clients behind a relay were slow or stalled whenever more than one
+connection to the same gateway was open at once (every browser page load).
+The relay could carry only one QUIC flow per NAT'd gateway.
+
+- **Relay: no more same-IP route purge.** A new CLIENT_ROUTE no longer deletes
+  the client's other routes to the same gateway; idle routes still age out via
+  the 5-minute sweeper.
+- **Relay: gateway replies are routed by QUIC connection ID** instead of to the
+  most recently connected client. The relay learns each client's connection ID
+  (and its routing prefix) from the client's Initial and routes by the
+  Destination Connection ID, falling back to the old behaviour for traffic it
+  cannot classify. Short headers are matched on the first bit only because
+  quinn greases the fixed bit (RFC 9287).
+- **Client: relay-routable connection IDs.** quinn servers switch to a fresh
+  client-issued connection ID right after the handshake, inside encrypted
+  frames the relay cannot read. Every client endpoint now stamps all of its
+  connection IDs with one random 4-byte prefix
+  (`quic_transport::RelayRoutableCidGenerator`), so the relay keeps routing
+  after the switch. Gateways are unchanged.
+- Both halves are backward compatible: new relay + old clients already carries
+  concurrent flows far better (29/30 vs 5/25 in the A/B), and the full fix
+  (40/40, 120/120 with 12 concurrent connections) needs both.
+- Desktop 1.2.6 carries the new client.
+
+Plan and A/B results: `docs/plans/2026-10-20-relay-multi-client-quic.md`.
+
 ## v0.35.19 — 2026-10-18
 
 Enrolled devices no longer drop out of the name server after 24 hours

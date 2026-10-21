@@ -1,6 +1,6 @@
 # Relay: carry many concurrent QUIC flows per gateway (2026-10-20)
 
-## Problem (seen live, ChooseForce first client)
+## Problem (seen live, first remote client of a NAT'd customer gateway)
 Remote clients reach a NAT'd gateway through the relay. On v0.35.18/19:
 1. `do_install_client_route` deletes every other `{:client_map, {ip, _}}` entry from the
    same client IP to the same gateway (v0.29.3 stale-port cleanup). The agent opens one QUIC
@@ -69,6 +69,6 @@ Net: the relay carries one QUIC flow per gateway at a time. Logs: bursts of N
 - Advertising the gateway's public address so remote clients can skip the relay.
 
 ## Rollout
-Prod relay 44.227.148.151 (ztlp-relay container) is shared by every TRS gateway. Build the
+The prod relay (ztlp-relay container) is shared by every gateway. Build the
 image from this branch, deploy in a window with Steven's OK, watch `CLIENT_ROUTE` +
-gateway handshakes for ChooseForce and Blitz, roll back by retagging the previous image.
+gateway handshakes for the affected gateways, roll back by retagging the previous image.

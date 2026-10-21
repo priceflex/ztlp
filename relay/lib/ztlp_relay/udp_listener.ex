@@ -210,6 +210,11 @@ defmodule ZtlpRelay.UdpListener do
               {2, {{gw_ip, gw_port}, now_ms}}
             )
 
+            # 2026-10-20: remember which client owns this QUIC connection so
+            # the gateway's replies can be routed by connection ID (see
+            # quic_cid_route/2) instead of "most recent client".
+            learn_quic_cid(data, sender, {gw_ip, gw_port}, now_ms)
+
             :gen_udp.send(socket, gw_ip, gw_port, data)
             true
 
@@ -253,69 +258,17 @@ defmodule ZtlpRelay.UdpListener do
                 false
 
               true ->
-                # v0.29.3: when multiple client_map entries point at the same
-                # gateway 5-tuple (which happens whenever the same client host
-                # has connected before from a different ephemeral UDP port —
-                # the old entries don't auto-clean), we MUST pick the most
-                # recently installed one. ETS `:set` `match_object` returns
-                # entries in arbitrary hash-bucket order, so the naive `[head|_]`
-                # pattern routes gateway-→-client responses to dead ephemeral
-                # ports under load. Symptom: QUIC handshake completes on the
-                # gateway side but never converges on the client (the response
-                # was misrouted), so the user sees "error: connection error:
-                # timed out" right after "CLIENT_ROUTE sent". See v0.29.3
-                # release notes and `hermes_session_handoff.md` for the full
-                # diagnosis.
-                matches =
-                  :ets.match_object(
-                    :ztlp_forwarded_quic_tuples,
-                    {{:client_map, :"$1"}, {sender, :"$2"}}
-                  )
-
-                pick =
-                  matches
-                  |> Enum.reduce(nil, fn
-                    {{:client_map, client_addr}, {^sender, inserted_at}}, nil ->
-                      {client_addr, inserted_at}
-
-                    {{:client_map, client_addr}, {^sender, inserted_at}}, {_, best_at} = _best
-                    when inserted_at > best_at ->
-                      {client_addr, inserted_at}
-
-                    _, best ->
-                      best
-                  end)
-
-                # Legacy schema fallback (entries without inserted_at) — same
-                # tail-pick behaviour as before so unupgraded entries still
-                # route, but ONLY when no tagged entry is present.
-                pick =
-                  case pick do
-                    nil ->
-                      case :ets.match_object(
-                             :ztlp_forwarded_quic_tuples,
-                             {{:client_map, :_}, sender}
-                           ) do
-                        [{{:client_map, client_addr}, ^sender} | _] ->
-                          {client_addr, 0}
-
-                        _ ->
-                          nil
-                      end
-
-                    other ->
-                      other
-                  end
-
-                case pick do
-                  {{c_ip, c_port}, _inserted_at} ->
+                # 2026-10-20: route by QUIC connection ID first. Every reply
+                # from a gateway comes from the same gateway address, so the
+                # "most recent client" rule below can carry only one flow per
+                # gateway; the DCID names the exact client connection.
+                case quic_cid_route(data, sender) do
+                  {:ok, {c_ip, c_port}} ->
                     :gen_udp.send(socket, c_ip, c_port, data)
                     true
 
-                  _ ->
-                    # Sender is neither a mapped client nor a gateway with an
-                    # active client. Fall through to legacy L1 validation.
-                    false
+                  :error ->
+                    reverse_forward_most_recent(socket, sender, data)
                 end
             end
         end
@@ -376,6 +329,17 @@ defmodule ZtlpRelay.UdpListener do
             {
               {{:client_map, :"$1"}, {:"$2", :"$3"}},
               [{:<, :"$3", cutoff}],
+              [true]
+            },
+            # 2026-10-20: connection-ID routes ({:cid, gw, cid} -> {client, last_seen})
+            {
+              {{:cid, :_, :_}, {:_, :"$1"}},
+              [{:<, :"$1", cutoff}],
+              [true]
+            },
+            {
+              {{:cidp, :_, :_}, {:_, :"$1"}},
+              [{:<, :"$1", cutoff}],
               [true]
             }
           ]
@@ -574,16 +538,17 @@ defmodule ZtlpRelay.UdpListener do
   # the zone secret can point the relay anywhere.
   @doc false
   @spec relay_control_frame?(binary()) :: boolean()
-  def relay_control_frame?(<<0x5A, 0x37, type, _::binary>>) when type in [0x0A, 0x0B, 0x0D, 0x0E, 0x0F],
-    do: true
+  def relay_control_frame?(<<0x5A, 0x37, type, _::binary>>)
+      when type in [0x0A, 0x0B, 0x0D, 0x0E, 0x0F],
+      do: true
 
   def relay_control_frame?(_), do: false
 
   defp handle_gateway_register_addr(<<addr_len::8, rest::binary>>, sender)
        when addr_len >= 1 and addr_len <= 64 do
     case rest do
-      <<addr::binary-size(addr_len), node_id::binary-size(16), service_raw::binary-size(16), ttl::32,
-        timestamp::64, hmac::binary-size(32)>> ->
+      <<addr::binary-size(addr_len), node_id::binary-size(16), service_raw::binary-size(16),
+        ttl::32, timestamp::64, hmac::binary-size(32)>> ->
         service_name =
           service_raw |> :binary.bin_to_list() |> Enum.take_while(&(&1 != 0)) |> to_string()
 
@@ -615,12 +580,16 @@ defmodule ZtlpRelay.UdpListener do
         end
 
       _ ->
-        Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (body too short)")
+        Logger.warning(
+          "[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (body too short)"
+        )
     end
   end
 
   defp handle_gateway_register_addr(_data, sender) do
-    Logger.warning("[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (addr_len out of range)")
+    Logger.warning(
+      "[UdpListener] Malformed GATEWAY_REGISTER_ADDR from #{inspect(sender)} (addr_len out of range)"
+    )
   end
 
   # ":port"  -> {sender_ip, port}
@@ -911,7 +880,9 @@ defmodule ZtlpRelay.UdpListener do
   # zone-keyed lookup ("gw:<zone>") missed.
   defp pick_fallback_gateway(service_name, node_id) do
     case GatewayForwarder.pick_gateway_for_service(service_name) do
-      {:ok, _} = ok -> ok
+      {:ok, _} = ok ->
+        ok
+
       :error ->
         case node_id do
           <<0::128>> -> :error
@@ -983,44 +954,13 @@ defmodule ZtlpRelay.UdpListener do
           {:ok, gateway_addr} ->
             ensure_quic_tuple_table()
 
-            # v0.29.3: clean up stale entries from the SAME client source IP
-            # pointing to the SAME gateway BEFORE inserting the new mapping.
-            # Reason: every `ztlp connect` from the same host opens a fresh
-            # ephemeral UDP socket (OS-chosen port), so the previous run's
-            # `{:client_map, {ip, old_port}}` entry never gets reused. Left
-            # in place, the reverse-forward (gateway→client) `match_object`
-            # returns multiple entries in arbitrary ETS hash-bucket order
-            # and the [head|_] pick routes responses to dead ports — the
-            # exact handshake-flakiness signature seen in v0.29.0..v0.29.2.
-            #
-            # We only purge entries that share BOTH the client IP AND the
-            # target gateway address. We do NOT purge entries from the
-            # same IP pointing to a DIFFERENT gateway — the same host can
-            # legitimately have concurrent tunnels to multiple tenants.
-            {client_ip, _client_port} = sender
-
-            stale_matches =
-              :ets.match_object(
-                :ztlp_forwarded_quic_tuples,
-                {{:client_map, {client_ip, :_}}, {gateway_addr, :_}}
-              )
-
-            stale_count =
-              Enum.reduce(stale_matches, 0, fn
-                {{:client_map, ^sender}, _}, acc ->
-                  # Don't delete the entry we're about to overwrite — let
-                  # the :ets.insert below replace it atomically.
-                  acc
-
-                {{:client_map, other_client}, _}, acc ->
-                  :ets.delete(
-                    :ztlp_forwarded_quic_tuples,
-                    {:client_map, other_client}
-                  )
-
-                  acc + 1
-              end)
-
+            # 2026-10-20: no same-IP purge. v0.29.3 deleted every other
+            # client_map entry from this client IP to this gateway to stop
+            # replies going to dead ports. The agent now opens one QUIC
+            # connection per browser TCP connection, so that purge made a
+            # page load's parallel connections delete each other's routes.
+            # Replies are routed by QUIC connection ID (quic_cid_route/2) and
+            # dead ports age out through the idle sweeper.
             inserted_at = System.monotonic_time(:millisecond)
 
             :ets.insert(
@@ -1031,7 +971,7 @@ defmodule ZtlpRelay.UdpListener do
             Logger.info(
               "[UdpListener] CLIENT_ROUTE accepted: client=#{inspect(sender)} " <>
                 "service=#{service_name} gateway=#{inspect(gateway_addr)} " <>
-                "node_id=#{Base.encode16(node_id)} purged_stale=#{stale_count}"
+                "node_id=#{Base.encode16(node_id)}"
             )
 
             :ok
@@ -1181,6 +1121,183 @@ defmodule ZtlpRelay.UdpListener do
   # The QUIC tuple table is normally created on first GATEWAY_REGISTER. If a
   # CLIENT_ROUTE arrives before any gateway has registered, this guard makes
   # the relay tolerant of either ordering.
+
+  # ------------------------------------------------------------------
+  # QUIC connection-ID demux (2026-10-20)
+  # ------------------------------------------------------------------
+  # Replies from one gateway all arrive from the same gateway address, so the
+  # relay cannot tell from the 5-tuple which client connection they belong
+  # to. The client's long-header packets carry its Source Connection ID; the
+  # gateway addresses every reply to it as the Destination Connection ID. We
+  # learn {:cid, gateway, scid} -> client on the way in and route replies by
+  # DCID on the way out. Keys include the gateway address so a CID learned for
+  # one gateway can never steer another gateway's packets.
+
+  # quinn's default local CID length is 8; try it first, then the rest of the
+  # RFC 9000 range (short headers do not carry the length).
+  @quic_cid_lengths [8, 16, 20, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 1, 2, 3]
+
+  # Must match proto/src/quic_transport.rs RELAY_CID_LEN / RELAY_CID_PREFIX_LEN.
+  @routable_cid_len 8
+  @cid_prefix_len 4
+
+  defp learn_quic_cid(
+         <<1::1, _::7, _version::32, dcid_len, _dcid::binary-size(dcid_len), scid_len,
+           scid::binary-size(scid_len), _::binary>>,
+         client,
+         gateway,
+         now_ms
+       )
+       when dcid_len <= 20 and scid_len > 0 and scid_len <= 20 do
+    :ets.insert(:ztlp_forwarded_quic_tuples, {{:cid, gateway, scid}, {client, now_ms}})
+
+    # ZTLP clients stamp every CID of an endpoint with the same random
+    # @cid_prefix_len-byte prefix (proto RelayRoutableCidGenerator), so the
+    # prefix keeps routing after the gateway switches to a CID we never saw.
+    if scid_len == @routable_cid_len do
+      <<prefix::binary-size(@cid_prefix_len), _::binary>> = scid
+      :ets.insert(:ztlp_forwarded_quic_tuples, {{:cidp, gateway, prefix}, {client, now_ms}})
+    end
+
+    :ok
+  end
+
+  defp learn_quic_cid(_data, _client, _gateway, _now_ms), do: :ok
+
+  defp quic_cid_route(data, gateway) do
+    case quic_exact_cid_route(data, gateway) do
+      {:ok, _} = hit -> hit
+      :error -> quic_cid_prefix_route(data, gateway)
+    end
+  end
+
+  defp quic_exact_cid_route(data, gateway) do
+    case data do
+      <<1::1, _::7, _version::32, dcid_len, dcid::binary-size(dcid_len), _::binary>>
+      when dcid_len > 0 and dcid_len <= 20 ->
+        cid_lookup(gateway, dcid)
+
+      # Short header: first bit 0. Do not require the fixed bit (0x40):
+      # quinn greases it per RFC 9287, so real replies arrive as 0x2E etc.
+      <<0::1, _::7, rest::binary>> ->
+        Enum.find_value(@quic_cid_lengths, :error, fn len ->
+          with <<dcid::binary-size(len), _::binary>> <- rest,
+               {:ok, _client} = hit <- cid_lookup(gateway, dcid) do
+            hit
+          else
+            _ -> nil
+          end
+        end)
+
+      _ ->
+        :error
+    end
+  end
+
+  defp quic_cid_prefix_route(data, gateway) do
+    prefix =
+      case data do
+        <<1::1, _::7, _version::32, @routable_cid_len, prefix::binary-size(@cid_prefix_len),
+          _::binary>> ->
+          prefix
+
+        <<0::1, _::7, prefix::binary-size(@cid_prefix_len), _::binary>> ->
+          prefix
+
+        _ ->
+          nil
+      end
+
+    if prefix, do: table_route_lookup({:cidp, gateway, prefix}), else: :error
+  end
+
+  defp cid_lookup(gateway, dcid), do: table_route_lookup({:cid, gateway, dcid})
+
+  defp table_route_lookup(key) do
+    case :ets.lookup(:ztlp_forwarded_quic_tuples, key) do
+      [{^key, {client, _last_seen}}] ->
+        :ets.update_element(
+          :ztlp_forwarded_quic_tuples,
+          key,
+          {2, {client, System.monotonic_time(:millisecond)}}
+        )
+
+        {:ok, client}
+
+      _ ->
+        :error
+    end
+  end
+
+  # Pre-2026-10-20 reverse path, kept as the fallback for traffic that is not
+  # QUIC or whose connection ID the relay has not seen.
+  defp reverse_forward_most_recent(socket, sender, data) do
+    # v0.29.3: when multiple client_map entries point at the same
+    # gateway 5-tuple (which happens whenever the same client host
+    # has connected before from a different ephemeral UDP port —
+    # the old entries don't auto-clean), we MUST pick the most
+    # recently installed one. ETS `:set` `match_object` returns
+    # entries in arbitrary hash-bucket order, so the naive `[head|_]`
+    # pattern routes gateway-→-client responses to dead ephemeral
+    # ports under load. Symptom: QUIC handshake completes on the
+    # gateway side but never converges on the client (the response
+    # was misrouted), so the user sees "error: connection error:
+    # timed out" right after "CLIENT_ROUTE sent". See v0.29.3
+    # release notes and `hermes_session_handoff.md` for the full
+    # diagnosis.
+    matches =
+      :ets.match_object(
+        :ztlp_forwarded_quic_tuples,
+        {{:client_map, :"$1"}, {sender, :"$2"}}
+      )
+
+    pick =
+      matches
+      |> Enum.reduce(nil, fn
+        {{:client_map, client_addr}, {^sender, inserted_at}}, nil ->
+          {client_addr, inserted_at}
+
+        {{:client_map, client_addr}, {^sender, inserted_at}}, {_, best_at} = _best
+        when inserted_at > best_at ->
+          {client_addr, inserted_at}
+
+        _, best ->
+          best
+      end)
+
+    # Legacy schema fallback (entries without inserted_at) — same
+    # tail-pick behaviour as before so unupgraded entries still
+    # route, but ONLY when no tagged entry is present.
+    pick =
+      case pick do
+        nil ->
+          case :ets.match_object(
+                 :ztlp_forwarded_quic_tuples,
+                 {{:client_map, :_}, sender}
+               ) do
+            [{{:client_map, client_addr}, ^sender} | _] ->
+              {client_addr, 0}
+
+            _ ->
+              nil
+          end
+
+        other ->
+          other
+      end
+
+    case pick do
+      {{c_ip, c_port}, _inserted_at} ->
+        :gen_udp.send(socket, c_ip, c_port, data)
+        true
+
+      _ ->
+        # Sender is neither a mapped client nor a gateway with an
+        # active client. Fall through to legacy L1 validation.
+        false
+    end
+  end
+
   defp ensure_quic_tuple_table do
     if :ets.info(:ztlp_forwarded_quic_tuples, :name) == :undefined do
       :ets.new(:ztlp_forwarded_quic_tuples, [

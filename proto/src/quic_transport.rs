@@ -168,6 +168,84 @@ impl Default for QuicEndpointConfig {
 // Only compiled when both `quic-transport` and `tokio-runtime` are on.
 // iOS NE builds (`ios-sync`) skip this entire block.
 
+// ---------------------------------------------------------------------------
+// Relay-routable client connection IDs (2026-10-20)
+// ---------------------------------------------------------------------------
+//
+// A relay that fronts a NAT'd gateway receives every gateway->client packet
+// from the same gateway address, so it must route replies by the QUIC
+// Destination Connection ID. quinn servers switch to a fresh client-issued
+// CID as soon as the client's first NEW_CONNECTION_ID frame arrives; that
+// frame is encrypted, so the relay cannot learn the new CID. Giving every CID
+// issued by one client endpoint the same random prefix lets the relay learn
+// `prefix -> client address` from the client's Initial (cleartext SCID) and
+// keep routing after the switch. One endpoint == one UDP socket == one relay
+// client address, so the endpoint is exactly the right granularity.
+//
+// Trade-off: CIDs of one endpoint are linkable by an on-path observer through
+// the prefix. They already share the endpoint's UDP 4-tuple, and ZTLP clients
+// do not migrate, so this costs no unlinkability we actually had.
+
+/// Length of the per-endpoint routing prefix at the start of every client CID.
+pub const RELAY_CID_PREFIX_LEN: usize = 4;
+/// Total client CID length (prefix + random). quinn's default is also 8.
+pub const RELAY_CID_LEN: usize = 8;
+
+/// [`quinn_proto::ConnectionIdGenerator`] that stamps a fixed random prefix
+/// on every CID it issues. See the module comment above.
+#[derive(Debug, Clone, Copy)]
+pub struct RelayRoutableCidGenerator {
+    prefix: [u8; RELAY_CID_PREFIX_LEN],
+}
+
+impl RelayRoutableCidGenerator {
+    /// New generator with a fresh random prefix.
+    pub fn new() -> Self {
+        Self {
+            prefix: rand::random(),
+        }
+    }
+
+    /// The routing prefix shared by every CID this generator issues.
+    pub fn prefix(&self) -> [u8; RELAY_CID_PREFIX_LEN] {
+        self.prefix
+    }
+}
+
+impl Default for RelayRoutableCidGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl quinn_proto::ConnectionIdGenerator for RelayRoutableCidGenerator {
+    fn generate_cid(&mut self) -> quinn_proto::ConnectionId {
+        let mut bytes = [0u8; RELAY_CID_LEN];
+        bytes[..RELAY_CID_PREFIX_LEN].copy_from_slice(&self.prefix);
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes[RELAY_CID_PREFIX_LEN..]);
+        quinn_proto::ConnectionId::new(&bytes)
+    }
+
+    fn cid_len(&self) -> usize {
+        RELAY_CID_LEN
+    }
+
+    fn cid_lifetime(&self) -> Option<std::time::Duration> {
+        None
+    }
+}
+
+/// `quinn::EndpointConfig` for every ZTLP **client** endpoint: default config
+/// plus [`RelayRoutableCidGenerator`]. quinn calls the factory once per
+/// endpoint, so each endpoint gets its own prefix.
+pub fn client_endpoint_config() -> quinn::EndpointConfig {
+    let mut cfg = quinn::EndpointConfig::default();
+    cfg.cid_generator(|| -> Box<dyn quinn_proto::ConnectionIdGenerator> {
+        Box::new(RelayRoutableCidGenerator::new())
+    });
+    cfg
+}
+
 #[cfg(feature = "tokio-runtime")]
 pub mod tokio_endpoint {
     //! `quinn::Endpoint`-backed server/client. Phase 1 deliverable.
@@ -675,6 +753,19 @@ pub mod tokio_endpoint {
         }
     }
 
+    /// `quinn::Endpoint::client(addr)` equivalent that installs
+    /// [`super::client_endpoint_config`] (relay-routable CIDs).
+    fn client_endpoint_bind(bind_addr: SocketAddr) -> Result<quinn::Endpoint, QuicTransportError> {
+        let socket = std::net::UdpSocket::bind(bind_addr)?;
+        socket.set_nonblocking(true)?;
+        Ok(quinn::Endpoint::new(
+            super::client_endpoint_config(),
+            None,
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )?)
+    }
+
     #[derive(Debug)]
     pub struct QuicEndpoint {
         pub _cfg: QuicEndpointConfig,
@@ -840,7 +931,8 @@ pub mod tokio_endpoint {
 
             std_socket.set_nonblocking(true)?;
             let mut endpoint = quinn::Endpoint::new(
-                quinn::EndpointConfig::default(),
+                // Relay-routable CIDs: see RelayRoutableCidGenerator.
+                super::client_endpoint_config(),
                 None,
                 std_socket,
                 Arc::new(quinn::TokioRuntime),
@@ -881,7 +973,7 @@ pub mod tokio_endpoint {
             client_config.transport_config(Arc::new(transport_config));
 
             let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-            let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+            let mut endpoint = client_endpoint_bind(bind_addr)?;
             endpoint.set_default_client_config(client_config);
 
             let conn = endpoint.connect(remote, server_name)?.await?;
@@ -945,7 +1037,7 @@ pub mod tokio_endpoint {
         pub async fn new(cfg: QuicEndpointConfig) -> Result<Self, QuicTransportError> {
             ensure_crypto();
             let bind_addr = cfg.bind.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-            let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+            let endpoint = client_endpoint_bind(bind_addr)?;
             let actual = endpoint.local_addr()?;
             Self::from_endpoint(cfg, endpoint, actual)
                 .await
@@ -967,7 +1059,8 @@ pub mod tokio_endpoint {
             let bind_addr = std_socket.local_addr()?;
             std_socket.set_nonblocking(true)?;
             let endpoint = quinn::Endpoint::new(
-                quinn::EndpointConfig::default(),
+                // Relay-routable CIDs: see RelayRoutableCidGenerator.
+                super::client_endpoint_config(),
                 None,
                 std_socket,
                 Arc::new(quinn::TokioRuntime),
@@ -1656,6 +1749,37 @@ impl SansIoConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── relay-routable client CIDs ───────────────────────────────────
+
+    #[test]
+    fn relay_cid_generator_stamps_one_prefix_on_every_cid() {
+        use quinn_proto::ConnectionIdGenerator;
+        let mut g = RelayRoutableCidGenerator::new();
+        assert_eq!(g.cid_len(), RELAY_CID_LEN);
+        assert_eq!(g.cid_lifetime(), None);
+        let cids: Vec<_> = (0..16).map(|_| g.generate_cid()).collect();
+        for c in &cids {
+            assert_eq!(c.len(), RELAY_CID_LEN);
+            assert_eq!(&c[..RELAY_CID_PREFIX_LEN], &g.prefix()[..]);
+        }
+        // the random tail must differ (16 draws of 32 bits: collision ~3e-8)
+        let mut tails: Vec<_> = cids
+            .iter()
+            .map(|c| c[RELAY_CID_PREFIX_LEN..].to_vec())
+            .collect();
+        tails.sort();
+        tails.dedup();
+        assert_eq!(tails.len(), cids.len());
+    }
+
+    #[test]
+    fn relay_cid_generators_get_independent_prefixes() {
+        let prefixes: std::collections::HashSet<_> = (0..64)
+            .map(|_| RelayRoutableCidGenerator::new().prefix())
+            .collect();
+        assert!(prefixes.len() >= 63, "prefixes must be random per endpoint");
+    }
 
     #[test]
     fn alpn_is_stable() {

@@ -529,6 +529,37 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 17:20Z — **Slice 5c DONE (/zone page)** (cron tick). Commit `1519a9d7`.
+  - `app/controllers/zone_controller.rb`: `show` renders zone name/ns_addr, authority
+    import status (pubkey or "not imported" warning + copyable import command), the three
+    secrets (Set/Not set badges), last publish + last reconcile (from `ns.publish` /
+    `ns.reconcile` audit rows), and the drift table from `system_settings ns_drift_json`
+    (per-type panel/NS counts + missing/extra names; `failed` → error line; `not_configured`
+    → warning). `publish` / `reconcile` enqueue `RepublishNsJob` / `ReconcileNsJob` via
+    `perform_later` (write access only, `require_write_access` guard; audit
+    `zone.publish_now` / `zone.reconcile_now`; redirect back to /zone). Jobs are ENQUEUED,
+    not run inline, so a failed NS write cannot 500 the button.
+  - `app/views/zone/show.html.erb`: mock-shell classes (tally, panel, kv/dl, badge,
+    table-wrap, warn, code-box); buttons hidden for read_only admins.
+  - `config/routes.rb`: `GET /zone` + `POST /zone/publish` + `POST /zone/reconcile`.
+  - Tests (`test/controllers/zone_controller_test.rb`, 12, TDD RED first — all 12 failed
+    on `zone_path` NameError): name/ns_addr/authority status; imported pubkey shown +
+    "not imported" gone; all 3 secrets Not set → all Set after import; drift table
+    renders missing/extra names from ns_drift_json; failed + not_configured statuses
+    rendered; publish/reconcile enqueue the right job class (`job_class` key in the test
+    adapter's serialized hash) + redirect; read_only 403 on both mutations + buttons
+    hidden for them; rail aria-current on /zone.
+    Note: `authority_seed_ct` is 64-hex in the fixture zone (validates on import); the
+    test uses `save!(validate: false)` after `Ztlp::Ed25519.generate` because the
+    generated seed is 64 hex and the zone row already has name/ns_addr — this is a
+    test-harness convenience, the real import goes through the rake task (5a).
+  - Evidence: `SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test` → **177 runs / 675
+    assertions / 0 failures / 0 errors / 5 skips** (= ZTLP_TEST_NS-gated roundtrip;
+    was 165 runs before this slice). `bash scripts/ci-admin.sh` → `== all gates
+    passed` (rubocop clean; brakeman EOL-only; node --check OK; node --test 19/19).
+    `ruby -c` on every edited .rb + .erb: Syntax OK.
+  Next: Slice 6 — Users (per §4 queue).
+
 - 2026-10-22 17:10Z — **fix after Slice 5b, part 2** (republisher + reconciler, interactive).
   Republisher: (1) the 1.1 s sleep sat between the 4 *groups* (key/users/groups/devices), not
   between records — all users went back-to-back; now one gap between EVERY record write (test

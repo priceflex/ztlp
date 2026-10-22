@@ -15,5 +15,9 @@ Rails.application.routes.draw do
   resources :admins, only: %i[index new create edit update]
   resources :audit_logs, only: [ :index ]
 
+  get "zone", to: "zone#show", as: :zone
+  post "zone/publish", to: "zone#publish", as: :zone_publish
+  post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile
+
   root "dashboard#show"
 end

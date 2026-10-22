@@ -1,0 +1,73 @@
+<% content_for :title, "Name server - ZTLP Directory" %>
+<% secrets = { "Enrollment secret" => @zone.enrollment_secret_ct.present?, "Relay secret" => @zone.relay_secret_ct.present?, "NS admin API secret" => @zone.ns_admin_api_secret_ct.present? } %>
+<% last = ->(l) { l&.created_at&.utc&.strftime("%Y-%m-%d %H:%M:%S") } %>
+<div class="page-head">
+  <div><h1>Name server</h1><p class="lede">Zone <span class="mono"><%= @zone.name %></span> and its NS publication state.</p></div>
+</div>
+
+<div class="tally">
+  <div class="tally-item"><div class="tally-n" style="font-size:19px"><span class="mono"><%= @zone.name %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <span class="mono"><%= @zone.ns_addr %></span></div></div>
+  <div class="tally-item"><div class="tally-n"><%= @zone.authority_configured? ? "Yes" : "No" %></div><div class="tally-l">Zone authority</div><div class="tally-s"><%= @zone.authority_configured? ? "imported — records can be published" : "not imported" %></div></div>
+  <div class="tally-item"><div class="tally-n"><%= @last_publish ? "Yes" : "No" %></div><div class="tally-l">Last publish</div><div class="tally-s"><%= last.(@last_publish) || "never" %></div></div>
+  <div class="tally-item"><div class="tally-n"><%= @last_reconcile ? @last_reconcile.status : "-" %></div><div class="tally-l">Last reconcile</div><div class="tally-s"><%= last.(@last_reconcile) || "never" %></div></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Zone key</h2></div>
+    <% if @zone.authority_configured? %>
+      <div class="kv"><div class="kv-k">Authority pubkey</div><div class="kv-v mono"><%= @zone.authority_pubkey_hex %></div></div>
+    <% else %>
+      <div class="warn">Authority not imported. Records cannot be published to the NS until the zone key is imported:
+        <div class="mono copyline">bin/rake zone:import_authority[&lt;path to identity.json&gt;]</div></div>
+    <% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Secrets</h2></div>
+    <% secrets.each do |label, set| %>
+      <dl class="kv"><dt><%= label %></dt><dd><span class="badge <%= set ? "ok" : "" %>"><%= set ? "Set" : "Not set" %></span></dd></dl>
+    <% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Drift</h2><span class="sub">last check <%= @drift["checked_at"] ? Time.at(@drift["checked_at"].to_i).utc.strftime("%Y-%m-%d %H:%M:%S") : "never" %> &middot; <span class="badge <%= @drift["status"] == "ok" ? "ok" : (@drift["status"] == "failed" ? "bad" : "") %>"><%= @drift["status"] || "not checked" %></span></span></div>
+    <% if @drift["status"] == "failed" %>
+      <div class="warn">Reconcile failed: <span class="mono"><%= @drift["error"] %></span></div>
+    <% elsif @drift["status"] == "not_configured" %>
+      <div class="warn">NS admin API secret not set — drift checking is disabled until <code class="mono">zone:set_secret[ns_admin_api]</code> runs.</div>
+    <% else %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Type</th><th>Panel</th><th>NS</th><th>Missing in NS</th><th>Extra in NS</th></tr></thead>
+        <tbody>
+          <% %w[user device group].each do |t| %>
+            <% row = @drift[t] %>
+            <% next unless row %>
+            <tr>
+              <td class="mono"><%= t %></td>
+              <td><%= row["panel"] %></td>
+              <td><%= row["ns"] %></td>
+              <td class="mono sub"><%= Array(row["missing_in_ns"]).join(", ") %></td>
+              <td class="mono sub"><%= Array(row["extra_in_ns"]).join(", ") %></td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table></div>
+    <% end %>
+  </div>
+
+  <% if current_admin&.write_access? %>
+    <div class="panel">
+      <div class="panel-h"><h2>Run now</h2></div>
+      <div class="actions">
+        <%= form_with url: zone_publish_path, method: :post do %>
+          <button type="submit" class="btn">Publish now</button>
+        <% end %>
+        <%= form_with url: zone_reconcile_path, method: :post do %>
+          <button type="submit" class="btn">Reconcile now</button>
+        <% end %>
+      </div>
+      <div class="sub">Publish re-writes every record the panel publishes (authority KEY, active users, groups, enrolled devices), spaced ~1.1 s. Reconcile lists the NS record sets and refreshes the drift table.</div>
+    </div>
+  <% end %>
+</div>

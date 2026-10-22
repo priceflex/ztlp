@@ -56,7 +56,7 @@ module ApplicationHelper
   def nav_href(route)
     case route
     when "root" then root_path
-    when "users" then "/users"
+    when "users" then users_path
     when "devices" then "/devices"
     when "groups" then "/groups"
     when "apps" then "/apps"
@@ -71,5 +71,17 @@ module ApplicationHelper
 
   def initials(name)
     name.to_s.split(/\s+/).map { |w| w[0] }.first(2).join.upcase
+  end
+
+  # Status badge (mock design: dot + label; ok/warn/bad tone classes).
+  STATUS_TONE = {
+    "active" => "ok", "enrolled" => "ok", "redeemed" => "ok", "registered" => "ok",
+    "invited" => "warn", "pending" => "warn",
+    "disabled" => "bad", "revoked" => "bad", "expired" => "bad", "stale" => "bad"
+  }.freeze
+
+  def status_badge(status)
+    tone = STATUS_TONE.fetch(status.to_s, "")
+    tag.span(status, class: [ "badge", tone ].compact_blank.join(" "))
   end
 end

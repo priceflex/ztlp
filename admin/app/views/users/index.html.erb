@@ -1,0 +1,38 @@
+<% content_for :title, "Users - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Users</h1><p class="lede">People who can hold device identities in this zone. Each user enrolls devices with a single-use code.</p></div>
+</div>
+
+<div class="toolbar">
+  <div class="seg" role="group" aria-label="Filter by status">
+    <% UsersController::FILTERS.each do |key, label| %>
+      <% qs = { status: key }.tap { |h| h[:q] = @q if @q.present? } %>
+      <a href="<%= users_path(qs) %>"<% if @status == key %> aria-current="page"<% end %>><%= label %></a>
+    <% end %>
+  </div>
+  <%= form_with url: users_path, method: :get, class: "actions" do %>
+    <% if @status != "all" %><input type="hidden" name="status" value="<%= @status %>"><% end %>
+    <input type="search" name="q" value="<%= @q %>" placeholder="Search name or email" aria-label="Search users">
+  <% end %>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Kind</th><th>Role</th><th>Groups</th><th>Devices</th><th>Status</th></tr></thead>
+    <tbody>
+      <% @users.each do |u| %>
+        <tr data-act="open" data-drawer="<%= user_path(u) %>" tabindex="0">
+          <td><div class="who"><span class="avatar"><%= initials(u.display_name) %></span>
+            <div><div class="strong"><a href="<%= user_path(u) %>"><%= u.display_name %></a></div>
+            <div class="sub mono"><%= u.ns_name %></div></div></div></td>
+          <td class="nowrap"><%= u.kind == "service" ? "Service" : "Person" %></td>
+          <td class="nowrap"><%= u.role %></td>
+          <td><div class="chips"><% u.groups.each do |g| %><span class="chip"><%= g.name %></span><% end %></div></td>
+          <td class="row-devices"><%= u.devices.count(&:enrolled?) %></td>
+          <td class="nowrap"><%= status_badge(u.status) %></td>
+        </tr>
+      <% end %>
+      <% if @users.empty? %><tr class="empty"><td colspan="6">No users match. Clear the search or add a user.</td></tr><% end %>
+    </tbody>
+  </table>
+</div>

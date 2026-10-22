@@ -1,0 +1,59 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% unless drawer %><% content_for :title, "#{@user.display_name} - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div class="who"><span class="avatar lg"><%= initials(@user.display_name) %></span>
+    <div><h1><%= @user.display_name %></h1>
+    <p class="lede mono"><%= @user.ns_name %> &middot; <%= status_badge(@user.status) %></p></div></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Profile</h2><% if @user.kind == "service" %><span class="sub">service identity</span><% end %></div>
+    <dl class="kv"><dt>Username</dt><dd class="mono"><%= @user.username %></dd></dl>
+    <dl class="kv"><dt>Kind</dt><dd><%= @user.kind == "service" ? "Service" : "Person" %></dd></dl>
+    <dl class="kv"><dt>Role</dt><dd><%= @user.role %></dd></dl>
+    <% if @user.email.present? %><dl class="kv"><dt>Email</dt><dd><%= @user.email %></dd></dl><% end %>
+    <% if @user.phone.present? %><dl class="kv"><dt>Phone</dt><dd><%= @user.phone %><%= @user.sms_opt_in ? " (SMS opt-in)" : "" %></dd></dl><% end %>
+    <% if @user.notes.present? %><dl class="kv"><dt>Notes</dt><dd><%= @user.notes %></dd></dl><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Groups</h2></div>
+    <% if @user.groups.any? %>
+      <div class="chips">
+        <% @user.groups.each do |g| %>
+          <span class="chip"><%= g.name %></span>
+        <% end %>
+      </div>
+    <% else %><div class="empty-note">No groups.</div><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Devices</h2></div>
+    <% if @user.devices.any? %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Assurance</th><th>Status</th></tr></thead>
+        <tbody>
+          <% @user.devices.order(:name).each do |d| %>
+            <tr><td class="mono"><%= d.name %></td>
+              <td class="nowrap"><span class="badge <%= d.assurance >= 3 ? "ok" : (d.assurance == 2 ? "warn" : "") %>"><%= Ztlp::Assurance.label(d.assurance) %></span></td>
+              <td class="nowrap"><%= status_badge(d.status) %></td></tr>
+          <% end %>
+        </tbody>
+      </table></div>
+    <% else %><div class="empty-note">No devices.</div><% end %>
+  </div>
+
+  <div class="actions">
+    <a class="btn" href="<%= "/users/#{@user.id}/edit" %>">Edit</a>
+    <% if @user.status == "disabled" %>
+      <%= form_with url: "/users/#{@user.id}/enable", method: :post, class: "actions" do %>
+        <button type="submit" class="btn">Enable</button>
+      <% end %>
+    <% else %>
+      <%= form_with url: "/users/#{@user.id}/disable", method: :post, class: "actions" do %>
+        <button type="submit" class="btn" data-confirm="Disable <%= @user.display_name %>? Their NS record is revoked.">Disable</button>
+      <% end %>
+    <% end %>
+  </div>
+</div>

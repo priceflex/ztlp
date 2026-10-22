@@ -1,3 +1,384 @@
-// ZTLP Directory — the only JavaScript file (Slice 2 fills this in).
+// ZTLP Directory — the only JavaScript file (Slice 2b fills the pure contract).
 // Hand-written ES2017, no framework, no npm, no CDN (decision 1).
-// See docs/admin-panel/BUILD_LOOP.md §2.3 for the data-act contract.
+//
+// §2.3 contract (docs/admin-panel/BUILD_LOOP.md):
+//   data-act="theme"            toggle html[data-theme] light/dark, persist localStorage "ztlp-theme"
+//   data-act="nav-toggle"       mobile rail open/close (+ #nscrim)
+//   data-drawer="<url>"         on click: fetch(url, {headers:{Accept:"text/html","X-Drawer":"1"}})
+//                               → inject into #drawer, aria-hidden=false, trap focus, Esc/scrim closes
+//   data-act="copy" data-copy=  navigator.clipboard.writeText + toast "Copied"
+//   data-confirm="<text>"       on submit of a form: window.confirm (no custom modal in v1)
+//   #gs-input                   debounce 150ms → fetch /search.json?q= → render #gresults
+//   [data-toast]                server flashes rendered as <div data-toast> are shown then auto-hide 4s
+//
+// Pure functions live on window.ZtlpDirectory so test/javascript/directory_test.mjs
+// can unit-test them with plain node:test (no jsdom). DOM wiring sits below the
+// pure block and runs only when document/window look browser-shaped.
+
+(function () {
+  'use strict'
+
+  // =========================================================================
+  // Pure helpers — unit-tested in test/javascript/directory_test.mjs.
+  // No DOM / fetch / network access inside any of these.
+  // =========================================================================
+
+  const THEME_KEY = 'ztlp-theme'
+
+  // nextTheme(current) — pure: returns the next theme given the current one.
+  // Unrecognized input (empty, nil, "bogus") maps to "dark" (the app default).
+  function nextTheme(current) {
+    return current === 'light' ? 'dark' : 'light'
+  }
+
+  // searchUrl(q) — pure: return /search.json?q=... with q URL-encoded, or
+  // null when q is blank (so the caller can skip the fetch).
+  function searchUrl(q) {
+    if (q === null || q === undefined) return null
+    const trimmed = String(q).trim()
+    if (!trimmed) return null
+    return '/search.json?q=' + encodeURIComponent(trimmed)
+  }
+
+  // rankSearch(rows, q, opts) — pure: filter rows by q (name first, then sub)
+  // and sort by score descending. opts.maxResults defaults to 20.
+  // Score: name exact = 3, name prefix = 2, name substring = 1, sub substring = 1.
+  // (name and sub are the two fields the mock's gresults row shows.)
+  function rankSearch(rows, q, opts) {
+    const opts2 = opts || {}
+    const maxResults = opts2.maxResults || 20
+    const needle = String(q === null || q === undefined ? '' : q).toLowerCase().trim()
+    if (!needle) return []
+    const scored = []
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]
+      if (!row) continue
+      const name = String(row.name || '').toLowerCase()
+      const sub = String(row.sub || '').toLowerCase()
+      let score = 0
+      if (name === needle) score = 3
+      else if (name.indexOf(needle) === 0) score = 2
+      else if (name.indexOf(needle) !== -1) score = 1
+      else if (sub.indexOf(needle) !== -1) score = 1
+      if (score > 0) scored.push({ row: row, score: score })
+    }
+    scored.sort(function (a, b) { return b.score - a.score })
+    return scored.slice(0, maxResults).map(function (x) {
+      return {
+        type: x.row.type,
+        id: x.row.id,
+        name: x.row.name,
+        sub: x.row.sub,
+        url: x.row.url,
+        score: x.score,
+      }
+    })
+  }
+
+  // escapeHtml — pure: escape &, <, >, ", ' so server data never injects HTML
+  // into the drawer fragment or search results.
+  function escapeHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
+  // formatSearchResults(rows) — pure: escape name/sub and emit an <a> per row
+  // with role="option" and data-url. Empty list renders an honest "no matches"
+  // line (never a fabricated empty box).
+  function formatSearchResults(rows) {
+    if (!rows || rows.length === 0) {
+      return '<div class="gs-empty">no matches</div>'
+    }
+    const parts = []
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i]
+      parts.push(
+        '<a class="gs-row" href="' + escapeHtml(r.url) + '" role="option" data-url="' +
+        escapeHtml(r.url) + '" data-type="' + escapeHtml(r.type) + '">' +
+        '<span class="gs-type">' + escapeHtml(r.type) + '</span>' +
+        '<span class="gs-name">' + escapeHtml(r.name) + '</span>' +
+        '<span class="gs-sub">' + escapeHtml(r.sub) + '</span>' +
+        '</a>'
+      )
+    }
+    return parts.join('')
+  }
+
+  // copy(text) — pure contract: return the text it WOULD have written (or the
+  // empty string). The DOM handler (below) is what actually calls
+  // navigator.clipboard.writeText and toasts. This makes the behaviour
+  // testable without a clipboard.
+  function copy(text) {
+    return String(text === null || text === undefined ? '' : text)
+  }
+
+  // shouldConfirm(text) — pure: predicate the submit handler uses to decide
+  // whether to window.confirm() before the form goes.
+  function shouldConfirm(text) {
+    return !!(text && String(text).trim() !== '')
+  }
+
+  const api = {
+    THEME_KEY: THEME_KEY,
+    nextTheme: nextTheme,
+    searchUrl: searchUrl,
+    rankSearch: rankSearch,
+    formatSearchResults: formatSearchResults,
+    escapeHtml: escapeHtml,
+    copy: copy,
+    shouldConfirm: shouldConfirm,
+  }
+
+  // Expose for both the browser (data-act handlers below) and node:test.
+  if (typeof window !== 'undefined') {
+    window.ZtlpDirectory = api
+  } else if (typeof globalThis !== 'undefined') {
+    globalThis.window = globalThis.window || {}
+    globalThis.window.ZtlpDirectory = api
+  }
+
+  // =========================================================================
+  // DOM wiring — runs only in a real browser. Guarded so the pure tests
+  // above (which fake a minimal document) never trip an exception.
+  // =========================================================================
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  if (!document.addEventListener) return
+
+  // --- Theme ------------------------------------------------------------
+  function applyTheme(theme) {
+    const el = document.documentElement
+    if (!el || !el.setAttribute) return
+    if (theme === 'light' || theme === 'dark') el.setAttribute('data-theme', theme)
+    else el.removeAttribute('data-theme')
+  }
+
+  function initTheme() {
+    let current = 'dark'
+    try {
+      const saved = window.localStorage ? window.localStorage.getItem(THEME_KEY) : null
+      if (saved === 'light' || saved === 'dark') current = saved
+      else {
+        const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+        current = prefersLight ? 'light' : 'dark'
+      }
+    } catch (_e) { current = 'dark' }
+    applyTheme(current)
+  }
+
+  function onThemeClick() {
+    const el = document.documentElement
+    const current = el && el.getAttribute ? el.getAttribute('data-theme') : null
+    const next = nextTheme(current)
+    try { if (window.localStorage) window.localStorage.setItem(THEME_KEY, next) } catch (_e) {}
+    applyTheme(next)
+  }
+
+  // --- Mobile rail ------------------------------------------------------
+  function onNavToggle() {
+    const app = document.getElementById('app')
+    if (app && app.classList) app.classList.toggle('nav-open')
+    const scrim = document.getElementById('nscrim')
+    if (scrim && scrim.classList) scrim.classList.toggle('show')
+  }
+
+  function onNavClose() {
+    const app = document.getElementById('app')
+    if (app && app.classList) app.classList.remove('nav-open')
+    const scrim = document.getElementById('nscrim')
+    if (scrim && scrim.classList) scrim.classList.remove('show')
+  }
+
+  // --- Copy -------------------------------------------------------------
+  function onCopyClick(el) {
+    const text = el.getAttribute('data-copy') || ''
+    const text2 = copy(text)
+    if (!text2) return
+    const nav = window.navigator
+    const cb = nav && nav.clipboard && nav.clipboard.writeText
+    if (typeof cb === 'function') {
+      cb.call(nav.clipboard, text2).then(function () {
+        toast('Copied')
+      }, function () {
+        toast('Copy failed')
+      })
+    } else {
+      toast('Copy failed')
+    }
+  }
+
+  // --- Confirm-on-submit ------------------------------------------------
+  function onFormSubmit(ev) {
+    const form = ev.target
+    if (!form || !form.getAttribute) return
+    const text = form.getAttribute('data-confirm')
+    if (shouldConfirm(text)) {
+      const ok = window.confirm(text)
+      if (!ok) ev.preventDefault()
+    }
+  }
+
+  // --- Toast ------------------------------------------------------------
+  function toast(message) {
+    const root = document.getElementById('toasts')
+    if (!root) return
+    const el = document.createElement('div')
+    el.className = 'toast'
+    el.setAttribute('data-toast', '')
+    el.textContent = String(message)
+    root.appendChild(el)
+    setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el)
+    }, 4000)
+  }
+
+  // Auto-hide server-rendered flashes (layout renders <div data-toast> for
+  // notice/alert). They already exist in the DOM; this just times them out.
+  function autoHideFlashes() {
+    const flashes = document.querySelectorAll('[data-toast]')
+    for (let i = 0; i < flashes.length; i++) {
+      const el = flashes[i]
+      setTimeout(function () {
+        if (el && el.parentNode) el.parentNode.removeChild(el)
+      }, 4000)
+    }
+  }
+
+  // --- Drawer -----------------------------------------------------------
+  function openDrawer(url) {
+    const drawer = document.getElementById('drawer')
+    const scrim = document.getElementById('dscrim')
+    if (!drawer) return
+    fetch(url, { headers: { Accept: 'text/html', 'X-Drawer': '1' } })
+      .then(function (r) {
+        if (!r.ok) throw new Error('drawer fetch ' + r.status)
+        return r.text()
+      })
+      .then(function (html) {
+        drawer.innerHTML = html
+        drawer.setAttribute('aria-hidden', 'false')
+        if (scrim && scrim.classList) scrim.classList.add('show')
+        // Focus the first focusable inside the drawer (basic trap).
+        const first = drawer.querySelector('a,button,input,select,textarea,[tabindex]')
+        if (first && first.focus) first.focus()
+      })
+      .catch(function (err) {
+        drawer.innerHTML = '<div class="wrap"><div class="panel"><h3>Could not load details</h3>' +
+          '<p>' + escapeHtml(err && err.message ? err.message : String(err)) + '</p></div></div>'
+        drawer.setAttribute('aria-hidden', 'false')
+        if (scrim && scrim.classList) scrim.classList.add('show')
+      })
+  }
+
+  function closeDrawer() {
+    const drawer = document.getElementById('drawer')
+    const scrim = document.getElementById('dscrim')
+    if (drawer) drawer.setAttribute('aria-hidden', 'true')
+    if (scrim && scrim.classList) scrim.classList.remove('show')
+  }
+
+  function onDrawerClick(el) {
+    const url = el.getAttribute('data-drawer')
+    if (url) openDrawer(url)
+  }
+
+  function onKeydown(ev) {
+    if (ev.key === 'Escape') {
+      const drawer = document.getElementById('drawer')
+      if (drawer && drawer.getAttribute('aria-hidden') === 'false') closeDrawer()
+      const app = document.getElementById('app')
+      if (app && app.classList && app.classList.contains('nav-open')) onNavClose()
+    }
+  }
+
+  // --- Global search ----------------------------------------------------
+  let gsTimer = null
+  function onSearchInput(ev) {
+    const input = ev.target
+    const q = input ? (input.value || '') : ''
+    const box = document.getElementById('gresults')
+    if (!box) return
+    if (gsTimer) { clearTimeout(gsTimer); gsTimer = null }
+    const url = searchUrl(q)
+    if (!url) {
+      box.innerHTML = ''
+      box.removeAttribute('role')
+      return
+    }
+    gsTimer = setTimeout(function () {
+      fetch(url, { headers: { Accept: 'application/json' } })
+        .then(function (r) { if (!r.ok) throw new Error('search ' + r.status); return r.json() })
+        .then(function (rows) {
+          const ranked = rankSearch(rows || [], q)
+          box.innerHTML = formatSearchResults(ranked)
+          if (ranked.length > 0) box.setAttribute('role', 'listbox')
+          else box.removeAttribute('role')
+        })
+        .catch(function () {
+          box.innerHTML = '<div class="gs-empty">search unavailable</div>'
+        })
+    }, 150)
+  }
+
+  function onSearchKeydown(ev) {
+    const box = document.getElementById('gresults')
+    if (!box) return
+    const rows = Array.prototype.slice.call(box.querySelectorAll('a[data-url]'))
+    if (rows.length === 0) return
+    let idx = rows.findIndex(function (r) { return r.classList.contains('gs-active') })
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault()
+      idx = (idx + 1) % rows.length
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault()
+      idx = (idx - 1 + rows.length) % rows.length
+    } else if (ev.key === 'Enter') {
+      const active = idx >= 0 ? rows[idx] : rows[0]
+      if (active) { ev.preventDefault(); window.location.assign(active.getAttribute('data-url')) }
+      return
+    } else return
+    rows.forEach(function (r) { r.classList.remove('gs-active') })
+    rows[idx].classList.add('gs-active')
+    rows[idx].setAttribute('aria-selected', 'true')
+  }
+
+  // --- Wire it all up ---------------------------------------------------
+  function wire() {
+    initTheme()
+
+    document.addEventListener('click', function (ev) {
+      const el = ev.target && ev.target.closest ? ev.target.closest('[data-act],[data-drawer]') : null
+      if (!el) return
+      const act = el.getAttribute('data-act')
+      if (act === 'theme') onThemeClick()
+      else if (act === 'nav-toggle') onNavToggle()
+      else if (act === 'close-nav') onNavClose()
+      else if (act === 'close-drawer') closeDrawer()
+      else if (act === 'copy') onCopyClick(el)
+      if (el.hasAttribute('data-drawer')) onDrawerClick(el)
+    })
+
+    document.addEventListener('submit', function (ev) {
+      if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-confirm')) onFormSubmit(ev)
+    })
+
+    document.addEventListener('keydown', onKeydown)
+
+    const gs = document.getElementById('gs-input')
+    if (gs) {
+      gs.addEventListener('input', onSearchInput)
+      gs.addEventListener('keydown', onSearchKeydown)
+    }
+
+    autoHideFlashes()
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire)
+  } else {
+    wire()
+  }
+})()

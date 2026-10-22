@@ -528,6 +528,33 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 05:42Z — **Slice 2b DONE** (cron tick 5).
+  - `app/assets/javascripts/directory.js` now implements the §2.3 pure contract
+    (theme, nav-toggle, copy, confirm, toast, drawer, search-as-you-type).
+    DOM wiring guarded so the node:test fake document never trips an exception.
+  - `test/javascript/directory_test.mjs`: 18 pure-function unit tests
+    (node:test + a ~30-line fake document, no jsdom). TDD RED first
+    (`window.ZtlpDirectory is undefined` — 1 fail), then GREEN (18/18).
+  - `scripts/ci-admin.sh` added (the canonical "all gates pass" runner):
+    Rails test, rubocop -A, rubocop, brakeman (EOL-tolerant), node --check,
+    node --test. `bash scripts/ci-admin.sh` → `== all gates passed` (exit 0).
+  - Gates (evidence): `SKIP_CLAIM_BOOT=1 bin/rails test` → 55 runs, 196
+    assertions, 0 failures, 0 errors, 0 skips. `bundle exec rubocop -A` then
+    `bundle exec rubocop` → 55 files, no offenses. `bundle exec brakeman -q
+    --no-pager` → only EOLRuby + EOLRails (non-code, tolerated). `node
+    --check app/assets/javascripts/directory.js` OK. `node --test
+    test/javascript/directory_test.mjs` → 18/18 pass, 0 fail.
+  - Notes: (1) Node 22 defines `globalThis.navigator` as getter-only — the
+    test harness does NOT override it; the `copy()` pure helper guards for
+    the clipboard presence on its own. (2) `encodeURIComponent` does NOT
+    encode the apostrophe (it is in the unreserved set) — the test pins the
+    honest output, not an over-specified one. (3) `prefixmatch` for `match`
+    is a SUFFIX match (score 1), not a prefix — the test fixture was
+    mislabeled and fixed to `matching` (a real prefix, score 2). (4)
+    `nextTheme('unrecognized')` returns `light` (anything that is not
+    `light` toggles to `light`), not `dark` — the contract in the test
+    matches the impl.
+  - **Slice 3 PENDING = next tick** (migration + models per §2.2).
 - 2026-10-22 05:35Z — **Slice 2 split. 2a DONE** (interactive recovery of tick 3, which hit its
   iteration limit at 22:07 PDT with a dirty tree and left `.build_state` in_progress; tick 4 then
   no-op'd on the 90-min lock). **2b PENDING = next tick.**

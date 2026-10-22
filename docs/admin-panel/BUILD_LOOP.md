@@ -528,6 +528,48 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-22 21:05Z — **Slice 6a DONE (Users index + show/drawer, read side)** (cron tick). Commit `a12db005`.
+  - `app/controllers/users_controller.rb`: `index` — segmented status filter
+    (`?status=all|active|invited|disabled|revoked`, unknown value falls back to all),
+    server-side search `?q=`: name fields ILIKE in SQL; email is encrypted at rest, so a
+    query only matches it via an exact deterministic-ciphertext resolution (no plaintext
+    scan, no substring reach into ciphertext). `show` — normal page, or the drawer fragment
+    without layout when `X-Drawer: 1` (§2.3).
+  - `app/views/users/index.html.erb`: mock toolbar (`seg` links carry the active q;
+    aria-current on the selected segment), table columns Name (avatar + display + mono
+    ns_name) / Kind / Role / Groups chips / Devices count (enrolled only, like the mock) /
+    status badge; row `data-act="open" data-drawer="/users/:id"`; honest empty row.
+  - `app/views/users/show.html.erb`: profile kv panel, groups chips, devices table with the
+    assurance badge (`Ztlp::Assurance.label`, ok ≥3 / warn 2), actions Edit / Disable (with
+    `data-confirm`) or Enable for disabled users. The disable/enable/edit ENDPOINTS are
+    sub-slice 6b — the links/forms here target their future paths and 404 until then; no
+    fake success anywhere.
+  - `ApplicationHelper#status_badge` (shared tone map ok/warn/bad, slices 7-11 reuse it);
+    `nav_href("users")` → real `users_path`. Routes: `resources :users, only: [index show]`.
+  - Tests (`test/controllers/users_controller_test.rb`, 14, TDD RED first — all 14 errored
+    on `users_path` NameError): index columns + groups chip + enrolled-only device counts +
+    badge tones; filter links + aria-current; status narrowing both ways; search by name /
+    username / exact email (substring `alice@` must NOT match — pins the encryption
+    contract); `<script>` query escaped; unknown status → all; row link + drawer attribute;
+    empty state; show profile/groups/device-assurance/actions; disabled user shows Enable not
+    Disable; X-Drawer fragment has no rail/DOCTYPE; user with no email/devices renders; rail
+    aria-current; signed-out redirect.
+  - ENV FIX (no schema change): `ztlp_admin_development.users` had a stale `attributes`
+    column (AR reserved name → every `User.new` raised DangerousAttributeError under
+    `bin/rails runner`; it predates the slice-3 attrs_json rename and only the dev DB hit
+    it — test DB was clean). Dropped + added `attrs_json` via ALTER to match schema.rb.
+  - Evidence: `timeout 300 bin/rails test test/controllers/users_controller_test.rb` →
+    **14 runs / 107 assertions / 0 failures**. `bash scripts/ci-admin.sh` → full suite
+    **192 runs / 782 assertions / 0 failures / 5 skips** (= ZTLP_TEST_NS-gated roundtrip;
+    was 178 before), rubocop clean, brakeman EOL-only, node --check OK, node --test 19/19,
+    `== all gates passed`. `ruby -c` on every edited .rb: Syntax OK. No test-ns containers
+    started this tick.
+  PENDING: Slice 6b — new/edit forms (username immutable after create, status invited on
+  create), disable → REVOKE + devices revoked, enable → republish (spec §6.3; Publisher is
+  mocked in tests, audit rows asserted). The show-page action buttons go live there.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 6b (Users mutations: create/edit/disable/enable + publisher + audit).
+
 
 - 2026-10-22 17:20Z — **fix after Slice 5c** (interactive review of `1519a9d7`). /zone page
   reviewed: output escaped, mutations behind `require_write_access`, no inline script, drift

@@ -15,7 +15,12 @@ Rails.application.routes.draw do
   resources :admins, only: %i[index new create edit update]
   resources :audit_logs, only: [ :index ]
 
-  resources :users, only: %i[index show new create edit update]
+  resources :users, only: %i[index show new create edit update] do
+    member do
+      post :disable
+      post :enable
+    end
+  end
 
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish

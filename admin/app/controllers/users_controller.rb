@@ -10,8 +10,8 @@
 # never publishes, and update publishes only for an active user. All
 # mutations require write access and audit their own action.
 class UsersController < ApplicationController
-  before_action :set_user, only: %i[show edit update]
-  before_action :require_write_access, only: %i[new create edit update]
+  before_action :set_user, only: %i[show edit update disable enable]
+  before_action :require_write_access, only: %i[new create edit update disable enable]
 
   FILTERS = [ %w[all All], %w[active Active], %w[invited Invited],
               %w[disabled Disabled], %w[revoked Revoked] ].freeze
@@ -64,7 +64,85 @@ class UsersController < ApplicationController
     end
   end
 
+  # ------------------------------------------------- slice 6c: lifecycle
+  #
+  # Disable = REVOKE record for the user's ns name (spec §6.3) + the user's
+  # devices marked `revoked` in the DB. Enable = republish the user record
+  # (its devices[] no longer includes revoked devices, per Records.user_data)
+  # + re-activate the user and their devices. The DB is the source of truth:
+  # an NS failure never 500s after the save — the DB change stands, the
+  # failure is a warning, the 6-hourly republish retries.
+
+  def disable
+    if @user.status == "revoked"
+      audit!("user.disable", target: @user, status: "skipped",
+                          details: { username: @user.username, reason: "already_revoked" })
+      return redirect_to user_path(@user), alert: "#{@user.display_name} is already revoked."
+    end
+
+    # One REVOKE record for the user ns name (spec §6.3: a REVOKE "purges
+    # device and group indexes"). The devices are then marked `revoked` in
+    # the DB, which drops them from every later USER publish — that is how
+    # they go revoked in the NS too.
+    warning = begin
+      Ztlp::Publisher.revoke!(@zone, name: @user.ns_name, target: @user,
+                              reason: "user disabled", admin: current_admin)
+      nil
+    rescue Ztlp::NsClient::NsError => e
+      user_warning(e)
+    end
+
+    # The DB change stands regardless of the NS outcome.
+    revoked_count = @user.devices.where(status: "enrolled").count
+    @user.update!(status: "revoked")
+    @user.devices.where(status: "enrolled").update_all(status: "revoked",
+                                                       revoked_at: Time.current)
+    audit!("user.disable", target: @user, status: "ok",
+                        details: { username: @user.username,
+                                   ns_revoked: warning.nil?,
+                                   devices_revoked: revoked_count })
+    notice = "#{@user.display_name} disabled."
+    notice += " #{revoked_count} device(s) revoked." if revoked_count.positive?
+    redirect_to user_path(@user), notice: notice, alert: warning
+  end
+
+  def enable
+    if @user.active?
+      audit!("user.enable", target: @user, status: "skipped",
+                          details: { username: @user.username, reason: "already_active" })
+      return redirect_to user_path(@user), alert: "#{@user.display_name} is already active."
+    end
+
+    warnings = []
+    # Re-activate the device rows FIRST so the USER record we publish right
+    # after carries them in devices[] (Records.user_data reads live rows).
+    # The NS-side revoke of a user covers their device index entries; enable
+    # re-publishes the USER record (spec Slice 6: "Enable re-publishes").
+    @user.devices.where(status: "revoked").update_all(status: "enrolled", revoked_at: nil)
+    @user.update!(status: "active")
+
+    republished = begin
+      Ztlp::Publisher.publish_user!(@user, admin: current_admin)
+      true
+    rescue Ztlp::NsClient::NsError => e
+      warnings << user_warning(e)
+      false
+    end
+
+    audit!("user.enable", target: @user, status: "ok",
+                       details: { username: @user.username,
+                                  ns_republished: republished })
+    redirect_to user_path(@user), notice: "#{@user.display_name} enabled.",
+                                 alert: warnings.first
+  end
+
   private
+
+  # Warnings for the flash (never a 500 after the save).
+  def user_warning(e)
+    format("Saved, but not published to the name server (0x%02X %s). " \
+           "The 6-hourly republish will retry.", e.code, e.reason)
+  end
 
   def set_user
     @user = @zone.users.find(params[:id])

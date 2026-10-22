@@ -42,9 +42,9 @@ class UsersController < ApplicationController
     @user.status = "invited" # spec: new users are always invited
 
     if @user.save
-      publish_if_active!(@user)
+      warning = publish_if_active!(@user)
       audit!("user.create", target: @user, status: "ok", details: { username: @user.username })
-      redirect_to user_path(@user), notice: "#{@user.display_name} created (invited)."
+      redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).", alert: warning
     else
       render :new, status: :unprocessable_content
     end
@@ -56,9 +56,9 @@ class UsersController < ApplicationController
   def update
     # Username is immutable after create: never accept it from the form.
     if @user.update(user_params.except(:username))
-      publish_if_active!(@user)
+      warning = publish_if_active!(@user)
       audit!("user.update", target: @user, status: "ok", details: { username: @user.username })
-      redirect_to user_path(@user), notice: "#{@user.display_name} updated."
+      redirect_to user_path(@user), notice: "#{@user.display_name} updated.", alert: warning
     else
       render :edit, status: :unprocessable_content
     end
@@ -75,8 +75,18 @@ class UsersController < ApplicationController
   # Spec decision 2 (§14): publish a USER record on `active` only. A fresh
   # user is always `invited` (create never publishes); an edit of an active
   # user re-publishes so the NS sees the change before the 24h TTL.
+  # The DB save is the source of truth: an NS failure (no authority imported yet,
+  # NS down, rate limit) is audited by Publisher, surfaced as a warning, and
+  # retried by the 6-hourly RepublishNsJob — never a 500 after the save.
+  # Returns nil on success / not active, or the warning text.
   def publish_if_active!(user)
-    Ztlp::Publisher.publish_user!(user, admin: current_admin) if user.active?
+    return nil unless user.active?
+
+    Ztlp::Publisher.publish_user!(user, admin: current_admin)
+    nil
+  rescue Ztlp::NsClient::NsError => e
+    format("Saved, but not published to the name server (0x%02X %s). " \
+           "The 6-hourly republish will retry.", e.code, e.reason)
   end
 
   # Name/username are plain columns; email is encrypted at rest. Match name

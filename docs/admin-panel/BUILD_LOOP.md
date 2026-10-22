@@ -529,6 +529,18 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 21:50Z — **review of Slice 6b** (`fc62c420`). Write access enforced (403 tests), username
+  immutable, status not mass-assignable, active-only publish. One fix: `publish_if_active!` let an
+  `NsError` escape AFTER the save → 500 on every edit of an active user until identity.json is imported
+  (Publisher raises 0x00 no_authority) or whenever the NS is down. Now rescued: save stands, flash
+  alert "Saved, but not published to the name server (0xNN reason). The 6-hourly republish will retry."
+  Test RED (error escaped) → GREEN. `bash scripts/ci-admin.sh` → 206 runs / 869 assertions / 0 failures.
+  **RULE for 6c and Slices 7–10 (every controller that calls Publisher after a DB write): rescue
+  `Ztlp::NsClient::NsError`, keep the DB change, show the warning as `alert:`; never 500, and add a
+  test with `Ztlp::Publisher.expects(...).raises(NsError)`.** Exception: REVOKE on device revoke
+  (Slice 8): the spec's revoke flow decides; if unspecified, same rule plus the device stays
+  `revoked` in the DB.
+
 - 2026-10-22 21:38Z — **Slice 6b DONE (Users create/edit)** (cron tick). Commit `fc62c420`.
   - `app/controllers/users_controller.rb`: `new`/`create` build an **invited** user (spec
     decision 2, §14: publish a USER record on `active` only → create never publishes);

@@ -304,6 +304,17 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert AuditLog.where(action: "user.update", status: "ok").any?
   end
 
+  # The DB change is the source of truth; an NS failure (no authority imported yet, NS down,
+  # rate limit) must not 500 after the save. The 6-hourly RepublishNsJob retries.
+  test "update of an active user still saves and warns when the NS publish fails" do
+    Ztlp::Publisher.expects(:publish_user!).raises(Ztlp::NsClient::NsError.new(0x00, "no_authority"))
+    patch user_path(@alice), params: { user: { display_name: "Alice NS-down" } }
+    assert_redirected_to user_path(@alice)
+    assert_equal "Alice NS-down", @alice.reload.display_name
+    follow_redirect!
+    assert_select "[data-toast]", /not published to the name server.*0x00 no_authority/
+  end
+
   test "update of a non-active user does not publish" do
     # bob is invited
     Ztlp::Publisher.expects(:publish_user!).never

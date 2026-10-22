@@ -527,6 +527,26 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-22 15:02Z — **Slice 4c-i DONE (Publisher)** (cron tick). Commit `912c24ea`.
+  `app/services/ztlp/publisher.rb`: `publish_user!/publish_group!/publish_device!` (shared
+  `publish!` path) + `revoke!` (REVOKE record, name "revocation", never republishes). Each:
+  builds data via `Ztlp::Records`, raises `NsError 0x00 no_authority` before any NS call when
+  the zone has no authority seed, calls `NsClient.register` with the zone seed via the
+  `ns_client:` seam (defaults to the real class), stamps `ns_published_at` on success, and
+  audits `ns.publish` {name: <ns_name>, type, result: "ok" | "0xXX reason"} — details carry
+  name/type/result ONLY (a test scans the stored details JSON for pubkey/node-id leakage).
+  `test/services/ztlp/publisher_test.rb`: 7 hermetic tests (FakeNs captures the exact register
+  kwargs): happy path ×3 (exact Records payload, seed bytes, ns_addr, ns_published_at set),
+  no-data-in-audit, NsError passthrough + failed audit + no stamp, revoke! shape + no
+  republish, no-seed guard (0 NS calls). TDD: RED `uninitialized constant Ztlp::Publisher` →
+  GREEN. `bash scripts/ci-admin.sh` → all gates passed.
+  **Next: Slice 4c-ii** = `scripts/test-ns.sh up|down` (`ztlp-ns:v0.35.20` on 127.0.0.1:23196/udp
+  + 9203, throwaway secrets at runtime, never printed, `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=1`) +
+  `test/integration/ns_roundtrip_test.rb` gated on `ZTLP_TEST_NS`: register authority KEY at
+  `test.ztlp` → 0x06; register user/group/device → 0x06; `query` returns device with
+  `assurance`; `list(type: "group")` includes it; GROUP write signed by a non-authority seed →
+  `NsError` 0x05. The roundtrip is the real wire-format check (unit fixtures were built from
+  the Elixir source, not a live NS). Stop the NS container in the same tick.
 
 - 2026-10-22 15:05Z — **Slice 4b DONE (NsClient)** (interactive; cron was PAUSED 01:46→now
   because ticks 8 and 9 ran out of budget on this slice and left runaway test processes,

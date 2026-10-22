@@ -528,6 +528,47 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 15:32Z — **Slice 4c-ii DONE (test-ns.sh + ZTLP_TEST_NS roundtrip)** (cron tick).
+  Commit `2468863f`.
+  - `scripts/test-ns.sh up|down`: runs `ztlp-ns:v0.35.20` on 127.0.0.1:23196/udp + 9203 (metrics/
+    admin HTTP) with a throwaway `ZTLP_NS_ADMIN_API_SECRET` (64-hex, `openssl rand -hex 32`)
+    generated at runtime and written to the scratch env file — NEVER printed. `up` writes
+    `ZTLP_TEST_NS=1` + addr + admin port + secret to the file; the test sources it. `down`
+    removes the container + env file. `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=true` + `ram_copies`.
+    Key fix found live: `ZTLP_NS_METRICS_BIND=0.0.0.0` is REQUIRED — the NS default-binds its
+    metrics port to 127.0.0.1 *inside* the container, which Docker's port-forward cannot
+    reach (curl to host:9203 got HTTP 000 / ECONNRESET on /health, /metrics, /admin/records
+    alike; setting the bind env → /health 200). The UDP registration port worked regardless.
+  - `test/integration/ns_roundtrip_test.rb` (gated on `ZTLP_TEST_NS`; `raise Minitest::Skip`
+    in setup → 5 skips hermetically). Drives `Ztlp::NsClient` against a LIVE NS — the real
+    wire proof the unit fixtures (built from the Elixir source) could not give:
+    (1) register zone authority KEY (delegation:true) → 0x06; (2) register USER/GROUP/DEVICE
+    signed by the authority → 0x06 (each with a distinct per-test name suffix to dodge the
+    NS's per-{name,type} 60s rate limit; the zone KEY is memoized once per process);
+    (3) query returns the DEVICE with its `assurance` (real 0x02 parse); (4) `list(type:
+    "group")` via /admin/records includes the authority-written group; (5) a GROUP write
+    signed by a NON-authority seed → `NsError` 0x05 unauthorized (registration_auth.ex: group
+    has no self-registration path → :zone_authority_required → unauthorized).
+    NS logs (real, pasted above in evidence) show `registration_accepted` for the authority
+    KEY/USER/GROUP/DEVICE and `registration_rejected reason=unauthorized` for the intruder
+    GROUP — exactly what the tests assert.
+  - **Real-wire bug found & fixed (TDD RED→GREEN):** `NsClient.admin_headers` HMAC-keyed a
+    64-hex secret with the RAW HEX STRING, but the NS (`config.ex`) decodes 64-hex → 32 raw
+    bytes and keys the HMAC on the DECODED bytes, so every /admin/records call against a
+    64-hex secret returned 401 `:bad_signature`. `admin_secret_key` now decodes 64-hex → 32
+    raw bytes (other lengths pass through unchanged). Two hermetic tests pinned it (RED: the
+    64-hex test failed on the wrong-keyed signature; the 32-char compat test stayed green);
+    GREEN after the fix.
+  - Evidence: live roundtrip `5 runs, 17 assertions, 0 failures, 0 errors` (ZTLP_TEST_NS=1).
+    Hermetic `bin/rails test` → **134 runs, 502 assertions, 0 failures, 0 errors, 0 skips**
+    (was 127; +7 = 5 roundtrip skipped + 2 new admin_headers tests). `bash scripts/ci-admin.sh`
+    → `== all gates passed` (rubocop clean; brakeman EOL-only; node --check OK; node --test
+    19/19). `ruby -c` on every edited .rb OK. Test NS stopped + removed in the same tick.
+  - PII note: the authority seed / intruder seed / admin secret are all throwaway per run and
+    never printed; the NS log signer fields are pubkeys, not secrets.
+  Next: Slice 5 (Zone page + authority import + jobs — `zone:import_authority` reads the
+  identity.json seed the roundtrip now proves the NS will accept; Republish/Reconcile/Expire
+  jobs with NsClient mocked; `/zone` page).
 - 2026-10-22 15:10Z — **fix after Slice 4c-i** (interactive review). (1) **Seed format.**
   Publisher and `Records.authority_data` did `authority_seed_ct.unpack1("m")` (base64 → raw
   bytes) and handed that to `NsClient.register(seed:)` / Ed25519, which take the 64-hex seed.

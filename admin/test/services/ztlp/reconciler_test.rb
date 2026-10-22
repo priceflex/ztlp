@@ -115,14 +115,50 @@ class ReconcilerTest < ActiveSupport::TestCase
     assert_nil details["device_missing"]
   end
 
-  def test_raises_and_does_not_store_when_list_fails
+  def test_list_failure_is_recorded_not_raised
     client = Object.new
     client.define_singleton_method(:list) do |*_a, **_kw|
       raise Ztlp::NsClient::NsError.new(0x0C, "timeout")
     end
 
-    assert_raises(Ztlp::NsClient::NsError) { Ztlp::Reconciler.run(@zone, admin: @admin, ns_client: client) }
-    assert_nil SystemSetting[("ns_drift_json")]
+    assert_equal :failed, Ztlp::Reconciler.run(@zone, admin: @admin, ns_client: client)
+    drift = read_drift
+    assert_equal "failed", drift["status"]
+    assert_equal "0x0C timeout", drift["error"]
+    assert_kind_of Integer, drift["checked_at"]
+    assert AuditLog.exists?(action: "ns.reconcile", status: "failed")
+  end
+
+  def test_no_admin_api_secret_is_recorded_as_not_configured
+    @zone.update!(ns_admin_api_secret_ct: nil)
+    client = Object.new
+    client.define_singleton_method(:list) { |*_a, **_kw| raise "must not be called" }
+
+    assert_equal :not_configured, Ztlp::Reconciler.run(@zone, admin: @admin, ns_client: client)
+    assert_equal "not_configured", read_drift["status"]
+  end
+
+  def test_success_records_status_ok
+    client = FakeNsClient.new(users: [ ns_record("alice.users.test.ztlp") ],
+                              devices: [ ns_record("alice-mbp.test.ztlp") ])
+    assert_equal :ok, Ztlp::Reconciler.run(@zone, admin: @admin, ns_client: client)
+    assert_equal "ok", read_drift["status"]
+  end
+
+  def test_unpublished_rows_are_not_counted_as_missing_in_ns
+    # invited users and pending/revoked devices are never published (Republisher), so they
+    # must not show up as drift.
+    @zone.users.create!(username: "bob", ns_name: "bob.users.test.ztlp", role: "user", status: "invited")
+    @zone.devices.create!(name: "bob-pc", ns_name: "bob-pc.test.ztlp", node_id_hex: "ee" * 16,
+                          noise_pubkey_hex: "ff" * 32, assurance: 1, key_source: "file", status: "pending")
+    client = FakeNsClient.new(users: [ ns_record("alice.users.test.ztlp") ],
+                              devices: [ ns_record("alice-mbp.test.ztlp") ])
+    Ztlp::Reconciler.run(@zone, admin: @admin, ns_client: client)
+
+    drift = read_drift
+    assert_equal [], drift.dig("user", "missing_in_ns")
+    assert_equal [], drift.dig("device", "missing_in_ns")
+    assert_equal 1, drift.dig("user", "panel")
   end
 
   def test_default_ns_client_is_real_client_seam

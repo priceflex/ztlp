@@ -98,14 +98,25 @@ class RepublisherTest < ActiveSupport::TestCase
     refute_includes publisher.calls.map(&:first), "bob-laptop.test.ztlp"
   end
 
-  def test_spaces_writes_1_1_seconds_apart
+  def test_spaces_every_record_write_1_1_seconds_apart
+    @zone.users.create!(username: "carol", ns_name: "carol.users.test.ztlp",
+                        role: "user", status: "active", signing_pubkey_hex: "22" * 32)
     publisher = FakePublisher.new
-    sleeps = []
+    events = []
+    publisher.define_singleton_method(:publish_user!) do |user, **_kw|
+      events << [ :write, user.ns_name ]
+      @calls << [ user.ns_name, "user" ]
+      :ok
+    end
     Ztlp::Republisher.run(@zone, admin: @admin, publisher: publisher,
-                          sleep: ->(s) { sleeps << s })
+                          sleep: ->(s) { events << [ :sleep, s ] })
 
-    # 4 writes → 3 sleeps of exactly 1.1 s, no more, no less.
-    assert_equal [ 1.1, 1.1, 1.1 ], sleeps
+    # 5 records (key, alice, carol, staff, device) → 4 sleeps, one between EVERY pair of
+    # writes, including between the two users.
+    assert_equal 5, publisher.calls.size
+    assert_equal [ 1.1 ] * 4, events.select { |e| e[0] == :sleep }.map(&:last)
+    i_alice = events.index([ :write, "alice.users.test.ztlp" ])
+    assert_equal [ :sleep, 1.1 ], events[i_alice + 1], "a sleep must follow alice before carol"
   end
 
   def test_no_sleeps_when_fewer_than_two_writes
@@ -137,13 +148,21 @@ class RepublisherTest < ActiveSupport::TestCase
     Ztlp::Republisher.run(@zone, admin: @admin)
   end
 
-  def test_raises_ns_error_on_write_failure
+  def test_one_failed_write_does_not_stop_the_rest_and_is_reported
     publisher = FakePublisher.new
-    err = Ztlp::NsClient::NsError.new(0x0C, "timeout")
-    publisher.fail_with!(:user, err)
+    publisher.fail_with!(:user, Ztlp::NsClient::NsError.new(0x09, "rate_limited"))
 
-    assert_raises(Ztlp::NsClient::NsError) do
-      Ztlp::Republisher.run(@zone, admin: @admin, publisher: publisher, sleep: ->(_s) { nil })
-    end
+    result = Ztlp::Republisher.run(@zone, admin: @admin, publisher: publisher, sleep: ->(_s) { nil })
+
+    assert_equal [ [ "test.ztlp", "key" ], [ "staff.groups.test.ztlp", "group" ],
+                   [ "alice-mbp.test.ztlp", "device" ] ], publisher.calls
+    assert_equal({ ok: 3, failed: [ "alice.users.test.ztlp" ] }, result)
+  end
+
+  def test_skips_entirely_when_no_authority_is_imported
+    @zone.update!(authority_seed_ct: nil)
+    publisher = FakePublisher.new
+    assert_equal :no_authority, Ztlp::Republisher.run(@zone, admin: @admin, publisher: publisher, sleep: ->(_s) { nil })
+    assert_equal [], publisher.calls
   end
 end

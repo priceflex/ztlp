@@ -529,6 +529,22 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 17:10Z — **fix after Slice 5b, part 2** (republisher + reconciler, interactive).
+  Republisher: (1) the 1.1 s sleep sat between the 4 *groups* (key/users/groups/devices), not
+  between records — all users went back-to-back; now one gap between EVERY record write (test
+  with 2 users: 5 writes → 4 sleeps, sleep after alice before carol). (2) one NsError aborted the
+  whole run; now each failure is skipped and reported → returns `{ok:, failed:[ns names]}`
+  (Publisher already audits each failure). (3) no authority imported → returns `:no_authority`,
+  writes nothing (was: raise every 6 h). Reconciler: (4) NS failure raised and stored nothing →
+  now stores `ns_drift_json` `{status:"failed", error:"0x0C timeout", checked_at}` + audit
+  `ns.reconcile` failed, returns `:failed`; (5) no admin API secret → `{status:"not_configured"}`,
+  `:not_configured`; success adds `status:"ok"` (Slice 11's NS dot reads this); (6) drift compared
+  ALL panel rows, so invited users / pending+revoked devices always showed as "missing in NS" →
+  now only published sets (active users, enrolled devices, groups), same as Republisher.
+  RED (3 + 4 failing) → GREEN. `bash scripts/ci-admin.sh` → 165 runs / 619 assertions /
+  0 failures / 5 skips, all gates passed. Next: Slice 5c (/zone page; show drift status incl.
+  failed/not_configured).
+
 - 2026-10-22 16:55Z — **fix after Slice 5b** (interactive review of `822933a1`).
   `config/recurring.yml` used a `default: dispatches: [- class:, schedule:]` layout that
   solid_queue 1.7.0 silently ignores: `SolidQueue::Configuration.new.send(:recurring_tasks)`

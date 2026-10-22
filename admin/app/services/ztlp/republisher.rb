@@ -17,24 +17,36 @@ module Ztlp
     # `publish_device!`, and `authority!`, each taking the entity/zone first
     # and `ns_client:`/`admin:` keyword args (the Ztlp::Publisher contract).
     # `sleep:` is a callable taking the seconds to sleep (default: Kernel).
+    # Returns :no_authority (nothing written) when the zone has no authority seed yet,
+    # otherwise { ok: <count>, failed: [<ns names>] }. One rejected write (rate limit,
+    # timeout) is audited by Publisher and does NOT stop the remaining writes.
     def self.run(zone, admin: nil, publisher: nil, sleep: nil)
+      return :no_authority unless zone.authority_configured?
+
       publisher ||= NsClientPublisherProxy.new
       sleep ||= ->(secs) { Kernel.sleep(secs) }
 
-      writes = [
-        -> { publisher.authority!(zone, admin: admin) },
-        -> { zone.users.where(status: "active").order(:username).each { |u| publisher.publish_user!(u, admin: admin) } },
-        -> { zone.groups.order(:name).each { |g| publisher.publish_group!(g, admin: admin) } },
-        -> { zone.devices.where(status: "enrolled").order(:name).each { |d| publisher.publish_device!(d, admin: admin) } }
-      ]
-
-      total = count_writes(zone)
-      writes.each_with_index do |w, i|
-        w.call
-        # No trailing sleep after the last write.
-        sleep.call(PUBLISH_INTERVAL) if i < total - 1
+      writes = [ [ zone.name, -> { publisher.authority!(zone, admin: admin) } ] ]
+      zone.users.where(status: "active").order(:username).each do |u|
+        writes << [ u.ns_name, -> { publisher.publish_user!(u, admin: admin) } ]
       end
-      :ok
+      zone.groups.order(:name).each { |g| writes << [ g.ns_name, -> { publisher.publish_group!(g, admin: admin) } ] }
+      zone.devices.where(status: "enrolled").order(:name).each do |d|
+        writes << [ d.ns_name, -> { publisher.publish_device!(d, admin: admin) } ]
+      end
+
+      ok = 0
+      failed = []
+      writes.each_with_index do |(name, write), i|
+        sleep.call(PUBLISH_INTERVAL) if i.positive? # one gap between EVERY pair of record writes
+        begin
+          write.call
+          ok += 1
+        rescue NsClient::NsError
+          failed << name
+        end
+      end
+      { ok: ok, failed: failed }
     end
 
     # Total NS writes the republisher will make for `zone`.

@@ -534,6 +534,38 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 23:21Z — **Slice 7a DONE (Groups read side: index + show/drawer)** (cron tick). Commit `676289fc`.
+  - `app/controllers/groups_controller.rb`: `index` — zone groups ordered by name, member count
+    per row, applications column honest zero (no policies exist yet — Slice 9). `show` — scoped
+    lookup `@zone.groups.find` (cross-zone 404 pinned), members table via `@group.users`
+    (display name + username + role + status), full page or drawer fragment under `X-Drawer: 1`
+    (same contract as users#show: `render layout: false`), read-only "Policies" panel with the
+    empty note.
+  - Routes: `resources :groups, only: %i[index show]`. `nav_href("groups")` now `groups_path`
+    (was a bare path). The New group button renders `href="/groups/new"` as plain text until
+    7b lands the form + route (no dead helper reference).
+  - Views: `groups/index` (name/ns_name, description, `.row-members` count, drawer-linked rows,
+    write-gated New group button, empty state), `groups/show` (About, Members table with
+    empty-note, Policies empty-note). No inline script, no CDN, all output escaped.
+  - Tests (`test/controllers/groups_controller_test.rb`, 9 new, TDD RED first — all 9 errored
+    on the missing `groups_path`/`group_path` route helpers): index columns + member counts;
+    drawer links; New group button write-gated (hidden for read_only); empty state; show
+    members with role + status and no non-members; show is layout-less under X-Drawer and a
+    full page otherwise; empty members note; policies empty-note; cross-zone 404.
+  - Evidence: `timeout 300 bin/rails test test/controllers/groups_controller_test.rb` →
+    **9 runs / 55 assertions / 0 failures / 0 errors**. `bash scripts/ci-admin.sh` → full suite
+    **224 runs / 968 assertions / 0 failures / 0 errors / 6 skips** (= ZTLP_TEST_NS-gated
+    roundtrip; was 215/913), rubocop clean, brakeman EOL-only, node --check OK, node --test
+    19/19, `== all gates passed`. `ruby -c` on all 3 edited .rb: Syntax OK; ERB src parse OK
+    on both views. No test-ns containers started.
+  PENDING: Slice 7b — groups create/edit/destroy + add_member/remove_member; EVERY membership
+  change calls `Publisher.publish_group!` immediately (spec F13), rescued per the 6b rule
+  (NS failure → save stands, warning toast, never 500); "removing last member publishes an
+  empty members array" (test named in spec); destroy blocked while a rule references the
+  group and for `admins`. NOTE for 7b: `new_group_path` exists again once the `new`/`create`
+  routes land — switch the index button from the plain-path href back to the helper.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 7b (groups mutations + membership add/remove with immediate publish_group!).
 - 2026-10-22 23:35Z — **Slice 6c REDESIGNED per operator decision** (interactive; replaces the
   tick's `2c567d89` disable/enable). Review found: the tick's Disable wrote a REVOKE for the user
   name only, Enable re-published, and Enable re-enrolled EVERY revoked device (would resurrect an

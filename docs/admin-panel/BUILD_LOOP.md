@@ -528,6 +528,17 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 05:58Z — **fix after Slice 2b** (interactive review). Global search built results
+  with `innerHTML` + escapeHtml: text was escaped, but `href` took the server `url` unchecked, so
+  a `javascript:` url would render as a clickable script link, and it broke §2.3 ("search results
+  built with textContent"). Now `safeUrl()` (only `/path`; rejects schemes, `//host`, `/\host`)
+  + `renderSearchResults(doc, box, rows)` (createElement/textContent/replaceChildren; unsafe rows
+  dropped). RED 4 failing → GREEN. `bash scripts/ci-admin.sh` → `== all gates passed`
+  (55 rails runs / 0 failures; rubocop clean; brakeman EOL-only; node --check OK; node --test
+  19/19). Remaining `innerHTML` = drawer fragment only (server-rendered, allowed by §2.3).
+  Note: run JS tests as `node --test "test/javascript/*.mjs"` (a bare directory arg fails on
+  node 22 with "Cannot find module"). **Slice 2 DONE. Next: Slice 3** (migration + models).
+
 - 2026-10-22 05:42Z — **Slice 2b DONE** (cron tick 5).
   - `app/assets/javascripts/directory.js` now implements the §2.3 pure contract
     (theme, nav-toggle, copy, confirm, toast, drawer, search-as-you-type).

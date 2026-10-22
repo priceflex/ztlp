@@ -86,26 +86,48 @@
       .replace(/'/g, '&#39;')
   }
 
-  // formatSearchResults(rows) — pure: escape name/sub and emit an <a> per row
-  // with role="option" and data-url. Empty list renders an honest "no matches"
-  // line (never a fabricated empty box).
-  function formatSearchResults(rows) {
-    if (!rows || rows.length === 0) {
-      return '<div class="gs-empty">no matches</div>'
-    }
-    const parts = []
-    for (let i = 0; i < rows.length; i++) {
+  // safeUrl(u) — only same-origin absolute paths ("/x") may become links.
+  // Rejects scheme URLs (javascript:, https:), protocol-relative "//host" and
+  // the "/\\host" form browsers treat as protocol-relative.
+  function safeUrl(u) {
+    if (typeof u !== 'string' || u.length === 0) return null
+    if (u.charAt(0) !== '/') return null
+    const c = u.charAt(1)
+    if (c === '/' || c === '\\') return null
+    return u
+  }
+
+  // renderSearchResults(doc, box, rows) — builds the result list with
+  // createElement + textContent only (§2.3: never innerHTML with server data).
+  function renderSearchResults(doc, box, rows) {
+    const out = []
+    for (let i = 0; i < (rows || []).length; i++) {
       const r = rows[i]
-      parts.push(
-        '<a class="gs-row" href="' + escapeHtml(r.url) + '" role="option" data-url="' +
-        escapeHtml(r.url) + '" data-type="' + escapeHtml(r.type) + '">' +
-        '<span class="gs-type">' + escapeHtml(r.type) + '</span>' +
-        '<span class="gs-name">' + escapeHtml(r.name) + '</span>' +
-        '<span class="gs-sub">' + escapeHtml(r.sub) + '</span>' +
-        '</a>'
-      )
+      const url = safeUrl(r && r.url)
+      if (!url) continue
+      const a = doc.createElement('a')
+      a.setAttribute('class', 'gs-row')
+      a.setAttribute('href', url)
+      a.setAttribute('role', 'option')
+      a.setAttribute('data-url', url)
+      a.setAttribute('data-type', String(r.type || ''))
+      const parts = [['gs-type', r.type], ['gs-name', r.name], ['gs-sub', r.sub]]
+      for (let j = 0; j < parts.length; j++) {
+        const span = doc.createElement('span')
+        span.setAttribute('class', parts[j][0])
+        span.textContent = parts[j][1] == null ? '' : String(parts[j][1])
+        a.appendChild(span)
+      }
+      out.push(a)
     }
-    return parts.join('')
+    if (out.length === 0) {
+      const empty = doc.createElement('div')
+      empty.setAttribute('class', 'gs-empty')
+      empty.textContent = 'no matches'
+      out.push(empty)
+    }
+    box.replaceChildren.apply(box, out)
+    return out.length
   }
 
   // copy(text) — pure contract: return the text it WOULD have written (or the
@@ -127,7 +149,8 @@
     nextTheme: nextTheme,
     searchUrl: searchUrl,
     rankSearch: rankSearch,
-    formatSearchResults: formatSearchResults,
+    safeUrl: safeUrl,
+    renderSearchResults: renderSearchResults,
     escapeHtml: escapeHtml,
     copy: copy,
     shouldConfirm: shouldConfirm,
@@ -304,7 +327,7 @@
     if (gsTimer) { clearTimeout(gsTimer); gsTimer = null }
     const url = searchUrl(q)
     if (!url) {
-      box.innerHTML = ''
+      box.replaceChildren()
       box.removeAttribute('role')
       return
     }
@@ -313,12 +336,15 @@
         .then(function (r) { if (!r.ok) throw new Error('search ' + r.status); return r.json() })
         .then(function (rows) {
           const ranked = rankSearch(rows || [], q)
-          box.innerHTML = formatSearchResults(ranked)
-          if (ranked.length > 0) box.setAttribute('role', 'listbox')
+          renderSearchResults(document, box, ranked)
+          if (box.querySelector('a[data-url]')) box.setAttribute('role', 'listbox')
           else box.removeAttribute('role')
         })
         .catch(function () {
-          box.innerHTML = '<div class="gs-empty">search unavailable</div>'
+          const msg = document.createElement('div')
+          msg.setAttribute('class', 'gs-empty')
+          msg.textContent = 'search unavailable'
+          box.replaceChildren(msg)
         })
     }, 150)
   }

@@ -162,24 +162,55 @@ test('rankSearch: higher score sorts first', () => {
   assert.deepEqual(out.map(r => r.score), [3, 2, 1])
 })
 
-test('formatSearchResults: escapes HTML in name and sub', () => {
-  const rows = [
-    { type: 'user', id: 1, name: '<b>x</b>', sub: 'a&b', url: '/users/1', score: 3 },
-  ]
-  const html = Z.formatSearchResults(rows)
-  assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;'), 'name must be escaped')
-  assert.ok(html.includes('a&amp;b'), 'sub must be escaped')
+// Search results are built with createElement + textContent (§2.3: no innerHTML
+// with server data), and only same-origin paths become links.
+function fakeEl(tag) {
+  return {
+    tagName: tag.toUpperCase(), attrs: {}, children: [], textContent: '',
+    setAttribute(k, v) { this.attrs[k] = String(v) },
+    appendChild(c) { this.children.push(c); return c },
+    replaceChildren(...c) { this.children = c },
+  }
+}
+const fakeDoc = { createElement: fakeEl }
+
+test('safeUrl: only same-origin absolute paths pass', () => {
+  assert.equal(Z.safeUrl('/users/1'), '/users/1')
+  assert.equal(Z.safeUrl('javascript:alert(1)'), null)
+  assert.equal(Z.safeUrl('JaVaScRiPt:alert(1)'), null)
+  assert.equal(Z.safeUrl('//evil.example/x'), null)
+  assert.equal(Z.safeUrl('/\\evil.example'), null)
+  assert.equal(Z.safeUrl('https://evil.example/'), null)
+  assert.equal(Z.safeUrl(''), null)
+  assert.equal(Z.safeUrl(undefined), null)
 })
-test('formatSearchResults: empty list renders an honest "no matches" line', () => {
-  const html = Z.formatSearchResults([])
-  assert.ok(html.includes('no matches'), 'empty list must say so')
+test('renderSearchResults: names are text, never markup', () => {
+  const box = fakeEl('div')
+  Z.renderSearchResults(fakeDoc, box, [
+    { type: 'user', id: 1, name: '<img src=x onerror=alert(1)>', sub: 'a&b', url: '/users/1' },
+  ])
+  assert.equal(box.children.length, 1)
+  const a = box.children[0]
+  assert.equal(a.tagName, 'A')
+  assert.equal(a.attrs.role, 'option')
+  assert.equal(a.attrs.href, '/users/1')
+  assert.equal(a.attrs['data-url'], '/users/1')
+  assert.deepEqual(a.children.map(c => c.textContent), ['user', '<img src=x onerror=alert(1)>', 'a&b'])
 })
-test('formatSearchResults: each row is an <a> with role=option and data-url', () => {
-  const rows = [{ type: 'user', id: 1, name: 'steve', sub: 'steve.users', url: '/users/1', score: 3 }]
-  const html = Z.formatSearchResults(rows)
-  assert.ok(html.includes('<a '), 'rows render as anchors')
-  assert.ok(html.includes('role="option"'), 'each row carries role=option for ARIA listbox')
-  assert.ok(html.includes('data-url="/users/1"'), 'data-url carries the jump target')
+test('renderSearchResults: rows with an unsafe url are dropped', () => {
+  const box = fakeEl('div')
+  Z.renderSearchResults(fakeDoc, box, [
+    { type: 'user', id: 1, name: 'bad', sub: '', url: 'javascript:alert(1)' },
+    { type: 'user', id: 2, name: 'ok', sub: '', url: '/users/2' },
+  ])
+  assert.equal(box.children.length, 1)
+  assert.equal(box.children[0].attrs.href, '/users/2')
+})
+test('renderSearchResults: empty list renders an honest "no matches" line', () => {
+  const box = fakeEl('div')
+  Z.renderSearchResults(fakeDoc, box, [])
+  assert.equal(box.children.length, 1)
+  assert.equal(box.children[0].textContent, 'no matches')
 })
 
 // ---------------------------------------------------------------------------

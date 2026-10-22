@@ -529,6 +529,72 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 16:45Z — **Slice 5b DONE (RepublishNsJob, ReconcileNsJob, ExpireEnrollmentsJob + recurring.yml)** (cron tick).
+  Commit `822933a1`.
+  - `app/jobs/{republish_ns_job,reconcile_ns_job,expire_enrollments_job}.rb`:
+    thin solid_queue dispatchers (Zone.primary + service seam). The jobs take
+    no args; `Zone.primary` is resolved inside `perform` so a test with one
+    zone in the DB gets that zone (mocha expectation on the service's `.run`
+    asserts the exact `(zone, admin: nil)` args).
+  - `app/services/ztlp/republisher.rb` (`Ztlp::Republisher.run(zone, admin:,
+    publisher:, sleep:)`): publishes authority KEY → active users → groups →
+    enrolled devices, spaced 1.1 s between writes (no trailing sleep).
+    Default publisher `NsClientPublisherProxy` routes through
+    `Ztlp::Publisher`'s four class methods so the real `ns.publish` audit
+    rows are written (never the record data). `sleep:` seam is a callable
+    (default `Kernel.sleep`) so the suite never really sleeps 1.1 s/write.
+  - `app/services/ztlp/reconciler.rb` (`Ztlp::Reconciler.run(zone, admin:,
+    ns_client:, now:)`): lists user/device/group records from the NS admin
+    API (`NsClient.list` with the zone's `ns_admin_api_secret_ct`), compares
+    to panel rows, stores counts + sorted missing/extra names as JSON in
+    `system_settings ns_drift_json`. Names stay in the settings JSON (the
+    /zone drift table reads them); the `ns.reconcile` audit row carries
+    counts only. Default `ns_client:` is the real `Ztlp::NsClient` class.
+  - `app/models/enrollment.rb`: `Enrollment.expire_due!(now)` — flips
+    pending tokens past `expires_at` to `expired`. BUG FOUND IN RED: the
+    first draft used `where(...).count { update_all(status: "expired") }` —
+    the block IGNORES the receiver's where-clauses, so `update_all` ran
+    UNSCOPED and expired every pending row (the not-due row flipped too).
+    Fixed to a scoped `pluck(:id)` + `where(id: ids).update_all(...)`.
+  - `app/services/ztlp/publisher.rb`: `Ztlp::Publisher.publish_authority!(zone)`
+    — re-publishes the zone's authority KEY record (0x01) via the same
+    `call_register` seam + `ns.publish` audit path (the KEY is republished
+    each cycle so a fresh NS copy can verify previously-written records).
+  - `config/recurring.yml`: 6h republish / 30m reconcile / 5m expire
+    (solid_queue recurring schedule, loaded by the jobs service).
+  - **Mocha 3.1.0 BLOCK STUBS DO NOT RUN in this harness** (probed
+    2026-10-22): `obj.stubs(:m) { ... }` / `Class.stubs(:m) { ... }` — the
+    block body is not invoked AND its return value is discarded (even a
+    no-arg block capturing via side-effect fails). `.returns(...)` chains
+    and `expects(:m).with(...)` DO work. The spec said "job tests with
+    NsClient mocked (mocha)" — honored with mocha EXPECTATIONS (not block
+    stubs) + a hand-written `FakePublisher`/`FakeNsClient` (plain objects)
+    for the service-level capture tests. A comment in each test file pins
+    this so the next tick doesn't re-probe it.
+  - Tests (17 new, TDD RED first — all failed on missing constants):
+    `test/jobs/jobs_test.rb` (5): job wiring via mocha expectations;
+    expire test drives the real job end-to-end.
+    `test/services/ztlp/republisher_test.rb` (6): order, exclusions
+    (invited user + pending device skipped), 1.1 s spacing (recorder
+    lambda), no-sleep-when-<2-writes, real-publisher routing (mocha
+    expectations on `Ztlp::Publisher` class methods), NS error propagation.
+    `test/services/ztlp/reconciler_test.rb` (6): drift JSON shape, per-type
+    counts, sorted missing/extra names, audit counts-not-names, list
+    failure leaves settings nil, default `ns_client` is `Ztlp::NsClient`.
+  - Evidence: `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test` (full suite)
+    → **159 runs, 595 assertions, 0 failures, 0 errors, 5 skips** (=
+    ZTLP_TEST_NS-gated roundtrip; was 142 runs before this slice).
+    `bash scripts/ci-admin.sh` → `== all gates passed` (rubocop clean;
+    brakeman EOL-only; node --check OK; node --test 19/19). `ruby -c` on
+    every edited .rb file: Syntax OK.
+  - PENDING: the spec's "zone controller tests" for the /zone page (Slice
+    5c) are NOT in this commit — the `/zone` page + its controller + the
+    Publish-now / Reconcile-now buttons are the next slice.
+  Next: Slice 5c (/zone page: zone name, NS addr, authority pubkey or
+  "not imported" warning, secret set/not-set, last publish + reconcile,
+  drift table from ns_drift_json, Publish now / Reconcile now buttons
+  enqueuing the jobs, copyable import commands) + zone controller tests.
+
 - 2026-10-22 16:15Z — **fix after Slice 5a** (interactive review of `02a37163`).
   (1) **Relay secret (spec F20)**: `zone:set_secret` required 64 hex for every secret, so it
   would REFUSE the real relay secret and ACCEPT a hex one that never verifies (relay hex-decodes,

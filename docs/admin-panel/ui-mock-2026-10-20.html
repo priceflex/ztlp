@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ZTLP Directory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+:root{
+  --canvas:#F2F4F8; --surface:#FFFFFF; --surface-2:#F6F7FB; --ink:#18203A; --muted:#5B6480; --faint:#8A92A8;
+  --line:#DFE3EC; --line-strong:#C8CEDB;
+  --accent:#3346C8; --accent-ink:#FFFFFF; --accent-soft:#E8EBFB;
+  --rail:#151B36; --rail-ink:#BCC3DC; --rail-active:#232B52; --rail-strong:#FFFFFF; --rail-muted:#7880A2; --rail-accent:#8C9BFF;
+  --ok:#1C7A52; --ok-soft:#E2F2EA; --warn:#94600F; --warn-soft:#FBEFD9; --bad:#B3372A; --bad-soft:#FBE6E3;
+  --shadow:0 1px 2px rgba(21,27,54,.06),0 10px 28px rgba(21,27,54,.10);
+  --sans:"Instrument Sans",system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:light;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --canvas:#0E1222; --surface:#161B2E; --surface-2:#1C2237; --ink:#E5E8F2; --muted:#9AA2BB; --faint:#6D7590;
+    --line:#272E47; --line-strong:#363E5C;
+    --accent:#8492FF; --accent-ink:#0E1222; --accent-soft:#242B54;
+    --rail:#0A0E1B; --rail-ink:#AAB1CC; --rail-active:#1C2342; --rail-strong:#FFFFFF; --rail-muted:#666E8E; --rail-accent:#8C9BFF;
+    --ok:#4CC08A; --ok-soft:#163126; --warn:#E3AA4C; --warn-soft:#382B13; --bad:#F27D6C; --bad-soft:#3B1C19;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --canvas:#0E1222; --surface:#161B2E; --surface-2:#1C2237; --ink:#E5E8F2; --muted:#9AA2BB; --faint:#6D7590;
+  --line:#272E47; --line-strong:#363E5C;
+  --accent:#8492FF; --accent-ink:#0E1222; --accent-soft:#242B54;
+  --rail:#0A0E1B; --rail-ink:#AAB1CC; --rail-active:#1C2342; --rail-strong:#FFFFFF; --rail-muted:#666E8E; --rail-accent:#8C9BFF;
+  --ok:#4CC08A; --ok-soft:#163126; --warn:#E3AA4C; --warn-soft:#382B13; --bad:#F27D6C; --bad-soft:#3B1C19;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4);
+  color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px);-webkit-text-size-adjust:100%}
+body{margin:0;height:100%;background:var(--canvas);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+a{color:var(--accent)}
+img,svg{max-width:100%}
+.ic{flex:none;display:block}
+.mono{font-family:var(--mono);font-size:.86em;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px}
+.strong{font-weight:600}
+.nowrap{white-space:nowrap}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+[hidden]{display:none!important}
+
+/* Shell */
+.app{display:grid;grid-template-columns:252px minmax(0,1fr);height:100%}
+.rail{background:var(--rail);color:var(--rail-ink);display:flex;flex-direction:column;min-height:0;overflow-y:auto;padding:18px 12px 16px}
+.brand{display:flex;align-items:center;gap:11px;padding:4px 8px 16px}
+.brand-name{color:var(--rail-strong);font-weight:650;font-size:15.5px;letter-spacing:-.01em;line-height:1.2}
+.brand-zone{font-family:var(--mono);font-size:11.5px;color:var(--rail-ink);opacity:.85;overflow-wrap:anywhere}
+.nav-sec{margin-top:16px}
+.nav-label{font-size:12px;color:var(--rail-muted);padding:0 10px 6px;font-weight:500}
+.nav a{display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:7px;color:var(--rail-ink);text-decoration:none;font-size:14.5px;font-weight:500}
+.nav a:hover{background:rgba(255,255,255,.05);color:var(--rail-strong)}
+.nav a[aria-current="page"]{background:var(--rail-active);color:var(--rail-strong);box-shadow:inset 3px 0 0 var(--rail-accent)}
+.nav .n{margin-left:auto;font-size:12px;color:var(--rail-muted);font-variant-numeric:tabular-nums}
+.rail-foot{margin-top:auto;padding:16px 10px 0;border-top:1px solid rgba(255,255,255,.08);font-size:12.5px;display:grid;gap:3px}
+.ns-line{display:flex;align-items:center;gap:8px;color:var(--rail-strong);font-weight:550}
+.ns-meta{color:var(--rail-muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none;display:inline-block}
+.dot.ok{background:#3FB67F}.dot.warn{background:#E0A13E}.dot.bad{background:#E2604F}
+
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.topbar{display:flex;align-items:center;gap:12px;padding:11px 32px;border-bottom:1px solid var(--line);background:var(--surface)}
+.menu-btn{display:none}
+.gsearch{position:relative;flex:1;max-width:460px}
+.gsearch input{width:100%;padding:8px 12px 8px 36px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.gsearch>.ic{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none}
+.gresults{position:absolute;top:calc(100% + 6px);left:0;right:0;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);z-index:30;padding:6px;display:none;max-height:60vh;overflow-y:auto}
+.gresults.open{display:block}
+.gresults button{display:flex;width:100%;gap:10px;align-items:center;padding:8px 10px;border:0;background:none;border-radius:6px;text-align:left;cursor:pointer}
+.gresults button:hover,.gresults button:focus-visible{background:var(--surface-2)}
+.gresults .none{padding:10px;color:var(--muted);font-size:14px}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:6px}
+.me{display:flex;align-items:center;gap:9px;font-size:14px;padding-left:6px}
+.content{flex:1;overflow-y:auto;padding:28px 32px 64px;min-height:0}
+.wrap{max-width:1240px;margin:0 auto}
+
+/* Page head */
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+h1{font-size:27px;line-height:1.15;letter-spacing:-.022em;margin:0 0 6px;font-weight:650}
+.lede{margin:0;color:var(--muted);max-width:68ch}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:8px;border:1px solid var(--line-strong);background:var(--surface);font-weight:550;font-size:14px;cursor:pointer;white-space:nowrap;line-height:1.3;text-decoration:none;color:var(--ink)}
+.btn:hover{background:var(--surface-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff}
+.btn.danger-ghost{color:var(--bad)}
+.btn.sm{padding:5px 10px;font-size:13px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.icon-btn{display:inline-grid;place-items:center;width:34px;height:34px;border-radius:8px;border:1px solid transparent;background:none;cursor:pointer;color:var(--muted);padding:0}
+.icon-btn:hover{background:var(--surface-2);color:var(--ink)}
+.icon-btn:disabled{opacity:.3;cursor:default;background:none}
+.link{font-size:13.5px;font-weight:550;text-decoration:none}
+.link:hover{text-decoration:underline}
+
+/* Overview */
+.tally{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--surface);border:1px solid var(--line);border-radius:12px;margin-bottom:20px;overflow:hidden}
+.tally-item{padding:18px 20px;text-decoration:none;color:inherit;border-left:1px solid var(--line);display:grid;gap:1px}
+.tally-item:first-child{border-left:0}
+.tally-item:hover{background:var(--surface-2)}
+.tally-n{font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1.15;font-variant-numeric:tabular-nums}
+.tally-l{font-weight:550}
+.tally-s{color:var(--muted);font-size:13px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:20px;align-items:start}
+.stack{display:grid;gap:20px;min-width:0}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;min-width:0}
+.panel-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.panel-h h2{font-size:15.5px;margin:0;font-weight:620}
+.panel-b{padding:16px 18px}
+.count{font-size:12.5px;font-weight:600;color:var(--muted);background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:0 8px}
+.list{list-style:none;margin:0;padding:0}
+.list>li{display:flex;gap:12px;align-items:flex-start;padding:12px 18px;border-top:1px solid var(--line)}
+.list>li:first-child{border-top:0}
+.list>li[data-act]{cursor:pointer}
+.list>li[data-act]:hover{background:var(--surface-2)}
+.list .dot{margin-top:7px}
+.list .grow{flex:1;min-width:0}
+.feed-time{font-size:12.5px;color:var(--faint);white-space:nowrap;margin-left:auto;padding-left:8px}
+.empty-note{padding:22px 18px;color:var(--muted);font-size:14px}
+.infra{display:grid;gap:0}
+.infra-row{display:flex;align-items:center;gap:10px;padding:10px 18px;border-top:1px solid var(--line);font-size:14px}
+.infra-row:first-child{border-top:0}
+.infra-row .role{color:var(--muted);font-size:13px;margin-left:auto}
+
+/* Toolbar + tables */
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:none;padding:6px 13px;font-size:13.5px;cursor:pointer;color:var(--muted);font-weight:550;border-left:1px solid var(--line)}
+.seg button:first-child{border-left:0}
+.seg button[aria-pressed="true"]{background:var(--accent-soft);color:var(--accent)}
+.search{position:relative;margin-left:auto;min-width:260px}
+.search>.ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none}
+.search input{padding-left:34px!important}
+.table-wrap{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:550;color:var(--muted);font-size:13px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--surface-2);white-space:nowrap}
+td{padding:11px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr[data-act]{cursor:pointer}
+tbody tr[data-act]:hover td{background:var(--surface-2)}
+tr.empty td{padding:44px 16px;text-align:center;color:var(--muted);cursor:default}
+.row-actions{text-align:right;white-space:nowrap}
+.row-actions .btn+.btn{margin-left:6px}
+.table-foot{padding:10px 16px;color:var(--muted);font-size:13px;border-top:1px solid var(--line)}
+
+/* Badges, chips, avatars */
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px 2px 8px;border-radius:999px;font-size:12.5px;font-weight:550;white-space:nowrap;background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.badge.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.badge.bad{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.badge.plain::before{display:none}
+.chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:6px;background:var(--surface-2);border:1px solid var(--line);font-size:12.5px;white-space:nowrap;color:var(--ink)}
+.chip .ic{color:var(--muted)}
+.chip button{border:0;background:none;padding:0;margin-left:1px;cursor:pointer;color:var(--faint);display:grid}
+.chip button:hover{color:var(--bad)}
+.more{font-size:12.5px;color:var(--muted)}
+.avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:650;background:var(--accent-soft);color:var(--accent);flex:none;letter-spacing:.02em}
+.avatar.lg{width:44px;height:44px;font-size:15px}
+.who{display:flex;gap:11px;align-items:center;min-width:0}
+.who>div{min-width:0}
+.dev-ic{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;background:var(--surface-2);border:1px solid var(--line);color:var(--muted);flex:none}
+.dev-ic.lg{width:44px;height:44px;border-radius:10px}
+.warn-text{color:var(--warn);font-weight:550}
+
+/* Policies */
+.pol-layout{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:20px;align-items:start}
+.sim{position:sticky;top:0}
+.policies{list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.pol{display:grid;grid-template-columns:36px minmax(0,1fr) auto;gap:14px;padding:16px 14px 16px 16px;border-top:1px solid var(--line);align-items:start}
+.pol:first-child{border-top:0}
+.prio{font-family:var(--mono);font-size:13px;color:var(--muted);width:32px;height:32px;border-radius:8px;border:1px solid var(--line-strong);display:grid;place-items:center;font-variant-numeric:tabular-nums;background:var(--surface)}
+.pol-main{min-width:0;cursor:pointer;border:0;background:none;text-align:left;padding:0;display:block;width:100%}
+.pol-main:hover .pol-name strong{text-decoration:underline;text-underline-offset:3px}
+.pol-name{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:15px}
+.effect{font-size:12px;font-weight:650;padding:1px 8px;border-radius:5px;line-height:1.6}
+.effect.allow{background:var(--ok-soft);color:var(--ok)}
+.effect.deny{background:var(--bad-soft);color:var(--bad)}
+.rule{margin-top:9px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:13.5px;color:var(--muted)}
+.conds{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}
+.cond{font-size:12.5px;color:var(--muted);border:1px dashed var(--line-strong);border-radius:6px;padding:1px 8px}
+.pol.off .pol-main{opacity:.5}
+.pol.default{background:var(--surface-2)}
+.pol.default .prio{border-style:dashed}
+.pol-ctl{display:flex;align-items:center;gap:2px}
+.switch{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;font-size:14px}
+.switch input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.switch .tr{width:34px;height:20px;border-radius:999px;background:var(--line-strong);position:relative;transition:background .15s;flex:none}
+.switch .tr::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked+.tr{background:var(--accent)}
+.switch input:checked+.tr::after{transform:translateX(14px)}
+.switch input:focus-visible+.tr{outline:2px solid var(--accent);outline-offset:2px}
+.sim .panel-b{display:grid;gap:12px}
+.verdict{border-radius:10px;padding:14px 14px 12px;border:1px solid var(--line)}
+.verdict.allow{background:var(--ok-soft);border-color:transparent}
+.verdict.deny{background:var(--bad-soft);border-color:transparent}
+.verdict-h{display:flex;align-items:center;gap:8px;font-weight:650;font-size:16px}
+.verdict.allow .verdict-h{color:var(--ok)}
+.verdict.deny .verdict-h{color:var(--bad)}
+.verdict p{margin:4px 0 0;font-size:13.5px;color:var(--ink)}
+.trace{list-style:none;margin:0;padding:0;font-size:13px}
+.trace li{display:grid;grid-template-columns:30px minmax(0,1fr);gap:8px;padding:7px 0;border-top:1px dashed var(--line);color:var(--muted)}
+.trace li:first-child{border-top:0}
+.trace .tn{font-family:var(--mono);font-size:12px}
+.trace li.hit{color:var(--ink)}
+.trace li.hit .tn{color:var(--accent);font-weight:600}
+.trace li b{font-weight:600;color:var(--ink)}
+
+/* Drawer */
+.scrim{position:fixed;inset:0;background:rgba(10,14,28,.45);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,100%);background:var(--surface);border-left:1px solid var(--line);z-index:50;transform:translateX(100%);visibility:hidden;transition:transform .22s ease,visibility 0s linear .22s;display:flex;flex-direction:column;box-shadow:-14px 0 36px rgba(10,14,28,.16);padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+.drawer.open{transform:none;visibility:visible;transition:transform .22s ease}
+.dr-h{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:20px 22px 14px}
+.dr-h h2{margin:0;font-size:19px;letter-spacing:-.01em;line-height:1.25;overflow-wrap:anywhere}
+.dr-actions{display:flex;gap:8px;flex-wrap:wrap;padding:0 22px 16px;border-bottom:1px solid var(--line)}
+.dr-body{flex:1;overflow-y:auto;padding:0 22px 28px}
+.dr-body>section{padding:18px 0;border-bottom:1px solid var(--line)}
+.dr-body>section:last-child{border-bottom:0}
+.dr-body h3{font-size:14px;margin:0 0 10px;font-weight:620;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px 14px;margin:0;font-size:14px;align-items:center}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.kv select{padding:5px 9px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);max-width:100%}
+.inline-add{display:flex;gap:8px;margin-top:12px}
+.inline-add select{flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface)}
+.mini{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.mini li{display:flex;align-items:center;gap:10px;padding:9px 12px;border-top:1px solid var(--line);font-size:14px}
+.mini li:first-child{border-top:0}
+.mini li[data-act]{cursor:pointer}
+.mini li[data-act]:hover{background:var(--surface-2)}
+.mini .grow{flex:1;min-width:0}
+.mini .dot{margin-top:0}
+.code-box{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-wrap:anywhere;line-height:1.6;margin:0;white-space:pre-wrap}
+
+/* Modal + forms */
+.modal-root{position:fixed;inset:0;z-index:60;display:none;place-items:center;padding:16px;padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));background:rgba(10,14,28,.5)}
+.modal-root.on{display:grid}
+.modal{background:var(--surface);border-radius:14px;width:min(620px,100%);max-height:100%;overflow-y:auto;box-shadow:0 24px 64px rgba(10,14,28,.32);border:1px solid var(--line)}
+.modal.wide{width:min(820px,100%)}
+.modal.narrow{width:min(460px,100%)}
+.modal-h{padding:22px 24px 4px}
+.modal-h h2{margin:0;font-size:19px;letter-spacing:-.01em}
+.modal-h p{margin:6px 0 0;color:var(--muted);font-size:14px}
+.modal-b{padding:16px 24px 20px;display:grid;gap:16px}
+.modal-f{display:flex;justify-content:flex-end;gap:8px;padding:14px 24px 20px;border-top:1px solid var(--line);flex-wrap:wrap}
+.field{display:grid;gap:6px;min-width:0;border:0;margin:0;padding:0}
+.field>label,.field>legend{font-size:13.5px;font-weight:550;padding:0;margin-bottom:6px}
+.field>label{margin-bottom:0}
+.field input:not([type=checkbox]):not([type=radio]),.field select,.field textarea,.search input,.sim select,.hours input{padding:8px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);width:100%;min-width:0}
+.field textarea{resize:vertical}
+.hint{font-size:13px;color:var(--muted);margin:0}
+.err{color:var(--bad);font-size:13.5px;margin:0;font-weight:550}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.picker{border:1px solid var(--line-strong);border-radius:8px;max-height:220px;overflow-y:auto;padding:4px 6px}
+.picker h4{margin:8px 6px 2px;font-size:12.5px;color:var(--muted);font-weight:550}
+.check{display:flex;align-items:center;gap:9px;padding:5px 6px;border-radius:6px;font-size:14px;cursor:pointer}
+.check:hover{background:var(--surface-2)}
+.check input{accent-color:var(--accent);width:16px;height:16px;margin:0;flex:none}
+.check .sub{margin-left:auto}
+.check-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:2px 8px}
+.radio-cards{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.radio-card{border:1px solid var(--line-strong);border-radius:10px;padding:12px;display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+.radio-card input{accent-color:var(--accent);margin:3px 0 0}
+.radio-card:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.radio-card .sub{display:block;margin-top:2px}
+.suffix-input{display:flex;align-items:stretch;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden;background:var(--surface)}
+.field .suffix-input input{border:0!important;border-radius:0!important;flex:1}
+.suffix-input span{padding:8px 11px;background:var(--surface-2);color:var(--muted);font-family:var(--mono);font-size:12.5px;display:flex;align-items:center;border-left:1px solid var(--line);white-space:nowrap}
+.hours{display:flex;align-items:center;gap:8px;padding:2px 6px 0 31px;font-size:14px;color:var(--muted)}
+.hours input{width:auto!important}
+.notice{border-radius:10px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--line);font-size:14px}
+
+/* Enrollment credential */
+.cred{display:grid;grid-template-columns:auto minmax(0,1fr)}
+.cred-qr{padding:24px;display:grid;gap:10px;justify-items:center;align-content:start;border-right:2px dashed var(--line-strong);position:relative}
+.cred-qr::before,.cred-qr::after{content:"";position:absolute;right:-11px;width:20px;height:20px;border-radius:50%;background:var(--canvas);border:1px solid var(--line)}
+.cred-qr::before{top:-11px}.cred-qr::after{bottom:-11px}
+.qr-tile{background:#fff;border-radius:10px;padding:12px;border:1px solid #E1E4EC}
+#qr{width:196px;height:196px;display:grid;place-items:center}
+#qr img,#qr canvas{display:block;width:196px!important;height:196px!important}
+.qr-fallback{font-size:12.5px;color:#4A5268;text-align:center;padding:12px}
+.qr-cap{font-size:12.5px;color:var(--muted);text-align:center;max-width:220px}
+.cred-data{padding:22px 24px;display:grid;gap:16px;align-content:start;min-width:0}
+.cred-for{display:flex;align-items:center;gap:11px}
+.cred-label{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13.5px;font-weight:550;margin-bottom:6px}
+.code-big{font-family:var(--mono);font-size:27px;font-weight:500;letter-spacing:.06em;line-height:1.2;color:var(--ink)}
+.expiry{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted)}
+@media (max-width:640px){.cred{grid-template-columns:1fr}.cred-qr{border-right:0;border-bottom:2px dashed var(--line-strong)}.cred-qr::before,.cred-qr::after{display:none}}
+
+/* Toasts */
+.toasts{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));z-index:70;display:grid;gap:8px;justify-items:center;pointer-events:none;width:max-content;max-width:calc(100% - 32px)}
+.toast{background:var(--ink);color:var(--canvas);padding:10px 16px;border-radius:9px;font-size:14px;box-shadow:var(--shadow);display:flex;gap:8px;align-items:center}
+
+/* Responsive */
+@media (max-width:1100px){.pol-layout{grid-template-columns:1fr}.sim{position:static}.split{grid-template-columns:1fr}}
+@media (max-width:900px){
+  .app{grid-template-columns:1fr}
+  .rail{position:fixed;top:0;bottom:0;left:0;width:276px;z-index:45;transform:translateX(-100%);visibility:hidden;transition:transform .22s ease,visibility 0s linear .22s;padding-top:calc(18px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+  .app.nav-open .rail{transform:none;visibility:visible;transition:transform .22s ease}
+  .menu-btn{display:inline-grid}
+  .topbar{padding:10px 16px}
+  .content{padding:22px 16px 56px}
+  .me-name{display:none}
+}
+@media (max-width:760px){
+  .tally{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tally-item:nth-child(3){border-left:0}
+  .tally-item:nth-child(n+3){border-top:1px solid var(--line)}
+}
+@media (max-width:640px){
+  h1{font-size:23px}
+  .grid2,.radio-cards{grid-template-columns:1fr}
+  .search{margin-left:0;min-width:0;flex:1 1 100%}
+  .kv{grid-template-columns:1fr;gap:2px}
+  .kv dd{margin-bottom:10px}
+  .pol{grid-template-columns:32px minmax(0,1fr);}
+  .pol-ctl{grid-column:2}
+  .modal-h,.modal-b,.modal-f{padding-left:18px;padding-right:18px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="rail" id="rail" aria-label="Main navigation">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="9" fill="#3346C8"/><path d="M9 12.5 17 8.5l8 4-8 4-8-4z" fill="#fff"/><path d="m9 17 8 4 8-4" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round" opacity=".75"/><path d="m9 21.5 8 4 8-4" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round" opacity=".45"/></svg>
+      <div><div class="brand-name">ZTLP Directory</div><div class="brand-zone" id="brand-zone"></div></div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="rail-foot" id="rail-foot"></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" data-act="nav-toggle" aria-label="Open navigation"></button>
+      <div class="gsearch" id="gsearch">
+        <span id="gs-ic"></span>
+        <input type="search" id="gs-input" placeholder="Find a user, device, group or application" aria-label="Search the directory" autocomplete="off">
+        <div class="gresults" id="gresults" role="listbox"></div>
+      </div>
+      <div class="top-right">
+        <button class="icon-btn" data-act="theme" id="theme-btn" aria-label="Switch light or dark theme"></button>
+        <div class="me"><span class="avatar">SP</span><span class="me-name">Steven Price</span></div>
+      </div>
+    </header>
+    <main class="content" id="content" tabindex="-1"></main>
+  </div>
+</div>
+<div class="scrim" id="nscrim" data-act="close-nav"></div>
+<div class="scrim" id="dscrim" data-act="close-drawer"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="Details"></aside>
+<div class="modal-root" id="modal-root" role="dialog" aria-modal="true"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(function(){
+'use strict';
+var H=3600e3, D=24*H, STORE='ztlp-directory-v1', ME='Steven Price';
+
+/* ---------- Icons ---------- */
+var I={
+  grid:'<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
+  user:'<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/>',
+  laptop:'<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19.5h20"/>',
+  phone:'<rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18h2"/>',
+  server:'<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  layers:'<path d="M12 3 2.5 8 12 13l9.5-5L12 3z"/><path d="m2.5 13 9.5 5 9.5-5"/><path d="m2.5 17.5 9.5 4 9.5-4" opacity=".55"/>',
+  app:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/>',
+  shield:'<path d="M12 3 4.5 6v6c0 4.4 3.2 8 7.5 9 4.3-1 7.5-4.6 7.5-9V6L12 3z"/><path d="m9 12 2.2 2.2L15.5 10"/>',
+  key:'<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2"/>',
+  scroll:'<path d="M8 3.5h11v14.5a2.5 2.5 0 0 1-2.5 2.5H6"/><path d="M8 3.5a2 2 0 0 0-4 0V7h4"/><path d="M8 3.5V18a2.5 2.5 0 0 1-2.5 2.5"/><path d="M11.5 8.5h4.5M11.5 12.5h4.5"/>',
+  globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9s-1.3 6.5-3.7 9c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/>',
+  search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/>',
+  plus:'<path d="M12 5v14M5 12h14"/>',
+  x:'<path d="M6 6l12 12M18 6 6 18"/>',
+  menu:'<path d="M4 7h16M4 12h16M4 17h16"/>',
+  moon:'<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  copy:'<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
+  up:'<path d="m6 15 6-6 6 6"/>', down:'<path d="m6 9 6 6 6-6"/>',
+  check:'<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  ban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+  qr:'<rect x="3.5" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="14" y="3.5" width="6.5" height="6.5" rx="1"/><rect x="3.5" y="14" width="6.5" height="6.5" rx="1"/><path d="M14 14h3v3h-3zM20.5 14v.01M14 20.5h.01M17 20.5h3.5V17"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  link:'<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'
+};
+function ic(n,s){s=s||18;return '<svg class="ic" width="'+s+'" height="'+s+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+I[n]+'</svg>';}
+
+/* ---------- Utilities ---------- */
+var ALPH='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function rnd(n){var a=new Uint8Array(n);(window.crypto||window.msCrypto).getRandomValues(a);return Array.prototype.slice.call(a);}
+function b32(n){return rnd(n).map(function(x){return ALPH[x&31];}).join('');}
+function hex(n){return rnd(n).map(function(x){return ('0'+x.toString(16)).slice(-2);}).join('');}
+function uid(p){return p+'_'+b32(10).toLowerCase();}
+function nodeId(){return hex(16).match(/.{4}/g).join(':');}
+function keyFp(){return 'SHA256:'+btoa(String.fromCharCode.apply(null,rnd(24))).replace(/=+$/,'');}
+function slug(s){return String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function $(s){return document.querySelector(s);}
+function initials(n){return String(n).split(/\s+/).filter(Boolean).slice(0,2).map(function(w){return w[0].toUpperCase();}).join('');}
+function rel(ts){if(!ts)return 'Never';var s=Math.round((Date.now()-ts)/1000);if(s<45)return 'just now';var m=Math.round(s/60);if(m<60)return m+'m ago';var h=Math.round(m/60);if(h<24)return h+'h ago';var d=Math.round(h/24);if(d<30)return d+'d ago';return fmtDate(ts);}
+function fmtDate(ts){return new Date(ts).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});}
+function fmtTime(ts){return new Date(ts).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});}
+function left(ts){var ms=ts-Date.now();if(ms<=0)return 'Expired';var m=Math.floor(ms/60000),h=Math.floor(m/60),d=Math.floor(h/24);if(d)return d+'d '+(h%24)+'h left';if(h)return h+'h '+(m%60)+'m left';return Math.max(m,1)+'m left';}
+function h53(str,seed){var h1=0xdeadbeef^seed,h2=0x41c6ce57^seed;for(var i=0;i<str.length;i++){var ch=str.charCodeAt(i);h1=Math.imul(h1^ch,2654435761);h2=Math.imul(h2^ch,1597334677);}h1=Math.imul(h1^(h1>>>16),2246822507);h1^=Math.imul(h2^(h2>>>13),3266489909);h2=Math.imul(h2^(h2>>>16),2246822507);h2^=Math.imul(h1^(h1>>>13),3266489909);return (4294967296*(2097151&h2)+(h1>>>0)).toString(16).padStart(14,'0');}
+function chainHash(s){return h53(s,1)+h53(s,7);}
+var GENESIS='0000000000000000000000000000';
+
+/* ---------- Data model ---------- */
+var db, ui={q:{},f:{},drawer:null,sim:{},auditCat:'all',chain:null,confirmFn:null,lastFocus:null};
+function byId(arr,id){for(var i=0;i<arr.length;i++)if(arr[i].id===id)return arr[i];return null;}
+function U(id){return byId(db.users,id);} function Dv(id){return byId(db.devices,id);}
+function G(id){return byId(db.groups,id);} function A(id){return byId(db.apps,id);}
+function P(id){return byId(db.policies,id);} function E(id){return byId(db.enrollments,id);}
+function groupsOf(type,id){return db.groups.filter(function(g){return g.members.some(function(m){return m.type===type&&m.id===id;});});}
+function devIcon(d){return /iOS|Android/.test(d.platform)?'phone':/server|IoT/i.test(d.platform)?'server':'laptop';}
+function ownerName(d){var u=d.owner&&U(d.owner);return u?u.name:'Standalone device';}
+function subjObj(s){return s.type==='user'?U(s.id):s.type==='device'?Dv(s.id):G(s.id);}
+function subjName(s){var o=subjObj(s);return o?o.name:'(removed)';}
+function subjIcon(s){if(s.type==='group')return 'layers';if(s.type==='user')return 'user';var d=Dv(s.id);return d?devIcon(d):'laptop';}
+function enrStatus(e){return e.status==='active'&&e.expires<=Date.now()?'expired':e.status;}
+function gwName(id){return id;}
+
+function canon(x){return [x.prev,x.ts,x.actor,x.action,x.target?x.target.type+':'+x.target.id:'',x.summary].join('|');}
+function addAudit(d,e){var prev=d.audit.length?d.audit[0].hash:GENESIS;var x={id:uid('evt'),ts:e.ts,actor:e.actor,action:e.action,target:e.target||null,summary:e.summary,prev:prev};x.hash=chainHash(canon(x));d.audit.unshift(x);return x;}
+function verifyChain(){var list=db.audit.slice().reverse(),prev=GENESIS;for(var i=0;i<list.length;i++){var e=list[i];if(e.prev!==prev||chainHash(canon(e))!==e.hash)return {ok:false,index:i,entry:e,n:list.length};prev=e.hash;}return {ok:true,n:list.length};}
+function tgt(type,o){return o?{type:type,id:o.id,name:o.name}:null;}
+
+function makeToken(){var s=b32(26);return {token:s,code:s.slice(0,4)+'-'+s.slice(4,8)+'-'+s.slice(8,12)};}
+function enrollString(e){var z=db.zone;return 'ztlp://enroll?z='+encodeURIComponent(z.name)+'&ns='+encodeURIComponent(z.ns[0].host)+'&t='+e.token+'&fp='+encodeURIComponent(z.fingerprint.slice(7,23))+'&x='+Math.floor(e.expires/1000);}
+
+function seed(){
+  var now=Date.now();
+  var d={zone:{name:'techrockstars.ztlp',fingerprint:keyFp(),serial:2026101101,published:now-2*H,
+    ns:[{host:'ns1.techrockstars.ztlp',addr:'203.0.113.10',role:'Primary'},{host:'ns2.techrockstars.ztlp',addr:'198.51.100.22',role:'Secondary'}],
+    gateways:[{id:'gw-monrovia',addr:'203.0.113.20',site:'Monrovia office'},{id:'gw-cloud-west',addr:'198.51.100.40',site:'Cloud, us-west'}],
+    relays:[{id:'relay-lax-1',addr:'192.0.2.31'},{id:'relay-sjc-1',addr:'192.0.2.47'}]},
+    users:[],devices:[],groups:[],apps:[],policies:[],enrollments:[],audit:[]};
+  var ev=[];
+  function log(ts,actor,action,target,summary){ev.push({ts:ts,actor:actor,action:action,target:target,summary:summary});}
+  log(now-125*D,ME,'zone.create',{type:'zone',id:'zone',name:d.zone.name},'Created zone '+d.zone.name);
+  function u(name,email,role,mfa,status,ago){var x={id:uid('usr'),name:name,email:email,role:role,mfa:mfa,status:status,created:now-ago*D};d.users.push(x);log(x.created,ME,'user.create',tgt('user',x),'Created user '+name);return x;}
+  var sp=u('Steven Price','steven@techrockstars.com','admin',true,'active',122);
+  var mo=u('Maria Okafor','maria.okafor@techrockstars.com','user',true,'active',96);
+  var jl=u('Jordan Lee','jordan.lee@techrockstars.com','user',true,'active',80);
+  var pn=u('Priya Natarajan','priya.natarajan@techrockstars.com','user',true,'active',4);
+  var cm=u('Carlos Medina','carlos.medina@techrockstars.com','user',false,'active',60);
+  var dw=u('Dana Whitfield','dana@whitfield-consulting.com','user',true,'disabled',55);
+  var sb=u('Backup service','svc-backup@techrockstars.com','service',false,'active',101);
+  function dev(name,platform,owner,status,posture,ago,seen){var x={id:uid('dev'),name:name,platform:platform,owner:owner?owner.id:null,status:status,posture:posture,nodeId:nodeId(),keyFp:keyFp(),created:now-ago*D,lastSeen:seen==null?null:now-seen};d.devices.push(x);
+    if(status!=='pending')log(x.created+60e3,'ns1.techrockstars.ztlp','enroll.redeem',tgt('device',x),name+' enrolled'+(owner?' for '+owner.name:' as a standalone device'));return x;}
+  var d1=dev('SP-MBP-16','macOS',sp,'enrolled','healthy',121,4*60e3);
+  dev('SP-iPhone-15','iOS',sp,'enrolled','healthy',110,25*60e3);
+  dev('MO-ThinkPad','Windows',mo,'enrolled','healthy',95,12*60e3);
+  var d4=dev('JL-Surface','Windows',jl,'enrolled','warning',79,40*60e3);
+  var d5=dev('PN-MacBook-Air','macOS',pn,'enrolled','healthy',3,2*H);
+  var d6=dev('CM-Pixel-8','Android',cm,'enrolled','unknown',58,26*H);
+  var d7=dev('FRONTDESK-01','Windows',cm,'enrolled','healthy',58,8*60e3);
+  var d8=dev('DW-Latitude','Windows',dw,'revoked','unknown',54,9*D);
+  var d9=dev('srv-erp-01','Linux server',null,'enrolled','healthy',100,60e3);
+  var d10=dev('srv-backup-02','Linux server',sb,'enrolled','healthy',99,3*60e3);
+  var d11=dev('cnc-gateway-07','Linux IoT',null,'pending','unknown',0.2,null);
+  function isUser(o){return d.users.indexOf(o)>=0;} function isDev(o){return d.devices.indexOf(o)>=0;}
+  function typeOf(o){return isUser(o)?'user':isDev(o)?'device':'group';}
+  function g(name,description,members){var x={id:uid('grp'),name:name,description:description,members:members.map(function(m){return {type:typeOf(m),id:m.id};}),created:now-100*D};d.groups.push(x);log(x.created,ME,'group.create',tgt('group',x),'Created group '+name+' with '+members.length+' member'+(members.length===1?'':'s'));return x;}
+  var gA=g('Administrators','Full administrative access to the zone',[sp]);
+  var gE=g('Engineering','Developers and systems engineers',[mo,jl,pn]);
+  var gF=g('Front desk','Reception staff and the shared front-desk machine',[cm,d7]);
+  var gC=g('Contractors','External consultants with limited access',[dw]);
+  var gS=g('Servers','Headless server identities',[d9,d10]);
+  var gP=g('Shop floor','Machines on the manufacturing floor',[d11]);
+  function a(name,sub,host,port,protocol,gw,owner,desc,ago){var x={id:uid('app'),name:name,ztlpName:sub+'.'+d.zone.name,host:host,port:port,protocol:protocol,gateway:gw,owner:owner.id,description:desc,status:'active',serviceId:hex(16),created:now-ago*D};d.apps.push(x);log(x.created,ME,'app.register',tgt('app',x),'Registered '+name+' as '+x.ztlpName);return x;}
+  var aPortal=a('Client portal','portal','10.20.0.15',443,'HTTPS','gw-monrovia',gF,'Customer ticket and billing portal',90);
+  var aErp=a('ERP','erp','10.20.0.30',8443,'HTTPS','gw-monrovia',gE,'Inventory, orders and job costing',90);
+  var aGit=a('Git server','git','10.20.0.41',22,'SSH','gw-cloud-west',gE,'Source repositories',85);
+  var aSiem=a('SIEM ingest','siem','10.20.0.50',1514,'TCP','gw-monrovia',gA,'Log and event collection for the SIEM',85);
+  var aRdp=a('Remote desktop gateway','rdp','10.20.0.60',3389,'RDP','gw-monrovia',gA,'Administrative remote desktop access',70);
+  var aFiles=a('File share','files','10.20.0.70',445,'SMB','gw-monrovia',gE,'Department file shares',70);
+  function p(name,effect,subjects,apps,cond,enabled,desc,ago){var x={id:uid('pol'),name:name,effect:effect,subjects:subjects.map(function(s){return {type:typeOf(s),id:s.id};}),apps:apps==='*'?'*':apps.map(function(y){return y.id;}),cond:{healthy:!!cond.healthy,mfa:!!cond.mfa,hours:cond.hours||null},enabled:enabled,description:desc,updated:now-ago*D};d.policies.push(x);log(x.updated,ME,'policy.create',tgt('policy',x),'Created policy '+name);return x;}
+  p('Block contractors from admin tools','deny',[gC],[aSiem,aRdp],{},true,'Contractors never reach logging or remote desktop, whatever else allows them.',30);
+  p('Administrators: full access','allow',[gA],'*',{healthy:true,mfa:true},true,'',30);
+  p('Engineering: code, ERP and files','allow',[gE],[aGit,aErp,aFiles],{healthy:true},true,'',28);
+  p('Servers ship logs to the SIEM','allow',[gS],[aSiem],{},true,'',28);
+  p('Front desk: client portal in business hours','allow',[gF],[aPortal],{hours:{from:'07:00',to:'19:00'}},true,'',20);
+  p('Shop floor telemetry to ERP','allow',[gP],[aErp],{},false,'Turn on once cnc-gateway-07 finishes enrollment.',2);
+  function en(target,created,ttlH,status,ext){var t=makeToken();var x={id:uid('enr'),token:t.token,code:t.code,target:target,created:created,expires:created+ttlH*H,status:status,createdBy:ME};if(ext)for(var k in ext)x[k]=ext[k];d.enrollments.push(x);return x;}
+  var e1=en({type:'user',id:mo.id},now-6*H,72,'active');
+  log(e1.created,ME,'enroll.issue',tgt('user',mo),'Issued enrollment code '+e1.code+' for Maria Okafor');
+  var e2=en({type:'device',id:d11.id},now-5*H,10,'active');
+  log(e2.created,ME,'enroll.issue',tgt('device',d11),'Issued enrollment code '+e2.code+' for cnc-gateway-07');
+  en({type:'user',id:pn.id},now-4*D,72,'used',{redeemedBy:d5.id,redeemed:d5.created});
+  en({type:'user',id:jl.id},now-21*D,24,'active');
+  log(now-9*D,ME,'device.revoke',tgt('device',d8),'Revoked DW-Latitude');
+  log(now-9*D+2*60e3,ME,'user.disable',tgt('user',dw),'Disabled Dana Whitfield');
+  log(now-26*H,'gw-monrovia','access.deny',tgt('device',d6),'Denied CM-Pixel-8 to portal.'+d.zone.name+': outside allowed hours');
+  log(now-2*H,'ns1.techrockstars.ztlp','device.posture',tgt('device',d4),'JL-Surface reported posture: disk encryption is off');
+  log(now-40*60e3,'gw-cloud-west','access.deny',tgt('device',d4),'Denied JL-Surface to git.'+d.zone.name+': posture is not healthy');
+  log(now-12*60e3,'gw-monrovia','access.allow',tgt('device',d1),'Allowed SP-MBP-16 to rdp.'+d.zone.name+' by policy 2');
+  ev.sort(function(x,y){return x.ts-y.ts;});
+  ev.forEach(function(e){addAudit(d,e);});
+  return d;
+}
+
+function save(){try{localStorage.setItem(STORE,JSON.stringify(db));}catch(e){}}
+function load(){try{var raw=localStorage.getItem(STORE);if(raw){var x=JSON.parse(raw);if(x&&x.zone&&x.users&&x.audit)return x;}}catch(e){}return null;}
+db=load()||seed();
+if(!load())save();
+
+function commit(action,target,summary){if(action)addAudit(db,{ts:Date.now(),actor:ME,action:action,target:target,summary:summary});db.zone.serial++;db.zone.published=Date.now();ui.chain=null;save();render();}
+
+/* ---------- Policy evaluation ---------- */
+function inHours(h){var n=new Date(),m=n.getHours()*60+n.getMinutes();function p(s){var a=s.split(':');return (+a[0])*60+(+a[1]);}var f=p(h.from),t=p(h.to);return f<=t?(m>=f&&m<t):(m>=f||m<t);}
+function evaluate(deviceId,appId){
+  var dv=Dv(deviceId),app=A(appId),trace=[];
+  if(!dv||!app)return null;
+  var user=dv.owner?U(dv.owner):null;
+  var pre=dv.status!=='enrolled'?(dv.status==='pending'?dv.name+' has not finished enrollment':dv.name+' has a revoked identity')
+    :user&&user.status!=='active'?user.name+' is disabled'
+    :app.status!=='active'?app.name+' is turned off':null;
+  if(pre)return {decision:'deny',reason:pre,trace:trace,user:user,dv:dv,app:app,pre:true};
+  var gids={};groupsOf('device',dv.id).forEach(function(g){gids[g.id]=1;});if(user)groupsOf('user',user.id).forEach(function(g){gids[g.id]=1;});
+  for(var i=0;i<db.policies.length;i++){
+    var p=db.policies[i],n=i+1;
+    if(!p.enabled){trace.push({n:n,p:p,res:'skip',why:'Turned off'});continue;}
+    if(!(p.apps==='*'||p.apps.indexOf(app.id)>=0)){trace.push({n:n,p:p,res:'skip',why:'Does not cover this application'});continue;}
+    var subj=null;for(var j=0;j<p.subjects.length;j++){var s=p.subjects[j];if((s.type==='user'&&user&&s.id===user.id)||(s.type==='device'&&s.id===dv.id)||(s.type==='group'&&gids[s.id])){subj=s;break;}}
+    if(!subj){trace.push({n:n,p:p,res:'skip',why:'Does not cover this identity'});continue;}
+    var fails=[];
+    if(p.cond.healthy&&dv.posture!=='healthy')fails.push('device posture is not healthy');
+    if(p.cond.mfa&&!(user&&user.mfa))fails.push('MFA is not enabled');
+    if(p.cond.hours&&!inHours(p.cond.hours))fails.push('outside '+p.cond.hours.from+' to '+p.cond.hours.to);
+    if(fails.length){trace.push({n:n,p:p,res:'cond',why:'Covers this, but '+fails.join(' and ')});continue;}
+    trace.push({n:n,p:p,res:'hit',why:'Matched through '+(subj.type==='group'?'group ':'')+subjName(subj)});
+    return {decision:p.effect,policy:p,n:n,reason:(p.effect==='allow'?'Allowed by policy ':'Denied by policy ')+n+', '+p.name,trace:trace,user:user,dv:dv,app:app};
+  }
+  var cf=null;for(var k=0;k<trace.length;k++)if(trace[k].res==='cond'){cf=trace[k];break;}
+  return {decision:'deny',reason:cf?'Policy '+cf.n+' '+cf.why.charAt(0).toLowerCase()+cf.why.slice(1)+'. Nothing else matched, so the default deny applies.':'No policy matched, so the default deny applies.',trace:trace,user:user,dv:dv,app:app};
+}
+function userAccess(uid){
+  var devs=db.devices.filter(function(d){return d.owner===uid&&d.status==='enrolled';});
+  return db.apps.map(function(app){var rs=devs.map(function(d){return evaluate(d.id,app.id);});var ok=rs.filter(function(r){return r.decision==='allow';});return {app:app,allowed:ok.map(function(r){return r.dv.name;}),first:rs[0]};});
+}
+
+/* ---------- Small renderers ---------- */
+var BADGE={active:['ok','Active'],disabled:['','Disabled'],enrolled:['ok','Enrolled'],pending:['warn','Pending'],revoked:['bad','Revoked'],used:['','Redeemed'],expired:['','Expired'],healthy:['ok','Healthy'],warning:['warn','Needs attention'],unknown:['','Not reported'],off:['','Turned off']};
+function badge(s){var b=BADGE[s]||['',s];return '<span class="badge '+b[0]+'">'+esc(b[1])+'</span>';}
+var ROLE={admin:'Administrator',user:'User',service:'Service account'};
+function chips(names,max){max=max||2;if(!names.length)return '<span class="sub">None</span>';var out=names.slice(0,max).map(function(n){return '<span class="chip">'+esc(n)+'</span>';}).join('');if(names.length>max)out+='<span class="more">+'+(names.length-max)+'</span>';return '<div class="chips">'+out+'</div>';}
+function subjChip(s){return '<span class="chip">'+ic(subjIcon(s),13)+esc(subjName(s))+'</span>';}
+function appChip(id){var a=A(id);return '<span class="chip">'+ic('app',13)+esc(a?a.name:'(removed)')+'</span>';}
+function pageHead(title,lede,actions){return '<div class="page-head"><div><h1>'+title+'</h1><p class="lede">'+lede+'</p></div>'+(actions?'<div class="actions">'+actions+'</div>':'')+'</div>';}
+function toolbar(key,filters,ph){var cur=ui.f[key]||'all';var seg=filters?'<div class="seg" role="group" aria-label="Filter">'+filters.map(function(f){return '<button type="button" data-act="filter" data-view="'+key+'" data-val="'+f[0]+'" aria-pressed="'+(cur===f[0])+'">'+f[1]+'</button>';}).join('')+'</div>':'';
+  return '<div class="toolbar">'+seg+'<div class="search">'+ic('search',16)+'<input type="search" data-search="'+key+'" placeholder="'+ph+'" value="'+esc(ui.q[key]||'')+'" aria-label="'+ph+'"></div></div>';}
+function table(heads,key,rows,foot){return '<div class="table-wrap"><table><thead><tr>'+heads.map(function(h){return '<th scope="col">'+h+'</th>';}).join('')+'</tr></thead><tbody id="list-'+key+'">'+rows+'</tbody></table>'+(foot||'')+'</div>';}
+function emptyRow(n,msg){return '<tr class="empty"><td colspan="'+n+'">'+msg+'</td></tr>';}
+function matchQ(key,text){var q=(ui.q[key]||'').trim().toLowerCase();return !q||text.toLowerCase().indexOf(q)>=0;}
+function btn(act,label,icon,cls,attrs){return '<button type="button" class="btn '+(cls||'')+'" data-act="'+act+'" '+(attrs||'')+'>'+(icon?ic(icon,16):'')+label+'</button>';}
+function devCell(d){return '<div class="who"><span class="dev-ic">'+ic(devIcon(d),17)+'</span><div><div class="strong">'+esc(d.name)+'</div><div class="sub">'+esc(d.platform)+'</div></div></div>';}
+function userCell(u){return '<div class="who"><span class="avatar">'+initials(u.name)+'</span><div><div class="strong">'+esc(u.name)+'</div><div class="sub">'+esc(u.email)+'</div></div></div>';}
+function activityList(filterFn,limit){var items=db.audit.filter(filterFn).slice(0,limit||6);if(!items.length)return '<p class="sub" style="margin:0">No activity recorded yet.</p>';
+  return '<ul class="mini">'+items.map(function(e){return '<li data-act="open" data-type="audit" data-id="'+e.id+'"><div class="grow"><div>'+esc(e.summary)+'</div><div class="sub">'+esc(e.actor)+'</div></div><span class="feed-time">'+rel(e.ts)+'</span></li>';}).join('')+'</ul>';}
+
+/* ---------- Views ---------- */
+function viewOverview(){
+  var z=db.zone,now=Date.now();
+  var uA=db.users.filter(function(u){return u.status==='active';}).length;
+  var dE=db.devices.filter(function(d){return d.status==='enrolled';}).length,dP=db.devices.filter(function(d){return d.status==='pending';}).length;
+  var pOn=db.policies.filter(function(p){return p.enabled;}).length;
+  var eA=db.enrollments.filter(function(e){return enrStatus(e)==='active';}).length;
+  var att=[];
+  db.enrollments.forEach(function(e){if(enrStatus(e)==='active'&&e.expires-now<24*H)att.push(['warn','Enrollment code '+e.code+' for '+enrTargetName(e)+' expires soon','<span data-countdown="'+e.expires+'">'+left(e.expires)+'</span>','show-enroll','enroll',e.id]);});
+  db.devices.forEach(function(d){if(d.status==='enrolled'&&d.posture==='warning')att.push(['warn',d.name+' reports a posture problem','Policies that require healthy posture will refuse it','open','device',d.id]);});
+  db.devices.forEach(function(d){if(d.status==='pending')att.push(['warn',d.name+' is waiting to enroll','Created '+rel(d.created),'open','device',d.id]);});
+  db.apps.forEach(function(a){var cov=db.policies.some(function(p){return p.enabled&&p.effect==='allow'&&(p.apps==='*'||p.apps.indexOf(a.id)>=0)&&!(p.apps==='*'&&false);});var only=db.policies.some(function(p){return p.enabled&&p.effect==='allow'&&p.apps!=='*'&&p.apps.indexOf(a.id)>=0;});if(!only&&a.status==='active')att.push(['','No policy grants access to '+a.name+' specifically','Only broad policies reach it','open','app',a.id]);});
+  db.policies.forEach(function(p,i){if(!p.enabled)att.push(['','Policy '+(i+1)+' is turned off',p.name,'nav','policies','']);});
+  db.users.forEach(function(u){if(u.status==='active'&&!u.mfa&&u.role!=='service')att.push(['warn',u.name+' does not have MFA',"Policies that require MFA won't match","open",'user',u.id]);});
+  var attHtml=att.length?'<ul class="list">'+att.map(function(a){var act=a[3]==='nav'?'data-act="go" data-route="policies"':a[3]==='show-enroll'?'data-act="show-enroll" data-id="'+a[5]+'"':'data-act="open" data-type="'+a[4]+'" data-id="'+a[5]+'"';return '<li '+act+' tabindex="0"><span class="dot '+a[0]+'"></span><div class="grow"><div>'+esc(a[1])+'</div><div class="sub">'+a[2]+'</div></div></li>';}).join('')+'</ul>':'<div class="empty-note">Nothing needs attention. Every device is healthy and every code is in date.</div>';
+  var feed=db.audit.slice(0,8).map(function(e){return '<li data-act="open" data-type="audit" data-id="'+e.id+'" tabindex="0"><div class="grow"><div>'+esc(e.summary)+'</div><div class="sub">'+esc(e.actor)+'</div></div><span class="feed-time">'+rel(e.ts)+'</span></li>';}).join('');
+  var infra=z.ns.map(function(n){return '<div class="infra-row"><span class="dot ok"></span><span class="mono">'+esc(n.host)+'</span><span class="role">Name server, '+n.role.toLowerCase()+'</span></div>';}).join('')+
+    z.gateways.map(function(g){return '<div class="infra-row"><span class="dot ok"></span><span class="mono">'+esc(g.id)+'</span><span class="role">Gateway, '+esc(g.site)+'</span></div>';}).join('')+
+    z.relays.map(function(r){return '<div class="infra-row"><span class="dot ok"></span><span class="mono">'+esc(r.id)+'</span><span class="role">Relay</span></div>';}).join('');
+  return '<div class="wrap">'+pageHead('Overview','Identities, devices and access for <span class="mono">'+esc(z.name)+'</span>. The name server is on serial '+z.serial+', last published '+rel(z.published)+'.',btn('new-device','Add device','plus')+btn('new-user','New user','plus','primary'))+
+    '<div class="tally">'+
+      '<a class="tally-item" href="#users"><span class="tally-n">'+uA+'</span><span class="tally-l">Active users</span><span class="tally-s">'+(db.users.length-uA)+' disabled</span></a>'+
+      '<a class="tally-item" href="#devices"><span class="tally-n">'+dE+'</span><span class="tally-l">Enrolled devices</span><span class="tally-s">'+dP+' waiting to enroll</span></a>'+
+      '<a class="tally-item" href="#apps"><span class="tally-n">'+db.apps.length+'</span><span class="tally-l">Applications</span><span class="tally-s">'+db.apps.filter(function(a){return a.status!=='active';}).length+' turned off</span></a>'+
+      '<a class="tally-item" href="#policies"><span class="tally-n">'+pOn+'</span><span class="tally-l">Policies in force</span><span class="tally-s">'+eA+' open enrollment code'+(eA===1?'':'s')+'</span></a>'+
+    '</div>'+
+    '<div class="split"><div class="stack">'+
+      '<section class="panel"><header class="panel-h"><h2>Needs attention</h2><span class="count">'+att.length+'</span></header>'+attHtml+'</section>'+
+      '<section class="panel"><header class="panel-h"><h2>Zone infrastructure</h2><a class="link" href="#zone">Name server</a></header><div class="infra">'+infra+'</div></section>'+
+    '</div><section class="panel"><header class="panel-h"><h2>Recent activity</h2><a class="link" href="#audit">Open audit log</a></header><ul class="list">'+feed+'</ul></section></div></div>';
+}
+
+var LIST={};
+LIST.users=function(){var f=ui.f.users||'all';var rows=db.users.filter(function(u){return (f==='all'||u.status===f||(f==='admin'&&u.role==='admin'))&&matchQ('users',u.name+' '+u.email);});
+  if(!rows.length)return emptyRow(6,'No users match. Clear the search or create a user.');
+  return rows.map(function(u){var gs=groupsOf('user',u.id).map(function(g){return g.name;});var dc=db.devices.filter(function(d){return d.owner===u.id&&d.status==='enrolled';}).length;
+    return '<tr data-act="open" data-type="user" data-id="'+u.id+'" tabindex="0"><td>'+userCell(u)+'</td><td class="nowrap">'+ROLE[u.role]+'</td><td>'+chips(gs)+'</td><td>'+dc+'</td><td>'+(u.mfa?'On':'<span class="warn-text">Off</span>')+'</td><td>'+badge(u.status)+'</td></tr>';}).join('');};
+function viewUsers(){return '<div class="wrap">'+pageHead('Users','People who can hold device identities in this zone. Each user enrolls devices with a single-use code.',btn('new-user','New user','plus','primary'))+
+  toolbar('users',[['all','All'],['active','Active'],['disabled','Disabled'],['admin','Administrators']],'Search name or email')+table(['Name','Role','Groups','Devices','MFA','Status'],'users',LIST.users())+'</div>';}
+
+LIST.devices=function(){var f=ui.f.devices||'all';var rows=db.devices.filter(function(d){return (f==='all'||d.status===f||(f==='standalone'&&!d.owner))&&matchQ('devices',d.name+' '+d.platform+' '+ownerName(d)+' '+d.nodeId);});
+  if(!rows.length)return emptyRow(6,'No devices match. Clear the search or add a device.');
+  return rows.map(function(d){var o=d.owner?U(d.owner):null;
+    return '<tr data-act="open" data-type="device" data-id="'+d.id+'" tabindex="0"><td>'+devCell(d)+'</td><td>'+(o?esc(o.name):'<span class="sub">Standalone</span>')+'</td><td class="mono nowrap">'+d.nodeId.slice(0,14)+'…</td><td>'+(d.status==='enrolled'?badge(d.posture):'<span class="sub">Not applicable</span>')+'</td><td>'+badge(d.status)+'</td><td class="nowrap">'+rel(d.lastSeen)+'</td></tr>';}).join('');};
+function viewDevices(){return '<div class="wrap">'+pageHead('Devices','Every device holds its own node identity. A device can belong to a user, or stand on its own for servers, kiosks and machines.',btn('new-device','Add device','plus','primary'))+
+  toolbar('devices',[['all','All'],['enrolled','Enrolled'],['pending','Pending'],['revoked','Revoked'],['standalone','Standalone']],'Search name, owner or node ID')+table(['Device','Belongs to','Node ID','Posture','Status','Last seen'],'devices',LIST.devices())+'</div>';}
+
+function policyUses(type,id){return db.policies.filter(function(p){return p.subjects.some(function(s){return s.type===type&&s.id===id;});});}
+LIST.groups=function(){var rows=db.groups.filter(function(g){return matchQ('groups',g.name+' '+g.description);});
+  if(!rows.length)return emptyRow(4,'No groups match. Clear the search or create a group.');
+  return rows.map(function(g){var nu=g.members.filter(function(m){return m.type==='user';}).length,nd=g.members.length-nu,pu=policyUses('group',g.id).length;
+    return '<tr data-act="open" data-type="group" data-id="'+g.id+'" tabindex="0"><td><div class="who"><span class="dev-ic">'+ic('layers',17)+'</span><div><div class="strong">'+esc(g.name)+'</div><div class="sub">'+esc(g.description||'')+'</div></div></div></td><td class="nowrap">'+nu+' user'+(nu===1?'':'s')+', '+nd+' device'+(nd===1?'':'s')+'</td><td>'+(pu?pu+' polic'+(pu===1?'y':'ies'):'<span class="sub">Not used</span>')+'</td><td class="nowrap">'+fmtDate(g.created)+'</td></tr>';}).join('');};
+function viewGroups(){return '<div class="wrap">'+pageHead('Groups','Groups can hold users, devices, or both. Policies grant access to groups, so membership is how access changes.',btn('new-group','New group','plus','primary'))+
+  toolbar('groups',null,'Search groups')+table(['Group','Members','Used by','Created'],'groups',LIST.groups())+'</div>';}
+
+LIST.apps=function(){var f=ui.f.apps||'all';var rows=db.apps.filter(function(a){return (f==='all'||a.status===f)&&matchQ('apps',a.name+' '+a.ztlpName+' '+a.host);});
+  if(!rows.length)return emptyRow(6,'No applications match. Clear the search or register an application.');
+  return rows.map(function(a){return '<tr data-act="open" data-type="app" data-id="'+a.id+'" tabindex="0"><td><div class="who"><span class="dev-ic">'+ic('app',17)+'</span><div><div class="strong">'+esc(a.name)+'</div><div class="sub">'+esc(a.description||'')+'</div></div></div></td><td class="mono nowrap">'+esc(a.ztlpName)+'</td><td class="mono nowrap">'+esc(a.host)+':'+a.port+'</td><td>'+esc(a.protocol)+'</td><td class="mono nowrap">'+esc(a.gateway)+'</td><td>'+badge(a.status==='active'?'active':'off')+'</td></tr>';}).join('');};
+function viewApps(){return '<div class="wrap">'+pageHead('Applications','Services published through a ZTLP gateway. They have a name in the zone and no open ports on the internet.',btn('new-app','Register application','plus','primary'))+
+  toolbar('apps',[['all','All'],['active','Active'],['disabled','Turned off']],'Search name, service name or backend')+table(['Application','Service name','Backend','Protocol','Gateway','Status'],'apps',LIST.apps())+'</div>';}
+
+function condChips(p){var c=[];if(p.cond.healthy)c.push('Healthy posture');if(p.cond.mfa)c.push('MFA on');if(p.cond.hours)c.push(p.cond.hours.from+' to '+p.cond.hours.to);return c.length?'<div class="conds">'+c.map(function(x){return '<span class="cond">'+esc(x)+'</span>';}).join('')+'</div>':'';}
+function viewPolicies(){
+  var n=db.policies.length;
+  var list=db.policies.map(function(p,i){
+    return '<li class="pol'+(p.enabled?'':' off')+'"><span class="prio" title="Checked '+(i+1)+(i===0?'st':i===1?'nd':i===2?'rd':'th')+'">'+(i+1)+'</span>'+
+      '<button type="button" class="pol-main" data-act="edit-policy" data-id="'+p.id+'"><div class="pol-name"><span class="effect '+p.effect+'">'+(p.effect==='allow'?'Allow':'Deny')+'</span><strong>'+esc(p.name)+'</strong></div>'+
+      '<div class="rule">'+(p.subjects.length?p.subjects.map(subjChip).join(''):'<span class="chip">Nobody</span>')+'<span>to</span>'+(p.apps==='*'?'<span class="chip">'+ic('app',13)+'All applications</span>':p.apps.length?p.apps.map(appChip).join(''):'<span class="chip">No applications</span>')+'</div>'+condChips(p)+'</button>'+
+      '<div class="pol-ctl"><label class="switch" title="'+(p.enabled?'Turn off':'Turn on')+'"><input type="checkbox" data-change="policy-enabled" data-id="'+p.id+'" '+(p.enabled?'checked':'')+' aria-label="Policy '+(i+1)+' in force"><span class="tr"></span></label>'+
+      '<button class="icon-btn" data-act="move-policy" data-id="'+p.id+'" data-dir="-1" aria-label="Move up" '+(i===0?'disabled':'')+'>'+ic('up',17)+'</button><button class="icon-btn" data-act="move-policy" data-id="'+p.id+'" data-dir="1" aria-label="Move down" '+(i===n-1?'disabled':'')+'>'+ic('down',17)+'</button></div></li>';
+  }).join('')+'<li class="pol default"><span class="prio">'+(n+1)+'</span><div><div class="pol-name"><span class="effect deny">Deny</span><strong>Everything not matched above</strong></div><div class="rule">The zone default. It cannot be changed or moved.</div></div><span></span></li>';
+  return '<div class="wrap">'+pageHead('Policies','Checked from the top for every new session. The first policy that fully matches decides; if none does, the session is refused.',btn('new-policy','New policy','plus','primary'))+
+    '<div class="pol-layout"><ol class="policies">'+list+'</ol><section class="panel sim" id="sim">'+simPanel()+'</section></div></div>';
+}
+function deviceOptions(sel){var groups={};db.devices.forEach(function(d){var k=ownerName(d);(groups[k]=groups[k]||[]).push(d);});
+  return Object.keys(groups).sort(function(a,b){return a==='Standalone device'?1:b==='Standalone device'?-1:a.localeCompare(b);}).map(function(k){return '<optgroup label="'+esc(k==='Standalone device'?'Standalone devices':k)+'">'+groups[k].map(function(d){return '<option value="'+d.id+'" '+(d.id===sel?'selected':'')+'>'+esc(d.name)+(d.status!=='enrolled'?' ('+d.status+')':'')+'</option>';}).join('')+'</optgroup>';}).join('');}
+function simPanel(){
+  if(!ui.sim.device||!Dv(ui.sim.device)){var dd=db.devices.filter(function(d){return d.status==='enrolled';})[0];ui.sim.device=dd?dd.id:(db.devices[0]||{}).id;}
+  if(!ui.sim.app||!A(ui.sim.app))ui.sim.app=(db.apps[0]||{}).id;
+  if(!db.devices.length||!db.apps.length)return '<header class="panel-h"><h2>Test access</h2></header><div class="panel-b"><p class="hint">Add a device and an application to test a session.</p></div>';
+  return '<header class="panel-h"><h2>Test access</h2></header><div class="panel-b">'+
+    '<div class="field"><label for="sim-dev">From device</label><select id="sim-dev" data-change="sim" data-k="device">'+deviceOptions(ui.sim.device)+'</select></div>'+
+    '<div class="field"><label for="sim-app">To application</label><select id="sim-app" data-change="sim" data-k="app">'+db.apps.map(function(a){return '<option value="'+a.id+'" '+(a.id===ui.sim.app?'selected':'')+'>'+esc(a.name)+'</option>';}).join('')+'</select></div>'+
+    '<div id="sim-result">'+simResult()+'</div></div>';
+}
+function simResult(){var r=evaluate(ui.sim.device,ui.sim.app);if(!r)return '';
+  var who=r.user?esc(r.user.name)+' on '+esc(r.dv.name):esc(r.dv.name)+' (standalone)';
+  var tr=r.trace.length?'<ol class="trace">'+r.trace.map(function(t){return '<li class="'+(t.res==='hit'?'hit':'')+'"><span class="tn">'+t.n+'</span><span><b>'+esc(t.p.name)+'</b><br>'+esc(t.why)+'</span></li>';}).join('')+(r.policy?'':'<li class="hit"><span class="tn">'+(db.policies.length+1)+'</span><span><b>Default deny</b><br>Nothing above matched</span></li>')+'</ol>':'';
+  return '<div class="verdict '+r.decision+'"><div class="verdict-h">'+ic(r.decision==='allow'?'check':'ban',18)+(r.decision==='allow'?'Session allowed':'Session refused')+'</div><p>'+who+' to <span class="mono">'+esc(r.app.ztlpName)+'</span></p><p>'+esc(r.reason)+'</p></div>'+tr;}
+
+function enrTargetName(e){if(e.target.type==='user'){var u=U(e.target.id);return u?u.name:'(removed user)';}var d=Dv(e.target.id);return d?d.name:'(removed device)';}
+LIST.enrollments=function(){var f=ui.f.enrollments||'all';var rows=db.enrollments.slice().sort(function(a,b){return b.created-a.created;}).filter(function(e){var s=enrStatus(e);return (f==='all'||s===f)&&matchQ('enrollments',e.code+' '+enrTargetName(e));});
+  if(!rows.length)return emptyRow(6,'No enrollment codes match. Issue one from a user or add a device.');
+  return rows.map(function(e){var s=enrStatus(e);var t=e.target.type==='user'?'<div class="strong">'+esc(enrTargetName(e))+'</div><div class="sub">Any one new device</div>':'<div class="strong">'+esc(enrTargetName(e))+'</div><div class="sub">This device only</div>';
+    return '<tr data-act="show-enroll" data-id="'+e.id+'" tabindex="0"><td class="mono strong nowrap">'+e.code+'</td><td>'+t+'</td><td class="nowrap">'+rel(e.created)+'</td><td class="nowrap">'+(s==='active'?'<span data-countdown="'+e.expires+'">'+left(e.expires)+'</span>':fmtTime(e.expires))+'</td><td>'+badge(s)+'</td><td class="row-actions">'+(s==='active'?'<button class="btn sm" data-act="redeem-enroll" data-id="'+e.id+'" title="Simulates the device completing enrollment">Mark redeemed</button><button class="btn sm danger-ghost" data-act="revoke-enroll" data-id="'+e.id+'">Revoke</button>':'')+'</td></tr>';}).join('');};
+function viewEnrollments(){return '<div class="wrap">'+pageHead('Enrollments','Single-use codes that bind a new device to the zone. The device makes its key pair locally and registers the public key with the name server.',btn('new-device','Add device','plus')+btn('pick-enroll-user','Enroll a device for a user','qr','primary'))+
+  toolbar('enrollments',[['all','All'],['active','Active'],['used','Redeemed'],['expired','Expired'],['revoked','Revoked']],'Search code or name')+table(['Code','For','Issued','Expires','Status',''],'enrollments',LIST.enrollments())+'</div>';}
+
+var CAT={zone:'Zone',user:'Identity',group:'Identity',device:'Devices',enroll:'Enrollment',app:'Applications',policy:'Policy',access:'Access decisions'};
+function catOf(a){return CAT[a.split('.')[0]]||'Other';}
+LIST.audit=function(){var c=ui.auditCat;var rows=db.audit.filter(function(e){return (c==='all'||catOf(e.action)===c)&&matchQ('audit',e.summary+' '+e.actor+' '+e.action);});
+  if(!rows.length)return emptyRow(5,'No events match these filters.');
+  return rows.slice(0,250).map(function(e){return '<tr data-act="open" data-type="audit" data-id="'+e.id+'" tabindex="0"><td class="nowrap">'+fmtTime(e.ts)+'<div class="sub">'+rel(e.ts)+'</div></td><td>'+esc(e.actor)+'</td><td>'+esc(e.summary)+'</td><td><span class="badge plain">'+catOf(e.action)+'</span></td><td class="mono nowrap">'+e.hash.slice(0,10)+'</td></tr>';}).join('');};
+function viewAudit(){
+  var cats=['all'];Object.keys(CAT).forEach(function(k){if(cats.indexOf(CAT[k])<0)cats.push(CAT[k]);});
+  var ch=ui.chain;var chainLine=ch?(ch.ok?'<span class="badge ok">Chain intact</span> <span class="sub">'+ch.n+' events verified '+rel(ch.at)+'</span>':'<span class="badge bad">Chain broken</span> <span class="sub">Event '+(ch.index+1)+' does not match the hash before it</span>'):'<span class="sub">Each event carries the hash of the one before it, so a removed or edited entry breaks the chain.</span>';
+  return '<div class="wrap">'+pageHead('Audit log','Every change to the zone and every access decision reported by gateways, in order.',btn('export-audit','Export JSON')+btn('verify-chain','Verify chain','shield','primary'))+
+    '<div class="toolbar"><div class="field" style="min-width:200px"><select data-change="audit-cat" aria-label="Category">'+cats.map(function(c){return '<option value="'+c+'" '+(ui.auditCat===c?'selected':'')+'>'+(c==='all'?'All categories':c)+'</option>';}).join('')+'</select></div>'+
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+chainLine+'</div>'+
+    '<div class="search">'+ic('search',16)+'<input type="search" data-search="audit" placeholder="Search events or actors" value="'+esc(ui.q.audit||'')+'" aria-label="Search events"></div></div>'+
+    table(['Time','Actor','Event','Category','Hash'],'audit',LIST.audit(),db.audit.length>250?'<div class="table-foot">Showing the newest 250 of '+db.audit.length+' events. Export to see all of them.</div>':'')+'</div>';
+}
+
+function records(){var z=db.zone,r=[];
+  r.push([z.name,'SOA',z.ns[0].host+' serial '+z.serial]);
+  z.ns.forEach(function(n){r.push([z.name,'NS',n.host+' '+n.addr]);});
+  r.push([z.name,'ZKEY',z.fingerprint]);
+  z.gateways.forEach(function(g){r.push([g.id+'.gw.'+z.name,'GW',g.addr]);});
+  z.relays.forEach(function(x){r.push([x.id+'.relay.'+z.name,'RELAY',x.addr]);});
+  db.users.forEach(function(u){if(u.status==='active')r.push([slug(u.email.split('@')[0])+'.users.'+z.name,'ZID',u.id]);});
+  db.devices.forEach(function(d){if(d.status==='enrolled')r.push([slug(d.name)+'.nodes.'+z.name,'KEY',d.nodeId]);if(d.status==='revoked')r.push([slug(d.name)+'.nodes.'+z.name,'REVOKE',d.nodeId]);});
+  db.apps.forEach(function(a){if(a.status==='active')r.push([a.ztlpName,'SVC',a.gateway+' '+a.port+'/'+a.protocol.toLowerCase()+' id='+a.serviceId.slice(0,12)]);});
+  db.policies.forEach(function(p,i){if(p.enabled)r.push(['p'+(i+1)+'.policy.'+z.name,'POLICY',p.effect+' '+p.subjects.length+' subject'+(p.subjects.length===1?'':'s')+' to '+(p.apps==='*'?'all':p.apps.length)+' app'+(p.apps!=='*'&&p.apps.length===1?'':'s')]);});
+  return r;}
+LIST.records=function(){var rows=records().filter(function(r){return matchQ('records',r.join(' '));});if(!rows.length)return emptyRow(3,'No records match.');return rows.map(function(r){return '<tr><td class="mono">'+esc(r[0])+'</td><td><span class="badge plain mono">'+r[1]+'</span></td><td class="mono" style="overflow-wrap:anywhere">'+esc(r[2])+'</td></tr>';}).join('');};
+function viewZone(){var z=db.zone;
+  function rows(list,cols){return list.map(function(x){return '<div class="infra-row"><span class="dot ok"></span><span class="mono">'+esc(x[cols[0]])+'</span><span class="role mono">'+esc(x[cols[1]])+'</span></div>';}).join('');}
+  return '<div class="wrap">'+pageHead('Name server','The zone the directory publishes. Every change on this console raises the serial and is pushed to the name servers.','')+
+  '<div class="split" style="margin-bottom:20px"><section class="panel"><header class="panel-h"><h2>Zone settings</h2></header><form class="panel-b" data-form="zone" style="display:grid;gap:14px">'+
+    '<div class="field"><label for="z-name">Zone name</label><input id="z-name" name="name" value="'+esc(z.name)+'" required pattern="[a-z0-9.-]+" title="Lowercase letters, digits, dots and hyphens"></div>'+
+    '<dl class="kv"><dt>Serial</dt><dd class="mono">'+z.serial+'</dd><dt>Last published</dt><dd>'+fmtTime(z.published)+'</dd><dt>Zone key</dt><dd class="mono">'+esc(z.fingerprint)+'</dd></dl>'+
+    '<div class="actions"><button class="btn primary" type="submit">Save zone</button><button type="button" class="btn danger-ghost" data-act="reset-demo">Reset sample data</button></div></form></section>'+
+  '<div class="stack"><section class="panel"><header class="panel-h"><h2>Name servers</h2></header><div class="infra">'+rows(z.ns,['host','addr'])+'</div></section>'+
+  '<section class="panel"><header class="panel-h"><h2>Gateways and relays</h2></header><div class="infra">'+rows(z.gateways,['id','addr'])+rows(z.relays,['id','addr'])+'</div></section></div></div>'+
+  '<h2 style="font-size:17px;margin:8px 0 4px">Published records</h2><p class="hint" style="margin-bottom:12px">Record types here are placeholders. Map them to the types in your ZTLP RFC when you connect a real name server.</p>'+
+  toolbar('records',null,'Search records')+table(['Name','Type','Value'],'records',LIST.records())+'</div>';}
+
+var VIEWS={overview:viewOverview,users:viewUsers,devices:viewDevices,groups:viewGroups,apps:viewApps,policies:viewPolicies,enrollments:viewEnrollments,audit:viewAudit,zone:viewZone};
+var NAV=[['Directory',[['overview','Overview','grid'],['users','Users','user'],['devices','Devices','laptop'],['groups','Groups','layers']]],['Access',[['apps','Applications','app'],['policies','Policies','shield'],['enrollments','Enrollments','key']]],['Operations',[['audit','Audit log','scroll'],['zone','Name server','globe']]]];
+function navCount(k){return {users:db.users.length,devices:db.devices.length,groups:db.groups.length,apps:db.apps.length,policies:db.policies.length,enrollments:db.enrollments.filter(function(e){return enrStatus(e)==='active';}).length}[k];}
+
+/* ---------- Drawers ---------- */
+var DRAWER={};
+function drHead(icon,title,sub,actions){return '<header class="dr-h"><div class="who">'+icon+'<div><h2>'+title+'</h2><div class="sub">'+sub+'</div></div></div><button class="icon-btn" data-act="close-drawer" aria-label="Close details">'+ic('x')+'</button></header>'+(actions?'<div class="dr-actions">'+actions+'</div>':'');}
+function groupSection(type,id){var gs=groupsOf(type,id),avail=db.groups.filter(function(g){return gs.indexOf(g)<0;});
+  return '<section><h3>Groups</h3>'+(gs.length?'<div class="chips">'+gs.map(function(g){return '<span class="chip">'+ic('layers',13)+esc(g.name)+'<button data-act="remove-member" data-group="'+g.id+'" data-type="'+type+'" data-id="'+id+'" aria-label="Remove from '+esc(g.name)+'">'+ic('x',13)+'</button></span>';}).join('')+'</div>':'<p class="sub" style="margin:0">Not in any group.</p>')+
+  (avail.length?'<div class="inline-add"><select id="add-group-sel" aria-label="Group to add">'+avail.map(function(g){return '<option value="'+g.id+'">'+esc(g.name)+'</option>';}).join('')+'</select><button class="btn sm" data-act="add-to-group" data-type="'+type+'" data-id="'+id+'">Add to group</button></div>':'')+'</section>';}
+function accessSection(rows){return '<section><h3>Effective access</h3><ul class="mini">'+rows.map(function(r){return '<li data-act="test-access" data-device="'+(r.dev||'')+'" data-app="'+r.app.id+'"><span class="dot '+(r.ok?'ok':'bad')+'"></span><div class="grow"><div class="strong">'+esc(r.app.name)+'</div><div class="sub">'+esc(r.text)+'</div></div></li>';}).join('')+'</ul><p class="hint" style="margin-top:8px">Select a row to open it in the policy tester.</p></section>';}
+DRAWER.user=function(id){var u=U(id);if(!u)return null;var devs=db.devices.filter(function(d){return d.owner===id;});
+  var acc;var en=devs.filter(function(d){return d.status==='enrolled';});
+  if(!en.length)acc='<section><h3>Effective access</h3><p class="sub" style="margin:0">No enrolled devices yet, so nothing is reachable. Issue an enrollment code to get started.</p></section>';
+  else acc=accessSection(userAccess(id).map(function(x){return {app:x.app,ok:x.allowed.length>0,dev:x.allowed.length?byName(x.allowed[0]):x.first.dv.id,text:x.allowed.length?'Allowed from '+x.allowed.join(', '):x.first.reason};}));
+  var pend=db.enrollments.filter(function(e){return e.target.type==='user'&&e.target.id===id&&enrStatus(e)==='active';});
+  return drHead('<span class="avatar lg">'+initials(u.name)+'</span>',esc(u.name),esc(u.email),
+    btn('enroll-user','Enroll a device','qr','primary','data-id="'+id+'"')+btn('toggle-user',u.status==='active'?'Disable user':'Enable user','','','data-id="'+id+'"')+btn('delete-user','Delete','','danger-ghost','data-id="'+id+'"'))+
+  '<div class="dr-body"><section><h3>Identity</h3><dl class="kv"><dt>Status</dt><dd>'+badge(u.status)+'</dd><dt>Identity ID</dt><dd class="mono">'+u.id+'</dd>'+
+    '<dt><label for="u-role">Role</label></dt><dd><select id="u-role" data-change="user-role" data-id="'+id+'">'+Object.keys(ROLE).map(function(k){return '<option value="'+k+'" '+(u.role===k?'selected':'')+'>'+ROLE[k]+'</option>';}).join('')+'</select></dd>'+
+    '<dt>Require MFA</dt><dd><label class="switch"><input type="checkbox" data-change="user-mfa" data-id="'+id+'" '+(u.mfa?'checked':'')+'><span class="tr"></span>'+(u.mfa?'On':'Off')+'</label></dd>'+
+    '<dt>Created</dt><dd>'+fmtDate(u.created)+'</dd></dl></section>'+
+  groupSection('user',id)+
+  '<section><h3>Devices <span class="sub">'+devs.length+'</span></h3>'+(devs.length?'<ul class="mini">'+devs.map(function(d){return '<li data-act="open" data-type="device" data-id="'+d.id+'"><span class="dev-ic">'+ic(devIcon(d),16)+'</span><div class="grow"><div class="strong">'+esc(d.name)+'</div><div class="sub">'+esc(d.platform)+', last seen '+rel(d.lastSeen)+'</div></div>'+badge(d.status)+'</li>';}).join('')+'</ul>':'<p class="sub" style="margin:0">No devices yet.</p>')+
+    (pend.length?'<p class="hint" style="margin-top:10px">'+pend.length+' open enrollment code'+(pend.length===1?'':'s')+': '+pend.map(function(e){return '<a href="#" data-act="show-enroll" data-id="'+e.id+'" class="mono">'+e.code+'</a>';}).join(', ')+'</p>':'')+'</section>'+
+  acc+'<section><h3>Recent activity</h3>'+activityList(function(e){return e.target&&e.target.id===id;})+'</section></div>';};
+function byName(n){for(var i=0;i<db.devices.length;i++)if(db.devices[i].name===n)return db.devices[i].id;return '';}
+DRAWER.device=function(id){var d=Dv(id);if(!d)return null;
+  var acts=(d.status==='enrolled'?btn('revoke-device','Revoke identity','ban','danger-ghost','data-id="'+id+'"'):btn('reissue-device',d.status==='pending'?'Show new enrollment code':'Re-enroll device','qr','primary','data-id="'+id+'"')+(d.status==='pending'?btn('revoke-device','Cancel enrollment','','danger-ghost','data-id="'+id+'"'):''))+btn('delete-device','Delete','','danger-ghost','data-id="'+id+'"');
+  var acc=d.status==='enrolled'?accessSection(db.apps.map(function(a){var r=evaluate(id,a.id);return {app:a,ok:r.decision==='allow',dev:id,text:r.reason};})):'<section><h3>Effective access</h3><p class="sub" style="margin:0">This device cannot open sessions until it is enrolled.</p></section>';
+  return drHead('<span class="dev-ic lg">'+ic(devIcon(d),20)+'</span>',esc(d.name),esc(d.platform)+', '+(d.owner?'belongs to '+esc(ownerName(d)):'standalone device'),acts)+
+  '<div class="dr-body"><section><h3>Identity</h3><dl class="kv"><dt>Status</dt><dd>'+badge(d.status)+'</dd><dt>Posture</dt><dd>'+(d.status==='enrolled'?badge(d.posture)+' <span class="sub">reported by the agent</span>':'<span class="sub">Not applicable</span>')+'</dd>'+
+    '<dt>Node ID</dt><dd class="mono">'+d.nodeId+'</dd><dt>Public key</dt><dd class="mono">'+(d.status==='pending'?'<span class="sub">Generated on the device during enrollment</span>':esc(d.keyFp))+'</dd>'+
+    '<dt><label for="d-owner">Belongs to</label></dt><dd><select id="d-owner" data-change="device-owner" data-id="'+id+'"><option value="">Standalone device</option>'+db.users.map(function(u){return '<option value="'+u.id+'" '+(d.owner===u.id?'selected':'')+'>'+esc(u.name)+'</option>';}).join('')+'</select></dd>'+
+    '<dt>Last seen</dt><dd>'+rel(d.lastSeen)+'</dd><dt>Created</dt><dd>'+fmtDate(d.created)+'</dd></dl></section>'+
+  groupSection('device',id)+acc+'<section><h3>Recent activity</h3>'+activityList(function(e){return e.target&&e.target.id===id;})+'</section></div>';};
+DRAWER.group=function(id){var g=G(id);if(!g)return null;var inG={};g.members.forEach(function(m){inG[m.type+':'+m.id]=1;});
+  var availU=db.users.filter(function(u){return !inG['user:'+u.id];}),availD=db.devices.filter(function(d){return !inG['device:'+d.id]&&d.status!=='revoked';});
+  var pols=policyUses('group',id);
+  return drHead('<span class="dev-ic lg">'+ic('layers',20)+'</span>',esc(g.name),esc(g.description||'No description'),btn('delete-group','Delete group','','danger-ghost','data-id="'+id+'"'))+
+  '<div class="dr-body"><section><h3>Members <span class="sub">'+g.members.length+'</span></h3>'+(g.members.length?'<ul class="mini">'+g.members.map(function(m){var o=subjObj(m);if(!o)return '';return '<li><span class="'+(m.type==='user'?'avatar':'dev-ic')+'">'+(m.type==='user'?initials(o.name):ic(devIcon(o),16))+'</span><div class="grow" data-act="open" data-type="'+m.type+'" data-id="'+m.id+'" style="cursor:pointer"><div class="strong">'+esc(o.name)+'</div><div class="sub">'+(m.type==='user'?'User':'Device, '+esc(ownerName(o)))+'</div></div><button class="icon-btn" data-act="remove-member" data-group="'+id+'" data-type="'+m.type+'" data-id="'+m.id+'" aria-label="Remove '+esc(o.name)+'">'+ic('x',16)+'</button></li>';}).join('')+'</ul>':'<p class="sub" style="margin:0">No members yet.</p>')+
+    ((availU.length||availD.length)?'<div class="inline-add"><select id="add-member-sel" aria-label="Member to add">'+(availU.length?'<optgroup label="Users">'+availU.map(function(u){return '<option value="user:'+u.id+'">'+esc(u.name)+'</option>';}).join('')+'</optgroup>':'')+(availD.length?'<optgroup label="Devices">'+availD.map(function(d){return '<option value="device:'+d.id+'">'+esc(d.name)+'</option>';}).join('')+'</optgroup>':'')+'</select><button class="btn sm" data-act="add-member" data-id="'+id+'">Add member</button></div>':'')+'</section>'+
+  '<section><h3>Policies that use this group</h3>'+(pols.length?'<ul class="mini">'+pols.map(function(p){return '<li data-act="edit-policy" data-id="'+p.id+'"><span class="effect '+p.effect+'">'+(p.effect==='allow'?'Allow':'Deny')+'</span><div class="grow">'+esc(p.name)+'</div><span class="sub">#'+(db.policies.indexOf(p)+1)+'</span></li>';}).join('')+'</ul>':'<p class="sub" style="margin:0">No policy refers to this group, so membership grants nothing yet.</p>')+'</section>'+
+  '<section><h3>Recent activity</h3>'+activityList(function(e){return e.target&&e.target.id===id;})+'</section></div>';};
+DRAWER.app=function(id){var a=A(id);if(!a)return null;var og=G(a.owner);
+  var pols=db.policies.filter(function(p){return p.apps==='*'||p.apps.indexOf(id)>=0;});
+  var reach=[];db.devices.forEach(function(d){if(d.status==='enrolled'){var r=evaluate(d.id,id);if(r.decision==='allow')reach.push(d);}});
+  return drHead('<span class="dev-ic lg">'+ic('app',20)+'</span>',esc(a.name),'<span class="mono">'+esc(a.ztlpName)+'</span>',btn('toggle-app',a.status==='active'?'Turn off':'Turn on','','','data-id="'+id+'"')+btn('test-app','Test access','shield','','data-id="'+id+'"')+btn('delete-app','Delete','','danger-ghost','data-id="'+id+'"'))+
+  '<div class="dr-body"><section><h3>Service</h3><dl class="kv"><dt>Status</dt><dd>'+badge(a.status==='active'?'active':'off')+'</dd><dt>Service ID</dt><dd class="mono">'+a.serviceId+'</dd><dt>Backend</dt><dd class="mono">'+esc(a.host)+':'+a.port+'</dd><dt>Protocol</dt><dd>'+esc(a.protocol)+'</dd><dt>Gateway</dt><dd class="mono">'+esc(a.gateway)+'</dd><dt>Owner group</dt><dd>'+(og?esc(og.name):'<span class="sub">None</span>')+'</dd><dt>Registered</dt><dd>'+fmtDate(a.created)+'</dd></dl></section>'+
+  '<section><h3>Name server record</h3><pre class="code-box">'+esc(a.ztlpName)+'  SVC  '+esc(a.gateway)+' '+a.port+'/'+esc(a.protocol.toLowerCase())+' id='+a.serviceId.slice(0,12)+'</pre></section>'+
+  '<section><h3>Policies that cover it</h3>'+(pols.length?'<ul class="mini">'+pols.map(function(p){return '<li data-act="edit-policy" data-id="'+p.id+'"><span class="effect '+p.effect+'">'+(p.effect==='allow'?'Allow':'Deny')+'</span><div class="grow">'+esc(p.name)+(p.enabled?'':' <span class="sub">(off)</span>')+'</div><span class="sub">#'+(db.policies.indexOf(p)+1)+'</span></li>';}).join('')+'</ul>':'<p class="sub" style="margin:0">No policy covers it, so every session is refused.</p>')+'</section>'+
+  '<section><h3>Devices that can reach it now <span class="sub">'+reach.length+'</span></h3>'+(reach.length?'<div class="chips">'+reach.map(function(d){return '<span class="chip">'+ic(devIcon(d),13)+esc(d.name)+'</span>';}).join('')+'</div>':'<p class="sub" style="margin:0">None right now.</p>')+'</section>'+
+  '<section><h3>Recent activity</h3>'+activityList(function(e){return e.target&&e.target.id===id;})+'</section></div>';};
+DRAWER.audit=function(id){var e=byId(db.audit,id);if(!e)return null;var idx=db.audit.length-db.audit.indexOf(e);
+  return drHead('<span class="dev-ic lg">'+ic('scroll',20)+'</span>','Event '+idx,fmtTime(e.ts),'')+
+  '<div class="dr-body"><section><h3>What happened</h3><p style="margin:0 0 12px">'+esc(e.summary)+'</p><dl class="kv"><dt>Actor</dt><dd>'+esc(e.actor)+'</dd><dt>Action</dt><dd class="mono">'+esc(e.action)+'</dd><dt>Category</dt><dd>'+catOf(e.action)+'</dd>'+(e.target?'<dt>Target</dt><dd>'+esc(e.target.name||e.target.id)+' <span class="sub">'+esc(e.target.type)+'</span></dd>':'')+'<dt>Time</dt><dd>'+new Date(e.ts).toISOString()+'</dd></dl></section>'+
+  '<section><h3>Chain</h3><dl class="kv"><dt>Previous hash</dt><dd class="mono">'+e.prev+'</dd><dt>This hash</dt><dd class="mono">'+e.hash+'</dd></dl></section>'+
+  '<section><h3>Raw event</h3><pre class="code-box">'+esc(JSON.stringify(e,null,2))+'</pre></section></div>';};
+
+/* ---------- Render ---------- */
+var route='overview';
+function render(){
+  var r=(location.hash||'').replace(/^#/,'')||'overview';route=VIEWS[r]?r:'overview';
+  var c=$('#content'),st=c.scrollTop;
+  var ae=document.activeElement,keep=ae&&ae.dataset&&ae.dataset.search?ae.dataset.search:null;
+  c.innerHTML=VIEWS[route]();c.scrollTop=st;
+  if(keep){var inp=c.querySelector('[data-search="'+keep+'"]');if(inp){inp.focus();var v=inp.value;inp.value='';inp.value=v;}}
+  renderChrome();renderDrawer();
+}
+function renderChrome(){
+  $('#brand-zone').textContent=db.zone.name;
+  $('#nav').innerHTML=NAV.map(function(s){return '<div class="nav-sec"><div class="nav-label">'+s[0]+'</div>'+s[1].map(function(it){var n=navCount(it[0]);return '<a href="#'+it[0]+'" '+(route===it[0]?'aria-current="page"':'')+'>'+ic(it[2],18)+'<span>'+it[1]+'</span>'+(n!=null?'<span class="n">'+n+'</span>':'')+'</a>';}).join('')+'</div>';}).join('');
+  $('#rail-foot').innerHTML='<div class="ns-line"><span class="dot ok"></span>Name servers in sync</div><div class="ns-meta">Serial <span class="mono">'+db.zone.serial+'</span></div><div class="ns-meta">Published '+rel(db.zone.published)+'</div>';
+}
+function renderDrawer(){
+  var dr=$('#drawer');
+  if(!ui.drawer){dr.classList.remove('open');dr.setAttribute('aria-hidden','true');$('#dscrim').classList.remove('on');return;}
+  var html=DRAWER[ui.drawer.type](ui.drawer.id);
+  if(!html){ui.drawer=null;return renderDrawer();}
+  var body=dr.querySelector('.dr-body'),st=body?body.scrollTop:0,same=dr.dataset.key===ui.drawer.type+':'+ui.drawer.id;
+  dr.innerHTML=html;dr.dataset.key=ui.drawer.type+':'+ui.drawer.id;
+  if(same){var nb=dr.querySelector('.dr-body');if(nb)nb.scrollTop=st;}
+  var wasOpen=dr.classList.contains('open');
+  dr.classList.add('open');dr.setAttribute('aria-hidden','false');$('#dscrim').classList.add('on');
+  if(!wasOpen||!same){var cb=dr.querySelector('[data-act="close-drawer"]');setTimeout(function(){cb&&cb.focus();},30);}
+}
+function openDrawer(type,id){ui.lastDrawerFocus=document.activeElement;ui.drawer={type:type,id:id};renderDrawer();}
+function closeDrawer(){ui.drawer=null;renderDrawer();var f=ui.lastDrawerFocus;if(f&&document.body.contains(f))f.focus();}
+
+/* ---------- Modals ---------- */
+function openModal(html,cls){var r=$('#modal-root');ui.lastFocus=document.activeElement;r.innerHTML='<div class="modal '+(cls||'')+'">'+html+'</div>';r.classList.add('on');
+  setTimeout(function(){var f=r.querySelector('[autofocus]')||r.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),select,textarea')||r.querySelector('.btn.primary');f&&f.focus();},20);}
+function closeModal(){var r=$('#modal-root');r.classList.remove('on');r.innerHTML='';ui.confirmFn=null;var f=ui.lastFocus;if(f&&document.body.contains(f))f.focus();}
+function confirmModal(title,body,label,fn,danger){ui.confirmFn=fn;openModal('<div class="modal-h"><h2>'+title+'</h2></div><div class="modal-b"><p style="margin:0">'+body+'</p></div><div class="modal-f"><button class="btn" data-act="close-modal">Cancel</button><button class="btn '+(danger===false?'primary':'danger')+'" data-act="confirm-yes" autofocus>'+label+'</button></div>','narrow');}
+function formErr(f,msg){var e=f.querySelector('.err');if(e){e.textContent=msg;e.hidden=false;}}
+function groupChecks(selected,type){selected=selected||[];return db.groups.length?'<div class="check-grid">'+db.groups.map(function(g){return '<label class="check"><input type="checkbox" name="groups" value="'+g.id+'" '+(selected.indexOf(g.id)>=0?'checked':'')+'>'+esc(g.name)+'</label>';}).join('')+'</div>':'<p class="hint">No groups yet.</p>';}
+var TTL='<select name="ttl"><option value="1">1 hour</option><option value="24">24 hours</option><option value="72" selected>3 days</option><option value="168">7 days</option></select>';
+var PLATFORMS=['Windows','macOS','Linux','iOS','Android','Linux server','Linux IoT'];
+
+function modalNewUser(){openModal('<form data-form="new-user"><div class="modal-h"><h2>New user</h2><p>The user is published to the name server as soon as you create it.</p></div><div class="modal-b">'+
+  '<div class="grid2"><div class="field"><label for="nu-name">Full name</label><input id="nu-name" name="name" required autocomplete="off"></div><div class="field"><label for="nu-email">Email</label><input id="nu-email" name="email" type="email" required autocomplete="off"></div></div>'+
+  '<div class="grid2"><div class="field"><label for="nu-role">Role</label><select id="nu-role" name="role"><option value="user">User</option><option value="admin">Administrator</option><option value="service">Service account</option></select></div><div class="field"><label>Multi-factor</label><label class="switch" style="min-height:38px"><input type="checkbox" name="mfa" checked><span class="tr"></span>Require MFA</label></div></div>'+
+  '<fieldset class="field"><legend>Groups</legend>'+groupChecks()+'</fieldset>'+
+  '<div class="notice" style="display:grid;gap:10px"><label class="check" style="padding:0"><input type="checkbox" name="issue" checked><strong>Issue an enrollment code now</strong></label><div class="field"><label for="nu-ttl" class="sub">Code expires after</label>'+TTL.replace('<select','<select id="nu-ttl"')+'</div></div>'+
+  '<p class="err" hidden></p></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Create user</button></div></form>');}
+
+function modalNewDevice(preUser){openModal('<form data-form="new-device"><div class="modal-h"><h2>Add device</h2><p>Creates a pending device and a code that only this device can redeem.</p></div><div class="modal-b">'+
+  '<fieldset class="field"><legend>Identity</legend><div class="radio-cards"><label class="radio-card"><input type="radio" name="mode" value="user" data-change="dev-mode" '+(preUser!==false?'checked':'')+'><span><strong>Belongs to a user</strong><span class="sub">Access follows both the user and the device</span></span></label><label class="radio-card"><input type="radio" name="mode" value="standalone" data-change="dev-mode" '+(preUser===false?'checked':'')+'><span><strong>Standalone device</strong><span class="sub">Servers, kiosks and machines with no person attached</span></span></label></div></fieldset>'+
+  '<div class="field" id="dev-user-field" '+(preUser===false?'hidden':'')+'><label for="nd-user">User</label><select id="nd-user" name="user">'+db.users.filter(function(u){return u.status==='active';}).map(function(u){return '<option value="'+u.id+'" '+(preUser===u.id?'selected':'')+'>'+esc(u.name)+'</option>';}).join('')+'</select></div>'+
+  '<div class="grid2"><div class="field"><label for="nd-name">Device name</label><input id="nd-name" name="name" required placeholder="srv-files-03" autocomplete="off"></div><div class="field"><label for="nd-plat">Platform</label><select id="nd-plat" name="platform">'+PLATFORMS.map(function(p){return '<option>'+p+'</option>';}).join('')+'</select></div></div>'+
+  '<fieldset class="field"><legend>Groups</legend>'+groupChecks()+'</fieldset>'+
+  '<div class="field"><label for="nd-ttl">Code expires after</label>'+TTL.replace('<select','<select id="nd-ttl"')+'</div>'+
+  '<p class="err" hidden></p></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Add device</button></div></form>');}
+
+function modalNewGroup(){var mk=function(list,type){return list.map(function(o){return '<label class="check"><input type="checkbox" name="members" value="'+type+':'+o.id+'">'+ic(type==='user'?'user':devIcon(o),15)+'<span>'+esc(o.name)+'</span></label>';}).join('');};
+  openModal('<form data-form="new-group"><div class="modal-h"><h2>New group</h2><p>Mix users and devices freely. A policy that names this group covers all of them.</p></div><div class="modal-b">'+
+  '<div class="field"><label for="ng-name">Name</label><input id="ng-name" name="name" required autocomplete="off"></div>'+
+  '<div class="field"><label for="ng-desc">Description</label><input id="ng-desc" name="description" autocomplete="off"></div>'+
+  '<fieldset class="field"><legend>Members</legend><div class="picker"><h4>Users</h4>'+mk(db.users,'user')+'<h4>Devices</h4>'+mk(db.devices.filter(function(d){return d.status!=='revoked';}),'device')+'</div></fieldset>'+
+  '<p class="err" hidden></p></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Create group</button></div></form>');}
+
+function modalNewApp(){openModal('<form data-form="new-app"><div class="modal-h"><h2>Register application</h2><p>The gateway reaches the backend on your private network. Clients only ever see the service name.</p></div><div class="modal-b">'+
+  '<div class="grid2"><div class="field"><label for="na-name">Name</label><input id="na-name" name="name" required autocomplete="off" data-change="app-name"></div><div class="field"><label for="na-sub">Service name</label><div class="suffix-input"><input id="na-sub" name="sub" required pattern="[a-z0-9-]+" title="Lowercase letters, digits and hyphens" autocomplete="off"><span>.'+esc(db.zone.name)+'</span></div></div></div>'+
+  '<div class="grid2"><div class="field"><label for="na-host">Backend host</label><input id="na-host" name="host" required placeholder="10.20.0.80" autocomplete="off"></div><div class="grid2"><div class="field"><label for="na-port">Port</label><input id="na-port" name="port" type="number" min="1" max="65535" required value="443"></div><div class="field"><label for="na-proto">Protocol</label><select id="na-proto" name="protocol"><option>HTTPS</option><option>TCP</option><option>UDP</option><option>SSH</option><option>RDP</option><option>SMB</option></select></div></div></div>'+
+  '<div class="grid2"><div class="field"><label for="na-gw">Gateway</label><select id="na-gw" name="gateway">'+db.zone.gateways.map(function(g){return '<option value="'+g.id+'">'+esc(g.id)+', '+esc(g.site)+'</option>';}).join('')+'</select></div><div class="field"><label for="na-owner">Owner group</label><select id="na-owner" name="owner"><option value="">None</option>'+db.groups.map(function(g){return '<option value="'+g.id+'">'+esc(g.name)+'</option>';}).join('')+'</select></div></div>'+
+  '<div class="field"><label for="na-desc">Description</label><input id="na-desc" name="description" autocomplete="off"></div>'+
+  '<div class="field"><label for="na-grant">Grant access now</label><select id="na-grant" name="grant"><option value="">Do not create a policy yet</option>'+db.groups.map(function(g){return '<option value="'+g.id+'">Allow '+esc(g.name)+'</option>';}).join('')+'</select><p class="hint">Without a policy, every session to this application is refused.</p></div>'+
+  '<p class="err" hidden></p></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Register application</button></div></form>','wide');}
+
+function modalPolicy(id){
+  var p=id?P(id):{name:'',effect:'allow',subjects:[],apps:[],cond:{healthy:true,mfa:false,hours:null},enabled:true,description:''};
+  function has(t,i){return p.subjects.some(function(s){return s.type===t&&s.id===i;});}
+  var all=p.apps==='*';
+  function pick(t,list,label){return list.length?'<h4>'+label+'</h4>'+list.map(function(x){return '<label class="check"><input type="checkbox" name="subj" value="'+t+':'+x.id+'" '+(has(t,x.id)?'checked':'')+'>'+ic(t==='group'?'layers':t==='user'?'user':devIcon(x),15)+'<span>'+esc(x.name)+'</span>'+(t==='device'?'<span class="sub">'+esc(x.owner?ownerName(x):'Standalone')+'</span>':'')+'</label>';}).join(''):'';}
+  openModal('<form data-form="policy" data-id="'+(id||'')+'"><div class="modal-h"><h2>'+(id?'Edit policy':'New policy')+'</h2><p>'+(id?'Policy '+(db.policies.indexOf(p)+1)+' of '+db.policies.length+'. ':'New policies go to the bottom of the list. ')+'The first policy that fully matches a session decides it.</p></div><div class="modal-b">'+
+  '<div class="field"><label for="p-name">Name</label><input id="p-name" name="name" required value="'+esc(p.name)+'" placeholder="Engineering: code and ERP" autocomplete="off"></div>'+
+  '<fieldset class="field"><legend>Effect</legend><div class="radio-cards"><label class="radio-card"><input type="radio" name="effect" value="allow" '+(p.effect==='allow'?'checked':'')+'><span><strong>Allow</strong><span class="sub">Open the session when this matches</span></span></label><label class="radio-card"><input type="radio" name="effect" value="deny" '+(p.effect==='deny'?'checked':'')+'><span><strong>Deny</strong><span class="sub">Refuse it, even if a later policy would allow it</span></span></label></div></fieldset>'+
+  '<div class="grid2"><fieldset class="field"><legend>Who</legend><div class="picker">'+pick('group',db.groups,'Groups')+pick('user',db.users,'Users')+pick('device',db.devices.filter(function(d){return d.status!=='revoked';}),'Devices')+'</div></fieldset>'+
+  '<fieldset class="field"><legend>Applications</legend><div class="picker"><label class="check"><input type="checkbox" name="allapps" '+(all?'checked':'')+'><strong>All applications</strong></label>'+db.apps.map(function(a){return '<label class="check"><input type="checkbox" name="app" value="'+a.id+'" '+(!all&&p.apps.indexOf(a.id)>=0?'checked':'')+'><span>'+esc(a.name)+'</span></label>';}).join('')+'</div></fieldset></div>'+
+  '<fieldset class="field"><legend>Conditions</legend><label class="check"><input type="checkbox" name="healthy" '+(p.cond.healthy?'checked':'')+'>Device posture must be healthy</label><label class="check"><input type="checkbox" name="mfa" '+(p.cond.mfa?'checked':'')+'>User must have MFA turned on</label><label class="check"><input type="checkbox" name="hoursOn" '+(p.cond.hours?'checked':'')+'>Only during set hours</label><div class="hours"><input type="time" name="from" aria-label="From" value="'+(p.cond.hours?p.cond.hours.from:'07:00')+'"> to <input type="time" name="to" aria-label="To" value="'+(p.cond.hours?p.cond.hours.to:'19:00')+'"></div></fieldset>'+
+  '<div class="field"><label for="p-desc">Notes</label><textarea id="p-desc" name="description" rows="2">'+esc(p.description||'')+'</textarea></div>'+
+  '<p class="err" hidden></p></div><div class="modal-f">'+(id?'<button type="button" class="btn danger-ghost" data-act="delete-policy" data-id="'+id+'" style="margin-right:auto">Delete policy</button>':'')+'<button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">'+(id?'Save policy':'Create policy')+'</button></div></form>','wide');}
+
+function modalPickUser(){var us=db.users.filter(function(u){return u.status==='active';});
+  openModal('<form data-form="pick-enroll-user"><div class="modal-h"><h2>Enroll a device for a user</h2><p>The code works on any one new device. Whatever enrolls with it belongs to this user.</p></div><div class="modal-b"><div class="field"><label for="pe-user">User</label><select id="pe-user" name="user">'+us.map(function(u){return '<option value="'+u.id+'">'+esc(u.name)+'</option>';}).join('')+'</select></div><div class="field"><label for="pe-ttl">Code expires after</label>'+TTL.replace('<select','<select id="pe-ttl"')+'</div></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Issue code</button></div></form>','narrow');}
+
+function issueEnrollment(target,ttlH){var t=makeToken();var e={id:uid('enr'),token:t.token,code:t.code,target:target,created:Date.now(),expires:Date.now()+ttlH*H,status:'active',createdBy:ME};db.enrollments.push(e);return e;}
+function showEnrollment(eid){var e=E(eid);if(!e)return;var s=enrStatus(e);
+  var isUser=e.target.type==='user',o=isUser?U(e.target.id):Dv(e.target.id);
+  var forHtml='<div class="cred-for">'+(isUser?'<span class="avatar">'+initials(o?o.name:'?')+'</span>':'<span class="dev-ic">'+ic(o?devIcon(o):'laptop',16)+'</span>')+'<div><div class="strong">'+esc(enrTargetName(e))+'</div><div class="sub">'+(isUser?esc(o?o.email:'')+', any one new device':'This device only'+(o&&o.owner?', for '+esc(ownerName(o)):''))+'</div></div></div>';
+  if(s!=='active'){openModal('<div class="modal-h"><h2>Enrollment code <span class="mono">'+e.code+'</span></h2></div><div class="modal-b">'+forHtml+'<div class="notice">'+(s==='used'?'Redeemed'+(e.redeemedBy&&Dv(e.redeemedBy)?' by '+esc(Dv(e.redeemedBy).name):'')+(e.redeemed?' on '+fmtTime(e.redeemed):'')+'.':s==='expired'?'Expired on '+fmtTime(e.expires)+' without being used.':'Revoked. It can no longer be redeemed.')+' Issue a new code if the device still needs to enroll.</div></div><div class="modal-f"><button class="btn primary" data-act="close-modal">Done</button></div>','narrow');return;}
+  var str=enrollString(e);
+  openModal('<div class="cred"><div class="cred-qr"><div class="qr-tile"><div id="qr" role="img" aria-label="QR code for enrollment code '+e.code+'"></div></div><span class="qr-cap">Scan with the ZTLP agent on the device</span></div>'+
+  '<div class="cred-data"><div><h2 style="margin:0 0 12px;font-size:19px">Enrollment code</h2>'+forHtml+'</div>'+
+  '<div><div class="cred-label"><span>Short code</span><button class="btn sm" data-act="copy" data-text="'+e.code+'">'+ic('copy',14)+'Copy</button></div><div class="code-big">'+e.code+'</div></div>'+
+  '<div><div class="cred-label"><span>Enrollment string</span><button class="btn sm" data-act="copy" data-text="'+esc(str)+'">'+ic('copy',14)+'Copy</button></div><pre class="code-box">'+esc(str)+'</pre></div>'+
+  '<div><div class="cred-label"><span>Command line</span><button class="btn sm" data-act="copy" data-text="'+esc('ztlp enroll "'+str+'"')+'">'+ic('copy',14)+'Copy</button></div><pre class="code-box">ztlp enroll "'+esc(str)+'"</pre></div>'+
+  '<div class="expiry">'+ic('clock',16)+'<span>Single use. <span data-countdown="'+e.expires+'">'+left(e.expires)+'</span>, until '+fmtTime(e.expires)+'.</span></div>'+
+  '</div></div><div class="modal-f"><button class="btn danger-ghost" data-act="revoke-enroll" data-id="'+e.id+'" style="margin-right:auto">Revoke code</button><button class="btn primary" data-act="close-modal" autofocus>Done</button></div>','wide');
+  var el=document.getElementById('qr');
+  try{if(window.QRCode){new window.QRCode(el,{text:str,width:196,height:196,colorDark:'#151B36',colorLight:'#ffffff',correctLevel:window.QRCode.CorrectLevel.L});}else{el.innerHTML='<div class="qr-fallback">The QR library did not load. Use the short code or the enrollment string.</div>';}}catch(err){el.innerHTML='<div class="qr-fallback">This string is too long for a QR code. Use the short code instead.</div>';}
+}
+function modalRedeem(eid){var e=E(eid);if(!e)return;
+  if(e.target.type==='device'){var d=Dv(e.target.id);if(!d)return;e.status='used';e.redeemedBy=d.id;e.redeemed=Date.now();d.status='enrolled';d.posture='healthy';d.lastSeen=Date.now();d.keyFp=keyFp();commit('enroll.redeem',tgt('device',d),d.name+' redeemed code '+e.code+' and enrolled');toast(d.name+' is enrolled');return;}
+  openModal('<form data-form="redeem" data-id="'+eid+'"><div class="modal-h"><h2>Mark code '+e.code+' redeemed</h2><p>Stands in for the agent completing enrollment, so you can try the flow without a real device.</p></div><div class="modal-b"><div class="field"><label for="rd-name">Device name</label><input id="rd-name" name="name" required autocomplete="off"></div><div class="field"><label for="rd-plat">Platform</label><select id="rd-plat" name="platform">'+PLATFORMS.map(function(p){return '<option>'+p+'</option>';}).join('')+'</select></div><p class="err" hidden></p></div><div class="modal-f"><button type="button" class="btn" data-act="close-modal">Cancel</button><button class="btn primary" type="submit">Enroll device</button></div></form>','narrow');}
+
+/* ---------- Toasts / clipboard ---------- */
+function toast(msg){var t=document.createElement('div');t.className='toast';t.innerHTML=ic('check',16)+'<span>'+esc(msg)+'</span>';$('#toasts').appendChild(t);setTimeout(function(){t.remove();},2600);}
+function copyText(text){function fallback(){var ta=document.createElement('textarea');ta.value=text;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}ta.remove();toast(ok?'Copied':'Copy is blocked here. Select the text and copy it manually.');}
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(function(){toast('Copied');},fallback);}else fallback();}
+
+/* ---------- Mutations ---------- */
+function nameTaken(list,name,except){return list.some(function(x){return x.id!==except&&x.name.toLowerCase()===name.toLowerCase();});}
+function removeEverywhere(type,id){db.groups.forEach(function(g){g.members=g.members.filter(function(m){return !(m.type===type&&m.id===id);});});db.policies.forEach(function(p){p.subjects=p.subjects.filter(function(s){return !(s.type===type&&s.id===id);});});}
+
+var ACT={
+  'nav-toggle':function(){$('#app').classList.toggle('nav-open');$('#nscrim').classList.toggle('on');},
+  'close-nav':function(){closeNav();},
+  'go':function(el){location.hash=el.dataset.route;},
+  'theme':function(){var cur=document.documentElement.dataset.theme||(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');var nx=cur==='dark'?'light':'dark';document.documentElement.dataset.theme=nx;try{localStorage.setItem('ztlp-theme',nx);}catch(e){}themeIcon();},
+  'filter':function(el){ui.f[el.dataset.view]=el.dataset.val;render();},
+  'open':function(el){openDrawer(el.dataset.type,el.dataset.id);},
+  'gopen':function(el){$('#gresults').classList.remove('open');$('#gs-input').value='';var map={user:'users',device:'devices',group:'groups',app:'apps'};if(route!==map[el.dataset.type])location.hash=map[el.dataset.type];openDrawer(el.dataset.type,el.dataset.id);},
+  'close-drawer':function(){closeDrawer();},
+  'close-modal':function(){closeModal();},
+  'confirm-yes':function(){var f=ui.confirmFn;closeModal();if(f)f();},
+  'new-user':function(){modalNewUser();},
+  'new-device':function(){modalNewDevice();},
+  'new-group':function(){modalNewGroup();},
+  'new-app':function(){modalNewApp();},
+  'new-policy':function(){modalPolicy();},
+  'edit-policy':function(el){modalPolicy(el.dataset.id);},
+  'pick-enroll-user':function(){modalPickUser();},
+  'enroll-user':function(el){var u=U(el.dataset.id);if(u.status!=='active'){toast('Enable '+u.name+' before issuing a code');return;}var e=issueEnrollment({type:'user',id:u.id},72);commit('enroll.issue',tgt('user',u),'Issued enrollment code '+e.code+' for '+u.name);showEnrollment(e.id);},
+  'show-enroll':function(el,ev){ev.preventDefault();showEnrollment(el.dataset.id);},
+  'revoke-enroll':function(el){var e=E(el.dataset.id);confirmModal('Revoke code '+e.code+'?','The code stops working immediately. Anyone holding it will need a new one.','Revoke code',function(){e.status='revoked';var d=e.target.type==='device'?Dv(e.target.id):null;commit('enroll.revoke',e.target.type==='device'?tgt('device',d):tgt('user',U(e.target.id)),'Revoked enrollment code '+e.code+' for '+enrTargetName(e));toast('Code revoked');});},
+  'redeem-enroll':function(el){modalRedeem(el.dataset.id);},
+  'toggle-user':function(el){var u=U(el.dataset.id);if(u.status==='active'){confirmModal('Disable '+esc(u.name)+'?','Their devices stay enrolled, but every new session is refused until you enable the user again.','Disable user',function(){u.status='disabled';commit('user.disable',tgt('user',u),'Disabled '+u.name);});}else{u.status='active';commit('user.enable',tgt('user',u),'Enabled '+u.name);}},
+  'delete-user':function(el){var u=U(el.dataset.id);var n=db.devices.filter(function(d){return d.owner===u.id&&d.status!=='revoked';}).length;confirmModal('Delete '+esc(u.name)+'?','This removes the user from every group and policy'+(n?' and revokes '+n+' device identit'+(n===1?'y':'ies'):'')+'. The audit history is kept.','Delete user',function(){db.devices.forEach(function(d){if(d.owner===u.id&&d.status!=='revoked'){d.status='revoked';}});db.enrollments.forEach(function(e){if(e.target.type==='user'&&e.target.id===u.id&&e.status==='active')e.status='revoked';});removeEverywhere('user',u.id);db.users=db.users.filter(function(x){return x!==u;});ui.drawer=null;commit('user.delete',tgt('user',u),'Deleted user '+u.name);toast('User deleted');});},
+  'revoke-device':function(el){var d=Dv(el.dataset.id);var pend=d.status==='pending';confirmModal(pend?'Cancel enrollment for '+esc(d.name)+'?':'Revoke '+esc(d.name)+'?',pend?'Its open enrollment code stops working.':'Its key is published as revoked and gateways drop its sessions. You can re-enroll it later with a new code.',pend?'Cancel enrollment':'Revoke identity',function(){d.status='revoked';db.enrollments.forEach(function(e){if(e.target.type==='device'&&e.target.id===d.id&&e.status==='active')e.status='revoked';});commit('device.revoke',tgt('device',d),(pend?'Cancelled enrollment for ':'Revoked ')+d.name);toast(pend?'Enrollment cancelled':'Device revoked');});},
+  'reissue-device':function(el){var d=Dv(el.dataset.id);db.enrollments.forEach(function(e){if(e.target.type==='device'&&e.target.id===d.id&&e.status==='active')e.status='revoked';});var was=d.status;d.status='pending';d.nodeId=was==='revoked'?nodeId():d.nodeId;var e=issueEnrollment({type:'device',id:d.id},72);commit('enroll.issue',tgt('device',d),'Issued enrollment code '+e.code+' for '+d.name);showEnrollment(e.id);},
+  'delete-device':function(el){var d=Dv(el.dataset.id);confirmModal('Delete '+esc(d.name)+'?','The device is removed from groups and policies and its node ID is retired. The audit history is kept.','Delete device',function(){if(d.status!=='revoked')d.status='revoked';removeEverywhere('device',d.id);db.enrollments.forEach(function(e){if(e.target.type==='device'&&e.target.id===d.id&&e.status==='active')e.status='revoked';});db.devices=db.devices.filter(function(x){return x!==d;});ui.drawer=null;commit('device.delete',tgt('device',d),'Deleted device '+d.name);toast('Device deleted');});},
+  'remove-member':function(el){var g=G(el.dataset.group),type=el.dataset.type,id=el.dataset.id;var o=type==='user'?U(id):Dv(id);g.members=g.members.filter(function(m){return !(m.type===type&&m.id===id);});commit('group.update',tgt('group',g),'Removed '+(o?o.name:id)+' from '+g.name);},
+  'add-to-group':function(el){var sel=$('#add-group-sel');if(!sel)return;var g=G(sel.value),type=el.dataset.type,id=el.dataset.id,o=type==='user'?U(id):Dv(id);g.members.push({type:type,id:id});commit('group.update',tgt('group',g),'Added '+o.name+' to '+g.name);},
+  'add-member':function(el){var sel=$('#add-member-sel');if(!sel)return;var g=G(el.dataset.id),v=sel.value.split(':'),o=v[0]==='user'?U(v[1]):Dv(v[1]);g.members.push({type:v[0],id:v[1]});commit('group.update',tgt('group',g),'Added '+o.name+' to '+g.name);},
+  'delete-group':function(el){var g=G(el.dataset.id);var n=policyUses('group',g.id).length;confirmModal('Delete '+esc(g.name)+'?',(n?'It is named in '+n+' polic'+(n===1?'y':'ies')+'; it will be removed from '+(n===1?'it':'them')+'. ':'')+'Members keep their other groups.','Delete group',function(){removeEverywhere('group',g.id);db.apps.forEach(function(a){if(a.owner===g.id)a.owner='';});db.groups=db.groups.filter(function(x){return x!==g;});ui.drawer=null;commit('group.delete',tgt('group',g),'Deleted group '+g.name);toast('Group deleted');});},
+  'toggle-app':function(el){var a=A(el.dataset.id);a.status=a.status==='active'?'disabled':'active';commit(a.status==='active'?'app.enable':'app.disable',tgt('app',a),(a.status==='active'?'Turned on ':'Turned off ')+a.name);},
+  'delete-app':function(el){var a=A(el.dataset.id);confirmModal('Delete '+esc(a.name)+'?','Its service record is withdrawn from the name server and it is removed from every policy.','Delete application',function(){db.policies.forEach(function(p){if(p.apps!=='*')p.apps=p.apps.filter(function(x){return x!==a.id;});});db.apps=db.apps.filter(function(x){return x!==a;});ui.drawer=null;commit('app.delete',tgt('app',a),'Deleted application '+a.name);toast('Application deleted');});},
+  'test-app':function(el){ui.sim.app=el.dataset.id;ui.drawer=null;if(route==='policies')render();else location.hash='policies';},
+  'test-access':function(el){if(el.dataset.device)ui.sim.device=el.dataset.device;ui.sim.app=el.dataset.app;ui.drawer=null;if(route==='policies')render();else location.hash='policies';},
+  'move-policy':function(el){var i=db.policies.indexOf(P(el.dataset.id)),j=i+(+el.dataset.dir);if(j<0||j>=db.policies.length)return;var p=db.policies[i];db.policies[i]=db.policies[j];db.policies[j]=p;commit('policy.reorder',tgt('policy',p),'Moved policy '+p.name+' from '+(i+1)+' to '+(j+1));
+    var b=document.querySelector('[data-act="move-policy"][data-id="'+p.id+'"][data-dir="'+el.dataset.dir+'"]');if(b&&!b.disabled)b.focus();},
+  'delete-policy':function(el){var p=P(el.dataset.id);closeModal();confirmModal('Delete policy '+esc(p.name)+'?','Sessions it allowed will fall through to the policies below it.','Delete policy',function(){db.policies=db.policies.filter(function(x){return x!==p;});commit('policy.delete',tgt('policy',p),'Deleted policy '+p.name);toast('Policy deleted');});},
+  'copy':function(el){copyText(el.dataset.text);},
+  'verify-chain':function(){var r=verifyChain();r.at=Date.now();ui.chain=r;render();toast(r.ok?'Chain intact: '+r.n+' events':'Chain broken at event '+(r.index+1));},
+  'export-audit':function(){var data=JSON.stringify({zone:db.zone.name,exported:new Date().toISOString(),events:db.audit.slice().reverse()},null,2);openModal('<div class="modal-h"><h2>Export audit log</h2><p>'+db.audit.length+' events, oldest first, with their chain hashes.</p></div><div class="modal-b"><textarea class="code-box" readonly rows="14" style="width:100%;resize:vertical" aria-label="Audit log JSON">'+esc(data)+'</textarea></div><div class="modal-f"><button class="btn" data-act="close-modal">Close</button><button class="btn primary" data-act="copy-export">'+ic('copy',16)+'Copy JSON</button></div>','wide');ui.exportData=data;},
+  'copy-export':function(){copyText(ui.exportData||'');},
+  'reset-demo':function(){confirmModal('Reset sample data?','Everything on this console goes back to the sample zone. Changes you made here are lost.','Reset',function(){db=seed();ui={q:{},f:{},drawer:null,sim:{},auditCat:'all',chain:null};save();location.hash='overview';render();toast('Sample data restored');});}
+};
+
+var FORM={
+  'new-user':function(f){var fd=new FormData(f),name=fd.get('name').trim(),email=fd.get('email').trim().toLowerCase();
+    if(db.users.some(function(u){return u.email.toLowerCase()===email;}))return formErr(f,'A user with this email already exists.');
+    var u={id:uid('usr'),name:name,email:email,role:fd.get('role'),mfa:!!fd.get('mfa'),status:'active',created:Date.now()};db.users.push(u);
+    fd.getAll('groups').forEach(function(gid){var g=G(gid);if(g)g.members.push({type:'user',id:u.id});});
+    addAudit(db,{ts:Date.now(),actor:ME,action:'user.create',target:tgt('user',u),summary:'Created user '+name});
+    closeModal();
+    if(fd.get('issue')){var e=issueEnrollment({type:'user',id:u.id},+fd.get('ttl'));commit('enroll.issue',tgt('user',u),'Issued enrollment code '+e.code+' for '+name);showEnrollment(e.id);}
+    else{commit();toast('User created');openDrawer('user',u.id);}},
+  'new-device':function(f){var fd=new FormData(f),name=fd.get('name').trim(),mode=fd.get('mode');
+    if(nameTaken(db.devices,name))return formErr(f,'A device with this name already exists.');
+    var owner=mode==='user'?fd.get('user'):null;if(mode==='user'&&!owner)return formErr(f,'Pick a user, or choose standalone device.');
+    var d={id:uid('dev'),name:name,platform:fd.get('platform'),owner:owner,status:'pending',posture:'unknown',nodeId:nodeId(),keyFp:'',created:Date.now(),lastSeen:null};db.devices.push(d);
+    fd.getAll('groups').forEach(function(gid){var g=G(gid);if(g)g.members.push({type:'device',id:d.id});});
+    addAudit(db,{ts:Date.now(),actor:ME,action:'device.create',target:tgt('device',d),summary:'Added device '+name+(owner?' for '+U(owner).name:' as a standalone device')});
+    var e=issueEnrollment({type:'device',id:d.id},+fd.get('ttl'));closeModal();commit('enroll.issue',tgt('device',d),'Issued enrollment code '+e.code+' for '+name);showEnrollment(e.id);},
+  'new-group':function(f){var fd=new FormData(f),name=fd.get('name').trim();if(nameTaken(db.groups,name))return formErr(f,'A group with this name already exists.');
+    var g={id:uid('grp'),name:name,description:fd.get('description').trim(),members:fd.getAll('members').map(function(v){var p=v.split(':');return {type:p[0],id:p[1]};}),created:Date.now()};db.groups.push(g);
+    closeModal();commit('group.create',tgt('group',g),'Created group '+name+' with '+g.members.length+' member'+(g.members.length===1?'':'s'));openDrawer('group',g.id);toast('Group created');},
+  'new-app':function(f){var fd=new FormData(f),name=fd.get('name').trim(),sub=slug(fd.get('sub')),full=sub+'.'+db.zone.name;
+    if(!sub)return formErr(f,'Enter a service name using letters, digits and hyphens.');
+    if(db.apps.some(function(a){return a.ztlpName===full;}))return formErr(f,full+' is already registered.');
+    var port=+fd.get('port');if(!(port>=1&&port<=65535))return formErr(f,'Port must be between 1 and 65535.');
+    var a={id:uid('app'),name:name,ztlpName:full,host:fd.get('host').trim(),port:port,protocol:fd.get('protocol'),gateway:fd.get('gateway'),owner:fd.get('owner'),description:fd.get('description').trim(),status:'active',serviceId:hex(16),created:Date.now()};db.apps.push(a);
+    addAudit(db,{ts:Date.now(),actor:ME,action:'app.register',target:tgt('app',a),summary:'Registered '+name+' as '+full});
+    var gid=fd.get('grant');if(gid){var g=G(gid);var p={id:uid('pol'),name:g.name+': '+name,effect:'allow',subjects:[{type:'group',id:gid}],apps:[a.id],cond:{healthy:true,mfa:false,hours:null},enabled:true,description:'Created when '+name+' was registered.',updated:Date.now()};db.policies.push(p);addAudit(db,{ts:Date.now(),actor:ME,action:'policy.create',target:tgt('policy',p),summary:'Created policy '+p.name});}
+    closeModal();commit();openDrawer('app',a.id);toast(name+' registered');},
+  'policy':function(f){var fd=new FormData(f),id=f.dataset.id,name=fd.get('name').trim();
+    var subjects=fd.getAll('subj').map(function(v){var p=v.split(':');return {type:p[0],id:p[1]};});
+    var apps=fd.get('allapps')?'*':fd.getAll('app');
+    if(!subjects.length)return formErr(f,'Choose at least one group, user or device under Who.');
+    if(apps!=='*'&&!apps.length)return formErr(f,'Choose at least one application, or All applications.');
+    var cond={healthy:!!fd.get('healthy'),mfa:!!fd.get('mfa'),hours:fd.get('hoursOn')?{from:fd.get('from')||'00:00',to:fd.get('to')||'23:59'}:null};
+    var p=id?P(id):{id:uid('pol'),enabled:true};
+    p.name=name;p.effect=fd.get('effect');p.subjects=subjects;p.apps=apps;p.cond=cond;p.description=fd.get('description').trim();p.updated=Date.now();
+    if(!id)db.policies.push(p);closeModal();commit(id?'policy.update':'policy.create',tgt('policy',p),(id?'Updated policy ':'Created policy ')+name);toast(id?'Policy saved':'Policy created');},
+  'pick-enroll-user':function(f){var fd=new FormData(f),u=U(fd.get('user'));if(!u)return;closeModal();var e=issueEnrollment({type:'user',id:u.id},+fd.get('ttl'));commit('enroll.issue',tgt('user',u),'Issued enrollment code '+e.code+' for '+u.name);showEnrollment(e.id);},
+  'redeem':function(f){var fd=new FormData(f),e=E(f.dataset.id),name=fd.get('name').trim();if(nameTaken(db.devices,name))return formErr(f,'A device with this name already exists.');
+    var u=U(e.target.id);var d={id:uid('dev'),name:name,platform:fd.get('platform'),owner:u?u.id:null,status:'enrolled',posture:'healthy',nodeId:nodeId(),keyFp:keyFp(),created:Date.now(),lastSeen:Date.now()};db.devices.push(d);
+    e.status='used';e.redeemedBy=d.id;e.redeemed=Date.now();closeModal();commit('enroll.redeem',tgt('device',d),name+' redeemed code '+e.code+' and enrolled for '+(u?u.name:'(removed user)'));toast(name+' is enrolled');},
+  'zone':function(f){var fd=new FormData(f),nn=fd.get('name').trim().toLowerCase(),old=db.zone.name;if(!nn||nn===old){toast('No changes to save');return;}
+    function sw(s){return s.slice(-old.length)===old?s.slice(0,-old.length)+nn:s;}
+    db.zone.name=nn;db.zone.ns.forEach(function(n){n.host=sw(n.host);});db.apps.forEach(function(a){a.ztlpName=sw(a.ztlpName);});
+    commit('zone.update',{type:'zone',id:'zone',name:nn},'Renamed zone '+old+' to '+nn);toast('Zone saved');}
+};
+
+var CHANGE={
+  'user-role':function(el){var u=U(el.dataset.id);u.role=el.value;commit('user.update',tgt('user',u),'Changed role of '+u.name+' to '+ROLE[u.role]);},
+  'user-mfa':function(el){var u=U(el.dataset.id);u.mfa=el.checked;commit('user.update',tgt('user',u),(u.mfa?'Required':'Stopped requiring')+' MFA for '+u.name);},
+  'device-owner':function(el){var d=Dv(el.dataset.id);d.owner=el.value||null;commit('device.update',tgt('device',d),d.owner?'Assigned '+d.name+' to '+U(d.owner).name:'Made '+d.name+' a standalone device');},
+  'policy-enabled':function(el){var p=P(el.dataset.id);p.enabled=el.checked;commit('policy.update',tgt('policy',p),(p.enabled?'Turned on policy ':'Turned off policy ')+p.name);},
+  'sim':function(el){ui.sim[el.dataset.k]=el.value;var r=$('#sim-result');if(r)r.innerHTML=simResult();},
+  'audit-cat':function(el){ui.auditCat=el.value;var tb=$('#list-audit');if(tb)tb.innerHTML=LIST.audit();},
+  'dev-mode':function(el){var f=$('#dev-user-field');if(f)f.hidden=el.value!=='user';}
+};
+
+/* ---------- Global search ---------- */
+function gsearch(q){q=q.trim().toLowerCase();if(!q)return null;var out=[];
+  db.users.forEach(function(u){if((u.name+' '+u.email).toLowerCase().indexOf(q)>=0)out.push(['user',u.id,'<span class="avatar">'+initials(u.name)+'</span>',u.name,u.email]);});
+  db.devices.forEach(function(d){if((d.name+' '+d.nodeId).toLowerCase().indexOf(q)>=0)out.push(['device',d.id,'<span class="dev-ic">'+ic(devIcon(d),16)+'</span>',d.name,d.platform+', '+ownerName(d)]);});
+  db.groups.forEach(function(g){if(g.name.toLowerCase().indexOf(q)>=0)out.push(['group',g.id,'<span class="dev-ic">'+ic('layers',16)+'</span>',g.name,g.members.length+' members']);});
+  db.apps.forEach(function(a){if((a.name+' '+a.ztlpName).toLowerCase().indexOf(q)>=0)out.push(['app',a.id,'<span class="dev-ic">'+ic('app',16)+'</span>',a.name,a.ztlpName]);});
+  return out.slice(0,8);}
+
+/* ---------- Events ---------- */
+function closeNav(){$('#app').classList.remove('nav-open');$('#nscrim').classList.remove('on');}
+document.addEventListener('click',function(e){
+  var mr=$('#modal-root');if(e.target===mr){closeModal();return;}
+  var el=e.target.closest('[data-act]');
+  if(!e.target.closest('#gsearch'))$('#gresults').classList.remove('open');
+  if(!el)return;
+  if(el.tagName==='A'&&el.getAttribute('href')&&el.dataset.act!=='show-enroll')return;
+  var fn=ACT[el.dataset.act];if(fn){fn(el,e);}
+});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){if($('#modal-root').classList.contains('on'))closeModal();else if(ui.drawer)closeDrawer();else if($('#gresults').classList.contains('open'))$('#gresults').classList.remove('open');else closeNav();return;}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-act],li[data-act]')){e.preventDefault();e.target.click();}
+  if(e.key==='/'&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)&&!$('#modal-root').classList.contains('on')){e.preventDefault();$('#gs-input').focus();}
+});
+document.addEventListener('submit',function(e){e.preventDefault();var f=e.target,fn=FORM[f.dataset.form];if(fn)fn(f);});
+document.addEventListener('change',function(e){var k=e.target.dataset&&e.target.dataset.change;if(k&&CHANGE[k]&&k!=='app-name')CHANGE[k](e.target);});
+document.addEventListener('input',function(e){var t=e.target;
+  if(t.dataset.search){ui.q[t.dataset.search]=t.value;var tb=document.getElementById('list-'+t.dataset.search);if(tb)tb.innerHTML=LIST[t.dataset.search]();return;}
+  if(t.dataset.change==='app-name'){var sub=document.getElementById('na-sub');if(sub&&!sub.dataset.touched)sub.value=slug(t.value);return;}
+  if(t.id==='na-sub'){t.dataset.touched='1';return;}
+  if(t.id==='gs-input'){var res=gsearch(t.value),box=$('#gresults');if(!res){box.classList.remove('open');return;}
+    box.innerHTML=res.length?res.map(function(r){return '<button type="button" data-act="gopen" data-type="'+r[0]+'" data-id="'+r[1]+'">'+r[2]+'<span><span class="strong">'+esc(r[3])+'</span><br><span class="sub">'+esc(r[4])+'</span></span></button>';}).join(''):'<div class="none">Nothing in the directory matches.</div>';box.classList.add('open');}
+});
+window.addEventListener('hashchange',function(){closeNav();ui.drawer=null;var c=$('#content');render();c.scrollTop=0;c.focus({preventScroll:true});});
+setInterval(function(){document.querySelectorAll('[data-countdown]').forEach(function(el){el.textContent=left(+el.dataset.countdown);});},30000);
+
+function themeIcon(){var cur=document.documentElement.dataset.theme||(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');$('#theme-btn').innerHTML=ic(cur==='dark'?'sun':'moon',18);}
+try{var th=localStorage.getItem('ztlp-theme');if(th)document.documentElement.dataset.theme=th;}catch(e){}
+document.querySelector('.menu-btn').innerHTML=ic('menu',20);
+$('#gs-ic').outerHTML=ic('search',16);
+themeIcon();
+render();
+})();
+</script>
+</body>
+</html>

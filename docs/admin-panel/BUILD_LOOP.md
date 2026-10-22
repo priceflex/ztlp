@@ -1,0 +1,552 @@
+# ZTLP Admin Panel — Directory UI build loop
+
+> **For Hermes:** this file is the spec a build-loop session re-reads every tick. Work ONE slice per
+> tick, TDD, commit per slice, update the STATUS section at the bottom. Use the
+> `subagent-driven-development` skill if you fan work out; otherwise do the slice yourself.
+> Load skills `ztlp-admin-panel`, `rails-development-pitfalls`, `test-driven-development`,
+> `autonomous-cron-build-loop` before the first slice.
+
+**Goal:** Replace the slice-1 Tailwind pages with the "ZTLP Directory" interface
+(`docs/admin-panel/ui-mock-2026-10-20.html`) so an administrator can, through `admin.trs.ztlp` only,
+manage users, devices, the user each device belongs to, groups, group membership, applications and
+their access rules, mint enrollment codes, and see the name server state — with every change
+published to the name server as signed records.
+
+**Architecture:** Rails 7.1 server-rendered pages + ONE hand-written JavaScript file (no framework,
+no CDN, no npm packages) + the mock's CSS design system ported verbatim. The panel database is the
+profile service (PII, authoritative). The name server (NS) is the authentication authority and
+receives only opaque identifiers, public keys, roles, group membership and device ownership — never
+names, emails or phone numbers. Access to the panel requires a verified ZTLP tunnel identity.
+
+**Tech stack:** Ruby 3.2 / Rails 7.1.6 / MariaDB 11.4 / Propshaft / minitest + mocha / Docker.
+Removed: tailwindcss-rails, importmap, turbo-rails, stimulus-rails, any external `<script>`/`<link>`.
+
+**Branch / worktree:** `plan/admin-panel` checked out at `/home/trs/ztlp-admin` (NOT /tmp — /tmp is
+pruned). Always `export HOME=/home/trs` before bundler/git in a Hermes profile shell.
+Existing spec: `docs/ADMIN-PANEL-SPEC.md` (v1.1). This file is an addendum; where they conflict,
+THIS file wins (decisions below supersede spec §4.2 browser-login, §5 users/devices/policies shape,
+§8.2 policy UI, and §10.1 Gemfile).
+
+---
+
+## 0. Ground truth verified 2026-10-21 (do not re-research; cite line if you change it)
+
+| # | Fact | Where |
+|---|------|-------|
+| G1 | Branch `plan/admin-panel` = `329674d4`, 2 commits over main: slice 1 (claim, Ed25519 login, admins, audit) + tunnel SSO. 37 tests. Image `ztlp-admin:0.1.1`. | `git log plan/admin-panel` |
+| G2 | Live prod panel on NS box `44.227.148.151` (`~/ztlp-admin-site/`): db, web(0.1.1), jobs, gateway `ztlp-cli:signed-reg` all Up 2 weeks. Prod NS env has `ZTLP_NS_REQUIRE_REGISTRATION_AUTH`, `ZTLP_ENROLLMENT_SECRET`, `ZTLP_NS_ADMIN_API_SECRET` set. The exited `ztlp-admin-*` containers on the Hermes VM are the local smoke stack, not prod. | ssh probe 2026-10-21 |
+| G3 | Gateway signs 8 header fields incl. `X-ZTLP-Assurance` and `X-ZTLP-Admin-Email` (= the label from `--admin-pubkey-email pub=label`, i.e. an opaque username, NOT an email). Panel verifier: `admin/app/services/ztlp/gateway_identity.rb` (`SIGNED = authenticated admin-email device-name zone group assurance audience timestamp`). | `proto/src/http_injector.rs:91-95` |
+| G4 | The gateway reads `assurance` from the NS **DEVICE record** (`cbor_extract_string(data,"assurance")`), present only if recorded at enrollment. So the panel controls a device's assurance by writing it into the DEVICE record. | `proto/src/bin/ztlp-cli.rs:5168-5178` |
+| G5 | Assurance levels: `hardware`(4) `device_bound`(3) `software`(2) `unknown`(1); key sources `yubikey tpm secure-enclave strongbox file unknown`. Manufacturer attestation roots are a placeholder → level 4 is unverifiable today. | `ns/lib/ztlp_ns/attestation.ex:1-45` |
+| G6 | Rust gateway policy = per-service allow-list only: exact name, `*.suffix`, `group:<ns group>`, `role:<role>`, `*`. Default deny. **No deny rules, no time windows, no per-service min_assurance in the Rust gateway.** Elixir gateway has `min_assurance` per route. | `proto/src/policy.rs:1-35`, `gateway/lib/ztlp_gateway/sni_router.ex:101-141` |
+| G7 | NS USER record: `public_key` required, `role ∈ user|tech|admin`, `email` optional (default `""`), `devices[]`. GROUP members = user ns names, written only by the zone authority. DEVICE: `node_id, public_key, owner` (+ any extra keys such as `assurance`). | `ns/lib/ztlp_ns/record.ex:396-520` |
+| G8 | NS signed-write mode is `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=true`; a local test NS can be run from image `ztlp-ns:v0.35.20` (present on the Hermes VM) with `-e ZTLP_ENROLLMENT_SECRET=<64hex> -e ZTLP_NS_ADMIN_API_SECRET=<64hex>`; UDP 23096, HTTP 9103. | `ns/Dockerfile:74-86`, `ns/lib/ztlp_ns/config.ex` |
+| G9 | `docker exec ztlp-admin-web ./bin/rails runner` fails (AR encryption keys live in `/data/keys.env`); use `/rails/bin/docker-entrypoint ./bin/rails runner`. Recreating the gateway container rotates the QUIC cert → clear client pins (skill `ztlp-admin-panel` step 5). | skill `ztlp-admin-panel` |
+| G10 | The dev test DB container is `ztlp-admin-dev-db` (mariadb:11.4, 127.0.0.1:33061, root `devroot`). `docker start ztlp-admin-dev-db`. | skill `ztlp-admin-panel` |
+
+---
+
+## 1. Decisions (locked 2026-10-21 by the operator)
+
+1. **Frontend = hand-written JavaScript.** One file `admin/app/assets/javascripts/directory.js`
+   (ES2017, no build step, served by Propshaft, loaded with `defer`). No framework, no npm, no CDN,
+   no inline scripts (CSP `script-src 'self'`). Reason given: supply-chain / prompt-injection risk in
+   third-party packages. Turbo/Stimulus/importmap are removed; forms are plain Rails forms.
+2. **Visual language = the mock, verbatim.** Port the mock's `<style>` into
+   `admin/app/assets/stylesheets/directory.css` (CSS variables, light/dark via
+   `prefers-color-scheme` + `data-theme`, rail/topbar/content shell, panel/table/badge/chip/drawer/
+   modal/toast classes). Fonts: use the mock's font stacks with `system-ui` fallback; do NOT load
+   Google Fonts. If Instrument Sans / JetBrains Mono are wanted, vendor the OFL `.woff2` files under
+   `admin/app/assets/fonts/` in a later slice. QR codes are rendered server-side with `rqrcode`
+   (SVG); the mock's `qrcodejs` CDN script is dropped.
+3. **No MFA anywhere.** No passwords exist, so there is nothing for MFA to protect. The mock's
+   `user.mfa` column and "MFA required" policy condition are removed and replaced by **assurance**.
+4. **Assurance is a device attribute** (key source + level 1-4, G5), shown on every device row,
+   stored in the DEVICE record (G4), enforceable as a minimum on the panel itself and on Elixir
+   gateways; rendered-but-not-enforced for Rust gateways (G6) with a visible "not enforced by this
+   gateway" note. Level 4 is displayed as "hardware (unverified)" until attestation lands.
+5. **User presence is documented, NOT built.** (Operator: "I like the idea, just not right now.")
+   Definition and rationale are in skill `ztlp-admin-panel` references/ui-spec-2026-10-20.md.
+   No UI, no column, no policy condition for it in this build.
+6. **Dropped from the mock (no backing in ZTLP today):** device `posture`; policy `effect: deny`;
+   time-window conditions; groups containing devices. A headless device that must belong to a group
+   gets an owner **service user** (`role: user`, `kind: service`), exactly as the mock's "Backup
+   service" user. Groups contain users only (G7).
+7. **Policy model = the gateway's real model.** An *Application* is a service on a gateway
+   (`name`, `backend host:port`, `protocol`, `min_assurance`, `enabled`). A *Rule* is one allow-list
+   entry on an application: subject type `group | role | user | device | any` → rendered to
+   `group:<g>.groups.<zone>`, `role:<r>`, `<u>.users.<zone>`, `<d>.<zone>`, `*`. Rules are ordered
+   (position) only for display; the gateway treats them as a set. Default deny is implicit and shown.
+8. **Access to the panel requires a verified ZTLP tunnel identity (mandatory SSO).** With
+   `ZTLP_REQUIRE_GATEWAY=1` (default `1` in production), any request lacking a verified
+   `X-ZTLP-*` bundle gets a 403 page "Connect through ZTLP" — except `/up` and `/api/v1/*`. The
+   Ed25519 challenge login stays, but only as the step *after* the tunnel identity is verified and
+   the subject is not yet an administrator (e.g. a second admin's first sign-in). Minimum panel
+   assurance is `ZTLP_MIN_ASSURANCE` (default `unknown` = no floor) — raise it only after Slice 2
+   records what the live gateway actually sends.
+9. **Bootstrap flow (first run):**
+   1. Container prints the claim code (exists). Operator opens `/claim` through the tunnel, pastes
+      their Ed25519 public key (from `identity.json` → `python ztlp-admin-sign.py pubkey`) and the
+      code → becomes `super_admin` and a directory user is created for them (new: today only the
+      admin row is made).
+   2. The Overview then shows a **Setup checklist** with warnings until done: (a) add a second
+      administrator, (b) acknowledge the break-glass procedure, (c) import the zone authority seed,
+      (d) NS admin API secret configured. Each item links to the page that completes it; (b) is
+      a super_admin "I have verified SSH certificate access to the host" acknowledgement, audited.
+   3. **Break-glass = `bin/rails admin:reset_claim` run on the host over SSH** (spec §4.1 step 6,
+      not yet written → written in Slice 11). It is never a web route. The checklist text says so.
+10. **Two services (operator's SAML analogy).** See §3. Built now: the data separation (PII only in
+    the panel DB, encrypted; NS gets opaque names/keys/roles). Spec'd, not built now: the consent-
+    gated Profile Claims API.
+11. **Secrets never leave the box.** The zone-authority `identity.json` is copied to the NS host by
+    the operator; the panel imports it with a rake task. Never print seeds, tokens or relay secrets
+    in logs, audit details, test output or this file.
+
+---
+
+## 2. Target product (what "done" looks like)
+
+Rail navigation (mock `NAV`): **Directory**: Overview, Users, Devices, Groups · **Access**:
+Applications, Policies, Enrollments · **Operations**: Audit log, Name server, Administrators.
+Top bar: global search (`/search.json?q=` → users/devices/groups/applications, jump to entity),
+theme toggle, current admin. Row click opens a right-side drawer with details and actions; create/
+edit use modals or plain pages; toasts for results. Every mutation writes an audit row and, when
+it changes an NS-published fact, publishes the record immediately (and the 6-hourly republish job
+keeps it alive).
+
+### 2.1 Routes (final)
+
+```
+GET  /                                   overview#show        tally, setup checklist, activity, NS/relay/gateway status
+GET  /search.json?q=                     search#index         JSON [{type,id,name,sub,url}]
+resources :users          index show new create edit update + member: disable enable
+resources :devices        index show edit update            + member: revoke, assign_owner
+resources :groups         index show new create edit update destroy + member: add_member remove_member
+resources :applications   index show new create edit update destroy   (nested) resources :rules only: create destroy
+GET  /policies                           policies#index      all rules grouped by application + test-access widget
+POST /policies/test                      policies#test       {device_id, application_id} → decision + trace (JSON)
+resources :enrollments    index show new create             + member: revoke
+GET  /zone                               zone#show           zone, authority status, last publish/reconcile, drift
+POST /zone/publish                       zone#publish        enqueue RepublishNsJob now
+POST /zone/reconcile                     zone#reconcile      enqueue ReconcileNsJob now
+POST /setup/acknowledge_breakglass       setup#acknowledge_breakglass   (super_admin)
+resources :admins         (exists)       audit_logs (exists)  claim/login/logout/auth/* (exist)  /up (exists)
+POST /api/v1/enrollments/:token_id/redeem  (spec §7.4; Slice 10, signed)
+```
+
+### 2.2 Data model delta (one migration `20261021000001_create_directory_tables.rb`)
+
+All tables `charset: utf8mb4, collation: utf8mb4_unicode_ci`, bigint ids, timestamps, short index
+names. `encrypts` = Active Record Encryption (keys already bootstrapped by the entrypoint).
+
+```
+users             zone_id, username (label, unique/zone), ns_name (unique "<u>.users.<zone>"),
+                  kind (person|service), display_name, first_name, last_name,
+                  email (encrypts, deterministic — lookup), phone (encrypts), sms_opt_in (bool),
+                  role (user|tech|admin), status (invited|active|disabled|revoked),
+                  signing_pubkey_hex (nullable; set on first redeem), attributes (json), notes,
+                  ns_published_at, created_by_admin_id
+groups            zone_id, name (unique/zone), ns_name ("<g>.groups.<zone>"), description, ns_published_at
+group_memberships group_id, user_id (unique pair), added_by_admin_id
+devices           zone_id, name (unique/zone), ns_name ("<d>.<zone>"), user_id (owner, nullable),
+                  node_id_hex (unique), noise_pubkey_hex, signing_pubkey_hex, platform,
+                  key_source (yubikey|tpm|secure-enclave|strongbox|file|unknown), assurance (1..4),
+                  agent_version, status (pending|enrolled|revoked), enrolled_at, last_seen_at,
+                  enrollment_id, ns_published_at, revoked_at, revocation_reason
+enrollments       zone_id, token_id (16B hex, unique), kind (user_device|device_only), user_id,
+                  device_name, embed_relay_secret, max_uses, uses, expires_at,
+                  status (pending|redeemed|expired|revoked), code (8-char human code, unique),
+                  token_uri_ct (encrypts), redeemed_at, redeemed_device_id, created_by_admin_id, revoked_at
+gateways          zone_id, name, ns_name, kind (rust_listen|elixir), host_note, node_id_hex,
+                  signing_pubkey_hex, status (planned|registered|online|stale), last_svc_seen_at,
+                  addresses (json), policy_rendered_at
+applications      gateway_id, name (service label, unique/gateway), backend, protocol,
+                  min_assurance (1..4, default 1), enabled (bool, default true), description
+policy_rules      application_id, subject_type (group|role|user|device|any), subject_id (nullable),
+                  subject_value (role name / literal), position
+system_settings   (exists) keys added: breakglass_acknowledged_at, breakglass_acknowledged_by
+admins            add: user_id already exists (fk users)
+```
+
+### 2.3 JavaScript contract (`directory.js`, the ONLY script)
+
+Progressive enhancement over server-rendered HTML. Everything works without it except search-as-
+you-type and drawer animation (the drawer target also exists as a normal page).
+
+```
+data-act="theme"            toggle html[data-theme] light/dark, persist in localStorage "ztlp-theme"
+data-act="nav-toggle"       mobile rail open/close (+ #nscrim)
+data-drawer="<url>"         on click: fetch(url, {headers:{Accept:"text/html", "X-Drawer":"1"}}) →
+                            inject into #drawer, aria-hidden=false, trap focus, Esc/scrim closes;
+                            server renders the same show.html.erb without layout when X-Drawer=1
+data-act="copy" data-copy=  navigator.clipboard.writeText + toast "Copied"
+data-confirm="<text>"       on submit of a form: window.confirm (no custom modal in v1)
+#gs-input                   debounce 150ms → fetch /search.json?q= → render #gresults (role=listbox,
+                            arrow keys + Enter), click = location.assign(url)
+[data-toast]                server flashes rendered as <div data-toast> are shown then auto-hide 4s
+data-act="test-access"      POST /policies/test (JSON, X-CSRF-Token from meta) → render trace list
+```
+Rules: no `innerHTML` with server data except the drawer fragment (server-rendered, escaped by
+ERB); search results built with `textContent`. CSRF token read from `<meta name="csrf-token">`.
+Lint: `node --check directory.js` in CI (node is at `/home/trs/.local/bin/node`).
+
+---
+
+## 3. Two-service design (build the separation now, the API later)
+
+| | Service A — Authentication authority | Service B — Profile service |
+|---|---|---|
+| **What** | The ZTLP name server. Public by nature: anything that authenticates to a zone queries it. | The admin panel database behind `admin.trs.ztlp`. |
+| **Holds** | KEY, USER{public_key, role, devices[]}, DEVICE{node_id, public_key, owner, assurance}, GROUP{members[]}, SVC, REVOKE. Names are opaque labels (`steve.users.trs.ztlp`). | display name, first/last, email, phone, SMS opt-in, free attributes, notes, enrollment history, audit. Encrypted at rest. |
+| **Never holds** | names, emails, phone numbers (USER `email` is written as `""`, G7). | private keys of users/devices. |
+| **Consumer today** | gateways (policy), agents, the panel's reconcile job. | the panel UI only. |
+| **Consumer later** | unchanged. | **Profile Claims API** (`GET /api/v1/profile/<user ns name>?scopes=name,email,phone`) for applications behind ZTLP gateways, modelled on OIDC/SAML attribute release: an *application* registers a signing key; a *consent* row (user × application × scopes) is required before claims are released; the user is asked once ("Allow <app> to see your name and email?") through a consent page on the panel; every release is audited. Tables reserved for that slice: `application_keys`, `consents`. **Not built in this loop.** |
+
+Consequence for this build: `Ztlp::Records` (Slice 4) is the single place that maps a panel
+row → NS record data, and it MUST NOT include `display_name`, `email`, `phone` or `attributes`.
+A test pins that (`records_test.rb: "user record carries no PII"`).
+
+---
+
+## 4. Slice queue (one per tick, in order; each ends with green tests + a commit)
+
+Every slice: `cd /home/trs/ztlp-admin/admin && export HOME=/home/trs`, start
+`ztlp-admin-dev-db`, `SKIP_CLAIM_BOOT=1 bin/rails test`, `bundle exec rubocop -A`,
+`bundle exec brakeman -q --no-pager`, `node --check app/assets/javascripts/directory.js`
+(from Slice 2 on), then `git add <explicit paths>` and `git commit`. Never `git add -A`.
+
+### Slice 0 — Commit the brief, re-establish the dev loop
+- Files: `docs/admin-panel/BUILD_LOOP.md` (this), `docs/admin-panel/ui-mock-2026-10-20.html`.
+- Steps: `docker start ztlp-admin-dev-db`; `bundle install`; `bin/rails db:prepare`;
+  `RAILS_ENV=test bin/rails db:prepare`; `SKIP_CLAIM_BOOT=1 bin/rails test` → expect 37 runs,
+  0 failures. If the DB container is gone, recreate per G10.
+- Add `admin/.build_state` + `admin/scripts/build_lock.sh` (flock, exit 0 on LOCKED) copied from
+  the `autonomous-cron-build-loop` skill scripts. Add `.build_state` to `admin/.gitignore`.
+- Commit: `docs(admin): directory UI build loop spec + mock`.
+
+### Slice 1 — Strip the frontend stack
+- Remove gems `tailwindcss-rails`, `importmap-rails`, `turbo-rails`, `stimulus-rails`; delete
+  `app/assets/tailwind/`, `app/javascript/`, `config/importmap.rb`, `bin/importmap`,
+  `Procfile.dev` tailwind line, `app/assets/builds/`. Keep Propshaft.
+- `config/initializers/content_security_policy.rb`: `default_src :self; script_src :self;
+  style_src :self; img_src :self, :data; font_src :self; connect_src :self; form_action :self;
+  frame_ancestors :none` and `config.content_security_policy_nonce_generator = nil` (no inline).
+- Layout: new `app/views/layouts/application.html.erb` with the mock shell: `<div class="app">`
+  rail (`brand`, `nav` from a `NAV` constant in `ApplicationHelper`, `rail-foot` with zone + NS
+  dot), `main` → `topbar` (search, theme, me) + `content`. Stylesheets `directory.css` (Slice 1 =
+  the mock `<style>` block copied verbatim, minus the Google Fonts `@import`), script
+  `<%= javascript_include_tag "directory", defer: true %>` (file created empty here, filled in
+  Slice 2).
+- Re-skin existing pages (dashboard, admins, audit_logs, claims/show, sessions/new) with mock
+  classes (`page-head`, `panel`, `table-wrap`, `btn`, `badge`). No behaviour change.
+- Tests: existing 37 stay green; add `test/controllers/layout_test.rb`: signed-in GET `/` has
+  `.rail .nav a[aria-current="page"]`, no `<script src` other than `/assets/directory-*.js`,
+  no `http://` or `https://` in `<link>`/`<script>` tags. Add `test/csp_test.rb`: response
+  header `Content-Security-Policy` includes `script-src 'self'`.
+- Commit: `feat(admin): directory shell, CSS port, drop tailwind/importmap/turbo/stimulus`.
+
+### Slice 2 — directory.js + mandatory gateway gating + assurance capture
+- `app/assets/javascripts/directory.js` implementing §2.3 (theme, nav-toggle, copy, confirm,
+  toast, drawer fetch, search). Pure functions in a `window.ZtlpDirectory` object so they can be
+  unit-tested with `node test/javascript/directory_test.mjs` (plain `node:test` + a 30-line fake
+  `document`; no jsdom). Add `test/javascript/` to the test command in `scripts/ci-admin.sh`.
+- `ApplicationController`: new `before_action :require_gateway_identity`, ahead of
+  `require_sign_in`, skipped for `health#up`, `api/*`. Behaviour:
+  ```ruby
+  def require_gateway_identity
+    return unless gateway_required?
+    r = Ztlp::GatewayIdentity.verify(request.headers)
+    unless r.ok
+      AuditLog.record!("auth.gateway_rejected", ip: request.remote_ip, status: "denied",
+                       details: { error: r.error })
+      return render "errors/connect_through_ztlp", status: :forbidden, layout: "bare"
+    end
+    @gateway_identity = r
+    if Ztlp::Assurance.level(r.assurance) < Ztlp::Assurance.level(ENV.fetch("ZTLP_MIN_ASSURANCE", "unknown"))
+      AuditLog.record!("auth.assurance_insufficient", ip: request.remote_ip, status: "denied",
+                       details: { actual: r.assurance, required: ENV["ZTLP_MIN_ASSURANCE"] })
+      return render "errors/assurance_insufficient", status: :forbidden, layout: "bare"
+    end
+  end
+  def gateway_required? = ENV.fetch("ZTLP_REQUIRE_GATEWAY", Rails.env.production? ? "1" : "0") == "1"
+  ```
+  `GatewayIdentity::Result` gains `assurance:`; `verify` returns `fields["assurance"]`.
+- `app/services/ztlp/assurance.rb`: `LEVELS = {"unknown"=>1,"software"=>2,"device-bound"=>3,
+  "device_bound"=>3,"hardware"=>4}`, `level(str)`, `label(int)` ("hardware (unverified)" for 4
+  until `ATTESTATION_VERIFIED=1`), `KEY_SOURCES`.
+- Session: store `session[:assurance] = r.assurance` at `gateway_sign_in!`; show it in the rail foot.
+- Tests (`test/controllers/gateway_gate_test.rb`): with `ZTLP_REQUIRE_GATEWAY=1` and no headers →
+  403 + audit row; with a valid signed bundle (reuse helper from `gateway_sso_test.rb`) → 200;
+  with `ZTLP_MIN_ASSURANCE=device-bound` and bundle assurance `software` → 403 + audit
+  `auth.assurance_insufficient`; `/up` always 200. `test/services/ztlp/assurance_test.rb`.
+- **Operator-facing note for deploy:** before setting `ZTLP_MIN_ASSURANCE` in prod, read the last
+  `auth.login_ztlp` audit rows after this slice ships — they now include `assurance`. Do not set a
+  floor above what the AI computer actually reports.
+- Commit: `feat(admin): directory.js, mandatory ZTLP gateway gate, assurance capture`.
+
+### Slice 3 — Migration + models (directory core)
+- Migration per §2.2 (users, groups, group_memberships, devices, enrollments, gateways,
+  applications, policy_rules). `encrypts :email, deterministic: true`, `encrypts :phone`.
+- Models with validations: `User` (label regex from `Admin::USERNAME`, `ns_name` computed
+  before_validation from zone, `kind`, `role`, `status` enums-as-strings), `Group`,
+  `GroupMembership`, `Device` (`key_source` inclusion, `assurance` 1..4, `ns_name`), `Enrollment`
+  (`code` = 8 chars from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, `token_id` 16B hex), `Gateway`,
+  `Application` (`min_assurance` 1..4), `PolicyRule` (`subject_type` inclusion; `render` →
+  `"group:<ns>"|"role:<v>"|"<ns>"|"*"`). `Zone` gains `has_many` for all.
+- `Claim.perform!` now also creates the directory `User` for the first admin (`kind: person,
+  role: admin, status: active, username = admin.username`) inside the same transaction and links
+  `admins.user_id`; creates default groups `admins` (member: that user) and `staff`.
+- Tests: model tests for every validation above; `claim_test.rb` extended: after claim, one
+  `User`, two `Group`s, membership exists, `admin.user_id` set.
+- Commit: `feat(admin): directory schema and models`.
+
+### Slice 4 — NsClient + Records mapping (signed writes, reads, list) with a real NS in tests
+- `app/services/ztlp/cbor.rb` (deterministic encoder per spec §6.1). **Sort map keys by the
+  ENCODED key bytes, `(byte_size, bytes)` — header byte included — exactly as
+  `ns/lib/ztlp_ns/cbor.ex:43-56` does.** Golden vectors (verified 2026-10-21 against an
+  independent Python encoder):
+  `{"a"=>1}` → `a1 61 61 01`; `{"role"=>"user","public_key"=>"ab"}` → `a2 64 72 6f 6c 65 64 75
+  73 65 72 6a 70 75 62 6c 69 63 5f 6b 65 79 62 61 62` (keys sorted by (length, bytes): "role"
+  before "public_key"); `{"devices"=>[]}` → `a1 67 64 65 76 69 63 65 73 80`; `true` → `f5`;
+  `1000` → `19 03 e8`.
+- `app/services/ztlp/ns_client.rb`: `register(name:, type_byte:, data:, seed:)` exactly as spec
+  §6.2; `query(name:, type_byte:)` (0x01, padded to 600 bytes, parse 0x02 reply); `list(type:,
+  zone:)` via HTTP `/admin/records` with HMAC headers (spec F6); `NsError` with the 12 codes.
+  UDP via `UDPSocket`, 5 s timeout, 1 retry.
+- `app/services/ztlp/records.rb`: `user_data(user)` → `{public_key, role, devices:[ns names],
+  email: ""}` (**no PII**); `device_data(device)` → `{node_id, public_key, owner, assurance:
+  "hardware|device-bound|software|unknown", key_source}`; `group_data(group)` → `{members:[...],
+  description: ""}` (description is panel-only too); `authority_data(zone)`; `revoke_data(name)`.
+- `app/services/ztlp/publisher.rb`: `publish_user!/publish_group!/publish_device!/revoke!` —
+  calls NsClient with the zone's authority seed, sets `ns_published_at`, audits `ns.publish`
+  with `{name, type, result}` (never the data).
+- Tests: unit golden vectors; `records_test.rb` "user record carries no PII" asserts none of
+  `display_name/email(non-empty)/phone/first_name/last_name` appear in the CBOR bytes;
+  **integration** `test/integration/ns_roundtrip_test.rb` runs only when `ZTLP_TEST_NS` is set:
+  starts nothing itself; `scripts/test-ns.sh up|down` runs `ztlp-ns:v0.35.20` on
+  `127.0.0.1:23196/udp` + `9203` with throwaway secrets, `ZTLP_NS_REQUIRE_REGISTRATION_AUTH=true`.
+  Test: register authority KEY at `test.ztlp` → `0x06`; register user, group, device → `0x06`;
+  `query` returns the device with `assurance`; `list(type: "group")` includes it; a write signed
+  with a non-authority seed for a GROUP → `NsError` 0x05 unauthorized.
+- Commit: `feat(admin): NsClient (CBOR, signed 0x09, 0x01 query, /admin/records) + Records`.
+
+### Slice 5 — Zone page + authority import + jobs
+- `lib/tasks/zone.rake`: `zone:import_authority[path]` reads `identity.json`
+  (`signing_key_seed` hex), stores `authority_seed_ct` + `authority_pubkey_hex`, audits
+  `zone.authority_imported` (pubkey only). `zone:set_secret[enrollment|relay|ns_admin_api]` reads
+  the value from **stdin** (never argv). `zone:export_authority` prints seed (super-admin runbook,
+  audited).
+- Jobs (solid_queue, recurring config in `config/recurring.yml`): `RepublishNsJob` (every 6h:
+  authority KEY, active users, groups, enrolled devices, spaced 1.1 s), `ReconcileNsJob` (every
+  30 min: `list` user/device/group/svc → drift counts stored in `system_settings`
+  `ns_drift_json`), `ExpireEnrollmentsJob` (every 5 min).
+- `/zone` page: zone name, NS addr, authority pubkey (or "not imported" warning), enrollment/
+  relay/API secret "set/not set", last publish + reconcile, drift table, buttons Publish now /
+  Reconcile now (write-access), copyable `ztlp-admin` commands for the import.
+- Tests: rake task test with a temp identity.json; job tests with `NsClient` mocked (mocha)
+  asserting call order and spacing (stub `sleep`); zone controller tests.
+- Commit: `feat(admin): zone page, authority import, republish/reconcile/expire jobs`.
+
+### Slice 6 — Users
+- Index (toolbar segmented filter: all/active/invited/disabled/revoked; search box filters
+  server-side via `?q=`), table columns: name (display + mono `username`), kind, role, groups
+  (chips), devices (count), status badge, last activity. Row → drawer (show): profile fields,
+  groups with remove, devices owned (with assurance badge), enrollment codes, actions Edit /
+  Disable / Enable / New enrollment.
+- New/edit form: username (label, immutable after create), display name, first/last, email,
+  phone, SMS opt-in, role (`user|tech|admin`), kind (`person|service`), notes. On create:
+  `status: invited`, `publish_user!` only when `active` (spec decision 2). Disable → `publish`
+  with devices list unchanged? **No:** disable = REVOKE record for the user ns name + mark
+  devices `revoked` in NS (spec §6.3 revoke). Enable re-publishes.
+- Tests: controller tests for each action incl. `read_only` admin → 403 on mutations; publisher
+  is mocked; audit rows asserted; drawer request (`X-Drawer: 1`) renders without layout.
+- Commit: `feat(admin): users directory`.
+
+### Slice 7 — Groups
+- Index (name, description, member count, applications referencing it), show/drawer: members
+  table (user, role, status) with remove, "Add member" select (users not in group), policies that
+  reference the group (read-only list linking to Applications). New/edit/destroy (destroy blocked
+  while a rule references it; blocked for `admins`).
+- Every membership change → `publish_group!` immediately (this is what makes access changes live
+  without a gateway restart, spec F13).
+- Tests as Slice 6; plus "removing last member publishes an empty members array".
+- Commit: `feat(admin): groups`.
+
+### Slice 8 — Devices
+- Index (filter: all/enrolled/pending/revoked; platform chips), columns: name (mono ns_name),
+  platform, owner (link), key source + assurance badge (`ok` for ≥3, `warn` for 2, plain for 1,
+  "hardware (unverified)" text for 4), agent version, last seen, status. Drawer: identity
+  (node id, pubkey fingerprints, copy), owner with **Assign owner** select (publishes DEVICE +
+  both USERs' `devices[]`), groups via owner, effective applications (computed by the Slice 9
+  evaluator), Revoke (reason required → REVOKE record, status revoked).
+- No create form: devices come from enrollment redeem (Slice 10) or reconcile import ("unknown
+  device seen in NS" → one-click adopt with owner select).
+- Tests: assign_owner publishes 3 records in order (device, old owner user, new owner user);
+  revoke writes REVOKE and never republishes; read_only 403.
+- Commit: `feat(admin): devices`.
+
+### Slice 9 — Applications, Policies, policy renderer, test-access
+- Gateways: minimal CRUD inside Applications (gateway select on the application form, "New
+  gateway" inline: name, kind, host_note). Reconcile marks `online` when SVC seen.
+- Applications index (name, ztlp name `<name>.<zone>`, gateway, backend, protocol, min
+  assurance, rules count, enabled badge); show/drawer: rules list with add (subject type +
+  picker) / remove, "Rendered policy" code block (`policy.toml` for rust_listen or YAML for
+  elixir) with copy, note "Rule changes need a gateway restart; membership changes are live".
+  `min_assurance` shows "(not enforced by Rust gateways)" when the gateway kind is `rust_listen`.
+- `app/services/ztlp/policy_renderer.rb`: per gateway → TOML (`default = "deny"`, one
+  `[[services]]` per enabled application, `allow = [...]` from rules) or YAML. Golden tests.
+- Policies page: all rules grouped by application (read-only overview) + **Test access** widget:
+  select device + application → `POST /policies/test` → `Ztlp::AccessEvaluator.evaluate(device,
+  application)` returning `{decision: allow|deny, reason, trace: [{rule, result, why}]}` mirroring
+  the gateway: device revoked/pending → deny; owner disabled → deny; application disabled → deny;
+  assurance < min_assurance → deny (flag `enforced: false` when gateway is rust_listen, still
+  shown); walk rules: `any` → allow; `device` exact; `user` == owner; `role` == owner.role;
+  `group` ∋ owner; none → deny ("default deny").
+- Tests: renderer goldens; evaluator table-driven (10+ cases); controller tests; JS test for the
+  trace rendering function.
+- Commit: `feat(admin): applications, rules, policy renderer, test-access`.
+
+### Slice 10 — Enrollments (current token format) + redeem endpoint + QR
+- `app/services/ztlp/blake2s_hmac.rb` (manual ipad/opad over `OpenSSL::Digest "BLAKE2s256"`)
+  and `app/services/ztlp/token_minter.rb` producing the **current v1 binary token** (spec F8: no
+  identity flag yet; `max_uses=1`, expiry ≤ 24h, nonce 16B, MAC keyed with the zone enrollment
+  secret) → `ztlp://enroll/<base64url>`. Golden test: a token minted here must verify with
+  `ztlp admin enroll`'s parser — use `docker run --rm --entrypoint ztlp ztlp-cli:signed-reg
+  enroll inspect <token>` if that verb exists; otherwise cross-check with the Elixir
+  `ZtlpNs.Enrollment.parse_token/2` through `docker exec` on the test NS (`scripts/test-ns.sh
+  parse <token>`). Record which method you used in STATUS.
+- New enrollment page: choose user (existing / new inline / device only), device name
+  (optional), expiry (1h default, max 24h), embed relay secret (default on, guardrail text).
+  Result page: token string (shown once), `rqrcode` SVG QR, copyable `ztlp setup --token "…"`,
+  human `code`. List with filters + revoke. Expiry sweep already exists (Slice 5).
+- `POST /api/v1/enrollments/:token_id/redeem` (spec §7.4; skips gateway gate; rack-attack
+  10/min/IP): verifies the body signature with `signing_pubkey_hex`, creates/updates the Device
+  (`key_source`, `assurance` from the body — field names `key_source`, `assurance`; default
+  `unknown`/1 when absent), sets owner, user `invited → active`, publishes DEVICE + USER.
+  Legacy `POST /api/enrollment/confirm` creates the device as `pending` for adoption.
+  (Client-side: the agent does not call this yet — that is a ZTLP release, spec slice 4. The
+  endpoint ships now so the release has a target. Say so on the enrollment page.)
+- Tests: minter goldens (round trip through the Elixir parser recorded as a fixture), redeem
+  happy path / bad signature / expired / exhausted; QR SVG present; token never in audit details.
+- Commit: `feat(admin): enrollments, token minter, redeem API, QR`.
+
+### Slice 11 — Overview, setup checklist, break-glass, search, administrators under Operations
+- Overview: tally strip (users/devices/groups/applications), **Setup checklist** panel (hidden
+  when all done): second administrator (`Admin.active.count >= 2`), break-glass acknowledged
+  (`system_settings.breakglass_acknowledged_at`), authority imported, NS admin API secret set,
+  `ZTLP_MIN_ASSURANCE` set (info only). Recent activity (last 20 audit rows, actor = admin or
+  "name server"/"gateway" for job/system rows). Infra panel: NS reachable (last reconcile ok),
+  relay/gateways from `gateways` status.
+- `POST /setup/acknowledge_breakglass` (super_admin): stores timestamp + admin, audits. The
+  checklist text: "Break-glass: if every administrator key is lost, run
+  `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim` on the
+  host over SSH (certificate auth). Confirm you can SSH to the host now."
+- `lib/tasks/admin.rake` `admin:reset_claim`: disables nothing, issues a fresh claim code and
+  prints it (reuses `Claim.issue!` with `needed?` bypassed via an explicit `force:` kwarg), audits
+  `system.reset_claim`. `Claim.perform!` with `force` path: when admins exist, claiming creates an
+  additional `super_admin` instead of failing (so break-glass yields a new admin without deleting
+  the old ones). Tests cover both.
+- `/search.json`: ILIKE over users (username/display_name/email-deterministic exact), devices
+  (name/node_id), groups, applications; max 20; JSON `{type,id,name,sub,url}`.
+- Move Administrators into the Operations rail section; rail foot shows `username · role ·
+  assurance` and zone + NS dot (green if last reconcile < 45 min and ok).
+- Tests: checklist visibility matrix; acknowledge audit; reset_claim; search JSON escaping
+  (query `<script>` returns escaped JSON and no HTML).
+- Commit: `feat(admin): overview, setup checklist, break-glass, search`.
+
+### Slice 12 — Build, local smoke, ship, live verify (operator gates the gateway recreate)
+- `admin/VERSION` → `0.2.0`. `find … chmod o+r` (G9 file-mode trap). `docker build -t
+  ztlp-admin:0.2.0 .`. Local prod-shape smoke: `docker compose -p admintest up -d` with throwaway
+  `.env`, `scripts/smoke-claim-login.sh` extended to: claim → overview shows checklist → create
+  user → create group → add member → `/zone` renders → `/search.json?q=` → `down -v`.
+- Ship per skill `ztlp-admin-panel` "Build + deploy" steps 3-4 (`docker save | gzip | ssh |
+  docker load`, bump `image:` for web AND jobs, `docker compose up -d --force-recreate web
+  jobs`). **Do not recreate the gateway.** Set `ZTLP_REQUIRE_GATEWAY=1` in the box `.env`
+  (already true by default in production). Do NOT set `ZTLP_MIN_ASSURANCE` yet.
+- Migration runs via entrypoint `db:prepare`. Then on the box:
+  `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails zone:import_authority[/data/identity.json]`
+  **only if the operator has placed the file there** — otherwise leave the checklist warning and
+  report BLOCKED-on-operator.
+- Live verify from the AI computer (real client path, per skill): `ssh trs@10.170.3.207
+  'curl.exe -s -m 25 -o NUL -w "HTTP %{http_code}" http://admin.trs.ztlp/up'` → 200; then the
+  operator opens `http://admin.trs.ztlp/` in Chrome: lands on Overview signed in via ZTLP, checklist
+  visible, Users page lists `steve`. Read the newest `auth.login_ztlp` audit row and record the
+  `assurance` value in STATUS.
+- A request WITHOUT the tunnel (`curl http://127.0.0.1:8081/` on the box) → 403 page. Record it.
+- Commit: `chore(admin): v0.2.0`. Tag is NOT pushed (operator gates tags).
+
+### Slice 13+ (only after 0-12 are DONE and the operator has clicked through)
+- Vendor fonts; drawer polish; CSV import; Profile Claims API (§3) in its own BUILD_LOOP addendum;
+  identity-carrying tokens (spec §7.1, needs a ZTLP release); `ZTLP_MIN_ASSURANCE=device-bound`
+  after the audit shows the AI computer reports ≥ device-bound.
+
+---
+
+## 5. Finish line / definition of done
+
+All true, each verified by a command or a real click and recorded in STATUS with the evidence:
+
+- [ ] `SKIP_CLAIM_BOOT=1 bin/rails test` green; `rubocop` clean; `brakeman -q` clean;
+      `node --check` + `node test/javascript/*.mjs` green; `ZTLP_TEST_NS` integration test green
+      against `ztlp-ns:v0.35.20` at least once (output pasted into STATUS, secrets redacted).
+- [ ] `grep -rn "cdnjs\|googleapis\|unpkg\|jsdelivr\|<script src=\"http" admin/app` → nothing.
+      `Gemfile` has no tailwind/importmap/turbo/stimulus.
+- [ ] Fresh `docker compose -p admintest up -d` → claim → Overview with setup checklist → create
+      user, group, membership, application + rule → rendered `policy.toml` contains
+      `group:<g>.groups.<zone>` → test-access returns allow for that user's device and deny after
+      removing the membership (script `scripts/smoke-directory.sh`, output in STATUS).
+- [ ] Live: `http://admin.trs.ztlp/` from the AI computer signs in via tunnel (audit
+      `auth.login_ztlp` with `assurance` recorded); loopback request without headers → 403.
+- [ ] Prod NS shows (via `/zone` reconcile) `steve.users.trs.ztlp` USER, `admins.groups.trs.ztlp`
+      and `staff.groups.trs.ztlp` GROUPs written by the panel's authority key — OR STATUS says
+      BLOCKED: authority `identity.json` not yet placed by the operator.
+- [ ] `records_test.rb` "no PII in NS records" passes, and a manual `query` of the live USER
+      record shows `email: ""`.
+- [ ] Operator has clicked Users → a user drawer → Devices → Groups → Applications → Policies →
+      Enrollments → Name server with no error page. (Ask him once per tick at most; do not block
+      other slices on it.)
+
+---
+
+## 6. Rules every tick
+
+1. STEP 0 `scripts/build_lock.sh` (exit if LOCKED). Write `.build_state` `in_progress`.
+2. Orient: read this file's STATUS, `git log --oneline -15`, `git status --short`. A dirty tree
+   from a previous tick = finish or `git stash` it with a note in STATUS; never leave it.
+3. One slice. TDD: failing test first, run it, make it pass, run the whole suite.
+4. Commit with explicit paths. Message prefix `feat(admin):` / `fix(admin):` / `docs(admin):`.
+5. Update STATUS (DONE / PENDING / BLOCKED / UNCERTAIN) with evidence lines. Mark `.build_state`
+   `done <sha>`.
+6. Never: push tags, recreate the prod gateway container, print or commit secrets, use `hosts:
+   all`, add a CDN/npm dependency, touch `/home/trs/ztlp` (main worktree) or other worktrees.
+7. If a slice needs the operator (identity.json, a click-through, a real-client check), do the
+   rest of the slice, mark BLOCKED-on-operator with the exact one-line ask, and continue to the
+   next slice that does not depend on it.
+8. Deploy (Slice 12) only after Slices 0-11 are DONE and the local smoke passes.
+
+---
+
+## STATUS (newest first; the next tick reads this)
+
+- 2026-10-22 04:06Z — **Slice 0 DONE** (tick 1, interactive session; cron loop scheduled after it).
+  - `docker start ztlp-admin-dev-db` → Up; `bundle install`, `db:prepare` (dev + test) OK.
+  - First test run: 37 runs, 10 errors — all `The asset 'tailwind.css' was not found` (the
+    gitignored `app/assets/builds/` output, environment not code). `bin/rails tailwindcss:build`
+    → `SKIP_CLAIM_BOOT=1 bin/rails test`: **37 runs, 132 assertions, 0 failures, 0 errors**.
+    Slice 1 removes Tailwind, so this step disappears then.
+  - `rubocop`: 51 files, no offenses. `brakeman -q`: only `EOLRails` (Rails 7.1.6 EOL notice),
+    no code warnings. §5 needs "brakeman -q clean" → a later slice adds `--except EOLRails` to
+    the gate or a `config/brakeman.ignore` entry; do not upgrade Rails inside this loop.
+  - `admin/scripts/build_lock.sh` added. Deviation from the skill script: the lock is the
+    `.build_state` file (in_progress < 90 min = LOCKED, exit 0), because a flock held by a script
+    is released when that shell exits and each tick command runs in its own shell.
+    Usage: `bash scripts/build_lock.sh "<intent>"` / `--done <sha>` / `--blocked "<why>"`.
+    Verified: second invocation printed `LOCKED`.
+  - `/.build_state` added to `admin/.gitignore`.
+  - Note: `bin/rails db:prepare` on the dev DB prints a fresh claim code for the DEV database
+    only (local, throwaway). Never copy claim codes into this file.
+  - Next: Slice 1 (strip frontend stack, directory shell, CSS port).
+
+- 2026-10-21 — plan written. Nothing started. Worktree `/home/trs/ztlp-admin` at `329674d4`.
+  Untracked: `docs/admin-panel/BUILD_LOOP.md`, `docs/admin-panel/ui-mock-2026-10-20.html`.
+  Next: Slice 0.

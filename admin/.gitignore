@@ -17,3 +17,4 @@
 *.pyc
 __pycache__/
 /db/*.sqlite3*
+/.build_state

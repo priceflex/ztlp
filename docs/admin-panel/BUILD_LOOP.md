@@ -529,6 +529,41 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 21:38Z — **Slice 6b DONE (Users create/edit)** (cron tick). Commit `fc62c420`.
+  - `app/controllers/users_controller.rb`: `new`/`create` build an **invited** user (spec
+    decision 2, §14: publish a USER record on `active` only → create never publishes);
+    `status` is NOT a form field (not in `user_params`). `edit`/`update` — **username is
+    immutable**: `update` does `user_params.except(:username)`. `publish_if_active!`
+    calls `Ztlp::Publisher.publish_user!` only for an `active` user. `require_write_access`
+    guards all four mutation actions; audit `user.create` / `user.update` (target the User
+    row). Re-render on validation failure uses `:unprocessable_content` (deprecation-clean).
+  - `app/models/user.rb`: `active?` / `disabled?` predicates.
+  - Views: `_form` partial (username is a readonly field on edit; SMS opt-in checkbox;
+    role/kind selects from `User::ROLES`/`KINDS`; no CDN/inline script), `new`/`edit`
+    wrappers, and a write-gated **New user** button on the index (hidden for read_only).
+  - Routes: `resources :users` now `only: %i[index show new create edit update]`.
+  - Tests (`test/controllers/users_controller_test.rb`, +13, TDD RED first — all 11
+    mutation tests errored on `new_user_path`/`edit_user_path` NameError / 404 before the
+    routes+actions existed): new form fields present; create → invited + normalized
+    ns_name + no publish + audit row; create is invited even if `status: active` submitted;
+    invalid username 422 + "lowercase DNS label"; duplicate username 422 + "taken";
+    read_only 403 on new/create; edit shows locked username (readonly) + email value;
+    update persists fields and ignores the submitted username + republishes active user +
+    audit; update of an invited user does NOT publish; bad role 422 re-render; read_only
+    403 on edit/update; index New-user button shown for write admin, hidden for read_only.
+  - Evidence: `timeout 300 bin/rails test test/controllers/users_controller_test.rb` →
+    **27 runs / 179 assertions / 0 failures**. `bash scripts/ci-admin.sh` → full suite
+    **205 runs / 862 assertions / 0 failures / 5 skips** (= ZTLP_TEST_NS-gated roundtrip;
+    was 192 before), rubocop clean, brakeman EOL-only, node --check OK, node --test 19/19,
+    `== all gates passed`. `ruby -c` on all edited .rb: Syntax OK; ERB src parse OK on all 4
+    views. No test-ns containers started this tick.
+  PENDING: Slice 6c — disable (= `Publisher.revoke!` on the user ns name + mark the
+  user's devices `revoked`) and enable (= republish user + re-activate devices). The
+  show-page Disable/Enable buttons target these future endpoints (still 404 until 6c).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 6c (Users disable/enable lifecycle + NS revoke/republish).
+
+
 - 2026-10-22 21:20Z — **review of Slice 6a** (`a12db005`). Views escape all output (no raw/html_safe,
   no inline script/handlers); drawer fragment via X-Drawer; filters whitelisted. One fix:
   `apply_search` resolved email by loading + decrypting EVERY zone user in Ruby (comment claimed an

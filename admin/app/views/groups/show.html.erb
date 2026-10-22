@@ -1,8 +1,10 @@
 <% drawer = request.headers["X-Drawer"] == "1" %>
+<% write = current_admin&.write_access? %>
 <% unless drawer %><% content_for :title, "#{@group.name} - ZTLP Directory" %><% end %>
 <div class="page-head">
   <div><h1><%= @group.name %></h1>
     <p class="lede mono"><%= @group.ns_name %></p></div>
+  <% if write %><div class="actions"><a class="btn" href="<%= edit_group_path(@group) %>">Edit</a></div><% end %>
 </div>
 
 <div class="stack">
@@ -15,21 +17,47 @@
     <div class="panel-h"><h2>Members</h2><span class="sub"><%= @members.size %></span></div>
     <% if @members.any? %>
       <div class="table-wrap"><table>
-        <thead><tr><th>User</th><th>Role</th><th>Status</th></tr></thead>
+        <thead><tr><th>User</th><th>Role</th><th>Status</th><% if write %><th></th><% end %></tr></thead>
         <tbody>
           <% @members.each do |u| %>
             <tr><td><div class="who"><div><div class="strong"><a href="<%= user_path(u) %>"><%= u.display_name %></a></div>
               <div class="sub mono"><%= u.username %></div></div></div></td>
               <td class="nowrap"><%= u.role %></td>
-              <td class="nowrap"><%= status_badge(u.status) %></td></tr>
+              <td class="nowrap"><%= status_badge(u.status) %></td>
+              <% if write %><td class="nowrap">
+                <%= form_with url: remove_member_group_path(@group, user_id: u.id), method: :delete, class: "inline-form",
+                              data: { confirm: "Remove #{u.display_name} from #{ @group.name }? This publishes the group to the name server." } do %>
+                  <button type="submit" class="btn sm">Remove</button>
+                <% end %></td><% end %></tr>
           <% end %>
         </tbody>
       </table></div>
     <% else %><div class="empty-note">No members.</div><% end %>
+
+    <% if write %><% if @candidates.any? %>
+      <div class="actions" style="margin-top:12px">
+        <%= form_with url: add_member_group_path(@group), method: :post, class: "inline-form" do %>
+          <%= select_tag :user_id,
+                options_for_select(@candidates.map { |u| [ "#{u.display_name} (#{u.username})", u.id ] }),
+                prompt: "Add member…" %>
+          <button type="submit" class="btn sm primary">Add member</button>
+        <% end %>
+      </div>
+    <% end %><% end %>
   </div>
 
   <div class="panel">
     <div class="panel-h"><h2>Policies</h2></div>
     <div class="empty-note">No policies reference this group yet.</div>
   </div>
+
+  <% if write && @group.name != "admins" %><div class="panel danger-zone">
+    <div class="panel-h"><h2>Danger</h2></div>
+    <div class="actions">
+      <%= form_with url: group_path(@group), method: :delete, class: "inline-form",
+                    data: { confirm: "Delete group #{ @group.name }? Any policy rule that references it must be removed first." } do %>
+        <button type="submit" class="btn danger">Delete group</button>
+      <% end %>
+    </div>
+  </div><% end %>
 </div>

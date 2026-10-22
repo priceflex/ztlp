@@ -21,9 +21,14 @@ Rails.application.routes.draw do
     end
   end
 
-  # Slice 7a: read side only (index/show). new_group_path points at the 7b
-  # form; until 7b lands the button renders the href via a plain path.
-  resources :groups, only: %i[index show]
+  # Slice 7a read side + 7b mutations (new/create, edit/update, destroy,
+  # add_member/remove_member).
+  resources :groups do
+    member do
+      post :add_member
+      delete :remove_member
+    end
+  end
 
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish

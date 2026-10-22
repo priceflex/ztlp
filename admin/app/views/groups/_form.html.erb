@@ -1,0 +1,23 @@
+<%# Slice 7b: shared group form (new + edit). Name is a DNS label, normalized
+    to lowercase by the model and drives the ns_name. %>
+<%= form_with model: @group, class: "stack" do |f| %>
+  <% if @group.errors.any? %>
+    <div class="notice"><span class="err"><%= @group.errors.full_messages.to_sentence %></span></div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-b" style="display:grid;gap:16px">
+      <div class="field">
+        <%= f.label :name %>
+        <%= f.text_field :name, required: true,
+                          pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
+                          class: "mono" %>
+        <p class="hint">Lowercase DNS label; the full name is <span class="mono">&lt;name&gt;.groups.&lt;zone&gt;</span>.</p>
+      </div>
+      <div class="field"><%= f.label :description %><%= f.text_field :description %></div>
+      <div class="actions">
+        <%= f.submit @group.persisted? ? "Save" : "Create group", class: "btn primary" %>
+        <%= link_to "Cancel", @group.persisted? ? group_path(@group) : groups_path, class: "btn" %>
+      </div>
+    </div>
+  </div>
+<% end %>

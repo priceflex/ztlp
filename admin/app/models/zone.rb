@@ -9,6 +9,9 @@ class Zone < ApplicationRecord
   has_many :devices
   has_many :enrollments
   has_many :gateways
+  has_many :applications
+  # PolicyRule has no zone_id (rules belong to an application's gateway);
+  # zone-scoped rule lookups must go through the gateway join.
 
   validates :name, presence: true, uniqueness: true
   validates :ns_addr, presence: true

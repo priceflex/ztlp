@@ -1,7 +1,7 @@
 <% content_for :title, "Groups - ZTLP Directory" %>
 <div class="page-head">
   <div><h1>Groups</h1><p class="lede">Named sets of users. A policy references a group, so membership changes take effect the moment they are published.</p></div>
-  <% if current_admin&.write_access? %><div class="actions"><a class="btn primary" href="/groups/new">New group</a></div><% end %>
+  <% if current_admin&.write_access? %><div class="actions"><%= link_to "New group", new_group_path, class: "btn primary" %></div><% end %>
 </div>
 
 <div class="table-wrap">

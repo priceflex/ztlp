@@ -534,6 +534,52 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 23:58Z — **Slice 7b DONE (Groups mutations + membership add/remove)** (cron tick). Commit `5c3e8253`.
+  - `groups_controller.rb`: `new`/`create` (name = lowercase DNS label, normalized by the model;
+    description; every save publishes the GROUP record immediately, rescued per the 6b rule —
+    NS failure → the save stands, warning toast, never a 500); `edit`/`update`; `destroy`
+    blocked for the default `admins` group (permanent panel access) and while any policy rule
+    references the group (rules are scoped through their application's gateway — `policy_rules`
+    has no `zone_id`, so the lookup joins `applications` → `gateways.zone_id`);
+    `add_member`/`remove_member` — EVERY membership change calls `Publisher.publish_group!`
+    immediately (spec F13, access changes go live without a gateway restart); removing the last
+    member publishes an empty members array (pinned by a test); unknown user id → no-op alert;
+    already-member → no publish. All mutations `require_write_access`, each audits its own
+    action (`group.create` / `group.update` / `group.add_member` / `group.remove_member` /
+    `group.destroy`, with `skipped` status + reason for the two destroy blocks).
+  - Routes: `resources :groups` (index/show/new/create/edit/update/destroy) + member
+    `post :add_member` / `delete :remove_member`. Zone model: `has_many :applications` (+ a
+    comment documenting why `policy_rules` is NOT a direct association — it hangs off the
+    application's gateway).
+  - Views: `groups/_form` (shared new/edit; `form_with` renders `input name="group[name]"`),
+    `groups/new`, `groups/edit`; `groups/show` gains the Add-member select (every non-member
+    user, prompt "Add member…"), per-row Remove buttons, Edit link, and the Danger delete
+    form — all write-gated, destructive actions as REAL forms carrying `data-confirm`
+    (directory.js intercepts form submits; no fake buttons). Index New group button now uses
+    `new_group_path` (the plain-path href from 7a is gone).
+  - Tests: +20 in `test/controllers/groups_controller_test.rb` (TDD RED first — the whole new
+    block errored on the missing route helpers). Covers: form shape; create normalizes the
+    name, sets ns_name, publishes with an empty members array; validation re-render without
+    publish; create NS-failure (save stands + toast); update republish + audit; duplicate-name
+    re-render without publish; add/remove publish the exact member set (block matchers on the
+    group passed to `publish_group!`); remove of last member publishes `{members: []}`;
+    membership NS-failure (save stands + toast); unknown user no-op; destroy ok /
+    referenced-by-rule blocked / admins blocked; read_only 403 on all 7 mutating endpoints;
+    two 7a assertions were updated to match the now-rendering Add-member select (non-members
+    appear in the select, not the members table).
+  - Evidence: `timeout 300 bin/rails test test/controllers/groups_controller_test.rb` →
+    **29 runs / 151 assertions / 0 failures / 0 errors**. `bash scripts/ci-admin.sh` → full
+    suite **244 runs / 1064 assertions / 0 failures / 0 errors / 6 skips** (= ZTLP_TEST_NS-
+    gated roundtrip; was 224/968 after 7a), rubocop clean, brakeman EOL-only, node --check
+    OK, node --test 19/19, `== all gates passed`. `ruby -c` on the 3 edited .rb: Syntax OK;
+    ERB src parse OK on all 5 group views. No test-ns containers started.
+  PENDING: Slice 8 — Devices (index/show/drawer, owner user = the device's person, assurance
+  from the DEVICE record, create via enrollment, revoke = fail-closed rule noted in 6c).
+  NOTE for 8: the group-page Policies panel is still the read-only empty note; Slice 9
+  (Applications/Policies) fills it and the index's applications count (honest zero until then).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 8 (Devices directory).
+
 - 2026-10-22 23:21Z — **Slice 7a DONE (Groups read side: index + show/drawer)** (cron tick). Commit `676289fc`.
   - `app/controllers/groups_controller.rb`: `index` — zone groups ordered by name, member count
     per row, applications column honest zero (no policies exist yet — Slice 9). `show` — scoped

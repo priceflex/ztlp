@@ -68,4 +68,39 @@ class ZtlpCborTest < ActiveSupport::TestCase
   test "symbol keys encode as text (Elixir-map parity)" do
     assert_equal enc({ "a" => 1 }), enc({ a: 1 })
   end
+
+  # ── decode (slice 4b: the NS record-data subset) ────────────────
+  # Round-trips pin the decoder against the encoder; the uint vector
+  # pins 24/25/26-extended integers, which `do_decode` once decoded as
+  # the literal info byte (24/25/26) — a 1000 would come back as 24.
+
+  test "decode round-trips a flat map of uint, text, bool, bytes, arrays" do
+    data = {
+      "node_id" => "abc123", "public_key" => "ab", "owner" => "steve.test.ztlp",
+      "level" => 4, "ok" => true, "no" => false,
+      "raw" => "\xC3\x28".b, "list" => [ 1, 2, "x" ],
+      "nested" => { "b" => 2, "a" => 1 }
+    }
+    assert_equal data, Ztlp::Cbor.decode(enc(data))
+  end
+
+  test "decode handles extended uints (24, 300, 70000, 65536) exactly" do
+    # NOTE: values >= 2**32 need the 8-byte (info 27) CBOR form, which the
+    # minimal encoder does not yet emit. 65536 is the smallest value that
+    # needs the 4-byte (info 26) form.
+    [ 24, 300, 70_000, 65_536, 0xFFFF_FFFF ].each do |n|
+      assert_equal n, Ztlp::Cbor.decode(Ztlp::Cbor.encode(n)), "uint #{n}"
+    end
+  end
+
+  test "decode raises on unsupported CBOR items" do
+    # 0xF9 is a half-precision float header — outside the NS record-data
+    # subset the panel decodes.
+    err = assert_raises(ArgumentError) { Ztlp::Cbor.decode("\xF9\x00\x00".b) }
+    assert_match(/unsupported CBOR item/, err.message)
+  end
+
+  test "decode rejects a negative integer (major 1)" do
+    assert_raises(ArgumentError) { Ztlp::Cbor.decode("\x20".b) }
+  end
 end

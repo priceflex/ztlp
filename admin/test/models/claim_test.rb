@@ -65,3 +65,28 @@ class ClaimTest < ActiveSupport::TestCase
     assert_raises(Claim::Error) { Claim.perform!({ claim_code: code, username: "s", display_name: "s", pubkey_hex: "nope" }) }
   end
 end
+
+class ClaimDirectoryTest < ActiveSupport::TestCase
+  def setup
+    @zone = Zone.create!(name: "trs.ztlp", ns_addr: "127.0.0.1:9103")
+  end
+
+  def perform_claim
+    code = Claim.issue!
+    _seed, pub = Ztlp::Ed25519.generate
+    Claim.perform!({ claim_code: code, username: "Steve", display_name: "Steven Price",
+                     email: "s@example.com", pubkey_hex: pub })
+  end
+
+  test "claim creates the directory user, default groups, membership and admin link" do
+    admin = perform_claim
+    user = User.find_by!(username: "steve")
+    assert_equal "steve.users.trs.ztlp", user.ns_name
+    assert_equal "person", user.kind
+    assert_equal "admin", user.role
+    assert_equal "active", user.status
+    assert_equal user.id, admin.reload.user_id
+    assert_equal %w[admins staff].sort, Group.all.pluck(:name).sort
+    assert GroupMembership.exists?(group: Group.find_by!(name: "admins"), user_id: user.id)
+  end
+end

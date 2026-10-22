@@ -4,6 +4,7 @@ class Admin < ApplicationRecord
   ROLES = %w[super_admin admin helpdesk read_only].freeze
   USERNAME = /\A[a-z0-9]([a-z0-9-]*[a-z0-9])?\z/
 
+  belongs_to :user, optional: true
   has_many :login_challenges, dependent: :delete_all
   has_many :session_tokens, dependent: :delete_all
   has_many :audit_logs

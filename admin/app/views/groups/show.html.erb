@@ -1,0 +1,35 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% unless drawer %><% content_for :title, "#{@group.name} - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div><h1><%= @group.name %></h1>
+    <p class="lede mono"><%= @group.ns_name %></p></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>About</h2></div>
+    <dl class="kv"><dt>Description</dt><dd><%= @group.description.presence || "—" %></dd></dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Members</h2><span class="sub"><%= @members.size %></span></div>
+    <% if @members.any? %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>User</th><th>Role</th><th>Status</th></tr></thead>
+        <tbody>
+          <% @members.each do |u| %>
+            <tr><td><div class="who"><div><div class="strong"><a href="<%= user_path(u) %>"><%= u.display_name %></a></div>
+              <div class="sub mono"><%= u.username %></div></div></div></td>
+              <td class="nowrap"><%= u.role %></td>
+              <td class="nowrap"><%= status_badge(u.status) %></td></tr>
+          <% end %>
+        </tbody>
+      </table></div>
+    <% else %><div class="empty-note">No members.</div><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Policies</h2></div>
+    <div class="empty-note">No policies reference this group yet.</div>
+  </div>
+</div>

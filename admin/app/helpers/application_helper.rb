@@ -58,7 +58,7 @@ module ApplicationHelper
     when "root" then root_path
     when "users" then users_path
     when "devices" then "/devices"
-    when "groups" then "/groups"
+    when "groups" then groups_path
     when "apps" then "/apps"
     when "policies" then "/policies"
     when "enrollments" then "/enrollments"

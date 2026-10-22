@@ -46,13 +46,12 @@
 
   <div class="actions">
     <a class="btn" href="<%= "/users/#{@user.id}/edit" %>">Edit</a>
-    <% if @user.status == "disabled" %>
-      <%= form_with url: "/users/#{@user.id}/enable", method: :post, class: "actions" do %>
-        <button type="submit" class="btn">Enable</button>
-      <% end %>
+    <% if @user.status == "revoked" %>
+      <span class="sub">Revoked permanently. To restore access, create a new user.</span>
     <% else %>
-      <%= form_with url: "/users/#{@user.id}/disable", method: :post, class: "actions" do %>
-        <button type="submit" class="btn" data-confirm="Disable <%= @user.display_name %>? Their NS record is revoked.">Disable</button>
+      <% n = @user.devices.count { |d| d.status == "enrolled" } %>
+      <%= form_with url: revoke_user_path(@user), method: :post, class: "actions" do %>
+        <button type="submit" class="btn danger" data-confirm="Permanently revoke <%= @user.display_name %> and <%= n %> device(s)? This cannot be undone: the name server never lets this user name be used again. To restore access you must create a new user.">Revoke user</button>
       <% end %>
     <% end %>
   </div>

@@ -10,8 +10,8 @@
 # never publishes, and update publishes only for an active user. All
 # mutations require write access and audit their own action.
 class UsersController < ApplicationController
-  before_action :set_user, only: %i[show edit update disable enable]
-  before_action :require_write_access, only: %i[new create edit update disable enable]
+  before_action :set_user, only: %i[show edit update revoke]
+  before_action :require_write_access, only: %i[new create edit update revoke]
 
   FILTERS = [ %w[all All], %w[active Active], %w[invited Invited],
               %w[disabled Disabled], %w[revoked Revoked] ].freeze
@@ -73,67 +73,35 @@ class UsersController < ApplicationController
   # an NS failure never 500s after the save — the DB change stands, the
   # failure is a warning, the 6-hourly republish retries.
 
-  def disable
+  # Operator decision 2026-10-22: PERMANENT "Revoke user" (no Enable). One REVOKE record lists
+  # the user + every enrolled device (the gateway does not cascade owner→device). In the NS a
+  # revocation can never be lifted. Security action: if the NS write fails, NOTHING changes.
+  def revoke
     if @user.status == "revoked"
-      audit!("user.disable", target: @user, status: "skipped",
-                          details: { username: @user.username, reason: "already_revoked" })
+      audit!("user.revoke", target: @user, status: "skipped",
+                            details: { username: @user.username, reason: "already_revoked" })
       return redirect_to user_path(@user), alert: "#{@user.display_name} is already revoked."
     end
 
-    # One REVOKE record for the user ns name (spec §6.3: a REVOKE "purges
-    # device and group indexes"). The devices are then marked `revoked` in
-    # the DB, which drops them from every later USER publish — that is how
-    # they go revoked in the NS too.
-    warning = begin
-      Ztlp::Publisher.revoke!(@zone, name: @user.ns_name, target: @user,
-                              reason: "user disabled", admin: current_admin)
-      nil
+    devices = @user.devices.where(status: "enrolled").to_a
+    begin
+      Ztlp::Publisher.revoke!(@zone, name: @user.ns_name, also: devices.map(&:ns_name), target: @user,
+                                     reason: "user revoked", admin: current_admin)
     rescue Ztlp::NsClient::NsError => e
-      user_warning(e)
+      audit!("user.revoke", target: @user, status: "failed",
+                            details: { username: @user.username, result: format("0x%02X %s", e.code, e.reason) })
+      return redirect_to user_path(@user),
+                         alert: format("%s was NOT revoked: the name server refused (0x%02X %s). Nothing changed.",
+                                       @user.display_name, e.code, e.reason)
     end
 
-    # The DB change stands regardless of the NS outcome.
-    revoked_count = @user.devices.where(status: "enrolled").count
-    @user.update!(status: "revoked")
-    @user.devices.where(status: "enrolled").update_all(status: "revoked",
-                                                       revoked_at: Time.current)
-    audit!("user.disable", target: @user, status: "ok",
-                        details: { username: @user.username,
-                                   ns_revoked: warning.nil?,
-                                   devices_revoked: revoked_count })
-    notice = "#{@user.display_name} disabled."
-    notice += " #{revoked_count} device(s) revoked." if revoked_count.positive?
-    redirect_to user_path(@user), notice: notice, alert: warning
-  end
-
-  def enable
-    if @user.active?
-      audit!("user.enable", target: @user, status: "skipped",
-                          details: { username: @user.username, reason: "already_active" })
-      return redirect_to user_path(@user), alert: "#{@user.display_name} is already active."
+    User.transaction do
+      @user.update!(status: "revoked")
+      @user.devices.where(id: devices.map(&:id)).update_all(status: "revoked", revoked_at: Time.current)
     end
-
-    warnings = []
-    # Re-activate the device rows FIRST so the USER record we publish right
-    # after carries them in devices[] (Records.user_data reads live rows).
-    # The NS-side revoke of a user covers their device index entries; enable
-    # re-publishes the USER record (spec Slice 6: "Enable re-publishes").
-    @user.devices.where(status: "revoked").update_all(status: "enrolled", revoked_at: nil)
-    @user.update!(status: "active")
-
-    republished = begin
-      Ztlp::Publisher.publish_user!(@user, admin: current_admin)
-      true
-    rescue Ztlp::NsClient::NsError => e
-      warnings << user_warning(e)
-      false
-    end
-
-    audit!("user.enable", target: @user, status: "ok",
-                       details: { username: @user.username,
-                                  ns_republished: republished })
-    redirect_to user_path(@user), notice: "#{@user.display_name} enabled.",
-                                 alert: warnings.first
+    audit!("user.revoke", target: @user, status: "ok",
+                          details: { username: @user.username, devices_revoked: devices.size })
+    redirect_to user_path(@user), notice: "#{@user.display_name} revoked permanently, with #{devices.size} device(s)."
   end
 
   private
@@ -187,7 +155,7 @@ class UsersController < ApplicationController
   # Strong params for the user form. `username` is accepted here so the
   # create path can build it, but update explicitly drops it (immutable).
   # `status` is NOT in the allowlist: it is managed by the lifecycle actions
-  # (invited on create, disabled/enable in 6c), never by a free-form field.
+  # (invited on create, revoked by the permanent revoke action), never by a free-form field.
   def user_params
     params.require(:user).permit(
       :username, :display_name, :first_name, :last_name,

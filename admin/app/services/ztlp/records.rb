@@ -71,10 +71,11 @@ module Ztlp
       }
     end
 
-    # REVOKE record data (type 0x05). TTL 0 — never expires.
-    def self.revoke_data(name, reason)
+    # REVOKE record data (type 0x05). TTL 0 — never expires. `also` adds more ids to the
+    # same record (user revoke lists the user + every enrolled device; the NS indexes each).
+    def self.revoke_data(name, reason, also = [])
       {
-        "revoked_ids" => [ name ],
+        "revoked_ids" => ([ name ] + Array(also)).uniq,
         "reason" => reason.to_s,
         "effective_at" => "now"
       }

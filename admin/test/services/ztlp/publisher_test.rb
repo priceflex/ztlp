@@ -155,6 +155,15 @@ class PublisherTest < ActiveSupport::TestCase
     refute_includes row.details.to_json, "ab" * 16, "node id leaked into audit"
   end
 
+  test "revoke! with also: lists every id in ONE record named for the primary name" do
+    assert_equal :ok, revoke(@zone, name: "alice.users.test.ztlp", also: [ "alice-mbp.test.ztlp", "alice-pc.test.ztlp" ],
+                                    reason: "user revoked")
+    call = @fake.calls.pop
+    assert_equal "revoke.alice.users.test.ztlp", call[:name]
+    assert_equal [ "alice.users.test.ztlp", "alice-mbp.test.ztlp", "alice-pc.test.ztlp" ], call[:data]["revoked_ids"]
+    assert_empty @fake.calls, "one REVOKE record, not one per id"
+  end
+
   test "a zone without an authority seed raises before any NS call" do
     bare = Zone.create!(name: "empty.ztlp", ns_addr: "127.0.0.1:23096")
     u = bare.users.create!(username: "bob", ns_name: "bob.users.empty.ztlp",

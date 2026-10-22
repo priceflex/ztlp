@@ -135,17 +135,18 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_includes body, "eng"
     assert_includes body, "alice-mbp"
     assert_includes body, "device-bound"
-    # actions per spec: Edit / Disable / New enrollment. Enable is for disabled users only.
+    # actions (operator decision 2026-10-22): Edit + a permanent Revoke user; no Disable/Enable.
     assert_select "a.btn[href=?]", "/users/#{@alice.id}/edit"
-    assert_select "form[action=?]", "/users/#{@alice.id}/disable"
+    assert_select "form[action=?]", "/users/#{@alice.id}/revoke"
     refute_includes body, "/users/#{@alice.id}/enable"
+    refute_includes body, "/users/#{@alice.id}/disable"
   end
 
-  test "show of a disabled user offers Enable not Disable" do
+  test "show of a legacy disabled user still offers Revoke, never Enable" do
     get user_path(@carol)
     assert_response :success
-    assert_select "form[action=?]", "/users/#{@carol.id}/enable"
-    refute_includes response.body, "/users/#{@carol.id}/disable"
+    assert_select "form[action=?]", "/users/#{@carol.id}/revoke"
+    refute_includes response.body, "/users/#{@carol.id}/enable"
   end
 
   test "show with X-Drawer renders the fragment without the layout shell" do
@@ -342,160 +343,81 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_equal "Alice Anderson", @alice.reload.display_name
   end
 
-  # ------------------------------------------------------ slice 6c: disable
+  # ------------------------------------------------------ slice 6c: revoke
   #
-  # Spec Slice 6 (§6.3): disable = REVOKE record for the user's ns name +
-  # the user's devices marked `revoked` in the NS. Enable = republish the
-  # user record + re-activate the devices. The DB is the source of truth and
-  # an NS failure must never 500 after the save (same rule as 6b): the
-  # DB change stands, the failure is a warning, the 6-hourly republish
-  # retries.
+  # Operator decision 2026-10-22: "Disable" is a PERMANENT "Revoke user". In the NS a
+  # revocation can never be lifted (server.ex step 7 "revoked entities cannot re-register";
+  # nothing deletes from ztlp_ns_revoked), so there is no Enable. ONE REVOKE record lists
+  # the user AND every enrolled device ns name (the gateway does not cascade owner→device).
+  # It is a security action: if the NS write fails, NOTHING changes in the DB (the panel must
+  # never say "revoked" while access continues; the republish job never retries a revoke).
 
-  test "disable revokes the user record and marks the user and devices revoked" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
+  test "revoke writes ONE REVOKE for the user plus every enrolled device and marks them revoked" do
     Ztlp::Publisher.expects(:revoke!)
-                   .with { |zone, kwargs| zone == @zone && kwargs[:name] == "alice.users.test.ztlp" &&
-                                          kwargs[:target].id == @alice.id }
+                   .with { |zone, kw| zone == @zone && kw[:name] == "alice.users.test.ztlp" &&
+                                      kw[:also] == [ "alice-mbp.test.ztlp" ] && kw[:target].id == @alice.id }
                    .returns(:ok)
-
-    post disable_user_path(@alice)
-    @alice.reload
-    assert_equal "revoked", @alice.status
-    # devices are stamped via update_all (revoked_at is a device column; the
-    # user row's own column is set by the controller after the NS write)
-    assert_equal [ "revoked" ], @alice.devices.reload.map(&:status),
-                 "disabling a user revokes their devices"
+    post revoke_user_path(@alice)
+    assert_equal "revoked", @alice.reload.status
+    assert_equal [ "revoked" ], @alice.devices.reload.map(&:status)
+    refute_nil @alice.devices.first.revoked_at
     follow_redirect!
-    assert_response :success
-    # audit row: the lifecycle action (the ns.publish row is written by the
-    # real Publisher, which is stubbed here — Slice 5 tests cover its audit)
-    assert AuditLog.where(action: "user.disable", status: "ok").any?
+    assert_select "[data-toast]", /revoked.*1 device/
+    assert AuditLog.where(action: "user.revoke", status: "ok").any?
   end
 
-  test "disable of a user with no devices revokes only the user record" do
-    Ztlp::Publisher.expects(:revoke!).returns(:ok)
-    post disable_user_path(@bob) # bob has a pending device
-    @bob.reload
-    assert_equal "revoked", @bob.status
-    # pending devices are not "owned" devices in the spec's disable sense;
-    # the controller only revokes ENROLLED devices.
+  test "pending devices are not listed in the REVOKE and stay pending" do
+    Ztlp::Publisher.expects(:revoke!).with { |_z, kw| kw[:also] == [] }.returns(:ok)
+    post revoke_user_path(@bob) # bob has only a pending device
+    assert_equal "revoked", @bob.reload.status
     assert_equal [ "pending" ], @bob.devices.reload.map(&:status)
-    follow_redirect!
-    assert_response :success
   end
 
-  test "disable still saves and warns when the NS revoke fails" do
+  test "when the NS revoke fails nothing changes and the admin is told" do
     Ztlp::Publisher.expects(:revoke!).raises(Ztlp::NsClient::NsError.new(0x00, "no_authority"))
-    post disable_user_path(@alice)
+    post revoke_user_path(@alice)
     assert_redirected_to user_path(@alice)
-    @alice.reload
-    assert_equal "revoked", @alice.status, "the DB change stands even when the NS is down"
+    assert_equal "active", @alice.reload.status, "panel must not claim a revocation the NS did not accept"
+    assert_equal [ "enrolled" ], @alice.devices.reload.map(&:status)
     follow_redirect!
-    assert_select "[data-toast]", /not published to the name server.*0x00 no_authority/
+    assert_select "[data-toast]", /NOT revoked.*0x00 no_authority/
+    assert AuditLog.where(action: "user.revoke", status: "failed").any?
   end
 
-  test "disabling an already-revoked user is refused without a second revoke" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
+  test "revoking an already-revoked user is refused without a second REVOKE" do
     @alice.update!(status: "revoked")
-    @alice.devices.update!(status: "revoked")
     Ztlp::Publisher.expects(:revoke!).never
-    post disable_user_path(@alice)
-    assert_redirected_to user_path(@alice)
+    post revoke_user_path(@alice)
     follow_redirect!
     assert_select "[data-toast]", /already revoked/
   end
 
-  test "read_only admin gets 403 on disable and enable" do
+  test "there is no enable route" do
+    refute_respond_to self, :enable_user_path
+    post "/users/#{@carol.id}/enable"
+    assert_response :not_found
+  end
+
+  test "read_only admin gets 403 on revoke" do
     ro, ro_seed = make_admin(role: "read_only", username: "readonly4")
     delete logout_path
     sign_in_as(ro, ro_seed)
-    post disable_user_path(@alice)
-    assert_response :forbidden
-    post enable_user_path(@carol)
+    Ztlp::Publisher.expects(:revoke!).never
+    post revoke_user_path(@alice)
     assert_response :forbidden
     assert_equal "active", @alice.reload.status
-    assert_equal "disabled", @carol.reload.status
   end
 
-  # ------------------------------------------------------- slice 6c: enable
-  #
-  # Enable re-publishes the user record and re-activates the user + their
-  # devices. Devices get a fresh DEVICE record via the Publisher (their
-  # ns_name was covered by the REVOKE record's scope at disable time).
-
-  test "enable reactivates the user and republishes the user record" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
+  test "show offers a permanent Revoke with a confirm naming the device count; none once revoked" do
+    get user_path(@alice)
+    assert_select "form[action=?] button[data-confirm]", revoke_user_path(@alice) do |b|
+      assert_match(/permanent/i, b.first["data-confirm"])
+      assert_match(/1 device/, b.first["data-confirm"])
+    end
+    assert_select "form[action$='/enable']", 0
     @alice.update!(status: "revoked")
-    Ztlp::Publisher.expects(:publish_user!).times(1).returns(:ok)
-
-    post enable_user_path(@alice)
-    @alice.reload
-    assert_equal "active", @alice.status
-    follow_redirect!
-    assert_response :success
-    assert AuditLog.where(action: "user.enable", status: "ok").any?
-  end
-
-  test "enable reactivates revoked devices owned by the user" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
-    @alice.update!(status: "revoked")
-    @alice.devices.update!(status: "revoked", revoked_at: Time.current)
-    Ztlp::Publisher.expects(:publish_user!).returns(:ok)
-
-    post enable_user_path(@alice)
-    @alice.reload
-    assert_equal [ "enrolled" ], @alice.devices.reload.map(&:status)
-    assert_nil @alice.devices.reload.map(&:revoked_at).compact.first,
-               "enable clears the device revoked stamp"
-  end
-
-  test "enable of a user with no revoked devices only republishes the user" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
-    @alice.update!(status: "revoked")
-    Ztlp::Publisher.expects(:publish_user!).returns(:ok)
-    Ztlp::Publisher.expects(:publish_device!).never
-
-    post enable_user_path(@alice)
-    @alice.reload
-    assert_equal "active", @alice.status
-    follow_redirect!
-    assert_response :success
-  end
-
-  test "enable still saves and warns when the NS republish fails" do
-    Ztlp::Publisher.expects(:publish_user!).raises(Ztlp::NsClient::NsError.new(0x01, "timeout"))
-    @alice.update!(status: "revoked")
-
-    post enable_user_path(@alice)
-    assert_redirected_to user_path(@alice)
-    assert_equal "active", @alice.reload.status, "the DB change stands even when the NS is down"
-    follow_redirect!
-    assert_select "[data-toast]", /not published to the name server.*0x01 timeout/
-  end
-
-  test "enabling an already-active user is refused without a republish" do
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
-    Ztlp::Publisher.expects(:publish_user!).never
-    post enable_user_path(@alice)
-    assert_redirected_to user_path(@alice)
-    assert_equal "active", @alice.reload.status
-    follow_redirect!
-    assert_select "[data-toast]", /already active/
-  end
-
-  test "enable republishes the user record with the reactivated devices in devices[]" do
-    # Records.user_data reads live device rows, so enable must flip the
-    # device rows BEFORE publishing for devices[] to carry them.
-    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
-    @alice.update!(status: "revoked")
-    @alice.devices.update!(status: "revoked", revoked_at: Time.current)
-
-    published_devices = nil
-    Ztlp::Publisher.expects(:publish_user!).with { |u| published_devices = u.devices.map(&:ns_name); true }
-                   .returns(:ok)
-
-    post enable_user_path(@alice)
-    assert_equal [ "alice-mbp.test.ztlp" ], published_devices,
-                 "the USER record published on enable must include the reactivated device"
+    get user_path(@alice)
+    assert_select "form[action=?]", revoke_user_path(@alice), 0
+    assert_select ".actions", /Revoked permanently/
   end
 end

@@ -352,12 +352,17 @@ Every slice: `cd /home/trs/ztlp-admin/admin && export HOME=/home/trs`, start
   server-side via `?q=`), table columns: name (display + mono `username`), kind, role, groups
   (chips), devices (count), status badge, last activity. Row → drawer (show): profile fields,
   groups with remove, devices owned (with assurance badge), enrollment codes, actions Edit /
-  Disable / Enable / New enrollment.
+  Revoke user (permanent) / New enrollment.
 - New/edit form: username (label, immutable after create), display name, first/last, email,
   phone, SMS opt-in, role (`user|tech|admin`), kind (`person|service`), notes. On create:
-  `status: invited`, `publish_user!` only when `active` (spec decision 2). Disable → `publish`
-  with devices list unchanged? **No:** disable = REVOKE record for the user ns name + mark
-  devices `revoked` in NS (spec §6.3 revoke). Enable re-publishes.
+  `status: invited`, `publish_user!` only when `active` (spec decision 2).
+  **OPERATOR DECISION 2026-10-22 (supersedes "Disable/Enable"):** there is no reversible disable.
+  The action is a PERMANENT "Revoke user": ONE REVOKE record (`revoke.<user ns>`) whose
+  `revoked_ids` = user ns name + every ENROLLED device ns name (the gateway does not cascade
+  owner→device); confirm dialog says it is permanent; NO Enable (an NS revocation can never be
+  lifted: server.ex step 7, nothing deletes from ztlp_ns_revoked); re-onboard under a NEW
+  username. If the NS write fails NOTHING changes in the DB (security action; exception to the
+  "save + warn" rule). Slice 8 device revoke follows the same fail-closed rule.
 - Tests: controller tests for each action incl. `read_only` admin → 403 on mutations; publisher
   is mocked; audit rows asserted; drawer request (`X-Drawer: 1`) renders without layout.
 - Commit: `feat(admin): users directory`.
@@ -528,6 +533,24 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-22 23:35Z — **Slice 6c REDESIGNED per operator decision** (interactive; replaces the
+  tick's `2c567d89` disable/enable). Review found: the tick's Disable wrote a REVOKE for the user
+  name only, Enable re-published, and Enable re-enrolled EVERY revoked device (would resurrect an
+  individually revoked/stolen device). In the NS a revocation is permanent (registration_auth
+  check_name_revocation; no code deletes from ztlp_ns_revoked) so Enable could never work, and the
+  gateway's owner→device cascade (`is_identity_revoked?`) is never called, so devices stayed valid.
+  Operator chose: permanent **Revoke user** = ONE REVOKE listing the user + every enrolled device;
+  no Enable. Done: `Records.revoke_data(name, reason, also)`, `Publisher.revoke!(…, also:)`, route
+  `post :revoke` (disable/enable routes removed), `UsersController#revoke` (fail-closed: NsError →
+  nothing changes, alert "NOT revoked … Nothing changed.", audit `user.revoke` failed), show view
+  "Revoke user" (btn danger, confirm says permanent + device count; "Revoked permanently" once
+  revoked). Tests: controller 7 new + 2 updated (RED 8 → GREEN), publisher multi-id test, and a
+  **live NS roundtrip**: one REVOKE with revoked_ids [user, device] → both query `:revoked`;
+  re-register the user after 61 s → rejected 0x07 (NS maps both revocation checks to 0x07);
+  authority can still write afterwards. ZTLP_TEST_NS run 6/6 green; `test-ns.sh down` clean.
+  `bash scripts/ci-admin.sh` → 215 runs / 913 assertions / 0 failures / 6 skips. **Slice 6 DONE.**
+  Next: Slice 7. NOTE for Slice 8: device revoke = same fail-closed rule.
 
 - 2026-10-22 22:57Z — **Slice 6c DONE (Users disable/enable lifecycle)** (cron tick). Commit `2c567d89`.
   - Routes: `resources :users` member `post :disable` / `post :enable` → helpers

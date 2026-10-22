@@ -36,8 +36,10 @@ module Ztlp
     # Write a REVOKE record (0x05) for `name` in `zone`. `target` (optional)
     # is the panel row the revocation applies to — used only for the audit
     # row's target. Never republishes the entity.
-    def self.revoke!(zone, name:, reason: nil, target: nil, ns_client: NsClient, admin: nil, **kw)
-      data = Records.revoke_data(name, reason)
+    # `also:` = extra ns names revoked by the SAME record (one write, one rate-limit slot).
+    # A revocation is PERMANENT in the NS: a revoked name can never be re-registered.
+    def self.revoke!(zone, name:, also: [], reason: nil, target: nil, ns_client: NsClient, admin: nil, **kw)
+      data = Records.revoke_data(name, reason, also)
       seed = zone.authority_seed_ct # 64-hex Ed25519 seed (identity.json signing_key_seed)
       audit_target = target || zone
 

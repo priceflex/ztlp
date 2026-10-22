@@ -212,4 +212,36 @@ class NsRoundtripTest < ActiveSupport::TestCase
                                             data: group_data([]), seed: INTRUDER[0])
     end
   end
+
+  # Operator decision 2026-10-22 (Slice 6c): user revoke = ONE REVOKE record listing the user AND
+  # each enrolled device. Prove against the real NS that every listed id is revoked, and that a
+  # revoked name can never be re-registered (why there is no Enable).
+  test "one REVOKE with revoked_ids [user, device] revokes both; re-register refused; authority unaffected" do
+    zn = ensure_zone_authority
+    ns = names(zn, "6")
+    node_id_hex = format("%064x", Random.bytes(32).unpack1("Q>"))[0, 64]
+    noise_pub_hex = format("%064x", Random.bytes(32).unpack1("Q>"))[0, 64]
+    client.register(NS_ADDR, TIMEOUT, name: ns[:user], type: "user",
+                                      data: user_data(ns[:user], [ ns[:device] ]), seed: AUTHORITY[0])
+    client.register(NS_ADDR, TIMEOUT, name: ns[:device], type: "device",
+                                      data: device_data(ns[:user], node_id_hex, noise_pub_hex), seed: AUTHORITY[0])
+    assert_kind_of Hash, client.query(NS_ADDR, TIMEOUT, name: ns[:device], type: "device")
+
+    client.register(NS_ADDR, TIMEOUT, name: "revoke.#{ns[:user]}", type: "revoke",
+                                      data: Ztlp::Records.revoke_data(ns[:user], "user revoked", [ ns[:device] ]),
+                                      seed: AUTHORITY[0])
+
+    assert_equal :revoked, client.query(NS_ADDR, TIMEOUT, name: ns[:user], type: "user")
+    assert_equal :revoked, client.query(NS_ADDR, TIMEOUT, name: ns[:device], type: "device")
+    sleep 61 # past the per-{name,type} rate-limit window, so the rejection is the revocation
+    # Both NS revocation checks (node_id and name) return {:error, :revoked}, which goes out on
+    # the wire as 0x07; the USER data carries no node_id, so this is the NAME revocation.
+    assert_ns_error(0x07) do
+      client.register(NS_ADDR, TIMEOUT, name: ns[:user], type: "user",
+                                        data: user_data(ns[:user], []), seed: AUTHORITY[0])
+    end
+    # ...and revoking a user does NOT touch the zone authority key: it can still write.
+    assert_equal :ok, client.register(NS_ADDR, TIMEOUT, name: "after-revoke.groups.#{zn}", type: "group",
+                                                        data: group_data([]), seed: AUTHORITY[0])
+  end
 end

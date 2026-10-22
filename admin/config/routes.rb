@@ -17,8 +17,7 @@ Rails.application.routes.draw do
 
   resources :users, only: %i[index show new create edit update] do
     member do
-      post :disable
-      post :enable
+      post :revoke
     end
   end
 

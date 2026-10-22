@@ -1,0 +1,27 @@
+# Slice 5b: solid_queue recurring jobs (spec Slice 5).
+#
+#   RepublishNsJob   every 6h  — re-write the zone's NS records (KEY, users,
+#                                groups, devices) so the NS copy stays fresh.
+#   ReconcileNsJob   every 30m — list user/device/group records from the NS
+#                                admin API, store drift counts in
+#                                system_settings `ns_drift_json`.
+#   ExpireEnrollmentsJob every 5m — sweep pending enrollment tokens past
+#                                expires_at to `expired`.
+#
+# The jobs service (`bin/jobs`) runs `solid_queue:start` when the
+# solid_queue_jobs table exists; this file is loaded by solid_queue from
+# `config/solid_queue.yml` (queue config) — the recurring schedule itself is
+# registered here via the `:recurring` key, which solid_queue 1.x reads from
+# `config/recurring.yml` when present.
+---
+default:
+  dispatches:
+    - class: RepublishNsJob
+      schedule: "0 */6 * * *"        # every 6 hours
+      description: "Re-publish the zone's NS records"
+    - class: ReconcileNsJob
+      schedule: "*/30 * * * *"       # every 30 minutes
+      description: "Reconcile panel rows against the NS record list"
+    - class: ExpireEnrollmentsJob
+      schedule: "*/5 * * * *"        # every 5 minutes
+      description: "Expire pending enrollment tokens past expires_at"

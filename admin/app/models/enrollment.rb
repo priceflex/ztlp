@@ -42,4 +42,17 @@ class Enrollment < ApplicationRecord
   def pending? = status == "pending"
   def expired? = status == "expired" || (expires_at.present? && expires_at < Time.current)
   def revocable? = pending?
+
+  # Slice 5b: sweep pending enrollment tokens past expires_at. Flips them to
+  # `expired` (idempotent — pending rows only). Returns the count of rows
+  # flipped. `now:` is the wall clock (default: Time.current).
+  #
+  # NOTE: `where(...).count { update_all }` would run update_all UNSCOPED
+  # (the block ignores the receiver's where-clauses) — the query and the
+  # update must use the SAME relation.
+  def self.expire_due!(now = Time.current)
+    relation = where(status: "pending").where.not(expires_at: nil).where(expires_at: ..now)
+    ids = relation.pluck(:id)
+    where(id: ids).update_all(status: "expired")
+  end
 end

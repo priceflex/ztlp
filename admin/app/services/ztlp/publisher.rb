@@ -58,6 +58,32 @@ module Ztlp
       result
     end
 
+    # Publish the zone's authority KEY record (0x01) — the record the zone's
+    # own authority signs, self-registered (registration_auth.ex:290-298).
+    # The KEY is republished on every republish cycle so a fresh NS copy can
+    # verify records the zone's authority has already written.
+    def self.publish_authority!(zone, ns_client: NsClient, admin: nil, **kw)
+      raise NsClient::NsError.new(0x00, "no_authority") unless zone.authority_configured?
+
+      seed = zone.authority_seed_ct
+      name = zone.name # the zone name IS the KEY record's name
+
+      result = begin
+        call_register(ns_client, zone.ns_addr, name: name, type: "key",
+                      data: Records.authority_data(zone), seed: seed, **kw)
+        :ok
+      rescue NsClient::NsError => e
+        audit(zone, "ns.publish", zone, "failed",
+              { "name" => name, "type" => "key", "result" => format("0x%02X %s", e.code, e.reason) },
+              admin)
+        raise
+      end
+
+      audit(zone, "ns.publish", zone, "ok",
+            { "name" => name, "type" => "key", "result" => "ok" }, admin)
+      result
+    end
+
     # ── internals ──────────────────────────────────────────────────
 
     # Shared happy/failure path for the three publish_*! methods.

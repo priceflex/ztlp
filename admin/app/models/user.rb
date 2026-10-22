@@ -23,6 +23,9 @@ class User < ApplicationRecord
     self.ns_name = "#{username}.users.#{zone&.name}" if username.present? && zone&.name.present?
   end
 
+  def active? = status == "active"
+  def disabled? = status == "disabled"
+
   validates :username, presence: true, length: { maximum: 63 },
                        format: { with: USERNAME, message: "must be a lowercase DNS label" },
                        uniqueness: { scope: :zone_id }

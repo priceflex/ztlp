@@ -1,0 +1,47 @@
+<% # Slice 6b: shared user form (new + edit). Username is a plain field on
+   # create and a locked (readonly) field on edit — the controller drops the
+   # submitted username on update regardless. %>
+<%= form_with model: user, class: "stack" do |f| %>
+  <% if user.errors.any? %>
+    <div class="notice"><span class="err"><%= user.errors.full_messages.to_sentence %></span></div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-b" style="display:grid;gap:16px">
+      <div class="grid2">
+        <div class="field">
+          <%= f.label :username %>
+          <%= f.text_field :username, required: true,
+                            readonly: user.persisted?,
+                            pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
+                            class: "mono" %>
+          <p class="hint"><%= user.persisted? ? "Username cannot be changed after creation." : "Lowercase DNS label; immutable after creation." %></p>
+        </div>
+        <div class="field"><%= f.label :display_name %><%= f.text_field :display_name %></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><%= f.label :first_name %><%= f.text_field :first_name %></div>
+        <div class="field"><%= f.label :last_name %><%= f.text_field :last_name %></div>
+      </div>
+      <div class="field"><%= f.label :email %><%= f.email_field :email %></div>
+      <div class="grid2">
+        <div class="field">
+          <%= f.label :phone %><%= f.telephone_field :phone %>
+          <label class="check"><%= check_box_tag "user[sms_opt_in]", "1", user.sms_opt_in %> SMS opt-in</label>
+        </div>
+        <div class="field">
+          <%= f.label :role %>
+          <%= f.select :role, User::ROLES.map { |r| [r.humanize, r] } %>
+        </div>
+      </div>
+      <div class="field">
+        <%= f.label :kind %>
+        <%= f.select :kind, User::KINDS.map { |k| [k.humanize, k] } %>
+      </div>
+      <div class="field"><%= f.label :notes %><%= f.text_area :notes, rows: 3 %></div>
+      <div class="actions">
+        <%= f.submit user.persisted? ? "Save" : "Create user", class: "btn primary" %>
+        <%= link_to "Cancel", user.persisted? ? user_path(user) : users_path, class: "btn" %>
+      </div>
+    </div>
+  </div>
+<% end %>

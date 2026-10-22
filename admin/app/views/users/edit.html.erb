@@ -1,0 +1,5 @@
+<% content_for :title, "Edit #{ @user.display_name } - ZTLP Directory" %>
+<div class="page-head"><div class="who"><span class="avatar lg"><%= initials(@user.display_name) %></span>
+  <div><h1>Edit <%= @user.display_name %></h1>
+  <p class="lede mono"><%= @user.ns_name %></p></div></div></div>
+<%= render "form", user: @user %>

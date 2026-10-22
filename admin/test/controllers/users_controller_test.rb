@@ -178,4 +178,156 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_response :redirect
     assert response.location.include?("/login")
   end
+
+  test "index shows a New user button for a write-capable admin" do
+    get users_path
+    assert_select "a.btn[href=?]", new_user_path
+  end
+
+  test "index hides the New user button from a read_only admin" do
+    ro, ro_seed = make_admin(role: "read_only", username: "readonly3")
+    delete logout_path
+    sign_in_as(ro, ro_seed)
+    get users_path
+    assert_response :success
+    assert_select "a[href=?]", new_user_path, count: 0
+  end
+
+  # -------------------------------------------------------- slice 6b: create
+  #
+  # Spec decision 2 (§14): publish a USER record on `active` only. A newly
+  # created user is `invited`, so create never publishes. `Ztlp::Publisher`
+  # is stubbed on every create/edit test so the controller cannot reach the
+  # NS; the assertion that it was (or was not) called is the contract.
+
+  test "new renders a form with the user fields" do
+    get new_user_path
+    assert_response :success
+    assert_select "form[action=?]", "/users"
+    assert_select "input[name=?]", "user[username]"
+    assert_select "input[name=?]", "user[display_name]"
+    assert_select "input[name=?]", "user[email]"
+    assert_select "select[name=?]", "user[role]"
+    assert_select "select[name=?]", "user[kind]"
+    assert_select "textarea[name=?]", "user[notes]"
+  end
+
+  test "create builds an invited user with normalized username and no publish" do
+    # invited => no publish (spec decision 2)
+    Ztlp::Publisher.expects(:publish_user!).never
+    post users_path, params: { user: { username: "Dave", display_name: "Dave Dee",
+                                       first_name: "Dave", last_name: "Dee",
+                                       email: "dave@example.com", role: "tech",
+                                       kind: "person", notes: "new hire" } }
+    dave = @zone.users.find_by(username: "dave")
+    assert dave, "user should be created"
+    assert_equal "invited", dave.status
+    assert_equal "dave.users.test.ztlp", dave.ns_name
+    assert_equal "tech", dave.role
+    assert_equal "new hire", dave.notes
+    assert_equal "dave@example.com", dave.email
+    follow_redirect!
+    assert_response :success
+    # audit row recorded
+    assert AuditLog.where(action: "user.create", status: "ok").any?
+  end
+
+  test "create always yields an invited user, even if an active status is submitted" do
+    # Spec: a new user is always invited; `status` is not a form field. So
+    # create never publishes even when the form claims `active`.
+    Ztlp::Publisher.expects(:publish_user!).never
+    post users_path, params: { user: { username: "evan", display_name: "Evan",
+                                       role: "user", kind: "person", status: "active" } }
+    evan = @zone.users.find_by(username: "evan")
+    assert evan
+    assert_equal "invited", evan.status
+    follow_redirect!
+    assert_response :success
+  end
+
+  test "create rejects an invalid username and re-renders the form with errors" do
+    Ztlp::Publisher.expects(:publish_user!).never
+    post users_path, params: { user: { username: "UPPER_bad", role: "user", kind: "person" } }
+    assert_response :unprocessable_content
+    assert_equal 0, @zone.users.where(username: "upper_bad").count
+    assert_includes response.body, "lowercase DNS label"
+  end
+
+  test "create rejects a duplicate username in the zone" do
+    Ztlp::Publisher.expects(:publish_user!).never
+    post users_path, params: { user: { username: "alice", role: "user", kind: "person" } }
+    assert_response :unprocessable_content
+    # one alice already exists; not two
+    assert_equal 1, @zone.users.where(username: "alice").count
+    assert_includes response.body, "taken"
+  end
+
+  test "read_only admin gets 403 on create and new" do
+    ro, ro_seed = make_admin(role: "read_only", username: "readonly")
+    delete logout_path
+    sign_in_as(ro, ro_seed)
+    get new_user_path
+    assert_response :forbidden
+    post users_path, params: { user: { username: "frank", role: "user", kind: "person" } }
+    assert_response :forbidden
+    assert_nil @zone.users.find_by(username: "frank")
+  end
+
+  # --------------------------------------------------------- slice 6b: edit
+
+  test "edit renders the existing user's fields and a locked username" do
+    get edit_user_path(@alice)
+    assert_response :success
+    body = response.body
+    assert_select "form[action=?]", "/users/#{@alice.id}"
+    assert_select "input[name=?][value=?]", "user[username]", "alice"
+    assert_select "input[name=?][readonly]", "user[username]", true,
+                  "username is immutable after create"
+    assert_select "input[name=?][value=?]", "user[email]", "alice@example.com"
+  end
+
+  test "update persists changed fields and ignores the submitted username" do
+    # alice is active => republish on save
+    @zone.authority_seed_ct = Ztlp::Ed25519.generate.first
+    Ztlp::Publisher.expects(:publish_user!).times(1).returns(:ok)
+    patch user_path(@alice), params: { user: { username: "EVE", display_name: "Alice A.",
+                                               email: "alice2@example.com", role: "admin",
+                                               notes: "promoted" } }
+    @alice.reload
+    assert_equal "alice", @alice.username, "username must not change"
+    assert_equal "Alice A.", @alice.display_name
+    assert_equal "alice2@example.com", @alice.email
+    assert_equal "admin", @alice.role
+    assert_equal "promoted", @alice.notes
+    follow_redirect!
+    assert_response :success
+    assert AuditLog.where(action: "user.update", status: "ok").any?
+  end
+
+  test "update of a non-active user does not publish" do
+    # bob is invited
+    Ztlp::Publisher.expects(:publish_user!).never
+    patch user_path(@bob), params: { user: { display_name: "Bob B.", role: "tech" } }
+    @bob.reload
+    assert_equal "Bob B.", @bob.display_name
+  end
+
+  test "update validates and re-renders on a bad role" do
+    Ztlp::Publisher.expects(:publish_user!).never
+    patch user_path(@bob), params: { user: { role: "wizard" } }
+    assert_response :unprocessable_content
+    assert_includes response.body, "role"
+    assert_equal "tech", @bob.reload.role
+  end
+
+  test "read_only admin gets 403 on edit and update" do
+    ro, ro_seed = make_admin(role: "read_only", username: "readonly2")
+    delete logout_path
+    sign_in_as(ro, ro_seed)
+    get edit_user_path(@alice)
+    assert_response :forbidden
+    patch user_path(@alice), params: { user: { display_name: "X" } }
+    assert_response :forbidden
+    assert_equal "Alice Anderson", @alice.reload.display_name
+  end
 end

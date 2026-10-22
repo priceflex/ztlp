@@ -489,6 +489,7 @@ All true, each verified by a command or a real click and recorded in STATUS with
 - [ ] `SKIP_CLAIM_BOOT=1 bin/rails test` green; `rubocop` clean; `brakeman -q` clean;
       `node --check` + `node test/javascript/*.mjs` green; `ZTLP_TEST_NS` integration test green
       against `ztlp-ns:v0.35.20` at least once (output pasted into STATUS, secrets redacted).
+      (ZTLP_TEST_NS part: DONE 2026-10-22 15:40Z, 5/5 green; rest re-checked at the end.)
 - [ ] `grep -rn "cdnjs\|googleapis\|unpkg\|jsdelivr\|<script src=\"http" admin/app` → nothing.
       `Gemfile` has no tailwind/importmap/turbo/stimulus.
 - [ ] Fresh `docker compose -p admintest up -d` → claim → Overview with setup checklist → create
@@ -527,6 +528,17 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-22 15:40Z — **Slice 4c-ii independently verified** (interactive). Fresh run:
+  `bash scripts/test-ns.sh up` → `set -a; . <scratch>/test_ns.env; set +a` →
+  `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test test/integration/ns_roundtrip_test.rb` →
+  **5 runs, 17 assertions, 0 failures, 0 errors, 0 skips** against `ztlp-ns:v0.35.20`
+  (NS log: 7× `registration_accepted`, 1× `registration_rejected` = the non-authority GROUP).
+  `test-ns.sh down` → container gone, env file removed. Confirmed in NS source: config.ex:389
+  decodes a 64-hex admin secret to 32 raw bytes (the tick's HMAC-key fix is right). NOTE: the
+  env file must be SOURCED (`set -a; .`); without it the list test fails with "admin API
+  secret missing". This satisfies the "`ZTLP_TEST_NS` integration test green" part of §5 box 1
+  (secrets not printed). **Slice 4 DONE.** Next: Slice 5 (zone page, authority import, jobs).
 
 - 2026-10-22 15:32Z — **Slice 4c-ii DONE (test-ns.sh + ZTLP_TEST_NS roundtrip)** (cron tick).
   Commit `2468863f`.

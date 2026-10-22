@@ -528,6 +528,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-22 21:20Z — **review of Slice 6a** (`a12db005`). Views escape all output (no raw/html_safe,
+  no inline script/handlers); drawer fragment via X-Drawer; filters whitelisted. One fix:
+  `apply_search` resolved email by loading + decrypting EVERY zone user in Ruby (comment claimed an
+  exact ciphertext lookup). Now `@zone.users.where(email: [q, q.downcase].uniq)`; verified the SQL is
+  `WHERE users.email = '{"p":...ciphertext...}'` (deterministic encryption, no plaintext). Users
+  tests 14/14; `bash scripts/ci-admin.sh` → all gates passed.
+  Ops note: this tick ran ~3h40m because the session fell back to `trs-deep` (fallback provider)
+  when `trs-balanced` failed at 10:28 PDT; trs-balanced healthy again by 12:5x.
+  Next: Slice 6b (create/edit/disable/enable + publish; Edit/Disable links 404 until then).
 - 2026-10-22 21:05Z — **Slice 6a DONE (Users index + show/drawer, read side)** (cron tick). Commit `a12db005`.
   - `app/controllers/users_controller.rb`: `index` — segmented status filter
     (`?status=all|active|invited|disabled|revoked`, unknown value falls back to all),

@@ -42,7 +42,9 @@ class UsersController < ApplicationController
       " OR LOWER(first_name) LIKE :like OR LOWER(last_name) LIKE :like",
       like: like
     )
-    email_owner_ids = @zone.users.select { |u| u.email.to_s.downcase == q.downcase }.map(&:id)
+    # email is `encrypts deterministic: true`, so AR turns where(email:) into an exact
+    # ciphertext match in SQL (no plaintext, no per-row decrypt). Try as typed + lowercased.
+    email_owner_ids = @zone.users.where(email: [ q, q.downcase ].uniq).pluck(:id)
     cond = cond.or(@zone.users.where(id: email_owner_ids)) if email_owner_ids.any?
     cond
   end

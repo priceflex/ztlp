@@ -529,6 +529,21 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 16:55Z — **fix after Slice 5b** (interactive review of `822933a1`).
+  `config/recurring.yml` used a `default: dispatches: [- class:, schedule:]` layout that
+  solid_queue 1.7.0 silently ignores: `SolidQueue::Configuration.new.send(:recurring_tasks)`
+  returned `[]` in production and development, so RepublishNsJob / ReconcileNsJob /
+  ExpireEnrollmentsJob would NEVER run. The job tests only called the classes directly.
+  Rewritten to solid_queue's format (`<env>: <key>: {class:, schedule:}`, `default` anchor merged
+  into production + development; `every 6 hours / 30 minutes / 5 minutes`). New
+  `test/config/recurring_schedule_test.rb` loads the file through `SolidQueue::Configuration#config_from`
+  for both envs and asserts the 3 class→schedule pairs, Fugit-parseable schedules and job classes
+  (RED: production read as {} → GREEN). After the fix, `recurring_tasks` in dev builds the task
+  objects (it now reaches the solid_queue_recurring_tasks table instead of returning []).
+  `bash scripts/ci-admin.sh` → 161 runs / 604 assertions / 0 failures / 5 skips, all gates passed.
+  **Slice 12 smoke must confirm the jobs container logs the scheduler with 3 recurring tasks.**
+  Next: Slice 5c (/zone page).
+
 - 2026-10-22 16:45Z — **Slice 5b DONE (RepublishNsJob, ReconcileNsJob, ExpireEnrollmentsJob + recurring.yml)** (cron tick).
   Commit `822933a1`.
   - `app/jobs/{republish_ns_job,reconcile_ns_job,expire_enrollments_job}.rb`:

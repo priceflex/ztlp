@@ -529,6 +529,22 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 16:15Z — **fix after Slice 5a** (interactive review of `02a37163`).
+  (1) **Relay secret (spec F20)**: `zone:set_secret` required 64 hex for every secret, so it
+  would REFUSE the real relay secret and ACCEPT a hex one that never verifies (relay hex-decodes,
+  Rust gateway uses ASCII). Now per-secret: enrollment/ns_admin_api `/\A\h{64}\z/`; relay =
+  48 alphanumerics and not pure hex. (2) **Authority overwrite guard**: re-importing a DIFFERENT
+  seed silently replaced the zone key (orphans every record it signed) → refused unless
+  `FORCE=1`; same seed = no-op; audit carries `replaced_pubkey_hex`. (3) **`zone:export_authority`**
+  (in §5 and spec §452, missing): prints the seed only with `CONFIRM=1`; audit
+  `zone.authority_exported` carries the pubkey, never the seed. (4) Tasks now `=> :environment`
+  (was a manual `Rails.application.initialize!`) and fail with `abort` messages.
+  Tests (`test/commands/zone_tasks_test.rb`, Open3 with env + stdin): RED 4 failures → GREEN
+  8 runs / 59 assertions. `bash scripts/ci-admin.sh` → 142 runs / 544 assertions / 0 failures /
+  5 skips (= ZTLP_TEST_NS-gated roundtrip), all gates passed.
+  Next: Slice 5b (jobs: RepublishNsJob, ReconcileNsJob, ExpireEnrollmentsJob + recurring.yml),
+  then 5c (/zone page).
+
 - 2026-10-22 16:05Z — **Slice 5a DONE (zone rake tasks: authority import + set_secret)** (cron tick).
   Commit `02a37163`.
   - `lib/tasks/zone.rake`: `zone:import_authority[path]` (reads identity.json as JSON, validates

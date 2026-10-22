@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "json"
+require "open3"
 
 # Slice 5a: zone rake tasks — authority import (identity.json) and
 # secret setters (value from stdin, never argv).
@@ -20,22 +21,26 @@ class ZoneTasksTest < ActiveSupport::TestCase
   # collisions.
   teardown do
     Zone.where(name: %w[test.ztlp bad.ztlp empty.ztlp short.ztlp]).delete_all
-    AuditLog.where(action: %w[zone.authority_imported zone.enrollment_secret_set zone.relay_secret_set zone.ns_admin_api_secret_set]).delete_all
+    AuditLog.where(action: %w[zone.authority_imported zone.authority_exported zone.enrollment_secret_set
+                              zone.relay_secret_set zone.ns_admin_api_secret_set]).delete_all
   end
 
-  def run_rake(verb, *args, stdin: nil)
-    # Run the task against the TEST database so the test can assert on the
-    # same rows it creates. RAILS_ENV=test is inherited from the test process.
-    cmd = "RAILS_ENV=test bin/rake zone:#{verb}"
+  # Returns [ok, stdout]. Runs against the TEST database (RAILS_ENV=test).
+  def run_rake_out(verb, *args, stdin: nil, env: {})
+    cmd = "bin/rake zone:#{verb}"
     cmd += "[#{args.join(",")}]" unless args.empty?
-    return system(cmd, out: File::NULL, err: File::NULL) if stdin.nil?
+    out, _err, st = Open3.capture3({ "RAILS_ENV" => "test" }.merge(env), cmd, stdin_data: stdin.to_s)
+    [ st.success?, out ]
+  end
 
-    # Ruby 3.2 `system(StringIO, cmd)` raises TypeError; feed stdin from a temp file.
-    f = File.join(Dir.tmpdir, "stdin_#{rand(1 << 32)}.txt")
-    File.write(f, stdin)
-    system("cat #{Shellwords.shellescape(f)} | #{cmd}", out: File::NULL, err: File::NULL)
-  ensure
-    File.delete(f) if f
+  def run_rake(verb, *args, stdin: nil, env: {})
+    run_rake_out(verb, *args, stdin: stdin, env: env).first
+  end
+
+  def identity_file(seed)
+    path = File.join(Dir.tmpdir, "identity_#{rand(1 << 32)}.json")
+    File.write(path, { "node_id" => "n", "signing_key_seed" => seed }.to_json)
+    path
   end
 
   def import_authority_task
@@ -83,9 +88,15 @@ class ZoneTasksTest < ActiveSupport::TestCase
     File.delete(path)
   end
 
+  VALID_SECRET = {
+    "enrollment" => "a" * 64,
+    "ns_admin_api" => "b" * 64,
+    "relay" => "Zq7" * 16 # 48 alphanumerics, NOT hex (spec F20)
+  }.freeze
+
   def secret_task(verb, zone_name: "test.ztlp")
     with_zone(name: zone_name)
-    run_rake("set_secret", verb, stdin: "#{"a" * 64}\n")
+    assert run_rake("set_secret", verb, stdin: "#{VALID_SECRET.fetch(verb)}\n"), "set_secret[#{verb}] must exit 0"
     with_zone(name: zone_name).reload
   end
 
@@ -98,7 +109,8 @@ class ZoneTasksTest < ActiveSupport::TestCase
       raw = ActiveRecord::Base.connection.select_value(
         "SELECT #{col} FROM zones WHERE name = #{ActiveRecord::Base.connection.quote(zone.name)}"
       )
-      refute_includes raw.to_s, "a" * 64, "#{col} must not be stored in plaintext"
+      assert_equal VALID_SECRET[verb], zone.public_send(col)
+      refute_includes raw.to_s, VALID_SECRET[verb], "#{col} must not be stored in plaintext"
       assert AuditLog.where(action: "zone.#{verb}_secret_set", target_id: zone.id).any?
     end
   end
@@ -112,12 +124,54 @@ class ZoneTasksTest < ActiveSupport::TestCase
     refute AuditLog.where(action: "zone.enrollment_secret_set").any?
   end
 
-  test "set_secret with a non-64-hex value fails and stores nothing" do
+  test "set_secret[enrollment] with a non-64-hex value fails and stores nothing" do
     zone = with_zone(name: "short.ztlp")
-    ok = run_rake("set_secret", "relay", stdin: "tooshort\n")
-    refute ok, "a non-64-hex secret must exit nonzero"
-    zone.reload
-    assert_nil zone.relay_secret_ct
-    refute AuditLog.where(action: "zone.relay_secret_set", target_id: zone.id).any?
+    refute run_rake("set_secret", "enrollment", stdin: "tooshort\n")
+    assert_nil zone.reload.enrollment_secret_ct
+    refute AuditLog.where(action: "zone.enrollment_secret_set", target_id: zone.id).any?
+  end
+
+  test "set_secret[relay] rejects a hex secret (spec F20: relay hex-decodes, Rust gateway does not)" do
+    zone = with_zone(name: "short.ztlp")
+    refute run_rake("set_secret", "relay", stdin: "#{"c" * 64}\n"), "a 64-hex relay secret must be refused"
+    refute run_rake("set_secret", "relay", stdin: "#{"c" * 48}\n"), "48 hex chars is still hex"
+    refute run_rake("set_secret", "relay", stdin: "short1\n")
+    assert_nil zone.reload.relay_secret_ct
+  end
+
+  test "import_authority refuses to replace a different seed unless FORCE=1; same seed is a no-op" do
+    zone = with_zone
+    seed1, = Ztlp::Ed25519.generate
+    seed2, pub2 = Ztlp::Ed25519.generate
+    p1 = identity_file(seed1)
+    p2 = identity_file(seed2)
+    assert run_rake("import_authority", p1)
+    assert run_rake("import_authority", p1), "re-importing the same seed is fine"
+    refute run_rake("import_authority", p2), "a different seed must be refused without FORCE=1"
+    assert_equal seed1, zone.reload.authority_seed_ct
+    assert run_rake("import_authority", p2, env: { "FORCE" => "1" })
+    assert_equal seed2, zone.reload.authority_seed_ct
+    assert_equal pub2, zone.authority_pubkey_hex
+  ensure
+    [ p1, p2 ].compact.each { |f| File.delete(f) if File.exist?(f) }
+  end
+
+  test "export_authority prints the seed only with CONFIRM=1, and audits the pubkey not the seed" do
+    zone = with_zone
+    seed, pub = Ztlp::Ed25519.generate
+    path = identity_file(seed)
+    assert run_rake("import_authority", path)
+    ok, out = run_rake_out("export_authority")
+    refute ok
+    refute_includes out, seed
+    ok, out = run_rake_out("export_authority", env: { "CONFIRM" => "1" })
+    assert ok
+    assert_includes out, seed
+    row = AuditLog.where(action: "zone.authority_exported", target_id: zone.id).last
+    assert row
+    assert_includes row.details.to_s, pub
+    refute_includes row.details.to_s, seed
+  ensure
+    File.delete(path) if path && File.exist?(path)
   end
 end

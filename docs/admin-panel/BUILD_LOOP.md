@@ -528,6 +528,32 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 15:05Z — **Slice 4b DONE (NsClient)** (interactive; cron was PAUSED 01:46→now
+  because ticks 8 and 9 ran out of budget on this slice and left runaway test processes,
+  ~4-5 GB each, that I killed). Tick 9 had committed `cd840995` (decoder major-type match,
+  header_size, send_one `retry` infinite loop) — reviewed, correct; its comment claiming
+  `pack("CN")` drops the length was false (removed). Tick 8's "Ruby `&` is broken" theory was
+  wrong (`161 & 0x1f == 1` is correct). Bugs fixed now in `ns_client.rb`, each pinned:
+  (1) **register sent a garbage pubkey**: `raw_pubkey` returns raw bytes, which were then
+  `pack("H*")`'d as hex → every signed write would fail NS signature verification.
+  (2) `recvfrom` without `maxlen` (real UDPSocket raises) → `recvfrom(65_535)`.
+  (3) real socket timeouts raise `IO::TimeoutError` (an IOError, not SystemCallError) and
+  escaped the retry → rescued. (4) `parse_record` read the 0x02 byte as the type, used `a*`
+  (swallows the buffer), 16-bit data_len and native-endian Q/I → rewritten to
+  `<<0x02, Record.encode>>` per record.ex:196 / server.ex:185 (big-endian, data_len::32,
+  sig/pub tail ignored); truncated replies → NsError 0x0A.
+  `test/services/ztlp/ns_client_test.rb` rewritten with a plain FakeSocket (recvfrom requires
+  maxlen) + FakeHttp: 12 tests (exact v2 framing + Ed25519.verify of the canonical form,
+  0xFF codes, retry exactly once, refused no-retry, 600-byte query pad, 0x02 parse, 0x03/0x04,
+  truncated, /admin/records HMAC, 401). RED (recvfrom arity, pubkey bytes) → GREEN.
+  `bash scripts/ci-admin.sh` → 119 runs / 427 assertions / 0 failures, all gates passed.
+  **Next: Slice 4c** = `Ztlp::Publisher` (+ audit `ns.publish` {name,type,result}, never data)
+  and `scripts/test-ns.sh up|down` (`ztlp-ns:v0.35.20` on 127.0.0.1:23196/udp + 9203,
+  throwaway secrets generated at runtime, never printed) + `test/integration/ns_roundtrip_test.rb`
+  gated on `ZTLP_TEST_NS`. Split: 4c-i Publisher (mocked NsClient), 4c-ii test-ns.sh + roundtrip.
+  The roundtrip is the real check of the wire format above; the unit fixtures were built from
+  the Elixir source, not from a live NS.
+
 - 2026-10-22 07:15Z — **fix after Slice 4a** (interactive review). (1) `Records.device_data`
   wrote `Assurance.label` into the DEVICE record, so a level-4 device would publish
   `assurance: "hardware (unverified)"`, a display string the gateway does not know. Added

@@ -35,8 +35,6 @@ module Ztlp
       elsif n <= 0xFFFF
         [ major | 25, n ].pack("Cn")
       else
-        # NOTE: Ruby `pack("CN")` packs only the 1-byte header — the
-        # 4-byte length would be dropped (no implicit C+N alignment).
         [ major | 26 ].pack("C*") + [ n ].pack("N")
       end
     end
@@ -169,6 +167,5 @@ module Ztlp
       end
     end
     private_class_method :read_info
-
   end
 end

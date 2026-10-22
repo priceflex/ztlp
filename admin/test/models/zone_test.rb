@@ -35,4 +35,13 @@ class ZonePrimaryTest < ActiveSupport::TestCase
     assert_raises(KeyError) { Zone.primary }
     assert_equal 0, Zone.count
   end
+
+  test "authority_seed_ct must be the 64-hex seed" do
+    ENV["ZTLP_ZONE"] = "acme.ztlp"
+    z = Zone.primary
+    z.authority_seed_ct = [ "x" * 32 ].pack("m")
+    assert_not z.valid?
+    z.authority_seed_ct = "ab" * 32
+    assert z.valid?
+  end
 end

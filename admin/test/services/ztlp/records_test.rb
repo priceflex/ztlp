@@ -123,8 +123,8 @@ class ZtlpRecordsTest < ActiveSupport::TestCase
   end
 
   test "authority_data for a zone" do
-    seed_bytes = OpenSSL::Random.random_bytes(32)
-    zone.authority_seed_ct = [ seed_bytes ].pack("m")
+    seed_hex, pub_hex = Ztlp::Ed25519.generate
+    zone.authority_seed_ct = seed_hex
     zone.save!
 
     data = Ztlp::Records.authority_data(zone)
@@ -134,7 +134,7 @@ class ZtlpRecordsTest < ActiveSupport::TestCase
     assert_equal "Ed25519", data["algorithm"]
     # public_key is the authority pubkey (32 bytes hex); no "zone" key —
     # the zone name IS the record name, not part of the data payload.
-    assert_equal 64, data["public_key"].length
+    assert_equal pub_hex, data["public_key"]
     refute data.key?("zone")
   end
 

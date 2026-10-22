@@ -59,7 +59,7 @@ module Ztlp
       raise Error, "zone has no authority seed" unless zone.authority_configured?
 
       pubkey = OpenSSL::PKey.new_raw_private_key(
-        "ED25519", zone.authority_seed_ct.unpack1("m")
+        "ED25519", [ zone.authority_seed_ct ].pack("H*")
       ).raw_public_key.unpack1("H*")
 
       {

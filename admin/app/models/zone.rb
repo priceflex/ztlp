@@ -12,6 +12,8 @@ class Zone < ApplicationRecord
 
   validates :name, presence: true, uniqueness: true
   validates :ns_addr, presence: true
+  # 64-hex Ed25519 seed, exactly identity.json's signing_key_seed.
+  validates :authority_seed_ct, format: { with: /\A\h{64}\z/ }, allow_nil: true
 
   # First use creates the zone from the deployment env (docker-compose.yml sets both).
   # No ZTLP_ZONE = misconfigured deployment: raise rather than invent a zone name.

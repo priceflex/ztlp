@@ -32,8 +32,10 @@ class PublisherTest < ActiveSupport::TestCase
   end
 
   def setup
-    @zone = Zone.create!(name: "test.ztlp", ns_addr: "127.0.0.1:23096",
-                         authority_seed_ct: Ztlp::Ed25519.generate[0].unpack1("m"))
+    # authority_seed_ct holds the 64-hex Ed25519 seed exactly as identity.json's
+    # signing_key_seed (the form NsClient.register(seed:) and Ed25519.sign take).
+    @seed_hex, @authority_pub = Ztlp::Ed25519.generate
+    @zone = Zone.create!(name: "test.ztlp", ns_addr: "127.0.0.1:23096", authority_seed_ct: @seed_hex)
     @user = @zone.users.create!(username: "alice", ns_name: "alice.users.test.ztlp",
                                 role: "user", status: "active",
                                 signing_pubkey_hex: "00" * 32)
@@ -77,7 +79,8 @@ class PublisherTest < ActiveSupport::TestCase
     assert_equal "alice.users.test.ztlp", call[:name]
     assert_equal "user", call[:type]
     assert_equal Ztlp::Records.user_data(@user), call[:data]
-    assert_equal @zone.authority_seed_ct.unpack1("m"), call[:seed]
+    assert_equal @seed_hex, call[:seed]
+    assert_match(/\A\h{64}\z/, call[:seed])
     assert_not_nil @user.reload.ns_published_at
     row = audit_for(@user).last
     assert_equal "ok", row.status
@@ -140,7 +143,9 @@ class PublisherTest < ActiveSupport::TestCase
     assert_equal :ok, result
     call = @fake.calls.pop
     assert_equal "revoke", call[:type]
-    assert_equal "revocation", call[:name]
+    # REVOKE records live at "revoke.<name>" (ztlp-cli.rs:11293 admin revoke).
+    assert_equal "revoke.alice-mbp.test.ztlp", call[:name]
+    assert_match(/\A\h{64}\z/, call[:seed])
     assert_equal({ "revoked_ids" => [ "alice-mbp.test.ztlp" ], "reason" => "stolen",
                    "effective_at" => "now" }, call[:data])
     assert_nil @device.reload.ns_published_at

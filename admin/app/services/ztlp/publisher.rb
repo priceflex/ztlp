@@ -38,11 +38,12 @@ module Ztlp
     # row's target. Never republishes the entity.
     def self.revoke!(zone, name:, reason: nil, target: nil, ns_client: NsClient, admin: nil, **kw)
       data = Records.revoke_data(name, reason)
-      seed = zone.authority_seed_ct.unpack1("m")
+      seed = zone.authority_seed_ct # 64-hex Ed25519 seed (identity.json signing_key_seed)
       audit_target = target || zone
 
       result = begin
-        call_register(ns_client, zone.ns_addr, name: "revocation", type: "revoke",
+        # REVOKE records live at "revoke.<name>" (ztlp-cli.rs:11293 `admin revoke`).
+        call_register(ns_client, zone.ns_addr, name: "revoke.#{name}", type: "revoke",
                       data: data, seed: seed, **kw)
         :ok
       rescue NsClient::NsError => e
@@ -65,7 +66,7 @@ module Ztlp
       raise NsClient::NsError.new(0x00, "no_authority") unless zone.authority_configured?
 
       name = entity.ns_name
-      seed = zone.authority_seed_ct.unpack1("m")
+      seed = zone.authority_seed_ct
 
       result = begin
         call_register(ns_client, zone.ns_addr, name: name, type: type, data: data,

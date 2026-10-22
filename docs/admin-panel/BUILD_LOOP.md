@@ -527,6 +527,20 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-22 15:10Z — **fix after Slice 4c-i** (interactive review). (1) **Seed format.**
+  Publisher and `Records.authority_data` did `authority_seed_ct.unpack1("m")` (base64 → raw
+  bytes) and handed that to `NsClient.register(seed:)` / Ed25519, which take the 64-hex seed.
+  The test hid it: its zone seed was `generate[0].unpack1("m")` (base64-decoding a hex string)
+  and it asserted that same garbage reached the mock. **Decided: `zones.authority_seed_ct` holds
+  the 64-hex seed exactly as identity.json `signing_key_seed`** (Slice 5 import stores it
+  as-is); `Zone` validates `/\A\h{64}\z/`. (2) **REVOKE record name** was the literal
+  `"revocation"`; the CLI's `admin revoke` writes `revoke.<name>` (ztlp-cli.rs:11293, data
+  shape matches `Records.revoke_data`) → now `revoke.#{name}`. Tests: publisher asserts the hex
+  seed + `revoke.<name>`; records asserts authority pubkey == generated pubkey; zone_test pins the
+  seed format (RED verified without the validation). `bash scripts/ci-admin.sh` → 127 runs /
+  481 assertions / 0 failures, all gates passed.
+  Next: Slice 4c-ii (scripts/test-ns.sh + ZTLP_TEST_NS roundtrip; the first real wire check).
 - 2026-10-22 15:02Z — **Slice 4c-i DONE (Publisher)** (cron tick). Commit `912c24ea`.
   `app/services/ztlp/publisher.rb`: `publish_user!/publish_group!/publish_device!` (shared
   `publish!` path) + `revoke!` (REVOKE record, name "revocation", never republishes). Each:

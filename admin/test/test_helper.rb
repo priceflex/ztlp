@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 ENV["RAILS_ENV"] ||= "test"
+ENV["ZTLP_ZONE"] ||= "test.ztlp" # Zone.primary creates the zone from this (see zone_test.rb)
 require_relative "../config/environment"
 require "rails/test_help"
 require "mocha/minitest"

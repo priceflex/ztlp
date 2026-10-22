@@ -528,6 +528,20 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 06:45Z — **fix after Slice 3** (interactive review). `Zone.primary` (called by
+  `load_zone` on every page) created a missing zone as hard-coded `trs.ztlp` /
+  `0.0.0.0:23095`, ignoring `ZTLP_ZONE`/`ZTLP_NS_ADDR` that docker-compose.yml and the layout
+  already use. Now `create!(name: ENV.fetch("ZTLP_ZONE"), ns_addr: ENV.fetch("ZTLP_NS_ADDR",
+  "127.0.0.1:23096"))`; no ZTLP_ZONE → KeyError, nothing created. `test/models/zone_test.rb`
+  (3 tests; RED 2 failures first). `test_helper.rb` sets `ZTLP_ZONE ||= "test.ztlp"`.
+  `bash scripts/ci-admin.sh` → 83 runs / 309 assertions / 0 failures, `== all gates passed`.
+  Review notes on Slice 3, no action: the "probe_test.rb from an interactive session" in the
+  Slice 3 entry was created by that cron tick, not by the interactive session.
+  **Slice 12 pre-deploy check (needs operator OK for the SSH read):** confirm the prod
+  `~/ztlp-admin-site/.env` sets `ZTLP_ZONE=trs.ztlp` and `ZTLP_NS_ADDR`, and whether a `zones`
+  row already exists there; compose defaults to `example.ztlp` if unset.
+  Next: Slice 4.
+
 - 2026-10-22 06:35Z — **Slice 3 DONE** (cron tick 6). Commit `3e5ce1da`.
   - Migration `20261021000001_create_directory_tables.rb` per §2.2: users, groups,
     group_memberships, devices, enrollments, gateways, applications, policy_rules +

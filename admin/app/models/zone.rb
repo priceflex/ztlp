@@ -13,8 +13,11 @@ class Zone < ApplicationRecord
   validates :name, presence: true, uniqueness: true
   validates :ns_addr, presence: true
 
+  # First use creates the zone from the deployment env (docker-compose.yml sets both).
+  # No ZTLP_ZONE = misconfigured deployment: raise rather than invent a zone name.
   def self.primary
-    order(:id).first || create!(name: "trs.ztlp", ns_addr: "0.0.0.0:23095")
+    order(:id).first ||
+      create!(name: ENV.fetch("ZTLP_ZONE"), ns_addr: ENV.fetch("ZTLP_NS_ADDR", "127.0.0.1:23096"))
   end
 
   def authority_configured? = authority_seed_ct.present?

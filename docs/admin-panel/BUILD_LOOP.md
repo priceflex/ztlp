@@ -528,6 +528,49 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 06:35Z — **Slice 3 DONE** (cron tick 6). Commit `3e5ce1da`.
+  - Migration `20261021000001_create_directory_tables.rb` per §2.2: users, groups,
+    group_memberships, devices, enrollments, gateways, applications, policy_rules +
+    `admins.user_id` index. All tables utf8mb4_unicode_ci, short index names.
+  - Models + validations: `User` (DNS-label username via `Admin::USERNAME`, ns_name
+    computed in before_validation, kind/role/status inclusions, `encrypts :email,
+    deterministic: true` + `encrypts :phone`), `Group`, `GroupMembership` (unique pair),
+    `Device` (key_source ∈ KEY_SOURCES, assurance 1..4, status), `Enrollment` (code
+    auto-gen 8 chars from ABCDEFGHJKLMNPQRSTUVWXYZ23456789 — no I/O/0/1; token_id
+    32-hex=16B, unique), `Gateway`, `Application` (min_assurance 1..4, ztlp_name),
+    `PolicyRule` (`render` → `group:<ns>`|`role:<v>`|`<ns>`|`*`). Zone has_many for all;
+    `Zone.primary` lazily creates the default zone.
+  - `Claim.perform!` now also creates the directory User (kind person, role admin,
+    status active), links `admin.user_id`, and creates groups `admins` (member: that
+    user) + `staff` — same transaction; groups use find_or_create so re-claim after
+    `admin:reset_claim` cannot collide.
+  - Bugs found & fixed during the loop (each pinned by a test): (1) column named
+    `attributes` → `ActiveRecord::DangerousAttributeError` (reserved); renamed
+    `attrs_json`. (2) block-form `before_validation do ... end` silently did not run on
+    new records in this harness — converted all five models to symbol+method form.
+    (3) `belongs_to :subject, polymorphic: true` + `subject_type ∈ {group,role,...}` →
+    AR constantizes the type as an STI class name (`NameError: wrong constant name
+    group`); PolicyRule now resolves the subject manually per type
+    (`SUBJECT_CLASS`, `subject_entity`) — comment in the model says why. (4) test
+    mislabels fixed honestly: alphabet check `[ILO1]`→`[IO01]` (L is not excluded by
+    `[A-Z2-9]`; I/O/0/1 are), ns_name overflow needs a long ZONE name not a long
+    username, encryption assertions must read the RAW column via SQL (the model
+    transparently decrypts).
+  - Evidence: `SKIP_CLAIM_BOOT=1 bin/rails test` → **80 runs, 303 assertions, 0
+    failures, 0 errors, 0 skips** (was 55). claim_test extended (ClaimDirectoryTest:
+    one User, two Groups, membership, admin.user_id). `bash scripts/ci-admin.sh` →
+    `== all gates passed` (rubocop clean; brakeman EOL-only; node --check OK; node
+    --test 19/19). `ruby -c` on every edited .rb OK.
+  - Housekeeping: the test DB had stale probe rows from an interactive session's
+    scratch probe_test (deleted) that broke Zone.primary ordering — cleared via
+    rails runner; no product impact.
+  - PENDING: none inside Slice 3. UNCERTAIN: none.
+  - **Next: Slice 4** — `Ztlp::Cbor` (deterministic encoder, golden vectors in §4),
+    `NsClient` (0x09 signed register, 0x01 query, /admin/records list), `Records`
+    mapping + "user record carries no PII" test, `Publisher`. Keep the NS integration
+    test behind `ZTLP_TEST_NS` + `scripts/test-ns.sh` per §4.
+
+
 - 2026-10-22 05:58Z — **fix after Slice 2b** (interactive review). Global search built results
   with `innerHTML` + escapeHtml: text was escaped, but `href` took the server `url` unchecked, so
   a `javascript:` url would render as a clickable script link, and it broke §2.3 ("search results

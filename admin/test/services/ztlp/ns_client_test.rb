@@ -185,6 +185,35 @@ class NsClientTest < ActiveSupport::TestCase
     assert_equal 0x05, err.code
   end
 
+  # The NS (ns/lib/ztlp_ns/config.ex) loads ZTLP_NS_ADMIN_API_SECRET as:
+  #   32 raw bytes used as-is, OR 64-char hex decoded to 32 bytes.
+  # The HMAC key the NS uses is the DECODED 32 raw bytes, not the 64-hex
+  # string. admin_headers must mirror that or every /admin/records call
+  # against a 64-hex secret returns 401 :bad_signature.
+  test "admin_headers HMACs a 64-hex secret with its decoded 32 raw bytes" do
+    secret_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    assert_equal 64, secret_hex.bytesize
+    secret_raw = [ secret_hex ].pack("H*")
+    ts = 1_761_100_000
+    path = "/admin/records?type=group"
+    canon = "GET\n#{path}\n#{ts}\n#{Digest::SHA256.hexdigest("")}"
+
+    headers = Ztlp::NsClient.admin_headers(secret_hex, ts, path)
+    # Keyed on the DECODED raw bytes — the shape the NS verifies.
+    assert_equal OpenSSL::HMAC.hexdigest("SHA256", secret_raw, canon), headers["x-ns-signature"]
+    # And it is NOT the raw-hex-string key (the pre-fix bug).
+    refute_equal OpenSSL::HMAC.hexdigest("SHA256", secret_hex, canon), headers["x-ns-signature"]
+  end
+
+  test "admin_headers uses a 32-char non-hex secret as-is (backwards compat)" do
+    secret = "s" * 32 # not 64-hex; used verbatim (existing contract)
+    ts = 1_761_100_000
+    path = "/admin/records"
+    canon = "GET\n#{path}\n#{ts}\n#{Digest::SHA256.hexdigest("")}"
+    headers = Ztlp::NsClient.admin_headers(secret, ts, path)
+    assert_equal OpenSSL::HMAC.hexdigest("SHA256", secret, canon), headers["x-ns-signature"]
+  end
+
   test "reason table: NS codes 0x00..0x0B plus panel-only 0x0C timeout, 0x0D refused" do
     assert_equal (0x00..0x0D).to_a, Ztlp::NsClient::REASON_CODES.keys.sort
     assert_equal "unauthorized", Ztlp::NsClient::REASON_CODES[0x05]

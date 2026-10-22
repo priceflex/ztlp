@@ -142,12 +142,25 @@ module Ztlp
       "/admin/records#{query.empty? ? "" : "?#{query}"}"
     end
 
-    # HMAC headers for /admin/records (admin_api.ex verify_request).
+    # HMAC headers for /admin/records (admin_api.ex verify_request). The
+    # NS (config.ex) loads the secret as 32 raw bytes (used as-is) or 64-char
+    # hex (decoded to 32 bytes); the HMAC key is the DECODED 32 raw bytes.
+    # Mirror that: a 64-hex secret is decoded before keying the HMAC; any
+    # other length is used verbatim (backwards-compat for raw/short secrets).
     def self.admin_headers(secret, ts, path)
+      key = admin_secret_key(secret)
       canonical_str = "GET\n#{path}\n#{ts}\n" + Digest::SHA256.hexdigest("")
-      sig = OpenSSL::HMAC.hexdigest(OpenSSL::Digest.new("sha256"), secret, canonical_str)
+      sig = OpenSSL::HMAC.hexdigest(OpenSSL::Digest.new("sha256"), key, canonical_str)
       { "x-ns-timestamp" => ts.to_s, "x-ns-signature" => sig }
     end
+
+    # The HMAC key the NS actually uses for /admin/records: a 64-char hex
+    # secret is decoded to its 32 raw bytes (ns/lib/ztlp_ns/config.ex loads
+    # ZTLP_NS_ADMIN_API_SECRET exactly this way); other lengths pass through.
+    def self.admin_secret_key(secret)
+      secret.match?(/\A[0-9a-fA-F]{64}\z/) ? [ secret ].pack("H*") : secret
+    end
+    private_class_method :admin_secret_key
 
     # ── internals ──────────────────────────────────────────────────
 

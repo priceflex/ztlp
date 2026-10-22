@@ -10,6 +10,17 @@ module Ztlp
 
     # 4 = "hardware" but until attestation is verified (ATTESTATION_VERIFIED=1)
     # it is presented as unverified.
+    # Value written into the NS DEVICE record (G4) and compared by gateways.
+    # Never the display label: "hardware (unverified)" is UI text only.
+    def self.wire(level)
+      case level.to_i
+      when 2 then "software"
+      when 3 then "device-bound"
+      when 4 then "hardware"
+      else "unknown"
+      end
+    end
+
     def self.label(level)
       case level.to_i
       when 1 then "unknown"

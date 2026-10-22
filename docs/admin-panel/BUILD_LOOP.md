@@ -528,6 +528,19 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 07:15Z — **fix after Slice 4a** (interactive review). (1) `Records.device_data`
+  wrote `Assurance.label` into the DEVICE record, so a level-4 device would publish
+  `assurance: "hardware (unverified)"`, a display string the gateway does not know. Added
+  `Assurance.wire(level)` (`unknown|software|device-bound|hardware`); records use it; label stays
+  UI-only. Test asserts the value is a key of `Assurance::LEVELS`. (2) `user_data` added
+  `username` + `ns_name` keys; §4 fixes the shape to `{public_key, role, devices, email:""}`
+  (the ns name is the record NAME, not data). Test pins exact keys. RED 2 failures → GREEN.
+  `bash scripts/ci-admin.sh` → 103 runs / 378 assertions / 0 failures, all gates passed.
+  Checked, no change: `device-bound` (hyphen) matches the Elixir gateway's
+  `assurance_to_string` (`http_header_injector.ex:310`) and §4; `Assurance.level` accepts both
+  spellings. PII test checks the encoded CBOR bytes (good).
+  Next: Slice 4b (NsClient + Publisher + test-ns.sh + ZTLP_TEST_NS roundtrip).
+
 - 2026-10-22 07:28Z — **Slice 4a DONE** (cron tick 7). Commit `652be7ba`.
   - `Ztlp::Cbor` (app/services/ztlp/cbor.rb): minimal deterministic RFC 8949
     §4.2.1 encoder, the Ruby twin of ns/lib/ztlp_ns/cbor.ex. Maps sorted by

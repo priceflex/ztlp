@@ -26,9 +26,7 @@ module Ztlp
         "public_key" => user.signing_pubkey_hex.to_s,
         "role" => user.role.to_s,
         "devices" => user.devices.order(:name).map(&:ns_name),
-        "email" => "",
-        "username" => user.username.to_s,
-        "ns_name" => user.ns_name
+        "email" => ""
       }
     end
 
@@ -42,15 +40,15 @@ module Ztlp
       }
     end
 
-    # DEVICE record (type 0x10). `assurance` is the human label string
-    # ("hardware|device-bound|software|unknown") per spec §6.3.
+    # DEVICE record (type 0x10). `assurance` is the wire value
+    # ("hardware|device-bound|software|unknown"), never the display label.
     def self.device_data(device)
       owner = device.user
       {
         "node_id" => device.node_id_hex.to_s,
         "public_key" => device.noise_pubkey_hex.to_s,
         "owner" => owner ? owner.ns_name : "",
-        "assurance" => Assurance.label(device.assurance),
+        "assurance" => Assurance.wire(device.assurance),
         "key_source" => device.key_source.to_s
       }
     end

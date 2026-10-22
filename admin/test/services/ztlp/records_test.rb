@@ -63,8 +63,8 @@ class ZtlpRecordsTest < ActiveSupport::TestCase
     data = Ztlp::Records.user_data(user)
 
     # The NS record must be opaque identifiers + keys + roles only.
-    assert_equal "steve", data["username"]
-    assert_equal "steve.users.test.ztlp", data["ns_name"]
+    # Exact §4 shape: no extra keys (username/ns_name are the record NAME, not data).
+    assert_equal %w[devices email public_key role], data.keys.sort
     assert_equal "user", data["role"]
     assert_equal "ab" * 32, data["public_key"]
     assert_equal "", data["email"]   # always "" per spec (G7)
@@ -150,19 +150,20 @@ class ZtlpRecordsTest < ActiveSupport::TestCase
     assert_equal "now", data["effective_at"]
   end
 
-  test "assurance level maps to the label string" do
+  test "assurance level maps to the NS wire value, never the display label" do
     user = make_user
     [
       [ 1, "unknown" ],
       [ 2, "software" ],
       [ 3, "device-bound" ],
-      [ 4, "hardware (unverified)" ]
+      [ 4, "hardware" ] # display says "hardware (unverified)"; the record carries the level
     ].each do |level, label|
       device = make_device(user, "dev-#{level}", assurance: level,
                                     node_id_hex: format("%032x", level),
                                     noise_pubkey_hex: format("%064x", level * 2))
       data = Ztlp::Records.device_data(device)
       assert_equal label, data["assurance"], "level #{level} should map to #{label}"
+      assert_includes Ztlp::Assurance::LEVELS.keys, data["assurance"]
     end
   end
 end

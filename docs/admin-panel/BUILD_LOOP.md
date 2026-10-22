@@ -529,6 +529,44 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 22:57Z — **Slice 6c DONE (Users disable/enable lifecycle)** (cron tick). Commit `2c567d89`.
+  - Routes: `resources :users` member `post :disable` / `post :enable` → helpers
+    `disable_user_path` / `enable_user_path` (the show-page forms from 6a now hit real endpoints;
+    no fake success anywhere).
+  - `UsersController#disable`: already-`revoked` → redirect + "already revoked" alert, NO NS write.
+    Otherwise one `Publisher.revoke!(@zone, name: user.ns_name, target: user, reason: "user
+    disabled")` (spec §6.3 REVOKE record), then the DB stamp stands regardless of the NS outcome:
+    user → `revoked`, ENROLLED devices → `revoked` + `revoked_at` (pending devices untouched —
+    pinned by a test). Audit `user.disable` with {username, ns_revoked, devices_revoked}.
+  - `UsersController#enable`: already-`active` → redirect + "already active" alert, NO publish.
+    Otherwise device rows re-activated (`enrolled`, `revoked_at` nil) FIRST so the immediately
+    following `publish_user!` carries them in `devices[]` (Records.user_data reads live rows —
+    pinned by a test capturing the user passed to publish), then audit `user.enable`.
+  - 6b rule honored: both actions rescue `Ztlp::NsClient::NsError`, keep the DB change, flash
+    "Saved, but not published to the name server (0xNN reason). The 6-hourly republish will
+    retry." — never a 500 after the save; tests drive it with `Publisher.expects(...).raises(...)`.
+  - `require_write_access` guards both actions.
+  - Tests (`test/controllers/users_controller_test.rb`, +12, TDD RED first — all errored on the
+    missing route helpers): disable revokes user record (name/target asserted via block matcher) +
+    devices revoked; pending devices untouched; NS-fail → save stands + toast; already-revoked
+    refused with no revoke call; read_only 403 on both; enable republishes + audit; enable flips
+    revoked devices + clears device `revoked_at`; no-device enable never calls publish_device!;
+    enable NS-fail → save stands + toast; already-active refused; enable publishes the reactivated
+    device in `devices[]`.
+  - Note: the User table has NO `revoked_at` column (only devices/enrollments do) — user
+    revocation time lives in the audit row's details, not a user column.
+  - Evidence: `timeout 300 bin/rails test test/controllers/users_controller_test.rb` →
+    **39 runs / 239 assertions / 0 failures**. `bash scripts/ci-admin.sh` → full suite
+    **217 runs / 922 assertions / 0 failures / 5 skips** (= ZTLP_TEST_NS-gated roundtrip; was 206),
+    rubocop clean (90 files), brakeman EOL-only, node --check OK, node --test 19/19,
+    `== all gates passed`. `ruby -c` on both edited .rb: Syntax OK. No test-ns containers started.
+ PENDING: Slice 7 — Groups (index/show/drawer, members add/remove → publish_group! immediately,
+ destroy blocked while a rule references it or for `admins`).
+ BLOCKED: none. UNCERTAIN: none.
+ Next: Slice 7a (Groups read side: index + show/drawer), then 7b mutations.
+
+
+
 - 2026-10-22 21:50Z — **review of Slice 6b** (`fc62c420`). Write access enforced (403 tests), username
   immutable, status not mass-assignable, active-only publish. One fix: `publish_if_active!` let an
   `NsError` escape AFTER the save → 500 on every edit of an active user until identity.json is imported

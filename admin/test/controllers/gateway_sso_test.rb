@@ -22,7 +22,7 @@ class GatewaySsoTest < ActionDispatch::IntegrationTest
   test "verified tunnel identity signs in without a form" do
     get root_path, headers: tunnel_headers
     assert_response :success
-    assert_select "h1", "Dashboard"
+    assert_select "h1", "Overview"
     assert_match(/via ZTLP aicomputer\.trs\.ztlp/, response.body)
     assert AuditLog.exists?(action: "auth.login_ztlp", admin_id: @admin.id)
     # session persists without headers on the next request

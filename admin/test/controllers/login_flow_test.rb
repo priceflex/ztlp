@@ -7,7 +7,7 @@ class LoginFlowTest < ActionDispatch::IntegrationTest
 
   test "challenge-response login via JSON then browser" do
     sign_in_as(@admin, @seed)
-    assert_select "h1", "Dashboard"
+    assert_select "h1", "Overview"
     assert AuditLog.exists?(action: "auth.login", admin_id: @admin.id)
     assert @admin.reload.last_login_at.present?
   end

@@ -5,6 +5,7 @@ class ApplicationController < ActionController::Base
 
   before_action :redirect_to_claim_if_unclaimed
   before_action :require_sign_in
+  before_action :load_zone
 
   IDLE_TIMEOUT = 8.hours
   ABSOLUTE_TIMEOUT = 24.hours
@@ -72,6 +73,10 @@ class ApplicationController < ActionController::Base
 
   def require_super_admin
     head :forbidden unless current_admin&.super_admin?
+  end
+
+  def load_zone
+    @zone ||= Zone.primary
   end
 
   def audit!(action, target: nil, status: "ok", **details)

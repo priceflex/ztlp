@@ -1,39 +1,69 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-slate-50">
+<html lang="en">
   <head>
-    <title><%= content_for(:title) || "ZTLP Admin" %></title>
+    <title><%= content_for(:title) || "ZTLP Directory" %></title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <%= csrf_meta_tags %>
-    <%= csp_meta_tag %>
     <link rel="icon" href="<%= asset_path("ztlp-logo.png") %>">
-    <%= stylesheet_link_tag "tailwind", "data-turbo-track": "reload" %>
-    <%= stylesheet_link_tag "application", "data-turbo-track": "reload" %>
-    <%= javascript_importmap_tags %>
+    <%= stylesheet_link_tag "directory" %>
+    <%= javascript_include_tag "directory", defer: true %>
   </head>
-  <body class="h-full text-slate-800">
-    <header class="bg-[#0f1b2d] text-white">
-      <div class="mx-auto max-w-6xl px-6 py-3 flex items-center gap-4">
-        <%= image_tag "ztlp-logo.png", alt: "ZTLP", class: "h-9" %>
-        <%= link_to "ZTLP Admin", root_path, class: "font-semibold tracking-wide" %>
+  <body>
+    <div class="app" id="app">
+      <aside class="rail" id="rail" aria-label="Main navigation">
+        <div class="brand">
+          <%= image_tag "ztlp-logo.png", alt: "ZTLP", width: 34, height: 34 %>
+          <div><div class="brand-name">ZTLP Directory</div><div class="brand-zone"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "") %></div></div>
+        </div>
         <% if signed_in? %>
-          <nav class="ml-6 flex gap-5 text-sm text-slate-200">
-            <%= link_to "Dashboard", root_path, class: "hover:text-white" %>
-            <%= link_to "Administrators", admins_path, class: "hover:text-white" %>
-            <%= link_to "Audit log", audit_logs_path, class: "hover:text-white" %>
+          <nav class="nav" id="nav">
+            <% route = current_route %>
+            <% ApplicationHelper::NAV.each do |section, items| %>
+              <div class="nav-sec"><div class="nav-label"><%= section %></div>
+                <% items.each do |item_route, label, icon| %>
+                  <a href="<%= nav_href(item_route) %>" <%= 'aria-current="page"' if item_route == route %>><%= nav_icon(icon) %><span><%= label %></span></a>
+                <% end %>
+              </div>
+            <% end %>
           </nav>
-          <div class="ml-auto flex items-center gap-4 text-sm">
-            <span class="text-slate-300"><%= current_admin.display_name %> <span class="text-slate-500">(<%= current_admin.role.humanize %><%= ", via ZTLP #{session[:device]}" if session[:via] == "ztlp" %>)</span></span>
-            <%= button_to "Sign out", logout_path, method: :delete, class: "rounded bg-slate-700 px-3 py-1 hover:bg-slate-600" %>
-          </div>
-        <% else %>
-          <span class="ml-auto font-mono text-xs text-slate-400"><%= request.host %></span>
         <% end %>
+        <div class="rail-foot">
+          <div class="ns-line"><span class="dot <%= @zone&.authority_configured? ? "ok" : "" %>"></span><%= @zone&.ns_addr || ENV.fetch("ZTLP_NS_ADDR", "name server") %></div>
+          <% if session[:via] == "ztlp" && session[:device].present? %><div class="ns-meta">via ZTLP <%= session[:device] %></div><% end %>
+          <div class="ns-meta">v<%= ZtlpAdmin::VERSION %></div>
+        </div>
+      </aside>
+      <div class="main">
+        <header class="topbar">
+          <button class="icon-btn menu-btn" data-act="nav-toggle" aria-label="Open navigation"><%= nav_icon("menu") %></button>
+          <div class="gsearch">
+            <span id="gs-ic"><%= nav_icon("search", 18) %></span>
+            <input type="search" id="gs-input" placeholder="Find a user, device, group or application" aria-label="Search the directory" autocomplete="off">
+            <div class="gresults" id="gresults" role="listbox"></div>
+          </div>
+          <div class="top-right">
+            <button class="icon-btn" data-act="theme" id="theme-btn" aria-label="Switch light or dark theme"><%= nav_icon("moon") %></button>
+            <% if signed_in? %>
+              <div class="me"><span class="avatar"><%= initials(current_admin.display_name) %></span><span class="me-name"><%= current_admin.display_name %></span></div>
+              <%= form_with url: logout_path, method: :delete, class: "actions" do %>
+                <button type="submit" class="btn sm">Sign out</button>
+              <% end %>
+            <% end %>
+          </div>
+        </header>
+        <main class="content" id="content" tabindex="-1">
+          <div class="wrap">
+            <% if notice %><div data-toast class="toast"><%= notice %></div><% end %>
+            <% if alert %><div data-toast class="toast"><%= alert %></div><% end %>
+            <%= yield %>
+          </div>
+        </main>
       </div>
-    </header>
-    <main class="mx-auto max-w-6xl px-6 py-8">
-      <% if notice %><div class="mb-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-2 text-emerald-800"><%= notice %></div><% end %>
-      <% if alert %><div class="mb-4 rounded border border-rose-200 bg-rose-50 px-4 py-2 text-rose-800"><%= alert %></div><% end %>
-      <%= yield %>
-    </main>
+    </div>
+    <div class="scrim" id="nscrim" data-act="close-nav"></div>
+    <div class="scrim" id="dscrim" data-act="close-drawer"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="Details"></aside>
+    <div class="modal-root" id="modal-root" role="dialog" aria-modal="true"></div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
   </body>
 </html>

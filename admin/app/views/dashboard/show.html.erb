@@ -1,25 +1,16 @@
-<% content_for :title, "Dashboard - ZTLP Admin" %>
-<h1 class="text-2xl font-semibold">Dashboard</h1>
-<div class="mt-6 grid grid-cols-3 gap-4">
-  <div class="rounded border bg-white p-4">
-    <div class="text-xs uppercase text-slate-500">Administrators</div>
-    <div class="mt-1 text-3xl font-semibold"><%= @admins.count %></div>
-    <%= link_to "Manage", admins_path, class: "text-sm text-[#1f5fa8]" %>
-  </div>
-  <div class="rounded border bg-white p-4">
-    <div class="text-xs uppercase text-slate-500">Zone</div>
-    <div class="mt-1 text-xl font-semibold font-mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></div>
-    <div class="text-xs text-slate-500">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div>
-    <div class="mt-1 text-xs <%= @zone&.authority_configured? ? "text-emerald-700" : "text-amber-700" %>">
-      Zone authority: <%= @zone&.authority_configured? ? "imported" : "not imported (users/groups cannot be published yet)" %>
-    </div>
-  </div>
-  <div class="rounded border bg-white p-4">
-    <div class="text-xs uppercase text-slate-500">Build</div>
-    <div class="mt-1 text-xl font-semibold">v<%= ZtlpAdmin::VERSION %></div>
-    <div class="text-xs text-slate-500">Slice 1: claim, key login, admins, audit</div>
+<% content_for :title, "Overview - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Overview</h1><p class="lede">Directory status for <%= @zone&.name || "this zone" %>.</p></div>
+</div>
+<div class="tally">
+  <a class="tally-item" href="<%= admins_path %>"><div class="tally-n"><%= @admins.count %></div><div class="tally-l">Administrators</div><div class="tally-s">who can sign in to this panel</div></a>
+  <a class="tally-item" href="/zone"><div class="tally-n" style="font-size:19px"><span class="mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div></a>
+  <div class="tally-item"><div class="tally-n"><%= @zone&.authority_configured? ? "Yes" : "No" %></div><div class="tally-l">Zone authority</div><div class="tally-s"><%= @zone&.authority_configured? ? "imported — records can be published" : "not imported (users/groups cannot be published yet)" %></div></div>
+  <div class="tally-item"><div class="tally-n">v<%= ZtlpAdmin::VERSION %></div><div class="tally-l">Build</div><div class="tally-s">slice 1: claim, key login, admins, audit</div></div>
+</div>
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Recent activity</h2><a class="link" href="<%= audit_logs_path %>">Full audit log</a></div>
+    <%= render "audit_logs/table", logs: @recent_audit %>
   </div>
 </div>
-
-<h2 class="mt-10 text-lg font-semibold">Recent activity</h2>
-<%= render "audit_logs/table", logs: @recent_audit %>

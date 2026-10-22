@@ -20,7 +20,7 @@ class ClaimFlowTest < ActionDispatch::IntegrationTest
     post claim_path, params: { claim: { claim_code: code, username: "steve", display_name: "Steven", pubkey_hex: pub } }
     assert_redirected_to root_path
     follow_redirect!
-    assert_select "h1", "Dashboard"
+    assert_select "h1", "Overview"
     assert_equal 1, Admin.count
     get claim_path
     assert_redirected_to root_path

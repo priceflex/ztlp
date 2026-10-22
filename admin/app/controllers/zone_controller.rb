@@ -38,11 +38,14 @@ class ZoneController < ApplicationController
     {}
   end
 
+  # Publisher audits the published USER/DEVICE/GROUP row (or the zone for KEY/REVOKE) as the
+  # target, so the last publish is the newest ns.publish row of any target.
   def last_audit
-    AuditLog.where(action: "ns.publish", target_id: @zone.id).order(created_at: :desc).first
+    AuditLog.where(action: "ns.publish").order(created_at: :desc, id: :desc).first
   end
 
   def last_reconcile_audit
-    AuditLog.where(action: "ns.reconcile", target_id: @zone.id).order(created_at: :desc).first
+    AuditLog.where(action: "ns.reconcile", target_type: "Zone", target_id: @zone.id)
+            .order(created_at: :desc, id: :desc).first
   end
 end

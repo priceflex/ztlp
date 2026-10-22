@@ -529,6 +529,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 17:20Z — **fix after Slice 5c** (interactive review of `1519a9d7`). /zone page
+  reviewed: output escaped, mutations behind `require_write_access`, no inline script, drift
+  statuses (ok/failed/not_configured) rendered. One bug: "Last publish" / "Last reconcile"
+  queried `target_id: @zone.id` with no `target_type`; Publisher audits the USER/DEVICE/GROUP row
+  as the target, so Last publish missed nearly every publish, and any row whose id equals the
+  zone id matched. Now: last publish = newest `ns.publish` of any target; last reconcile =
+  `target_type: "Zone", target_id: zone.id`. Test (RED "No" → GREEN "Yes"; a User-typed
+  reconcile row with the zone's id does not count). `bash scripts/ci-admin.sh` → 178 runs /
+  683 assertions / 0 failures / 5 skips, all gates passed. **Slice 5 DONE.** Next: Slice 6.
+
 - 2026-10-22 17:20Z — **Slice 5c DONE (/zone page)** (cron tick). Commit `1519a9d7`.
   - `app/controllers/zone_controller.rb`: `show` renders zone name/ns_addr, authority
     import status (pubkey or "not imported" warning + copyable import command), the three

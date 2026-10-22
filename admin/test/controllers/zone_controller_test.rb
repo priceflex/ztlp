@@ -146,4 +146,21 @@ class ZoneControllerTest < ActionDispatch::IntegrationTest
     get zone_path
     assert_select ".rail .nav a[href=\"/zone\"][aria-current=page]", 1
   end
+
+  # Publisher audits each USER/DEVICE/GROUP row as the target, so "last publish" must look
+  # at every ns.publish row, and a user whose id equals the zone's id must not count as a
+  # zone reconcile.
+  test "last publish counts entity-targeted ns.publish rows; reconcile is zone-typed only" do
+    user = @zone.users.create!(username: "pub1", role: "user", status: "active")
+    AuditLog.record!("ns.publish", target: user, status: "ok", details: { name: user.ns_name, type: "user" })
+    AuditLog.create!(action: "ns.reconcile", target_type: "User", target_id: @zone.id, status: "ok",
+                     created_at: Time.utc(2030, 1, 1))
+    get zone_path
+    assert_select ".tally-item", text: /Last publish/ do
+      assert_select ".tally-n", "Yes"
+    end
+    assert_select ".tally-item", text: /Last reconcile/ do
+      assert_select ".tally-s", "never"
+    end
+  end
 end

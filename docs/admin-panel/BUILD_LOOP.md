@@ -529,6 +529,37 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 16:05Z — **Slice 5a DONE (zone rake tasks: authority import + set_secret)** (cron tick).
+  Commit `02a37163`.
+  - `lib/tasks/zone.rake`: `zone:import_authority[path]` (reads identity.json as JSON, validates
+    64-hex `signing_key_seed`, derives the Ed25519 pubkey via `OpenSSL::PKey.new_raw_private_key`,
+    stores seed + pubkey on `Zone` (seed encrypted at rest via `encrypts`), audits
+    `zone.authority_imported` with the pubkey only — never the seed). `zone:set_secret[enrollment|relay|ns_admin_api]`
+    (value from STDIN only, never argv; validates 64-hex shape; empty stdin or bad shape → exit
+    nonzero, nothing stored; audits `zone.<verb>_secret_set` with `{length: 64}`). Both tasks call
+    `Rails.application.initialize!` because `bin/rake` loads the Rakefile which calls
+    `load_tasks` but does not run initializers (the AR connection pool and model autoload paths
+    are not set up without it).
+  - `test/commands/zone_tasks_test.rb` (5 tests, TDD RED first: all 5 failed on "task undefined"):
+    (1) import_authority stores the 64-hex seed + derived pubkey, audits pubkey only (asserts the
+    raw column does NOT contain the plaintext seed); (2) import_authority without a
+    `signing_key_seed` exits nonzero and stores nothing; (3) set_secret for all three verbs reads
+    from stdin, stores encrypted (raw column does not contain the plaintext), audits;
+    (4) set_secret on empty stdin is a no-op, no audit; (5) set_secret with a non-64-hex value
+    exits nonzero, stores nothing. `use_transactional_tests = false` (the rake subprocess runs in
+    a separate process and cannot see uncommitted rows); a `teardown` deletes the non-transactional
+    zones so the rest of the suite is unaffected.
+  - Evidence: `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test test/commands/zone_tasks_test.rb` →
+    5 runs, 30 assertions, 0 failures, 0 errors. `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test`
+    (full suite) → **139 runs, 515 assertions, 0 failures, 0 errors, 5 skips**. `bash
+    scripts/ci-admin.sh` → `== all gates passed` (rubocop clean; brakeman EOL-only; node --check
+    OK; node --test 19/19). `ruby -c lib/tasks/zone.rake` OK.
+  - Note: the test DB must be reset (`RAILS_ENV=test bin/rake db:drop db:create db:schema:load`)
+    before a full-suite run if a previous tick's non-transactional zones are still present; the
+    teardown handles this going forward.
+  Next: Slice 5b (RepublishNsJob, ReconcileNsJob, ExpireEnrollmentsJob — solid_queue recurring
+  jobs with NsClient mocked; `config/recurring.yml`).
+
 - 2026-10-22 15:40Z — **Slice 4c-ii independently verified** (interactive). Fresh run:
   `bash scripts/test-ns.sh up` → `set -a; . <scratch>/test_ns.env; set +a` →
   `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test test/integration/ns_roundtrip_test.rb` →

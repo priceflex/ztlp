@@ -528,6 +528,45 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 04:45Z — **Slice 1 DONE** (commit d68b4fcb).
+  - Removed gems `tailwindcss-rails`, `importmap-rails`, `turbo-rails`, `stimulus-rails` (Gemfile +
+    lock); deleted `app/assets/tailwind/`, `app/javascript/`, `app/assets/builds/`,
+    `config/importmap.rb`, `bin/importmap`; `Procfile.dev` now `web: bin/rails server` only.
+    `grep -rn "tailwind\|importmap\|turbo\|stimulus" app/ config/ Gemfile` → nothing (builds dir
+    removed; it was gitignored output).
+  - `config/initializers/content_security_policy.rb` now enforces:
+    `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 'data'; font-src 'self';
+    connect-src 'self'; form-action 'self'; frame-ancestors 'none'`, nonce generator nil.
+  - New layout `app/views/layouts/application.html.erb` = mock shell (`.app` grid, `.rail` with
+    brand + 3 nav sections from `ApplicationHelper::NAV`, rail-foot zone line + NS dot + version +
+    "via ZTLP <device>" when signed in via tunnel; `.topbar` with global search box, theme button,
+    `.me` avatar + sign-out; `.content > .wrap`; drawer/modal/toast scaffolding).
+  - `app/assets/stylesheets/directory.css` = mock `<style>` block copied verbatim (330 lines),
+    no `@import`/Google Fonts (verified by grep). `app/assets/javascripts/directory.js` created
+    empty (placeholder comment; Slice 2 fills it). `node --check` passes.
+  - Re-skinned with mock classes, no behaviour change: dashboard (page-head + tally + panel),
+    admins index/new/edit/_form (table-wrap, panel forms, field/hint/btn), audit_logs index +
+    _table (table-wrap, badge ok/bad), claims/show, sessions/new (panel + notice + code-box).
+  - `ApplicationController#load_zone` before_action so the layout's rail-foot zone line works on
+    every page (dashboard already set `@zone`; now all controllers do).
+  - Helper: `NAV`, `NAV_ICONS` (mock svg glyphs), `nav_icon`, `current_route` (aria-current),
+    `nav_href`, `initials`.
+  - TDD: RED first (`layout_test.rb` + `csp_test.rb`: 4 runs, 3 failures — no rail shell, no
+    directory.js tag, no CSP header), then GREEN.
+    - `test/controllers/layout_test.rb`: signed-in GET / has `.rail`, nav sections,
+      `aria-current=&quot;page&quot;` (Rails 7 ERB html_escape escapes attr quotes — pinned both
+      forms in the assertion), exactly ONE `<script src>` and it is `/assets/directory-*.js`
+      (deferred), zero external `href|src` in `<link>/<script>`, no googleapis/cdnjs.
+    - `test/csp_test.rb`: CSP header has `script-src 'self'`, `default-src 'self'`,
+      `style-src 'self'`, `frame-ancestors 'none'`, no `'nonce-`, no `'unsafe-inline'`.
+    - 3 existing tests updated for the honest page-title rename only
+      ("Dashboard" → "Overview"): claim_flow, gateway_sso, login_flow.
+  - Gates: `SKIP_CLAIM_BOOT=1 bin/rails test` → **41 runs, 160 assertions, 0 failures, 0 errors**.
+    `rubocop -A` then `rubocop` → 52 files, no offenses. `brakeman -q --no-pager` → only the
+    known `EOLRails` notice (no code findings). `node --check app/assets/javascripts/directory.js`
+    OK. `ruby -c` on all edited .rb files OK.
+  - Next: Slice 2 (directory.js contract, mandatory gateway gate, assurance capture).
+
 - 2026-10-22 04:06Z — **Slice 0 DONE** (tick 1, interactive session; cron loop scheduled after it).
   - `docker start ztlp-admin-dev-db` → Up; `bundle install`, `db:prepare` (dev + test) OK.
   - First test run: 37 runs, 10 errors — all `The asset 'tailwind.css' was not found` (the

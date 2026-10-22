@@ -528,6 +528,43 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 07:28Z — **Slice 4a DONE** (cron tick 7). Commit `652be7ba`.
+  - `Ztlp::Cbor` (app/services/ztlp/cbor.rb): minimal deterministic RFC 8949
+    §4.2.1 encoder, the Ruby twin of ns/lib/ztlp_ns/cbor.ex. Maps sorted by
+    (byte_size, bytes) of the ENCODED key (header byte included). 11 golden
+    vector tests (RED first: `uninitialized constant Ztlp::Cbor` × 11).
+  - `Ztlp::Records` (app/services/ztlp/records.rb): maps panel rows → NS
+    record data. THE PII BOUNDARY (spec §3, decision 10): `user_data` MUST
+    NOT include display_name, email, phone, first_name, last_name,
+    attributes or notes. 9 tests including "user record carries no PII"
+    (asserts none of the PII fields appear in the CBOR bytes).
+  - Bugs found & fixed during the loop (each pinned by a test):
+    (1) `"a1616101".b` does NOT give the 4 raw bytes 0xa1 0x61 0x61 0x01 —
+    it gives the 8 bytes of the hex CHARACTER STRINGS. Fix: `hex()` helper
+    in cbor_test.rb (`scan(/../).map { to_i(16) }.pack("C*")`).
+    (2) The `"A "` byte-string test was wrong: `"A "` IS valid UTF-8, so the
+    encoder correctly emits TEXT (0x62), not BYTES (0x42). Replaced with a
+    genuinely invalid UTF-8 sequence (0xC3 0x28).
+    (3) Nested map golden vector hand-computed wrong: `"dlist"` (header 0x64)
+    sorts before `"eouter"` (header 0x65). Encoder is correct; test fixed.
+    (4) `u.devices.create!` does NOT auto-set zone_id (User has no
+    has_many :devices through zone). Use `zone.devices.create!` or
+    `Device.new(user: u, zone: z)`. Test helper uses zone.devices.create!.
+  - Evidence: `SKIP_CLAIM_BOOT=1 bin/rails test` → **103 runs / 371
+    assertions / 0 failures / 0 errors / 0 skips** (was 83). `bash
+    scripts/ci-admin.sh` → `== all gates passed` (rubocop clean; brakeman
+    EOL-only; node --check OK; node --test 19/19). `ruby -c` on both new
+    .rb files OK.
+  - PENDING: Slice 4b (NsClient: 0x09 signed register, 0x01 query,
+    /admin/records list; Publisher: publish_user!/publish_group!/
+    publish_device!/revoke!; `scripts/test-ns.sh` + ZTLP_TEST_NS
+    integration test). Wire format confirmed from server.ex:
+    `<<0x09, name_len::16, name, type::8, data_len::16, data, sig_len::16,
+    sig, pubkey_len::16, pubkey>>`; canonical = `<<type::8, name_len::16,
+    name, data_bin>>` (registration_auth.ex build_canonical).
+  Next: Slice 4b (NsClient + Publisher + NS integration test).
+
+
 - 2026-10-22 06:45Z — **fix after Slice 3** (interactive review). `Zone.primary` (called by
   `load_zone` on every page) created a missing zone as hard-coded `trs.ztlp` /
   `0.0.0.0:23095`, ignoring `ZTLP_ZONE`/`ZTLP_NS_ADDR` that docker-compose.yml and the layout

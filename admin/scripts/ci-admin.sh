@@ -34,7 +34,7 @@ cd "$(dirname "$0")/.."
 # 1. Full Rails minitest suite
 # ---------------------------------------------------------------------------
 echo "== 1/6 SKIP_CLAIM_BOOT=1 bin/rails test"
-SKIP_CLAIM_BOOT=1 bin/rails test
+SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test  # a hung test must not run away (4-5 GB seen)
 
 # ---------------------------------------------------------------------------
 # 2 + 3. Rubocop (auto-fix, then verify clean)

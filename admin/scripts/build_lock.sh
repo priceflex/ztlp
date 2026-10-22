@@ -5,7 +5,9 @@
 #
 # A Hermes tick runs each shell command in a separate process, so a flock held
 # by this script would be released as soon as it exits. The lock is therefore
-# the heartbeat file itself: status in_progress younger than STALE_MIN minutes
+# the heartbeat file itself: status in_progress younger than STALE_MIN minutes (default 12: cron runs never overlap and the
+# next run starts 15 min after the previous one ENDS, so a cron tick that sees in_progress
+# is looking at a tick that died, e.g. hit its iteration limit)
 # = another tick is working -> print LOCKED and exit 0. flock only makes the
 # check-and-write atomic.
 #
@@ -17,7 +19,7 @@ set -euo pipefail
 ADMIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE="$ADMIN_DIR/.build_state"
 LOCK="$ADMIN_DIR/tmp/.build.lock"
-STALE_MIN="${STALE_MIN:-90}"
+STALE_MIN="${STALE_MIN:-12}"
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 mkdir -p "$ADMIN_DIR/tmp"
 

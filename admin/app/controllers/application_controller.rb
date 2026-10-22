@@ -3,6 +3,7 @@
 class ApplicationController < ActionController::Base
   helper_method :current_admin, :signed_in?
 
+  before_action :require_gateway_identity
   before_action :redirect_to_claim_if_unclaimed
   before_action :require_sign_in
   before_action :load_zone
@@ -11,6 +12,32 @@ class ApplicationController < ActionController::Base
   ABSOLUTE_TIMEOUT = 24.hours
 
   private
+
+  # Mandatory gateway gate (decision D5): in production the panel only answers
+  # requests that carry a verified ZTLP gateway identity bundle. A verified
+  # session is NOT sufficient on its own — every request must still come
+  # through the gateway, so a stolen session cookie from another network is
+  # dead. ZTLP_REQUIRE_GATEWAY defaults on in production; tests/dev default
+  # off so the challenge/claim flow stays reachable locally.
+  def require_gateway_identity
+    return unless gateway_required?
+
+    r = Ztlp::GatewayIdentity.verify(request.headers)
+    unless r.ok
+      AuditLog.record!("auth.gateway_rejected", ip: request.remote_ip, status: "denied", details: { error: r.error })
+      return render "errors/connect_through_ztlp", status: :forbidden, layout: "bare"
+    end
+
+    @gateway_identity = r
+    return if Ztlp::Assurance.level(r.assurance) >= Ztlp::Assurance.level(ENV.fetch("ZTLP_MIN_ASSURANCE", "unknown"))
+
+    @gate_actual, @gate_required = r.assurance, ENV["ZTLP_MIN_ASSURANCE"]
+    AuditLog.record!("auth.assurance_insufficient", ip: request.remote_ip, status: "denied",
+                      details: { actual: r.assurance, required: ENV["ZTLP_MIN_ASSURANCE"] })
+    render "errors/assurance_insufficient", status: :forbidden, layout: "bare"
+  end
+
+  def gateway_required? = ENV.fetch("ZTLP_REQUIRE_GATEWAY", Rails.env.production? ? "1" : "0") == "1"
 
   def current_admin
     return @current_admin if defined?(@current_admin)
@@ -47,8 +74,9 @@ class ApplicationController < ActionController::Base
     sign_in!(admin)
     session[:via] = "ztlp"
     session[:device] = r.device_name
+    session[:assurance] = r.assurance
     AuditLog.record!("auth.login_ztlp", admin: admin, ip: request.remote_ip,
-                     details: { device: r.device_name, zone: r.zone })
+                     details: { device: r.device_name, zone: r.zone, assurance: r.assurance })
   end
 
   def sign_in!(admin)

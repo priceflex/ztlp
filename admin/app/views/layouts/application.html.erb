@@ -28,8 +28,8 @@
           </nav>
         <% end %>
         <div class="rail-foot">
-          <div class="ns-line"><span class="dot <%= @zone&.authority_configured? ? "ok" : "" %>"></span><%= @zone&.ns_addr || ENV.fetch("ZTLP_NS_ADDR", "name server") %></div>
-          <% if session[:via] == "ztlp" && session[:device].present? %><div class="ns-meta">via ZTLP <%= session[:device] %></div><% end %>
+          <div class="ns-line"><span class="dot <%= @zone&.authority_configured? ? "ok" : "" %></span><%= @zone&.ns_addr || ENV.fetch("ZTLP_NS_ADDR", "name server") %></div>
+          <% if session[:via] == "ztlp" && session[:device].present? %><div class="ns-meta">via ZTLP <%= session[:device] %> &middot; <%= Ztlp::Assurance.label(Ztlp::Assurance.level(session[:assurance])) %></div><% end %>
           <div class="ns-meta">v<%= ZtlpAdmin::VERSION %></div>
         </div>
       </aside>

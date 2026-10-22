@@ -14,7 +14,7 @@ module Ztlp
     SIGNED = %w[authenticated admin-email device-name zone group assurance audience timestamp].freeze
     MAX_AGE = 30 # seconds, mirrors the PoC verifier
 
-    Result = Struct.new(:ok, :subject, :device_name, :zone, :fingerprint, :error, keyword_init: true)
+    Result = Struct.new(:ok, :subject, :device_name, :zone, :assurance, :fingerprint, :error, keyword_init: true)
 
     def self.secret = ENV["ZTLP_GATEWAY_HEADER_SECRET"].to_s
     def self.audience = ENV.fetch("ZTLP_GATEWAY_AUDIENCE", "admin")
@@ -44,7 +44,8 @@ module Ztlp
       expected = OpenSSL::HMAC.hexdigest("SHA256", secret, canonical)
       return Result.new(ok: false, error: "bad signature") unless ActiveSupport::SecurityUtils.secure_compare(expected, sig)
 
-      Result.new(ok: true, subject: fields["admin-email"], device_name: fields["device-name"], zone: fields["zone"])
+      Result.new(ok: true, subject: fields["admin-email"], device_name: fields["device-name"], zone: fields["zone"],
+                 assurance: fields["assurance"])
     end
   end
 end

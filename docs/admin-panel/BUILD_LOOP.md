@@ -528,6 +528,34 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 05:35Z — **Slice 2 split. 2a DONE** (interactive recovery of tick 3, which hit its
+  iteration limit at 22:07 PDT with a dirty tree and left `.build_state` in_progress; tick 4 then
+  no-op'd on the 90-min lock). **2b PENDING = next tick.**
+  - 2a = gateway gate + assurance capture: `Ztlp::Assurance` (levels/label/KEY_SOURCES),
+    `GatewayIdentity::Result#assurance`, `ApplicationController#require_gateway_identity`
+    (403 `errors/connect_through_ztlp` + audit `auth.gateway_rejected`; `ZTLP_MIN_ASSURANCE` floor
+    → 403 `errors/assurance_insufficient` + audit `auth.assurance_insufficient`), `bare` layout,
+    `session[:assurance]`, `auth.login_ztlp` details now include `assurance`, rail foot shows it.
+  - Fixed during review: (1) reverted tick 3's `Ed25519.sign` "openssl 3.1 fallback" — a
+    misdiagnosis; the Gemfile pins openssl >= 3.2 and 3.1 has no `new_raw_private_key` at all.
+    (2) reverted its `test_helper.rb` `host!` change — not the cause. Real cause of the
+    `include? for nil` crash: with the gate on, `/auth/challenge` itself is 403 (correct per
+    decision 8), so `login_url` was nil → `get nil`. Test now signs in with the gate off, then
+    turns it on; new test pins that `/auth/challenge` is 403 without a tunnel. (3) Removed the
+    tick's `return if Claim.needed?` exemption: decision 9 says the claim happens THROUGH the
+    tunnel. New tests: unclaimed + no headers → 403 (verified RED with the exemption restored:
+    1 failure), unclaimed + tunnel headers → 200. **Consequence for Slice 12 local smoke:** the
+    throwaway `.env` must set `ZTLP_REQUIRE_GATEWAY=0` or send signed headers.
+  - Evidence: `SKIP_CLAIM_BOOT=1 bin/rails test` → 55 runs, 196 assertions, 0 failures, 0 errors;
+    rubocop 55 files no offenses; brakeman = EOLRuby + EOLRails only.
+  - Lock: `STALE_MIN` default 90 → 12 (cron runs never overlap; next run starts 15 min after the
+    previous ENDS, so in_progress seen by a cron tick = dead tick).
+  - **2b (next tick):** `app/assets/javascripts/directory.js` per §2.3 + `test/javascript/
+    directory_test.mjs` (node:test, fake document, no jsdom) + `scripts/ci-admin.sh` runs it;
+    `node --check`. Commit `feat(admin): directory.js (theme, nav, copy, confirm, toast, drawer,
+    search)`. Keep the tick small: if not green by half the iteration budget, commit the green
+    subset and record what is left.
+
 - 2026-10-22 04:40Z — **fix after Slice 1** (interactive review). The rail nav rendered
   `aria-current=&quot;page&quot;` (a quoted string from `<%= %>` was escaped), so the CSS
   selector `.nav a[aria-current="page"]` never matched and the active item was not highlighted.

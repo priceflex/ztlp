@@ -534,6 +534,19 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 00:05Z — **review of Slice 7b** (`5c3e8253`). Membership add/remove publish immediately with
+  the warn-don't-500 rule; admins/referenced-group destroy blocks; 403s present. Two NS-staleness bugs
+  fixed: (1) **rename**: `ns_name` is rebuilt from the name on save, so a rename published a NEW GROUP
+  record and left the old one live with its members → name is now immutable after create
+  (`update` drops `:name`, form field `readonly` when persisted; test asserts the published ns_name is
+  unchanged). (2) **destroy** deleted the row but never touched the NS, so the GROUP record kept its
+  members (a rule on that name keeps granting, with no panel row to fix it) → destroy now, in ONE DB
+  transaction, deletes memberships, publishes the group with `members: []`, then destroys; an NsError
+  rolls everything back (fail-closed, alert "NOT deleted … Nothing changed.", audit failed). Not a
+  REVOKE: that would retire the group name permanently. RED 4 → GREEN; `bash scripts/ci-admin.sh` →
+  246 runs / 1075 assertions / 0 failures / 6 skips. **Slice 7 DONE.** Next: Slice 8 (Devices). Rules
+  for 8: device revoke fail-closed (see 6c); Assign owner publishes DEVICE + BOTH users' devices[].
+
 - 2026-10-22 23:58Z — **Slice 7b DONE (Groups mutations + membership add/remove)** (cron tick). Commit `5c3e8253`.
   - `groups_controller.rb`: `new`/`create` (name = lowercase DNS label, normalized by the model;
     description; every save publishes the GROUP record immediately, rescued per the 6b rule —

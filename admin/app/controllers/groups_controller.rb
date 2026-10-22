@@ -46,7 +46,9 @@ class GroupsController < ApplicationController
   end
 
   def update
-    if @group.update(group_params)
+    # Name is immutable after create: it drives ns_name, and a rename would leave the old GROUP
+    # record (with its members) live in the NS.
+    if @group.update(group_params.except(:name))
       warning = publish_group!(@group)
       audit!("group.update", target: @group, details: { name: @group.name })
       redirect_to group_path(@group), notice: "Group #{@group.name} updated.", alert: warning
@@ -102,7 +104,22 @@ class GroupsController < ApplicationController
       return redirect_to group_path(@group), alert: "#{@group.name} is referenced by a policy rule. Remove the rule first."
     end
 
-    @group.destroy!
+    # The GROUP record must not outlive the row with its members still listed (a rule keyed on
+    # the group name would keep granting access with no panel row left to fix it). Publish an
+    # EMPTY group first, inside the transaction: if the NS refuses, everything rolls back.
+    begin
+      Group.transaction do
+        @group.group_memberships.delete_all
+        Ztlp::Publisher.publish_group!(@group, admin: current_admin)
+        @group.destroy!
+      end
+    rescue Ztlp::NsClient::NsError => e
+      audit!("group.destroy", target: @group, status: "failed",
+                              details: { name: @group.name, result: format("0x%02X %s", e.code, e.reason) })
+      return redirect_to group_path(@group),
+                         alert: format("%s was NOT deleted: the name server refused the empty-group publish " \
+                                       "(0x%02X %s). Nothing changed.", @group.name, e.code, e.reason)
+    end
     audit!("group.destroy", target: @group, details: { name: @group.name })
     redirect_to groups_path, notice: "Group #{@group.name} deleted."
   end

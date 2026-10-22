@@ -8,10 +8,10 @@
     <div class="panel-b" style="display:grid;gap:16px">
       <div class="field">
         <%= f.label :name %>
-        <%= f.text_field :name, required: true,
+        <%= f.text_field :name, required: true, readonly: @group.persisted?,
                           pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
                           class: "mono" %>
-        <p class="hint">Lowercase DNS label; the full name is <span class="mono">&lt;name&gt;.groups.&lt;zone&gt;</span>.</p>
+        <p class="hint">Lowercase DNS label, fixed after create; the full name is <span class="mono">&lt;name&gt;.groups.&lt;zone&gt;</span>.</p>
       </div>
       <div class="field"><%= f.label :description %><%= f.text_field :description %></div>
       <div class="actions">

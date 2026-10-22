@@ -192,11 +192,22 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
     assert AuditLog.where(action: "group.update", status: "ok").any?
   end
 
-  test "update re-renders the form on a duplicate name without publishing" do
-    Ztlp::Publisher.expects(:publish_group!).never
-    patch group_path(@eng), params: { group: { name: "hr" } }
-    assert_response :unprocessable_content
-    assert_equal "eng", @eng.reload.name
+  # The name drives ns_name; a rename would publish a NEW GROUP record and leave the old one
+  # (with its members) live in the NS. Name is immutable after create, like username.
+  test "update ignores a submitted name: ns_name and the published record stay the same" do
+    published = nil
+    Ztlp::Publisher.expects(:publish_group!).with { |g, **| published = g.ns_name; true }.returns(:ok)
+    patch group_path(@eng), params: { group: { name: "ops", description: "renamed?" } }
+    @eng.reload
+    assert_equal "eng", @eng.name
+    assert_equal "eng.groups.test.ztlp", @eng.ns_name
+    assert_equal "renamed?", @eng.description
+    assert_equal "eng.groups.test.ztlp", published
+  end
+
+  test "edit shows the name read-only" do
+    get edit_group_path(@eng)
+    assert_select "input[name=?][readonly]", "group[name]"
   end
 
   # ------------------------------------------------------ add_member/remove_member
@@ -273,10 +284,25 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
 
   # ---------------------------------------------------------------- destroy
 
-  test "destroy deletes the group when nothing references it" do
-    post "/groups/#{@hr.id}", params: { _method: :delete }
-    refute @zone.groups.exists?(@hr.id)
+  # Deleting the DB row alone would leave the GROUP record (and its members) live in the NS with
+  # no panel row to fix it. Publish members: [] first; fail closed if the NS refuses.
+  test "destroy publishes the group with no members first, then deletes it" do
+    published_members = nil
+    Ztlp::Publisher.expects(:publish_group!)
+                   .with { |g, **| published_members = Ztlp::Records.group_data(g)["members"]; true }.returns(:ok)
+    delete group_path(@eng)
+    assert_equal [], published_members, "the NS must see an empty group before the row goes"
+    refute @zone.groups.exists?(@eng.id)
     assert AuditLog.where(action: "group.destroy", status: "ok").any?
+  end
+
+  test "destroy keeps the group when the NS refuses the empty publish" do
+    Ztlp::Publisher.expects(:publish_group!).raises(Ztlp::NsClient::NsError.new(0x0C, "timeout"))
+    delete group_path(@eng)
+    assert @zone.groups.exists?(@eng.id)
+    assert_equal [ @alice.id ], @eng.reload.users.map(&:id), "members must be unchanged"
+    follow_redirect!
+    assert_select "[data-toast]", /NOT deleted.*0x0C timeout/
   end
 
   test "destroy is blocked while a policy rule references the group" do

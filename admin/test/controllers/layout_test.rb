@@ -17,9 +17,10 @@ class LayoutTest < ActionDispatch::IntegrationTest
     body = response.body
     assert body.include?('class="rail"'), "expected the rail shell"
     assert body.include?("nav-sec"), "expected nav sections"
-    # Note: Rails 7 ERB html_escape escapes attribute quotes as &quot;
-    has_current = body.include?('aria-current="page"') || body.include?("aria-current=&quot;page&quot;")
-    assert has_current, "expected current nav marker"
+    # A real attribute, not escaped text: the CSS selector .nav a[aria-current="page"]
+    # only matches the parsed attribute. aria-current=&quot;page&quot; is a bug.
+    assert_select ".rail .nav a[aria-current=page]", 1
+    assert_not body.include?("&quot;page&quot;"), "aria-current must not be HTML-escaped"
     assert body.include?('class="app"'), "expected the .app grid shell"
     assert body.include?("topbar"), "expected the topbar"
     assert body.include?("brand"), "expected the brand block"

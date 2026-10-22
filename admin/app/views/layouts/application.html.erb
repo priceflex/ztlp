@@ -21,7 +21,7 @@
             <% ApplicationHelper::NAV.each do |section, items| %>
               <div class="nav-sec"><div class="nav-label"><%= section %></div>
                 <% items.each do |item_route, label, icon| %>
-                  <a href="<%= nav_href(item_route) %>" <%= 'aria-current="page"' if item_route == route %>><%= nav_icon(icon) %><span><%= label %></span></a>
+                  <a href="<%= nav_href(item_route) %>"<% if item_route == route %> aria-current="page"<% end %>><%= nav_icon(icon) %><span><%= label %></span></a>
                 <% end %>
               </div>
             <% end %>

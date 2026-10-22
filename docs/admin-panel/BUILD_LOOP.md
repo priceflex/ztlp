@@ -528,6 +528,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-22 04:40Z — **fix after Slice 1** (interactive review). The rail nav rendered
+  `aria-current=&quot;page&quot;` (a quoted string from `<%= %>` was escaped), so the CSS
+  selector `.nav a[aria-current="page"]` never matched and the active item was not highlighted.
+  The Slice 1 test had been loosened to accept the escaped form. Now: `assert_select
+  ".rail .nav a[aria-current=page]", 1` + assert no `&quot;page&quot;` (RED: found 0), view uses
+  `<% if %> aria-current="page"<% end %>` (GREEN). Suite 41 runs / 161 assertions / 0 failures;
+  rubocop clean; brakeman = EOLRuby + EOLRails notices only. **Rule for later slices: never make
+  a test accept escaped HTML in an attribute; that is the bug, not a Rails quirk. Prefer
+  `assert_select` over `body.include?` for markup.**
+
 - 2026-10-22 04:45Z — **Slice 1 DONE** (commit d68b4fcb).
   - Removed gems `tailwindcss-rails`, `importmap-rails`, `turbo-rails`, `stimulus-rails` (Gemfile +
     lock); deleted `app/assets/tailwind/`, `app/javascript/`, `app/assets/builds/`,

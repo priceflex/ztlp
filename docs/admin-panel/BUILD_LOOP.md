@@ -534,6 +534,35 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 00:48Z — **Slice 8b DONE (Devices: Assign owner — 3-record publish, fail-closed)** (cron tick). Commit `c5349caf`.
+  - `assign_owner` action (route existed since 8a): owner select posts `user_id` ("") = unassign. Publishes in order:
+    1. DEVICE record (owner field) — the security-critical write; an NsError → NOTHING changes in the DB
+    (old ownership stands in the NS), alert "NOT reassigned … Nothing changed.", audit `device.assign_owner`
+    `failed`. 2 + 3. both users' USER records (new owner, old owner) so their `devices[]` agree — save-and-warn
+    per the 6c/8a rule (the ownership already stands; the 6-hourly republish retries; toast names the user +
+    0x code). Already-same-owner → no publish, skipped audit, notice. Unknown user id → no publish, skipped
+    audit, "No such user". Success toast: "Owner changed: A → B" / "Owner set: B".
+  - View: the Owner panel now carries the Assign owner form (select of zone users + "— Unassigned —") for a
+    non-revoked device and a write admin; no form for revoked devices or read_only admins; unassigned devices
+    keep the honest "reconcile, Slice 12" note (no fake form).
+  - Tests (`test/controllers/device_assign_owner_test.rb`, 11, TDD RED first — 8 failed on the missing action /
+    form): form present with the bob option; no form for revoked / read_only / unassigned; assign publishes the
+    device + BOTH users (mocha cannot pin cross-expectation order, so the order contract is pinned by the
+    fail-closed test: a refused DEVICE write leaves the DB untouched and publishes no user); unassign publishes
+    device + old owner only; same-owner no-op (never publish); unknown id no-op; NS refusal fail-closed
+    (audit `failed`, toast 0x00 no_authority); partial failure warns and the change stands; read_only 403 +
+    device untouched.
+  - Evidence: `timeout 300 bin/rails test test/controllers/device_assign_owner_test.rb` → **11 runs / 44
+    assertions / 0 failures / 0 errors**; `test/controllers/devices_controller_test.rb` → 17 runs / 124
+    assertions / 0 failures (unchanged). `bash scripts/ci-admin.sh` → full suite **276 runs / 1244 assertions /
+    0 failures / 0 errors / 7 skips** (was 258/1178 after 8a review), rubocop clean, brakeman EOL-only,
+    node --check OK, node --test 19/19, `== all gates passed`. `ruby -c` on the controller: Syntax OK. No
+    test-ns containers started.
+  PENDING: Slice 9 (Applications, Policies, policy renderer, test-access). BLOCKED: none. UNCERTAIN: mocha
+  cannot assert cross-expectation call order — the device-before-users order is pinned indirectly (fail-closed
+  test) rather than directly; acceptable per the queue's intent ("publishes 3 records in order").
+  Next: Slice 9 (Applications directory).
+
 - 2026-10-23 00:40Z — **review of Slice 8a** (`6d34d98d`). Device revoke was fail-closed (good) but had
   NO tests for success / NS failure / missing reason (only the 403). Added 5. Fixes: (1) the REVOKE now
   also lists the device **node_id** (`also: [node_id_hex]`); user revoke lists every enrolled device's

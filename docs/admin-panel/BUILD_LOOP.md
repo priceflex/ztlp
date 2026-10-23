@@ -533,6 +533,37 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-23 06:34Z — **Slice 9c sub-slice 2 DONE (POST /policies/test + decision rendering)** (cron tick). Commit `c007d528`.
+  - Route `POST /policies/test` (`policies_test_path`). Controller `PoliciesController#test`: blank params →
+    422 (`:unprocessable_content`) with flash "Choose a device and an application to check." and NO audit row;
+    unknown device id → `raise ActiveRecord::RecordNotFound` (404); cross-zone application → zone-scoped
+    lookup (`Application.where(id:).where(gateway_id: @zone.gateways.select(:id))`, same shape as
+    `ApplicationsController#zone_application`) → 404 without revealing it exists elsewhere. A real check runs
+    `Ztlp::AccessEvaluator.evaluate(device, application)` and re-renders the page with the result under the widget.
+  - New partial `app/views/policies/_test_result.html.erb`: decision badge (allow ok / deny bad), reason line
+    (`data-testid="test-access-reason"`), per-rule trace table (`data-testid="trace-rule-N"`, rule/result/why),
+    warnings panel (`data-testid="test-access-warnings"`), and the assurance "not enforced by the gateway" note.
+    Whole result block carries `data-testid="test-access-result"`. All server-rendered + ERB-escaped — no
+    innerHTML with server data (§2.3); the sub-slice-3 JS widget stays open.
+  - Audit: `policy.test` (target = the Application, details device_name/application_name/decision/reason,
+    admin_id set via the shared `audit!` helper). Test-harness fix (not weakened): a second Zone needs
+    `ns_addr` (validates presence) — cross-zone fixture now passes it.
+  - TDD: `test/controllers/policies_test_action_controller_test.rb` (11) RED first (`policies_test_path`
+    undefined). One test-premise fix before implementing: blank-params is a form error → 422 re-render, not
+    an invented errors/ template.
+  - Evidence: file suite 11 runs / 59 assertions / 0 failures. Full suite `SKIP_CLAIM_BOOT=1 timeout 580
+    bin/rails test` → **409 runs / 1853 assertions / 0 failures / 0 errors / 7 skips** (was 398). `bash
+    scripts/ci-admin.sh` → node 21/21, rubocop clean, brakeman EOL-only, `== all gates passed`. `ruby -c` on
+    routes + controller: Syntax OK. No test-ns containers started.
+  PENDING: Slice 9c sub-slice 3 — the `data-act="test-access"` fetch widget in `directory.js` (POST JSON with
+    X-CSRF-Token, render trace via createElement/textContent pure helper + node test per §2.3). The plain form
+    already works without JS; this is progressive enhancement. Also still open from the 9b-4 review: move the
+    remaining inline `style=` out of the ERB (devices/show, claims/show, admins/_form, groups/_form,
+    groups/show, users/_form, applications/_form) into a NEW `admin.css` + site-wide `assert_select
+    "script:not([src])", false` + `assert_select "[style]", false` test. Slice 9b remainder (gateway `online`
+    reconcile on NS SVC listing) stays blocked on NS access / Slice 12.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9c sub-slice 3 (directory.js test-access widget + node test).
 - 2026-10-23 05:55Z — **Slice 9c sub-slice 1 DONE (Policies page: read-only overview + Test access widget)** (cron tick). Commit `be230b0c`.
   - `GET /policies` (`policies#index`): every application across the zone's gateways, each panel showing its rules (subject type + rendered literal), the per-gateway rendered policy code block (`PolicyRenderer`), and a
     `data-act="copy"` button (`data-testid="policy-copy-<name>"`, CSP-clean — no inline script). Disabled applications are listed (read-only overview). **Test access** widget: device picker (all devices, status shown) +

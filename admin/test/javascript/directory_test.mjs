@@ -167,9 +167,16 @@ test('rankSearch: higher score sorts first', () => {
 function fakeEl(tag) {
   return {
     tagName: tag.toUpperCase(), attrs: {}, children: [], textContent: '',
+    get firstChild() { return this.children[0] || null },
     setAttribute(k, v) { this.attrs[k] = String(v) },
     appendChild(c) { this.children.push(c); return c },
     replaceChildren(...c) { this.children = c },
+    querySelectorAll() {
+      // Walk the tree; return every descendant with any data-testid.
+      const out = []
+      ;(function walk(n) { (n.children || []).forEach(function (c) { if (c.attrs && c.attrs['data-testid'] !== undefined) out.push(c); walk(c) }) })(this)
+      return out
+    },
   }
 }
 const fakeDoc = { createElement: fakeEl }
@@ -253,5 +260,111 @@ test('ruleOptions: prompt first, then [label, id] pairs as {value: id, label}', 
   assert.deepEqual(window.ZtlpDirectory.ruleOptions('group', lists),
     [{ value: '', label: 'group…' }, { value: '9', label: 'techs' }])
   assert.deepEqual(window.ZtlpDirectory.ruleOptions('role', lists), [])
+})
+
+// ---------------------------------------------------------------------------
+// renderTestAccessResult (Slice 9c sub-slice 3) — the test-access widget
+// renders the decision badge, reason, trace table and warnings with
+// createElement/textContent only (§2.3: no innerHTML with server data).
+// ---------------------------------------------------------------------------
+// walkDescendants(node) — collect node + all its children recursively.
+function walkDescendants(node) {
+  const out = [node]
+  ;(node.children || []).forEach(function (c) { out.push.apply(out, walkDescendants(c)) })
+  return out
+}
+
+test('renderTestAccessResult: renders decision badge with ok class for allow', () => {
+  const box = fakeEl('div')
+  const panel = Z.renderTestAccessResult(fakeDoc, box, {
+    decision: 'allow',
+    reason: 'rule 1 matched',
+    trace: [{ rule: 'group: techs', result: 'allow', why: 'owner is in group techs' }],
+    warnings: [],
+    assurance_enforced: false,
+  })
+  assert.equal(box.children.length, 1)
+  assert.equal(panel.attrs['data-testid'], 'test-access-result')
+  // Badge: nested in the .panel-h head div, so walk all descendants.
+  const badge = walkDescendants(panel).find(c => c.attrs['data-testid'] === 'test-access-decision')
+  assert.ok(badge, 'decision badge present')
+  assert.equal(badge.attrs.class, 'badge ok')
+  assert.equal(badge.textContent, 'allow')
+  // Reason
+  const reason = panel.children.find(c => c.attrs['data-testid'] === 'test-access-reason')
+  assert.ok(reason, 'reason present')
+  assert.equal(reason.textContent, 'rule 1 matched')
+  // Trace rows are wrapped in table elements; walk all descendants.
+  const all = walkDescendants(panel)
+  const traceRow = all.find(c => c.attrs && c.attrs['data-testid'] === 'trace-rule-0')
+  assert.ok(traceRow, 'trace row present')
+})
+
+test('renderTestAccessResult: deny decision gets bad class', () => {
+  const box = fakeEl('div')
+  const panel = Z.renderTestAccessResult(fakeDoc, box, {
+    decision: 'deny',
+    reason: 'default deny (no rule matched)',
+    trace: [],
+    warnings: [],
+  })
+  const badge = walkDescendants(panel).find(c => c.attrs['data-testid'] === 'test-access-decision')
+  assert.equal(badge.attrs.class, 'badge bad')
+  assert.equal(badge.textContent, 'deny')
+})
+
+test('renderTestAccessResult: no trace renders an empty note', () => {
+  const box = fakeEl('div')
+  const panel = Z.renderTestAccessResult(fakeDoc, box, {
+    decision: 'deny', reason: 'device is pending (not enrolled)', trace: [], warnings: [],
+  })
+  const empty = panel.children.find(c => c.attrs.class === 'empty-note')
+  assert.ok(empty, 'empty note present')
+  assert.equal(empty.textContent, 'No rules were evaluated.')
+})
+
+test('renderTestAccessResult: warnings render as a warnings panel', () => {
+  const box = fakeEl('div')
+  const panel = Z.renderTestAccessResult(fakeDoc, box, {
+    decision: 'allow', reason: 'rule 2 matched',
+    trace: [{ rule: 'any', result: 'allow', why: 'matches every identity' }],
+    warnings: ['Device assurance high is below the application minimum critical'],
+  })
+  const wpanel = panel.children.find(c => c.attrs['data-testid'] === 'test-access-warnings')
+  assert.ok(wpanel, 'warnings panel present')
+})
+
+test('renderTestAccessResult: server data with markup is textContent, never innerHTML', () => {
+  const box = fakeEl('div')
+  Z.renderTestAccessResult(fakeDoc, box, {
+    decision: 'allow',
+    reason: '<img src=x onerror=alert(1)>',
+    trace: [{ rule: 'a<b', result: 'allow', why: 'c&d' }],
+    warnings: ['<script>alert(1)</script>'],
+  })
+  // The rendered panel must NOT carry an innerHTML-derived structure:
+  // every text node is set via textContent, so the fake element records
+  // the raw string — no nested <img>/<script> children were created.
+  const panel = box.children[0]
+  const reason = panel.children.find(c => c.attrs['data-testid'] === 'test-access-reason')
+  assert.equal(reason.textContent, '<img src=x onerror=alert(1)>')
+  // No fake element with tag IMG or SCRIPT was created anywhere.
+  const all = []
+  ;(function walk(n) {
+    all.push(n)
+    ;(n.children || []).forEach(walk)
+  })(panel)
+  assert.equal(all.find(e => e.tagName === 'IMG'), undefined)
+  assert.equal(all.find(e => e.tagName === 'SCRIPT'), undefined)
+})
+
+test('renderTestAccessResult: replaces existing children of the box', () => {
+  const box = fakeEl('div')
+  const old = fakeEl('div')
+  old.textContent = 'stale'
+  box.appendChild(old)
+  Z.renderTestAccessResult(fakeDoc, box, { decision: 'allow', reason: 'ok', trace: [], warnings: [] })
+  assert.equal(box.children.length, 1)
+  assert.equal(box.children[0].attrs['data-testid'], 'test-access-result')
 })
 

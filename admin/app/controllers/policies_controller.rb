@@ -17,8 +17,12 @@ class PoliciesController < ApplicationController
 
   def test
     if params[:device_id].blank? || params[:application_id].blank?
-      load_overview
       flash.now[:alert] = "Choose a device and an application to check."
+      if request.format.json?
+        return render json: { error: "Choose a device and an application to check." },
+                     status: :unprocessable_content
+      end
+      load_overview
       return render :index, status: :unprocessable_content
     end
 
@@ -34,14 +38,21 @@ class PoliciesController < ApplicationController
                   .first
     raise ActiveRecord::RecordNotFound, "application" if application.nil?
 
-    load_overview
     @test_result = Ztlp::AccessEvaluator.evaluate(device, application)
-    @test_result_device_name = device.name
-    @test_result_application_name = application.name
     audit!("policy.test", target: application,
           device_name: device.name, application_name: application.name,
           decision: @test_result[:decision], reason: @test_result[:reason])
-    render :index
+    # Slice 9c sub-slice 3: the directory.js widget posts JSON (X-CSRF-Token
+    # from the meta tag) and renders the decision client-side with
+    # createElement/textContent. The plain HTML form re-renders the page.
+    if request.format.json?
+      render json: @test_result
+    else
+      load_overview
+      @test_result_device_name = device.name
+      @test_result_application_name = application.name
+      render :index
+    end
   end
 
   private

@@ -138,4 +138,37 @@ class PoliciesTestControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "script:not([src])", false
   end
+
+  # Slice 9c sub-slice 3: the directory.js widget posts JSON and gets the
+  # decision back as JSON (no full-page re-render).
+  test "POST test as JSON returns the decision JSON" do
+    post policies_test_path, params: { device_id: @device.id, application_id: @open.id },
+         as: :json
+    assert_response :success
+    assert_equal "application/json", response.media_type
+    result = JSON.parse(response.body)
+    assert_equal "allow", result["decision"]
+    assert_kind_of Array, result["trace"]
+    assert_equal "any", result["trace"].first["rule"]
+  end
+
+  test "POST test as JSON with a deny returns the deny decision" do
+    post policies_test_path, params: { device_id: @pending.id, application_id: @open.id },
+         as: :json
+    assert_response :success
+    result = JSON.parse(response.body)
+    assert_equal "deny", result["decision"]
+    assert_includes result["reason"], "pending"
+  end
+
+  test "POST test as JSON with blank params returns 422 JSON" do
+    post policies_test_path, params: { device_id: "", application_id: "" }, as: :json
+    assert_response :unprocessable_content
+  end
+
+  test "the policies page renders the test-access results box" do
+    get policies_path
+    assert_response :success
+    assert_select %(div#test-access-results[data-testid="test-access-results"])
+  end
 end

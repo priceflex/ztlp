@@ -161,6 +161,103 @@
     }))
   }
 
+  // renderTestAccessResult(doc, box, result) — Slice 9c sub-slice 3: the
+  // test-access widget renders the decision badge, reason, per-rule trace
+  // table and warnings with createElement + textContent only (§2.3: never
+  // innerHTML with server data). result = the Ztlp::AccessEvaluator.result
+  // shape: { decision, reason, trace: [{rule, result, why}], warnings: [] }.
+  function renderTestAccessResult(doc, box, result) {
+    const panel = doc.createElement('div')
+    panel.setAttribute('class', 'panel')
+    panel.setAttribute('data-testid', 'test-access-result')
+
+    const head = doc.createElement('div')
+    head.setAttribute('class', 'panel-h')
+    const h = doc.createElement('h2')
+    h.textContent = 'Access check'
+    head.appendChild(h)
+    const decision = result && result.decision ? String(result.decision) : ''
+    const badge = doc.createElement('span')
+    badge.setAttribute('class', 'badge ' + (decision === 'allow' ? 'ok' : 'bad'))
+    badge.setAttribute('data-testid', 'test-access-decision')
+    badge.textContent = decision
+    head.appendChild(badge)
+    panel.appendChild(head)
+
+    const reason = doc.createElement('p')
+    reason.setAttribute('class', 'sub')
+    reason.setAttribute('data-testid', 'test-access-reason')
+    reason.textContent = result && result.reason ? String(result.reason) : ''
+    panel.appendChild(reason)
+
+    const trace = (result && result.trace) || []
+    if (trace.length > 0) {
+      const wrap = doc.createElement('div')
+      wrap.setAttribute('class', 'table-wrap')
+      const table = doc.createElement('table')
+      const thead = doc.createElement('thead')
+      const hrow = doc.createElement('tr')
+      ;['#', 'Rule', 'Result', 'Why'].forEach(function (label) {
+        const th = doc.createElement('th')
+        th.textContent = label
+        hrow.appendChild(th)
+      })
+      thead.appendChild(hrow)
+      table.appendChild(thead)
+      const tbody = doc.createElement('tbody')
+      for (let i = 0; i < trace.length; i++) {
+        const row = trace[i] || {}
+        const tr = doc.createElement('tr')
+        tr.setAttribute('data-testid', 'trace-rule-' + i)
+        ;[String(i), row.rule, row.result, row.why].forEach(function (cellText) {
+          const td = doc.createElement('td')
+          td.textContent = cellText == null ? '' : String(cellText)
+          tr.appendChild(td)
+        })
+        tbody.appendChild(tr)
+      }
+      table.appendChild(tbody)
+      wrap.appendChild(table)
+      panel.appendChild(wrap)
+    } else {
+      const empty = doc.createElement('div')
+      empty.setAttribute('class', 'empty-note')
+      empty.textContent = 'No rules were evaluated.'
+      panel.appendChild(empty)
+    }
+
+    const warnings = (result && result.warnings) || []
+    if (warnings.length > 0) {
+      const wpanel = doc.createElement('div')
+      wpanel.setAttribute('class', 'panel')
+      wpanel.setAttribute('data-testid', 'test-access-warnings')
+      const wh = doc.createElement('div')
+      const wh2 = doc.createElement('h3')
+      wh2.textContent = 'Warnings'
+      wh.appendChild(wh2)
+      wpanel.appendChild(wh)
+      for (let i = 0; i < warnings.length; i++) {
+        const p = doc.createElement('p')
+        p.setAttribute('class', 'sub')
+        p.textContent = String(warnings[i])
+        wpanel.appendChild(p)
+      }
+      panel.appendChild(wpanel)
+    }
+
+    const hint = doc.createElement('p')
+    hint.setAttribute('class', 'hint')
+    hint.textContent = 'min_assurance is not enforced by the gateway; this check is a panel-side simulation of the gateway decision.'
+    panel.appendChild(hint)
+
+    if (box.replaceChildren) box.replaceChildren(panel)
+    else {
+      while (box.firstChild) box.removeChild(box.firstChild)
+      box.appendChild(panel)
+    }
+    return panel
+  }
+
   const api = {
     THEME_KEY: THEME_KEY,
     ruleSubjectView: ruleSubjectView,
@@ -170,6 +267,7 @@
     rankSearch: rankSearch,
     safeUrl: safeUrl,
     renderSearchResults: renderSearchResults,
+    renderTestAccessResult: renderTestAccessResult,
     escapeHtml: escapeHtml,
     copy: copy,
     shouldConfirm: shouldConfirm,
@@ -420,6 +518,60 @@
     })
   }
 
+  // --- Test access (Slice 9c sub-slice 3) ------------------------------
+  // Progressive enhancement: the form also works as a plain HTML POST (the
+  // server re-renders the page with the result). When JS is available we
+  // intercept submit, POST JSON with the CSRF token from the meta tag, and
+  // render the response into a box under the form without a full page reload.
+  function csrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]')
+    return meta && meta.getAttribute ? meta.getAttribute('content') : ''
+  }
+
+  function onTestAccessSubmit(ev) {
+    const form = ev.target
+    if (!form || !form.getAttribute) return
+    const deviceSel = form.querySelector('[data-testid="test-access-device"]')
+    const appSel = form.querySelector('[data-testid="test-access-application"]')
+    if (!deviceSel || !appSel || !deviceSel.value || !appSel.value) return
+    const token = csrfToken()
+    if (!token) return // no meta tag — let the plain form POST go through
+    ev.preventDefault()
+    const box = document.getElementById('test-access-results')
+    if (!box) return
+    const btn = form.querySelector('button[type="submit"]')
+    if (btn) btn.disabled = true
+    fetch('/policies/test', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-CSRF-Token': token,
+      },
+      body: JSON.stringify({
+        device_id: deviceSel.value,
+        application_id: appSel.value,
+      }),
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('test access ' + r.status)
+        return r.json()
+      })
+      .then(function (result) {
+        renderTestAccessResult(document, box, result)
+      })
+      .catch(function () {
+        // Honest failure state: the plain form still works (drop JS, resubmit).
+        const note = document.createElement('div')
+        note.setAttribute('class', 'empty-note')
+        note.textContent = 'The check could not run in the background; the form still works without JavaScript.'
+        box.replaceChildren(note)
+      })
+      .finally(function () {
+        if (btn) btn.disabled = false
+      })
+  }
+
   // --- Wire it all up ---------------------------------------------------
   function wire() {
     initTheme()
@@ -438,6 +590,7 @@
 
     document.addEventListener('submit', function (ev) {
       if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-confirm')) onFormSubmit(ev)
+      if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-testid') && ev.target.getAttribute('data-testid') === 'test-access-form') onTestAccessSubmit(ev)
     })
 
     document.addEventListener('change', function (ev) {

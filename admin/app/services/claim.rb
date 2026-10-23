@@ -21,13 +21,18 @@ class Claim
       issue!
     end
 
-    def issue!
+    def issue!(force: false)
       raw = SecureRandom.random_bytes(20)
       code = Base32ish.encode(raw).scan(/.{1,4}/).join("-")
       SystemSetting[KEY_DIGEST] = Digest::SHA256.hexdigest(normalize(code))
       SystemSetting[KEY_EXPIRES] = TTL.from_now.iso8601
-      Rails.logger.warn("ZTLP ADMIN: no administrator yet. Claim code: #{code} (valid 24h)")
-      $stdout.puts("ZTLP ADMIN: no administrator yet. Claim code: #{code} (valid 24h)")
+      if force
+        Rails.logger.warn("ZTLP ADMIN: forced claim reissue (break-glass). Claim code: #{code} (valid 24h)")
+        $stdout.puts("ZTLP ADMIN: forced claim reissue (break-glass). Claim code: #{code} (valid 24h)")
+      else
+        Rails.logger.warn("ZTLP ADMIN: no administrator yet. Claim code: #{code} (valid 24h)")
+        $stdout.puts("ZTLP ADMIN: no administrator yet. Claim code: #{code} (valid 24h)")
+      end
       code
     end
 
@@ -40,8 +45,10 @@ class Claim
     end
 
     # params: claim_code, username, display_name, email, pubkey_hex, timestamp, signature (optional)
-    def perform!(params, ip: nil)
-      raise Error, "An administrator already exists." unless needed?
+    # force: true = break-glass (spec §4.1 step 6): when admins already exist, the claim creates an
+    # ADDITIONAL super_admin instead of failing. Only reachable from admin:reset_claim.
+    def perform!(params, ip: nil, force: false)
+      raise Error, "An administrator already exists." if !force && !needed?
       raise Error, "Invalid or expired claim code." unless code_valid?(params[:claim_code])
 
       pub = params[:pubkey_hex].to_s.strip.downcase
@@ -63,7 +70,7 @@ class Claim
 
       admin = nil
       Admin.transaction do
-        raise Error, "An administrator already exists." if Admin.exists_any?
+        raise Error, "An administrator already exists." if Admin.exists_any? && !force
 
         admin = Admin.create!(username: params[:username], display_name: params[:display_name],
                               email: params[:email].presence, pubkey_hex: pub, role: "super_admin")
@@ -76,7 +83,9 @@ class Claim
         admins_group.group_memberships.create!(user: user, added_by_admin: admin)
         SystemSetting.delete_key(KEY_DIGEST)
         SystemSetting.delete_key(KEY_EXPIRES)
-        AuditLog.record!("system.claimed", admin: admin, target: admin, ip: ip,
+        break_glass = force && Admin.where(id: admin.id).count < Admin.count
+        AuditLog.record!(break_glass ? "system.reset_claim" : "system.claimed",
+                                           admin: admin, target: admin, ip: ip,
                                            details: { signed: params[:signature].present? })
       end
       admin

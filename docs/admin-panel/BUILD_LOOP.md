@@ -534,6 +534,45 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 05:34Z — **Slice 9b sub-slice 6 DONE (gateway minimal CRUD inline from the application form)** (cron tick). Commit `c6f9d20c`.
+  - Routes: `GET /apps/new_gateway` (`gateways#new`, the inline "New gateway" form), `POST /gateways`
+    (`gateways#create`), `POST /gateways/:id/update_kind` (`gateways#update_kind`). Controller
+    `GatewaysController` — write-gated (`require_write_access` on new/create/update_kind), zone-scoped
+    (`@zone.gateways.find_by(id:)`, cross-zone/unknown id → 404), no NS publish (same contract as the
+    rest of Slice 9b: the operator deploys the rendered policy and restarts the gateway).
+  - **Minimal CRUD scope**: name + kind + host_note on create; `update_kind` edits kind + host_note
+    ONLY (name is immutable — it drives `ns_name <name>.<zone>` and the rendered service entry; a rename
+    would leave the old service live on the gateway with no panel row to fix it). Audit: `gateway.create`
+    / `gateway.update` (target = the Gateway row, details `{name, kind}`, admin_id set).
+  - One real bug found via the test: `update_kind` called `@gateway.update` on a nil when the id was
+    cross-zone (`scoped_gateway` → nil) → `NoMethodError: undefined method 'update' for nil:NilClass`
+    (500). Now `raise ActiveRecord::RecordNotFound` → 404. (rails-development-pitfalls #10b:
+    `find` raises before a nil-guard runs; the scoped `find_by` + explicit nil-check is the right shape.)
+  - Test-bug iteration (not weakened): `Gateway#normalize_name` downcases before validation, so an
+    uppercase name ("BadGw") is normalized to a valid label ("badgw") and CREATES — my first test
+    expected a 422, which was wrong. Pinned the normalization contract instead (assert the stored
+    name is "badgw"); added a leading-hyphen test ("-bad") that genuinely 422s.
+  - View: `app/views/gateways/new.html.erb` — inline form (name DNS-label pattern, kind select
+    rust_listen|elixir with the per-kind semantics hint, host_note), links back to the application
+    form. The application `_form` gateway field now carries a "New gateway" link to
+    `/apps/new_gateway` so the operator can add the zone's gateway row mid-flow.
+  - Evidence: `timeout 300 bin/rails test test/controllers/gateways_crud_controller_test.rb` →
+    15 runs / 53 assertions / 0 failures / 0 errors. Full suite `SKIP_CLAIM_BOOT=1 timeout 580
+    bin/rails test` → **393 runs / 1750 assertions / 0 failures / 0 errors / 7 skips** (was 378).
+    `bash scripts/ci-admin.sh` → node 21/21, rubocop clean, brakeman EOL-only, `== all gates passed`.
+    `ruby -c` on the controller + routes: Syntax OK. No test-ns containers started.
+  PENDING: Slice 9b remainder — **reconcile marks a gateway `online` when its SVC is seen in the NS**
+    (the second half of sub-slice 6; blocked on NS SVC-listing infrastructure + Slice 12 prod access —
+    the Reconciler currently lists only user/device/group, and NS access is gated until the operator
+    approves). Then Slice 9c (Policies page + `POST /policies/test` AccessEvaluator wiring + trace JS +
+    node test). Also still open from the 9b-4 review: move the remaining inline `style=` out of the ERB
+    (devices/show, claims/show, admins/_form, groups/_form, groups/show, users/_form, applications/_form)
+    into a NEW `admin.css` + site-wide `assert_select "script:not([src])", false` + `assert_select
+    "[style]", false` test.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9b sub-slice 6b (reconcile marks gateway `online` when SVC seen) — or, if the NS SVC-listing
+  seam is unavailable, proceed to Slice 9c (Policies page + test-access).
+
 - 2026-10-23 05:07Z — **Slice 9b sub-slice 5 DONE (application enable/disable)** (cron tick). Commit `0914d17c`.
   - Routes: `POST /applications/:id/enable` + `:disable` (member block, `enable_application`/`disable_application`
     path helpers — the `application_enable_path` shape I first wrote in the test does NOT exist for member

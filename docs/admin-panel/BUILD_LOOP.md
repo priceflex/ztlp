@@ -534,6 +534,40 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 03:14Z — **Slice 9b sub-slice 3 DONE (application mutations: new/create + edit/update)** (cron tick). Commit `5d6ab214`.
+  - `config/routes.rb`: `resources :applications, only: %i[index show new create edit update]` (rule add/remove +
+    enable/disable remain later sub-slices).
+  - `ApplicationsController`: `require_write_access` on all four mutation actions. Create takes the gateway from
+    the form — scoped to the zone (`@zone.gateways.find_by(id:)`), so an unknown id or a foreign-zone gateway 422
+    re-renders with "Pick a gateway from this zone." and nothing persists. Edit/update use `zone_application`
+    (same zone-scoped query as show; cross-zone id → 404). Name AND gateway are immutable after create: the name
+    drives the gateway's service entry and the ztlp name `<name>.<zone>` — a rename would leave the old service
+    live on the gateway with no panel row to fix it. No Publisher calls anywhere in this slice: the rendered
+    policy is a gateway-side artifact deployed at gateway restart, so both redirects carry "Deploy the rendered
+    policy and restart the gateway to make it live."
+  - Views: shared `_form` (gateway select listing every zone gateway with its kind + a semantics hint —
+    rust_listen: min-assurance not enforced by the gateway; elixir: group/role/user rules never match a
+    device; name field with "fixed after create" hint + DNS-label pattern; backend/protocol/min-assurance
+    (1..4)/description); `new` + `edit` pages. On edit the name field is `readonly` and the gateway select
+    `disabled` (form still submits the current values; the controller ignores name/gateway regardless).
+  - TDD: `test/controllers/applications_mutations_controller_test.rb` (14, RED first — 14 runs failed on the
+    missing routes / `NameError: new_application_path` before implementation). Own-bug iterations fixed in the
+    test, not by weakening: `Zone.create!` needs `ns_addr` (model validation), `f.select` `nil` options-hash
+    crashes on re-render (`include_blank: false`), and the edit-form attribute check switched from a string
+    regex (attribute order is not stable) to Nokogiri `at_css` + attribute reads.
+  - Evidence: `timeout 300 bin/rails test test/controllers/applications_mutations_controller_test.rb` →
+    14 runs / 63 assertions / 0 failures / 0 errors. Full suite `SKIP_CLAIM_BOOT=1 bin/rails test` →
+    **349 runs / 1544 assertions / 0 failures / 0 errors / 7 skips** (was 335; the +14 includes this slice's
+    14 and the prior tick's review tests). `bash scripts/ci-admin.sh` → node 19/19, rubocop clean,
+    brakeman EOL-only, `== all gates passed`. `ruby -c` on both edited .rb files: Syntax OK.
+    No test-ns containers started.
+  PENDING: Slice 9b remainder — rule add/remove forms (subject type + picker, with the gateway-semantics
+  warnings pinned by the 9b-1 review: group/role/user rules inert on elixir, user rules inert on
+  rust_listen), enable/disable action, gateway minimal CRUD ("New gateway" inline from the application
+  form), then Slice 9c (Policies page + `POST /policies/test` AccessEvaluator wiring + trace JS + node test).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9b sub-slice 4 (rule add/remove on the application show page).
+
 - 2026-10-23 03:05Z — **review of Slice 9b-2** (`4344c3bc` Applications index/show). SECURITY fixes:
   (1) **policy-line injection** — `Application#backend` had no validation and the renderer interpolated
   it into a `# --forward …` comment; a newline (`10.0.0.5:80\nallow = ["*"]`) started a REAL line the

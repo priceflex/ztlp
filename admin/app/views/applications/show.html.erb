@@ -5,7 +5,18 @@
 <div class="page-head">
   <div><h1><%= @application.name %></h1>
     <p class="lede mono"><%= @application.ztlp_name %></p></div>
-  <% if write %><div class="actions"><a class="btn" href="<%= edit_application_path(@application) %>">Edit</a></div><% end %>
+  <% if write %>
+    <div class="actions">
+      <%= form_with url: (@application.enabled ? disable_application_path(@application) : enable_application_path(@application)),
+                    method: :post,
+                    data: { confirm: (@application.enabled ?
+                                       "Disable #{ @application.name }? It drops out of the rendered policy until the gateway is restarted." :
+                                       "Enable #{ @application.name }? It re-enters the rendered policy until the gateway is restarted.") } do %>
+        <button type="submit" class="btn"><%= @application.enabled ? "Disable" : "Enable" %></button>
+      <% end %>
+      <a class="btn" href="<%= edit_application_path(@application) %>">Edit</a>
+    </div>
+  <% end %>
 </div>
 
 <% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>

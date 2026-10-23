@@ -14,7 +14,7 @@
 # editing an application publishes NOTHING to the NS: the rendered policy is a
 # gateway-side artifact deployed by the operator at gateway restart.
 class ApplicationsController < ApplicationController
-  before_action :require_write_access, only: %i[new create edit update]
+  before_action :require_write_access, only: %i[new create edit update enable disable]
 
   APP_FIELDS = %i[backend protocol min_assurance description].freeze
 
@@ -78,6 +78,20 @@ class ApplicationsController < ApplicationController
     end
   end
 
+  # Slice 9b sub-slice 5: enable/disable. The rendered policy only lists
+  # enabled applications as [[services]] (PolicyRenderer), so disabling is how
+  # an operator takes a service off the gateway's allow-list without deleting
+  # its rules. No NS publish: the operator deploys the rendered policy and
+  # restarts the gateway for the change to take effect (the redirect says so).
+  # Toggling to the current state is a no-op (no audit row).
+  def enable
+    set_enabled(true)
+  end
+
+  def disable
+    set_enabled(false)
+  end
+
   private
 
   # The show/edit/update target, scoped to the zone's gateways (cross-zone id
@@ -98,6 +112,23 @@ class ApplicationsController < ApplicationController
     @zone_users = @zone.users.order(:display_name).limit(500)
     @zone_devices = @zone.devices.order(:name).limit(500)
     @zone_groups = @zone.groups.order(:name).limit(500)
+  end
+
+  # One shared toggle so enable/disable can't drift apart. A no-op toggle
+  # (already in the requested state) writes no audit row and just re-renders.
+  def set_enabled(want)
+    @application = zone_application
+    if @application.enabled != want
+      @application.update!(enabled: want)
+      audit!(want ? "application.enable" : "application.disable", target: @application,
+            details: { name: @application.name, enabled: want })
+      redirect_to application_path(@application),
+                  notice: "Application #{@application.name} #{want ? 'enabled' : 'disabled'}. " \
+                          "Deploy the rendered policy and restart the gateway to make it live."
+    else
+      redirect_to application_path(@application),
+                  notice: "Application #{@application.name} is already #{want ? 'enabled' : 'disabled'}."
+    end
   end
 
   # A gateway the form may target must belong to THIS zone; an unknown id or a

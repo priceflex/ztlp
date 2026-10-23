@@ -383,6 +383,18 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
     assert_equal "0", hr_row.at_css("td.row-apps").text
   end
 
+  test "index counts references across ALL gateways (one gateway must not overwrite another)" do
+    gw1 = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
+    gw2 = @zone.gateways.create!(name: "gw2", kind: "elixir")
+    [ gw1.applications.create!(name: "api", backend: "127.0.0.1:8080"),
+      gw2.applications.create!(name: "wiki", backend: "127.0.0.1:8081") ].each do |app|
+      PolicyRule.create!(application: app, subject_type: "group", subject_id: @eng.id, position: 1)
+    end
+    get groups_path
+    eng_row = css_select("tbody tr").detect { |el| el.text.include?(@eng.ns_name) }
+    assert_equal "2", eng_row.at_css("td.row-apps").text
+  end
+
   test "show lists the applications whose rules reference the group" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
     api = gw.applications.create!(name: "api")

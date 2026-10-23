@@ -136,7 +136,7 @@ class GroupsController < ApplicationController
   def group_refs_by_ns_name
     refs = Hash.new { |h, k| h[k] = [] }
     @zone.gateways.each do |gw|
-      refs.merge!(group_refs_for_gateway(gw))
+      group_refs_for_gateway(gw).each { |ns, apps| refs[ns] |= apps } # accumulate, never overwrite
     end
     refs
   end

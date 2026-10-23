@@ -534,6 +534,10 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 02:00Z — review of `e649d298` (groups rule references): fine except `refs.merge!` per
+  gateway overwrote earlier gateways' apps for the same group (index count 1 instead of 2) → accumulate
+  with `|=`; test added (RED "1" → GREEN). ci-admin all gates passed. Next: Slice 9b.
+
 - 2026-10-23 01:44Z — **Slice 9a remainder DONE (groups directory surfaces policy-rule references)** (cron tick). Commit `e649d298`.
   - `Ztlp::PolicyRenderer.apps_for_group(gateway, group)` (service seam): the gateway's applications —
     enabled AND disabled — that carry a `group:` rule with `subject_value == group.ns_name` (the pinned

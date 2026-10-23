@@ -15,6 +15,8 @@ Rails.application.routes.draw do
   resources :admins, only: %i[index new create edit update]
   resources :audit_logs, only: [ :index ]
 
+  resources :applications, only: %i[index show]
+
   resources :users, only: %i[index show new create edit update] do
     member do
       post :revoke

@@ -1,0 +1,25 @@
+<% content_for :title, "Applications - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Applications</h1><p class="lede">Services exposed on the zone's gateways. Each one's allow-list is its policy rules; the default is deny.</p></div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Gateway</th><th>Backend</th><th>Protocol</th><th>Min assurance</th><th>Rules</th><th>Status</th></tr></thead>
+    <tbody>
+      <% @apps.each do |app| %>
+        <tr data-act="open" data-drawer="<%= application_path(app) %>" tabindex="0">
+          <td><div class="who"><div><div class="strong"><a href="<%= application_path(app) %>"><%= app.name %></a></div>
+            <div class="sub mono"><%= app.ztlp_name %></div></div></div></td>
+          <td class="nowrap mono"><%= app.gateway.name %>.<%= app.gateway.zone.name %></td>
+          <td class="nowrap mono"><%= app.backend.presence || "—" %></td>
+          <td class="nowrap"><%= app.protocol.presence || "—" %></td>
+          <td class="nowrap"><%= app.min_assurance %><% if app.gateway.kind == "rust_listen" %><div class="sub">(not enforced by Rust gateways)</div><% end %></td>
+          <td class="nowrap row-rules"><%= app.policy_rules.count %></td>
+          <td class="nowrap"><span class="badge <%= app.enabled ? "ok" : "bad" %>"><%= app.enabled ? "enabled" : "disabled" %></span></td>
+        </tr>
+      <% end %>
+      <% if @apps.empty? %><tr class="empty"><td colspan="7">No applications yet. Add an application on a gateway to start defining access.</td></tr><% end %>
+    </tbody>
+  </table>
+</div>

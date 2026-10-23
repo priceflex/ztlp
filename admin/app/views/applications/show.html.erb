@@ -1,0 +1,43 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% unless drawer %><% content_for :title, "#{@application.name} - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div><h1><%= @application.name %></h1>
+    <p class="lede mono"><%= @application.ztlp_name %></p></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>About</h2><span class="badge <%= @application.enabled ? "ok" : "bad" %>"><%= @application.enabled ? "enabled" : "disabled" %></span></div>
+    <dl class="kv">
+      <dt>Gateway</dt><dd class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %> (<%= @application.gateway.kind %>)</dd>
+      <dt>Backend</dt><dd class="mono"><%= @application.backend.presence || "—" %></dd>
+      <dt>Protocol</dt><dd><%= @application.protocol.presence || "—" %></dd>
+      <dt>Min assurance</dt><dd><%= @application.min_assurance %><% if @application.gateway.kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
+      <dt>Description</dt><dd><%= @application.description.presence || "—" %></dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @application.policy_rules.count %></span></div>
+    <% if @application.policy_rules.any? %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Subject type</th><th>Subject</th><th>Rendered literal</th></tr></thead>
+        <tbody>
+          <% @application.policy_rules.order(:position, :id).each do |rule| %>
+            <tr><td class="nowrap"><%= rule.position %></td>
+              <td class="nowrap"><%= rule.subject_type %></td>
+              <td class="nowrap mono"><%= rule.subject_entity&.ns_name || rule.subject_value || "all" %></td>
+              <td class="nowrap mono"><%= rule.render %></td></tr>
+          <% end %>
+        </tbody>
+      </table></div>
+      <% if @application.gateway.kind == "elixir" %><p class="hint">Note: group, role and user rules never match a device on an elixir gateway — only <span class="mono">*</span> or an exact device name do.</p><% end %>
+    <% else %><div class="empty-note">No rules yet — access is default deny.</div><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= @application.gateway.kind %></span></div>
+    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@application.gateway).html_safe %></code></pre>
+    <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %></span> and restart the gateway to apply it.</p>
+  </div>
+</div>

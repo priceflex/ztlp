@@ -534,6 +534,22 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 02:40Z — **review of Slice 9b-1** (`bb608e5c` AccessEvaluator). Three divergences from the
+  gateways fixed (tests rewritten RED → GREEN, 19/19):
+  (1) **Elixir semantics were assumed equal to Rust.** gateway/lib/ztlp_gateway/policy_engine.ex checks
+  `group:`/`role:` against the identity DIRECTLY (`is_group_member?(group, identity)`,
+  `user_role(identity)`) with NO device→owner step; identity = the device name the key resolves to and
+  GROUP members are user names → on **elixir** gateways group/role/user rules NEVER match a device; only
+  `*` (`:all`) and exact device names do. The evaluator now says so per rule.
+  (2) **Owner pre-check removed** — neither gateway has one; an ownerless device matches `*`/its name;
+  group/role rules on it deny with "device has no owner".
+  (3) **min_assurance is NOT a deny** — G6: no per-service floor on Rust; Elixir's is per-route config the
+  panel does not render. Decision = the gateway's; the floor is a `warnings[]` entry ("… not enforced by
+  <kind> gateways") and `assurance_enforced` is always false. Result hash gains `warnings:`.
+  ci-admin all gates passed. **For 9b-2 (UI): show `warnings` in the Test-access panel; the rule form
+  must warn that group/role/user rules do nothing on elixir gateways and user rules do nothing on
+  rust_listen.** Operator decision on user rules still pending (see 01:55Z).
+
 - 2026-10-23 02:15Z — **Slice 9b sub-slice 1 DONE (`Ztlp::AccessEvaluator`)** (cron tick). Commit `bb608e5c`.
   - `app/services/ztlp/access_evaluator.rb`: `Ztlp::AccessEvaluator.evaluate(device, application, ns_client:)`
     returns `{decision: "allow"|"deny", reason, trace: [{rule, result, why}], assurance_enforced: bool}`.

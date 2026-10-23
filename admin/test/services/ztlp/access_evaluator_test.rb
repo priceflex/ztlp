@@ -87,12 +87,16 @@ class AccessEvaluatorTest < ActiveSupport::TestCase
     assert_match(/disabled/i, out[:reason])
   end
 
-  test "unassigned owner: deny (fail-closed)" do
-    @app.policy_rules.create!(subject_type: "any")
-    anon = @zone.devices.create!(name: "orphan", key_source: "file", assurance: 1, status: "enrolled")
+  # The gateway has no owner pre-check: "*" and exact device literals match an ownerless
+  # device; only group:/role: consult the owner (policy.rs matches_pattern_async).
+  test "unassigned device: '*' still allows it, group/role cannot match it" do
+    anon = @zone.devices.create!(name: "orphan", key_source: "file", assurance: 3, status: "enrolled")
+    @app.policy_rules.create!(subject_type: "group", subject_id: @techs.id, position: 0)
     out = ev(anon, @app)
     assert_equal "deny", out[:decision]
-    assert_match(/no owner/i, out[:reason])
+    assert_match(/no owner/i, out[:trace].last[:why])
+    @app.policy_rules.create!(subject_type: "any", position: 1)
+    assert_equal "allow", ev(anon, @app)[:decision]
   end
 
   test "application disabled: deny" do
@@ -145,35 +149,42 @@ class AccessEvaluatorTest < ActiveSupport::TestCase
     assert_match(/no longer exists/i, out[:reason])
   end
 
-  test "any rule matches on the elixir gateway too (identity resolution is the same)" do
+  # Elixir gateway (gateway/lib/ztlp_gateway/policy_engine.ex): identity = the device name the
+  # client key resolves to; group: asks is_group_member?(group, identity) and role: asks
+  # user_role(identity) -- NO device->owner step. GROUP members are user names, so neither can
+  # match a device there. Only "*" (:all) and exact device names work.
+  test "elixir: group and role rules never match a device (no owner resolution)" do
     @app_off.update!(enabled: true)
-    @app_off.policy_rules.create!(subject_type: "group", subject_id: @techs.id)
-    assert_equal "allow", ev(@dev, @app_off)[:decision]
+    @app_off.policy_rules.create!(subject_type: "group", subject_id: @techs.id, position: 0)
+    @app_off.policy_rules.create!(subject_type: "role", subject_value: "tech", position: 1)
+    out = ev(@dev, @app_off)
+    assert_equal "deny", out[:decision]
+    assert out[:trace].all? { |t| t[:result] == "deny" && t[:why].match?(/elixir/i) }, out[:trace].inspect
   end
 
-  test "min_assurance below the app's floor: deny, and on rust_listen the gate is NOT enforced there" do
+  test "elixir: '*' and exact device rules allow" do
+    @app_off.update!(enabled: true)
+    @app_off.policy_rules.create!(subject_type: "device", subject_id: @dev.id)
+    assert_equal "allow", ev(@dev, @app_off)[:decision]
+    assert_equal "deny", ev(@dave_dev, @app_off)[:decision]
+  end
+
+  # G6: no per-service min_assurance on the Rust gateway; on Elixir it is per-route config the panel
+  # does not render. So the decision is the GATEWAY's and the floor is a warning, never a deny.
+  test "min_assurance below the floor: gateway decision stands, flagged as not enforced" do
     @app.policy_rules.create!(subject_type: "any")
     out = ev(@low, @app) # assurance 2 < min 3
-    assert_equal "deny", out[:decision]
+    assert_equal "allow", out[:decision], "the Rust gateway would let it in; the panel must say so"
     assert_equal false, out[:assurance_enforced]
-    assert_match(/assurance/i, out[:reason])
-
-    # Elixir gateway kind: the panel still reports the same deny, but the
-    # assurance gate is the mandatory panel gate, not the gateway's — the
-    # evaluator says enforced: false on both kinds today (the Rust gateway
-    # has no assurance check; the elixir gate is the panel's mandatory gate).
-    @app_off.update!(enabled: true)
-    @app_off.policy_rules.create!(subject_type: "any")
-    out2 = ev(@low, @app_off)
-    assert_equal "deny", out2[:decision]
-    assert_equal false, out2[:assurance_enforced]
+    assert_match(/not enforced/i, out[:warnings].join(" "))
+    assert_match(/below.*minimum/i, out[:warnings].join(" "))
   end
 
-  test "min_assurance met: allow proceeds to the rules and enforces the gate honestly" do
+  test "min_assurance met: no warning" do
     @app.policy_rules.create!(subject_type: "any")
-    out = ev(@dev, @app) # assurance 3 >= min 3
+    out = ev(@dev, @app)
     assert_equal "allow", out[:decision]
-    assert_equal true, out[:assurance_enforced]
+    assert_empty out[:warnings]
   end
 
   test "wildcard suffix rules mirror matches_pattern exactly" do

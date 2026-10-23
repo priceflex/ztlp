@@ -14,63 +14,54 @@ module Ztlp
   # check); it is enforced by the panel's mandatory gateway gate only. The
   # evaluator therefore always reports `assurance_enforced: false` while
   # still computing the deny/allow the panel gate would apply.
+  # Per gateway kind (reviewed 2026-10-23 against priceflex/ztlp HEAD):
+  #   rust_listen (proto/src/policy.rs): "*", exact device name; group:/role: resolve the device's
+  #     OWNER via NS (DEVICE.owner -> GROUP.members / USER.role); a user literal never equals a
+  #     device identity.
+  #   elixir (gateway/lib/ztlp_gateway/policy_engine.ex): identity = the device name its key
+  #     resolves to; group:/role: check THAT identity directly (is_group_member?/user_role) with no
+  #     owner step, and GROUP members are user names -> group/role/user rules never match a device.
+  # There is no owner pre-check in either gateway (an ownerless device can match "*" / its name).
+  # min_assurance: G6 -- the Rust gateway has no per-service floor; the Elixir floor is per-route
+  # config the panel does not render. So the floor is reported as a WARNING with
+  # assurance_enforced: false and never changes the gateway's decision.
   class AccessEvaluator
-    # `ns_client:` is the seam for NS group-membership lookups (default:
-    # Ztlp::NsClient, whose `list(port, secret, type:, zone:)` class method
-    # is the same seam Reconciler uses). When nil or when the NS list call
-    # fails, group rules fall back to the panel's Group row (stale but
-    # honest: the rule still renders, and a dead NS must not silently
-    # widen access — a group with an unreachable NS row denies).
     def self.evaluate(device, application, ns_client: NsClient)
       trace = []
-      reason = nil
-      decision = nil
-      enforced = false
+      warnings = []
+      kind = application.gateway&.kind || "rust_listen"
 
-      unless device.enrolled?
-        return deny!("device is #{device.status} (not enrolled)", trace, enforced: enforced)
-      end
-      unless (owner = device.user)
-        return deny!("device has no owner assigned", trace, enforced: enforced)
-      end
-      if %w[revoked disabled].include?(owner.status)
-        return deny!("owner #{owner.username} is #{owner.status}", trace, enforced: enforced)
-      end
-      unless application.enabled
-        return deny!("application #{application.name} is disabled", trace, enforced: enforced)
-      end
+      return result("deny", "device is #{device.status} (not enrolled)", trace, warnings) unless device.enrolled?
 
-      # min_assurance: computed against the panel gate (not the gateway).
-      # devices.assurance and applications.min_assurance are both integers
-      # (1..4); Assurance.wire is the display/NS label only.
+      owner = device.user
+      if owner && %w[revoked disabled].include?(owner.status)
+        return result("deny", "owner #{owner.username} is #{owner.status}", trace, warnings)
+      end
+      return result("deny", "application #{application.name} is disabled", trace, warnings) unless application.enabled
+
       if device.assurance.to_i < application.min_assurance.to_i
-        return deny!("assurance #{device.assurance} below application minimum #{application.min_assurance}", trace)
+        warnings << "Device assurance #{device.assurance} is below the application minimum " \
+                    "#{application.min_assurance}, but the minimum is not enforced by #{kind} gateways."
       end
-      enforced = true
 
-      rules = application.policy_rules.order(:position, :id).to_a
       zone = device.zone
       ns_port = Reconciler.ns_admin_port(zone)
       ns_secret = zone.ns_admin_api_secret_ct
-
-      rules.each do |rule|
-        result, why = rule_result(rule, device: device, owner: owner, zone: zone,
-                                  ns_client: ns_client, ns_port: ns_port, ns_secret: ns_secret)
-        trace << { rule: rule_label(rule), result: result, why: why }
-        if result == "allow"
-          return { decision: "allow", reason: "rule #{rule_label(rule)} matched",
-                   trace: trace, assurance_enforced: enforced }
-        end
+      application.policy_rules.order(:position, :id).each do |rule|
+        res, why = rule_result(rule, device: device, owner: owner, zone: zone, kind: kind,
+                                     ns_client: ns_client, ns_port: ns_port, ns_secret: ns_secret)
+        trace << { rule: rule_label(rule), result: res, why: why }
+        return result("allow", "rule #{rule_label(rule)} matched", trace, warnings) if res == "allow"
       end
 
       last = trace.last
-      reason = if last && last[:result] == "deny" && last[:why]
-                 last[:why]
-      else
-                 "default deny (no rule matched)"
-      end
-      deny!(reason, trace)
+      result("deny", last && last[:why] ? last[:why] : "default deny (no rule matched)", trace, warnings)
     end
+
+    def self.result(decision, reason, trace, warnings)
+      { decision: decision, reason: reason, trace: trace, warnings: warnings, assurance_enforced: false }
+    end
+    private_class_method :result
 
     # policy.rs matches_pattern: "*" matches everything; "*.suffix" matches
     # identities ending in ".suffix" (or equal to suffix); otherwise exact.
@@ -97,7 +88,15 @@ module Ztlp
     end
 
     # => ["allow"|"deny", why-string].
-    def self.rule_result(rule, device:, owner:, zone:, ns_client:, ns_port:, ns_secret:)
+    def self.rule_result(rule, device:, owner:, zone:, kind:, ns_client:, ns_port:, ns_secret:)
+      if kind == "elixir" && %w[group role user].include?(rule.subject_type)
+        return [ "deny", "#{rule.subject_type} rules never match a device on elixir gateways " \
+                         "(no owner lookup); use '*' or the device" ]
+      end
+      if owner.nil? && %w[group role].include?(rule.subject_type)
+        return [ "deny", "device has no owner, so #{rule.subject_type} rules cannot match it" ]
+      end
+
       case rule.subject_type
       when "any"
         [ "allow", "'*' matches every authenticated identity" ]
@@ -162,11 +161,5 @@ module Ztlp
     rescue NsClient::NsError
       fallback ? fallback.users.pluck(:ns_name).compact : nil
     end
-
-    def self.deny!(reason, trace, enforced: false)
-      { decision: "deny", reason: reason, trace: trace, assurance_enforced: enforced }
-    end
-
-    private_class_method :deny!
   end
 end

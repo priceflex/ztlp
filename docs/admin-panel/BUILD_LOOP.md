@@ -534,6 +534,24 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 01:55Z — **review of Slice 9a** (`f669ee30`): the renderer's output was NOT what either
+  gateway parses. Ground truth (priceflex/ztlp HEAD): Rust `ztlp listen --policy` = proto/src/policy.rs
+  `from_toml`, LINE-BASED, reads only `default`, `[[services]]`, `name = "<service>"`, single-line
+  `allow = [...]`; `<service>` = the listener's `--forward <name>:<addr>` name. 9a emitted `ztlp = …` +
+  `backends = "a", "b"` and no `name =` → the Rust gateway would see ZERO services (all default-deny).
+  Elixir gateway reads env `ZTLP_GATEWAY_POLICIES=<identity>:<service>,…` (config.ex), not YAML. Also
+  `render` returned nil with no apps, but a missing/unloadable policy file = ALLOW-ALL on Rust
+  (ztlp-cli.rs:5242). Rewritten: always renders; Rust TOML with `name = "<app.name>"`, `allow` one line,
+  `# --forward <app>:<backend>` comment; Elixir one env line; literals outside `[A-Za-z0-9*._@:-]` are
+  OMITTED with a comment (fail-closed; injection test). Goldens parse the output with a line-for-line
+  Ruby port of `from_toml` and of `parse_policy_entry` (test file header). 7/7; ci-admin all gates passed.
+  **RULE for 9b (AccessEvaluator) — must mirror the GATEWAY, not the spec prose:** on Rust the client
+  identity is the DEVICE ns name; plain literals match EXACTLY (`*` = all, `*.suffix` = suffix); only
+  `group:` and `role:` resolve device→owner. So a `user` rule (`alice.users.<zone>`) NEVER matches on a
+  rust_listen gateway → evaluator returns deny with why "user rules don't match devices on rust_listen
+  gateways; use a group" (and the rule UI should say so). Operator decision pending on whether to compile
+  user rules to the user's device names instead.
+
 - 2026-10-23 01:38Z — **Slice 9a DONE (policy renderer — TOML/YAML, rule literals)** (cron tick). Commit `f669ee30`.
   - `app/services/ztlp/policy_renderer.rb`: `Ztlp::PolicyRenderer.render(gateway)` returns nil for a gateway
     with no enabled applications (empty allow-list = default-deny, no document needed). `rust_listen` ->

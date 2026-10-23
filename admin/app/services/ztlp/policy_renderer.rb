@@ -1,90 +1,78 @@
 # frozen_string_literal: true
 
 module Ztlp
-  # Renders a gateway's policy allow-list from its applications + rules
-  # (Slice 9a). This is the panel's VIEW of the policy the gateway sees; the
-  # gateway reads its own records — the renderer exists so an operator can see
-  # and copy exactly what the gateway will enforce before restarting it
-  # (spec Slice 9: "Rule changes need a gateway restart").
+  # Renders a gateway's access policy in the format THAT gateway parses (Slice 9a, reviewed
+  # 2026-10-23 against the gateway sources in priceflex/ztlp):
   #
-  # Output is per gateway kind:
-  #   rust_listen -> TOML (default = "deny", one [[services]] per enabled app)
-  #   elixir      -> YAML (default: deny, one list entry per enabled app)
+  #   rust_listen -> policy.toml for `ztlp listen --policy`, read by proto/src/policy.rs
+  #                  `from_toml`, a LINE-BASED parser: `default = "deny"`, then per service
+  #                  `[[services]]` / `name = "<service>"` / single-line `allow = [ ... ]`.
+  #                  `<service>` is the listener's `--forward <name>:<addr>` name, i.e. the
+  #                  application name; the backend is shown as that `--forward` flag (comment).
+  #   elixir      -> one env line `ZTLP_GATEWAY_POLICIES=<identity>:<service>,...`
+  #                  (gateway/lib/ztlp_gateway/config.ex parse_policy_entry).
   #
-  # Fail-closed: a rule whose subject cannot be resolved (the group row lost
-  # its ns_name, the user was deleted) renders nothing for that rule rather
-  # than emitting a literal the gateway would match against.
+  # Always renders a document: a missing/unloadable policy file means ALLOW-ALL on the Rust
+  # gateway (ztlp-cli.rs:5242), so "no applications" must still say default deny.
+  # Fail-closed: a rule literal that could corrupt either line parser (anything outside
+  # [A-Za-z0-9*._@:-]) is omitted and listed as an "# OMITTED" comment, never emitted.
+  # Disabled applications are left out (Rust: absent service = default deny).
   class PolicyRenderer
-    # Renders the gateway's policy document, or nil if it has no enabled
-    # applications (an empty allow-list is the default-deny state and needs
-    # no document).
-    def self.render(gateway)
-      apps = gateway.applications.where(enabled: true).order(:name).includes(:policy_rules)
-      return nil if apps.empty?
+    SAFE_LITERAL = /\A[A-Za-z0-9*._@:-]+\z/
+    SAFE_SERVICE = /\A[A-Za-z0-9._-]+\z/
 
-      case gateway.kind
-      when "elixir" then render_yaml(gateway, apps)
-      else render_toml(gateway, apps)
-      end
+    def self.render(gateway)
+      apps = gateway.applications.where(enabled: true).order(:name).includes(:policy_rules).to_a
+      gateway.kind == "elixir" ? render_elixir(gateway, apps) : render_toml(gateway, apps)
     end
 
     class << self
       private
 
-      # The rule's literal as the gateway sees it. `PolicyRule#render`
-      # resolves the subject by DB id; when the group row is deleted it falls
-      # back to the rule's stored subject_value (the ns_name, pinned at create
-      # time), so the operator sees the exact literal the gateway will match
-      # even if the group row is gone. role/any subjects cannot be
-      # unresolvable (no entity lookup).
-      def rule_literal(rule)
-        rule.render
+      # [[safe literals], [omitted literals]] in rule order.
+      def literals(app)
+        all = app.policy_rules.sort_by { |r| [ r.position.to_i, r.id ] }.map(&:render).compact
+        all.partition { |l| l.match?(SAFE_LITERAL) }
       end
 
-      def toml_string(value)
-        %("#{value.to_s.gsub('"', '\\"').gsub("\\", "\\\\\\")}")
-      end
-
-      # Backends: when the protocol has a scheme in the backend string, the
-      # protocol is redundant and the backend stands alone; otherwise the
-      # protocol prefixes the bare address (e.g. protocol "http" + backend
-      # "10.0.0.5:8080" -> "http://10.0.0.5:8080").
-      def backend_urls(app)
-        backend = app.backend.to_s
-        return [ backend ] if backend.match?(%r{\Ahttps?://})
-
-        protocol = app.protocol.to_s
-        protocol.empty? ? [ backend ] : [ "#{protocol}://#{backend}" ]
+      def forward_flag(app)
+        app.backend.present? ? "--forward #{app.name}:#{app.backend.to_s.sub(%r{\Ahttps?://}, "")}" : nil
       end
 
       def render_toml(gateway, apps)
-        lines = [ "default = \"deny\"", "" ]
+        lines = [ "# policy.toml for gateway #{gateway.name} (ztlp listen --policy)",
+                  "# Rule changes need a gateway restart; group membership changes are live.",
+                  "default = \"deny\"" ]
         apps.each do |app|
-          lines << "[[services]]"
-          lines << "ztlp = #{toml_string(app.ztlp_name)}"
-          backends = backend_urls(app)
-          lines << "backends = #{backends.map { |b| toml_string(b) }.join(", ")}" if backends.any?
-          literals = app.policy_rules.order(:position, :id).map { |r| rule_literal(r) }.compact
-          lines << "allow = [#{literals.map { |l| toml_string(l) }.join(", ")}]"
           lines << ""
+          unless app.name.match?(SAFE_SERVICE)
+            lines << "# OMITTED application with an unsafe name"
+            next
+          end
+          safe, omitted = literals(app)
+          lines << "# #{app.ztlp_name}" << "[[services]]" << "name = \"#{app.name}\""
+          lines << "allow = [#{safe.map { |l| "\"#{l}\"" }.join(", ")}]"
+          flag = forward_flag(app)
+          lines << "# #{flag}" if flag
+          omitted.each { lines << "# OMITTED unsafe rule literal (fix the rule)" }
         end
-        lines.join("\n")
+        "#{lines.join("\n")}\n"
       end
 
-      def render_yaml(gateway, apps)
-        lines = [ "default: deny", "services:" ]
+      def render_elixir(gateway, apps)
+        entries = []
+        notes = []
         apps.each do |app|
-          lines << "  - ztlp: #{app.ztlp_name}"
-          backend_urls(app).each { |b| lines << "    backend: #{b}" }
-          literals = app.policy_rules.order(:position, :id).map { |r| rule_literal(r) }.compact
-          if literals.any?
-            lines << "    allow:"
-            literals.each { |l| lines << "      - #{l}" }
-          else
-            lines << "    allow: []"
-          end
+          next notes << "# OMITTED application with an unsafe name" unless app.name.match?(SAFE_SERVICE)
+
+          safe, omitted = literals(app)
+          safe.each { |l| entries << "#{l}:#{app.name}" }
+          omitted.each { notes << "# OMITTED unsafe rule literal (fix the rule) on #{app.name}" }
+          notes << "# #{app.name}: no rules (denied)" if safe.empty?
         end
-        lines.join("\n")
+        [ "# Elixir gateway #{gateway.name}: set in its environment, then restart it.",
+          *notes,
+          "ZTLP_GATEWAY_POLICIES=#{entries.join(",")}" ].join("\n") + "\n"
       end
     end
   end

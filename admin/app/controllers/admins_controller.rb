@@ -8,6 +8,22 @@ class AdminsController < ApplicationController
     @admins = Admin.order(:username)
   end
 
+  # Slice 11d: inline disable/enable from the list. No-op when already in the
+  # requested state (no duplicate audit row); a disabled admin cannot sign in
+  # (sessions gate), so this is the fast path, with the edit form as fallback.
+  def toggle
+    @admin = set_admin
+    want = params[:disabled] == "1"
+    if @admin.disabled? != want
+      @admin.update!(disabled_at: want ? Time.current : nil)
+      audit!("admin.updated", target: @admin,
+              details: { username: @admin.username, disabled: want })
+      redirect_to admins_path, notice: "Administrator #{@admin.username} #{want ? 'disabled' : 're-enabled'}."
+    else
+      redirect_to admins_path
+    end
+  end
+
   def new
     @admin = Admin.new(role: "admin")
   end

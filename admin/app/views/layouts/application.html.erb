@@ -31,6 +31,9 @@
           <div class="ns-line"><span class="dot <%= @zone&.authority_configured? ? "ok" : "" %>"></span><%= @zone&.ns_addr || ENV.fetch("ZTLP_NS_ADDR", "name server") %></div>
           <% if session[:via] == "ztlp" && session[:device].present? %><div class="ns-meta">via ZTLP <%= session[:device] %> &middot; <%= Ztlp::Assurance.label(Ztlp::Assurance.level(session[:assurance])) %></div><% end %>
           <div class="ns-meta">v<%= ZtlpAdmin::VERSION %></div>
+          <% if signed_in? %>
+            <div class="ns-meta" id="rail-me"><span class="avatar avatar-sm"><%= initials(current_admin.display_name) %></span><%= current_admin.username %> &middot; <%= current_admin.role.humanize %><% if session[:via] == "ztlp" %><% if session[:device].present? %> &middot; via ZTLP <%= session[:device] %><% end %> &middot; <%= Ztlp::Assurance.label(Device.find_by(ns_name: session[:device])&.assurance || session[:assurance]) %><% end %></div>
+          <% end %>
         </div>
       </aside>
       <div class="main">

@@ -16,7 +16,11 @@ Rails.application.routes.draw do
   post   "auth/verify",    to: "sessions#verify"
   get    "auth/session/:token", to: "sessions#exchange", as: :auth_session
 
-  resources :admins, only: %i[index new create edit update]
+  resources :admins, only: %i[index new create edit update] do
+    member do
+      post :toggle
+    end
+  end
   resources :audit_logs, only: [ :index ]
 
   # Slice 9b sub-slice 2 (read) + sub-slice 3 (new/create, edit/update) +

@@ -148,6 +148,7 @@ tbody tr[data-act]{cursor:pointer}
 tbody tr[data-act]:hover td{background:var(--surface-2)}
 tr.empty td{padding:44px 16px;text-align:center;color:var(--muted);cursor:default}
 .row-actions{text-align:right;white-space:nowrap}
+.row-actions form.inline{display:inline-flex;margin-left:8px}
 .row-actions .btn+.btn{margin-left:6px}
 .table-foot{padding:10px 16px;color:var(--muted);font-size:13px;border-top:1px solid var(--line)}
 

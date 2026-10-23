@@ -17,7 +17,17 @@
         <td><%= a.role.humanize %></td>
         <td class="mono sub" title="<%= a.pubkey_hex %>"><%= a.pubkey_hex[0, 16] %>…</td>
         <td class="sub nowrap"><%= a.last_login_at&.utc&.strftime("%Y-%m-%d %H:%M") || "never" %></td>
-        <td class="row-actions"><% if current_admin.super_admin? %><%= link_to "Edit", edit_admin_path(a), class: "btn sm" %><% end %></td>
+        <td class="row-actions">
+          <% if current_admin.super_admin? %>
+            <% if @admin != a %>
+              <%= form_with url: toggle_admin_path(a), method: :post, class: "inline" do %>
+                <input type="hidden" name="disabled" value="<%= a.disabled? ? '0' : '1' %>">
+                <button type="submit" class="btn sm" data-admin-toggle="<%= a.id %>"><%= a.disabled? ? "Re-enable" : "Disable" %></button>
+              <% end %>
+            <% end %>
+            <%= link_to "Edit", edit_admin_path(a), class: "btn sm" %>
+          <% end %>
+        </td>
       </tr>
     <% end %>
     </tbody>

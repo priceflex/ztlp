@@ -534,7 +534,14 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
-- 2026-10-23 10:20Z — **review of Slice 10b-4** (`8b4a8588` legacy confirm). Good bones (CSRF skipped,
+- 2026-10-23 11:05Z — **Slice 11a DONE (Overview root: tally + Setup checklist + break-glass acknowledge)** (cron tick, takeover of a stale 10:17Z tick that died mid-slice). Commit `2fc50287`.
+  - Prior tick left an uncommitted in-flight slice (modified dashboard_controller.rb + dashboard/show.html.erb + routes.rb, new setup_controller.rb + overview_setup_test.rb). Classified COMPLETE-per-autonomous-cron-build-loop case 3, finished + committed on its behalf (recovery note in the commit message).
+  - `DashboardController#show`: spec Overview — USERS/DEVICES/GROUPS/APPLICATIONS tally strip, Setup checklist (second admin / break-glass acknowledged / zone authority imported / NS admin API secret set — each item hidden once done, plus the ZTLP_MIN_ASSURANCE info-only line), infra panel (NS drift from the 30-minute reconcile + per-gateway status) + recent activity. `SetupController#acknowledge_breakglass` (super_admin only): system_settings timestamp + admin id + `system.breakglass_acknowledged` audit row; read_only → 403, no timestamp.
+  - Two bugs found via the tests (fixed forward, not reverted): (1) test premise — the shared setup creates TWO admins, which already satisfies the "second admin" checklist item, so the "shows the outstanding items" test asserted an item that was correctly hidden (guaranteed RED) → the test now destroys the second admin first; `make_zone_fully_done` no longer creates a third admin. (2) code — `Admin.active.count` only counted enabled admins; the checklist means "any second key exists" (a disabled admin's key still works via break-glass) → `Admin.count`.
+  - Evidence: `test/controllers/overview_setup_test.rb` → **6 runs / 41 assertions / 0 failures / 0 errors**. Full suite `SKIP_CLAIM_BOOT=1 timeout 580 bin/rails test` → **508 runs / 2322 assertions / 0 failures / 0 errors / 7 skips** (was 499/2275 at the 10b-4 tick). `bash scripts/ci-admin.sh` → **== all gates passed** (node 29/29, rubocop clean, brakeman EOL-only). `ruby -c` on the 4 edited .rb files: Syntax OK. No test-ns containers started.
+  PENDING: Slice 11 remainder — global search `/search.json?q=` (top bar), administrators page under Operations (list/disable), and the `bin/rails admin:reset_claim` break-glass task (spec §4.1 step 6). Slice 11a (overview + checklist + ack) is done.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 11b — global search endpoint + page (top-bar `#gs-input` already wired to /search.json in directory.js).- 2026-10-23 10:20Z — **review of Slice 10b-4** (`8b4a8588` legacy confirm). Good bones (CSRF skipped,
   takeover guard, lock, pending-only). Fixes: (1) the request body was invented (`code`, `device_name`);
   spec F10's legacy callback sends `token_id=&node_id=&name=&pubkey_hex=` → now that shape, so a real
   legacy client can reach it. (2) the 8-char HUMAN code was the credential — it is shown to every admin

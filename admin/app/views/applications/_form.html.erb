@@ -13,7 +13,7 @@
         <%= f.select :gateway_id,
                      options_for_select(@gateways.map { |g| ["#{g.name}.#{g.zone.name} (#{g.kind})", g.id] }, @application.gateway_id),
                      { include_blank: false },
-                     disabled: @application.persisted? %><p class="hint">Services on this gateway. On a <span class="mono">rust_listen</span> gateway the min-assurance floor is not enforced by the gateway; on an <span class="mono">elixir</span> gateway group, role and user rules never match a device.</p>
+                     disabled: @application.persisted? %><p class="hint">Services on this gateway. On a <span class="mono">rust_listen</span> gateway the min-assurance floor is not enforced by the gateway; on an <span class="mono">elixir</span> gateway group, role and user rules never match a device. <a href="<%= new_gateway_path %>">New gateway</a></p>
       </div>
       <div class="field">
         <%= f.label :name %>

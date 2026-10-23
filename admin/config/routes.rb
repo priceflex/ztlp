@@ -51,6 +51,13 @@ Rails.application.routes.draw do
     end
   end
 
+  # Slice 9b sub-slice 6: gateway minimal CRUD inline from the application
+  # form. Gateways are the objects applications live on, so the inline
+  # "New gateway" form is reachable from the application flow.
+  get  "apps/new_gateway", to: "gateways#new", as: :new_gateway
+  post "gateways", to: "gateways#create", as: :gateways
+  post "gateways/:id/update_kind", to: "gateways#update_kind", as: :update_kind_gateway
+
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile

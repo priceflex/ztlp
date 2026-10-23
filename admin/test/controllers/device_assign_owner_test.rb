@@ -52,9 +52,9 @@ class DeviceAssignOwnerTest < ActionDispatch::IntegrationTest
     assert_select "form[action=?]", assign_owner_device_path(@laptop), false
   end
 
-  test "show renders no assign form for an unassigned device (no one to own it yet)" do
+  test "show renders the assign form for an unassigned device (giving it an owner is the point)" do
     get device_path(@server)
-    assert_select "form[action=?]", assign_owner_device_path(@server), false
+    assert_select "form[action=?] select[name=user_id]", assign_owner_device_path(@server)
   end
 
   # -------------------------------------------------------- mutations
@@ -63,11 +63,15 @@ class DeviceAssignOwnerTest < ActionDispatch::IntegrationTest
     # mocha cannot pin cross-expectation order; the contract is: ONE device
     # write + ONE user write per affected user, and the device write happens
     # BEFORE the DB change (pinned by the fail-closed test below).
-    Ztlp::Publisher.expects(:publish_device!).with { |d, **| d.id == @laptop.id }.returns(:ok)
+    published_owner = nil
+    Ztlp::Publisher.expects(:publish_device!)
+                   .with { |d, **| published_owner = Ztlp::Records.device_data(d)["owner"]; d.id == @laptop.id }
+                   .returns(:ok)
     Ztlp::Publisher.expects(:publish_user!).with { |u, **| u.id == @bob.id }.returns(:ok)
     Ztlp::Publisher.expects(:publish_user!).with { |u, **| u.id == @alice.id }.returns(:ok)
 
     post assign_owner_device_path(@laptop), params: { user_id: @bob.id }
+    assert_equal "bob.users.test.ztlp", published_owner, "the DEVICE record must carry the NEW owner"
     assert_equal @bob, @laptop.reload.user
     assert AuditLog.where(action: "device.assign_owner", status: "ok").any?
     follow_redirect!
@@ -80,6 +84,42 @@ class DeviceAssignOwnerTest < ActionDispatch::IntegrationTest
 
     post assign_owner_device_path(@laptop), params: { user_id: "" }
     assert_nil @laptop.reload.user
+  end
+
+  test "an unassigned ENROLLED device gets an owner: DEVICE carries it, only the new owner republished" do
+    @server.update!(status: "enrolled")
+    published_owner = nil
+    Ztlp::Publisher.expects(:publish_device!)
+                   .with { |d, **| published_owner = Ztlp::Records.device_data(d)["owner"]; true }.returns(:ok)
+    Ztlp::Publisher.expects(:publish_user!).with { |u, **| u.id == @bob.id }.returns(:ok)
+    post assign_owner_device_path(@server), params: { user_id: @bob.id }
+    assert_equal "bob.users.test.ztlp", published_owner
+    assert_equal @bob, @server.reload.user
+  end
+
+  test "a PENDING device is reassigned in the panel only (no NS record exists yet)" do
+    Ztlp::Publisher.expects(:publish_device!).never
+    Ztlp::Publisher.expects(:publish_user!).never
+    post assign_owner_device_path(@server), params: { user_id: @bob.id }
+    assert_equal @bob, @server.reload.user
+  end
+
+  test "a revoked device cannot be reassigned" do
+    @laptop.update!(status: "revoked")
+    Ztlp::Publisher.expects(:publish_device!).never
+    post assign_owner_device_path(@laptop), params: { user_id: @bob.id }
+    assert_equal @alice, @laptop.reload.user
+    follow_redirect!
+    assert_select "[data-toast]", /revoked/
+  end
+
+  test "two failed user republishes render as readable text, not an array" do
+    Ztlp::Publisher.expects(:publish_device!).returns(:ok)
+    Ztlp::Publisher.expects(:publish_user!).twice.raises(Ztlp::NsClient::NsError.new(0x0C, "timeout"))
+    post assign_owner_device_path(@laptop), params: { user_id: @bob.id }
+    follow_redirect!
+    assert_select "[data-toast]", /Bob Brown's record was not republished.*Alice Anderson's record/
+    refute_includes response.body, "[&quot;"
   end
 
   test "assigning the current owner is a no-op (nothing published, nothing changed)" do
@@ -127,5 +167,19 @@ class DeviceAssignOwnerTest < ActionDispatch::IntegrationTest
     post assign_owner_device_path(@laptop), params: { user_id: @bob.id }
     assert_response :forbidden
     assert_equal @alice, @laptop.reload.user
+  end
+
+  test "a revoked user cannot be assigned a device" do
+    @bob.update!(status: "revoked")
+    Ztlp::Publisher.expects(:publish_device!).never
+    post assign_owner_device_path(@laptop), params: { user_id: @bob.id }
+    assert_equal @alice, @laptop.reload.user
+  end
+
+  # Test env disables forgery protection, so a raw <form> without a token passes tests and
+  # then 422s in production. Pin the token in the markup.
+  test "the assign form carries a CSRF token" do
+    get device_path(@laptop)
+    assert_select "form[action=?] input[name=authenticity_token]", assign_owner_device_path(@laptop)
   end
 end

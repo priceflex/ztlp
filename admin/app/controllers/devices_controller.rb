@@ -97,58 +97,64 @@ class DevicesController < ApplicationController
   # in the DB (the old ownership stands in the NS too). After the device
   # write stands, the two user republishes are save-and-warn (the
   # ownership change already happened; the 6-hourly republish retries).
+  # Spec Slice 8: Assign owner publishes DEVICE + both USERs' devices[].
+  # - revoked devices cannot be reassigned (their name is permanently revoked in the NS);
+  # - a PENDING device has no NS record yet (and devices[] lists enrolled only): DB change only;
+  # - an ENROLLED device: the new owner is set IN MEMORY first so the DEVICE record carries it;
+  #   the DB row is saved only after the NS accepts (fail-closed); then both USER records are
+  #   republished save-and-warn.
   def assign_owner
-    new_user = params[:user_id].to_s.strip
-    new_user = @device.user if new_user == @device.user&.id.to_s
-    target = new_user.blank? ? nil : @zone.users.find_by(id: new_user)
-
-    if target.nil? && !new_user.blank?
-      audit!("device.assign_owner", target: @device, status: "skipped",
-                                details: { name: @device.name, owner: new_user, reason: "unknown_user" })
-      return redirect_to device_path(@device),
-                         alert: "No such user (#{new_user})."
+    if @device.status == "revoked"
+      return redirect_to device_path(@device), alert: "#{@device.name} is revoked; it cannot be reassigned."
     end
 
-    if target == @device.user
+    raw = params[:user_id].to_s.strip
+    target = raw.empty? ? nil : @zone.users.find_by(id: raw)
+    if target.nil? && !raw.empty?
       audit!("device.assign_owner", target: @device, status: "skipped",
-                                details: { name: @device.name, owner: new_user, reason: "no_change" })
+                                    details: { name: @device.name, reason: "unknown_user" })
+      return redirect_to device_path(@device), alert: "No such user."
+    end
+
+    if target&.status == "revoked"
+      return redirect_to device_path(@device), alert: "#{target.display_name} is revoked and cannot own devices."
+    end
+
+    old_user = @device.user
+    if target == old_user
       return redirect_to device_path(@device),
                          notice: target ? "#{target.display_name} is already the owner." : "The device has no owner."
     end
 
-    old_user = @device.user
-    begin
-      # 1. the DEVICE record: owner field changes in the NS — this is the
-      #    security-critical write; a refusal changes nothing below.
-      Ztlp::Publisher.publish_device!(@device, admin: current_admin)
-    rescue Ztlp::NsClient::NsError => e
-      audit!("device.assign_owner", target: @device, status: "failed",
-                                 details: { name: @device.name, owner: new_user,
-                                           result: format("0x%02X %s", e.code, e.reason) })
-      return redirect_to device_path(@device),
-                         alert: format("%s was NOT reassigned: the name server refused (0x%02X %s). Nothing changed.",
-                                        @device.name, e.code, e.reason)
-    end
-
-    @device.update!(user: target)
-    audit!("device.assign_owner", target: @device, status: "ok",
-                           details: { name: @device.name,
-                                     from: old_user&.ns_name, to: target&.ns_name })
-
-    # 2 + 3. republish the two USER records so their devices[] agree.
-    # save-and-warn: the ownership already stands in the NS.
-    warnings = []
-    [ target, old_user ].compact.each do |u|
+    @device.user = target
+    if @device.status == "enrolled"
       begin
-        Ztlp::Publisher.publish_user!(u, admin: current_admin)
+        Ztlp::Publisher.publish_device!(@device, admin: current_admin)
       rescue Ztlp::NsClient::NsError => e
-        warnings << format("%s's record was not republished (0x%02X %s). The 6-hourly republish will retry.",
-                           u.display_name, e.code, e.reason)
+        @device.restore_attributes
+        audit!("device.assign_owner", target: @device, status: "failed",
+                                      details: { name: @device.name, result: format("0x%02X %s", e.code, e.reason) })
+        return redirect_to device_path(@device),
+                           alert: format("%s was NOT reassigned: the name server refused (0x%02X %s). Nothing changed.",
+                                         @device.name, e.code, e.reason)
       end
     end
-    redirect_to device_path(@device), alert: warnings.presence,
-                notice: old_user ? "Owner changed: #{old_user.display_name} → #{target ? target.display_name : 'Unassigned'}."
-                                 : "Owner set: #{target.display_name}."
+    @device.save!
+    audit!("device.assign_owner", target: @device, status: "ok",
+                                  details: { name: @device.name, from: old_user&.ns_name, to: target&.ns_name })
+
+    warnings = []
+    if @device.status == "enrolled"
+      [ target, old_user ].compact.each do |u|
+        Ztlp::Publisher.publish_user!(u, admin: current_admin)
+      rescue Ztlp::NsClient::NsError => e
+        warnings << format("%s's record was not republished (0x%02X %s).", u.display_name, e.code, e.reason)
+      end
+    end
+    warnings << "The 6-hourly republish will retry." if warnings.any?
+    notice = old_user ? "Owner changed: #{old_user.display_name} → #{target ? target.display_name : "Unassigned"}."
+                      : "Owner set: #{target.display_name}."
+    redirect_to device_path(@device), notice: notice, alert: warnings.any? ? warnings.join(" ") : nil
   end
 
   private

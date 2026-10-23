@@ -27,20 +27,21 @@
       <p><a href="<%= user_path(@device.user) %>"><%= @device.user.display_name %></a>
         <span class="sub mono"><%= @device.user.ns_name %></span></p>
       <p class="sub">Groups and access policies follow the owner.</p>
-      <% if @device.status != "revoked" && current_admin&.write_access? %>
-        <form action="<%= assign_owner_device_path(@device) %>" method="post" class="actions">
-          <label class="sub" for="user_id">Assign owner</label>
-          <select name="user_id" id="user_id">
-            <option value="">— Unassigned —</option>
-            <% @zone.users.order(:username).each do |u| %>
-              <option value="<%= u.id %>" <%= "selected" if u.id == @device.user.id %>><%= u.display_name %></option>
-            <% end %>
-          </select>
-          <button type="submit" class="btn">Save</button>
-        </form>
-      <% end %>
     <% else %>
-      <p class="empty-note">Unassigned. Adopting it from the name server (reconcile, Slice 12) can set an owner.</p>
+      <p class="empty-note">Unassigned.</p>
+    <% end %>
+    <% if @device.status != "revoked" && current_admin&.write_access? %>
+      <form action="<%= assign_owner_device_path(@device) %>" method="post" class="actions">
+        <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+        <label class="sub" for="user_id">Assign owner</label>
+        <select name="user_id" id="user_id">
+          <option value="">— Unassigned —</option>
+          <% @zone.users.where.not(status: "revoked").order(:username).each do |u| %>
+            <option value="<%= u.id %>" <%= "selected" if u.id == @device.user_id %>><%= u.display_name %></option>
+          <% end %>
+        </select>
+        <button type="submit" class="btn">Save</button>
+      </form>
     <% end %>
   </div>
 

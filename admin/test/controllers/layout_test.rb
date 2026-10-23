@@ -43,4 +43,12 @@ class LayoutTest < ActionDispatch::IntegrationTest
     refute response.body.include?("fonts.googleapis"), "no Google Fonts"
     refute response.body.include?("cdnjs"), "no cdnjs"
   end
+
+  # The rail NS line: the dot is its own empty element and the NS address is visible text
+  # (a missing `">` once swallowed the address into the class attribute).
+  test "rail NS line shows the dot element and the NS address as text" do
+    get root_path
+    assert_select ".rail-foot .ns-line > span.dot", 1
+    assert_select ".rail-foot .ns-line", text: /127\.0\.0\.1:23096/
+  end
 end

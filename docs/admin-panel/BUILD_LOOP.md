@@ -534,6 +534,21 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 01:15Z — **review of Slice 8b** (`c5349caf`). Fixed: (1) **stale owner published** —
+  `publish_device!` ran BEFORE the owner changed, and `Records.device_data` reads `device.user`, so the
+  DEVICE record carried the OLD owner (the NS never saw the reassignment; tests only checked `d.id`).
+  Now the owner is set in memory, the DEVICE is published, then the row saved (`restore_attributes` on
+  NsError = fail-closed). Tests capture `Records.device_data(d)["owner"]`. (2) The Assign form was a raw
+  `<form>` with **no CSRF token** → every assign would 422 in production (test env disables forgery
+  protection). Token added + pinned by test. (3) Unassigned devices had NO assign form (the main use).
+  (4) Pending device → DB-only (no NS record yet; devices[] is enrolled-only); revoked device and revoked
+  target user → refused. (5) Two warnings rendered as a Ruby array `["…"]` → joined text. (6) Layout:
+  rail NS line `<span class="dot …</span>` was missing `">` so the NS address was swallowed into the
+  attribute → fixed + layout test. `bash scripts/ci-admin.sh` → 283 runs / 1270 assertions / 0 failures.
+  **RULE (all slices): never hand-write `<form>`; use `form_with`/`button_to` (CSRF token). Tests cannot
+  catch a missing token.** Next: Slice 8 remainder per §4 (effective applications list needs Slice 9's
+  evaluator — leave it for 9), then Slice 9.
+
 - 2026-10-23 00:48Z — **Slice 8b DONE (Devices: Assign owner — 3-record publish, fail-closed)** (cron tick). Commit `c5349caf`.
   - `assign_owner` action (route existed since 8a): owner select posts `user_id` ("") = unassign. Publishes in order:
     1. DEVICE record (owner field) — the security-critical write; an NsError → NOTHING changes in the DB

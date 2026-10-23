@@ -534,6 +534,45 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 00:19Z — **Slice 8a DONE (Devices read side: index + show/drawer + permanent revoke)** (cron tick). Commit `6d34d98d`.
+  - Routes: `resources :devices, only: %i[index show]` + member `post :revoke` / `post :assign_owner` (assign_owner is a
+    placeholder route for 8c — no action yet; the route is there so the helper exists for the next sub-slice's TDD RED).
+  - `app/controllers/devices_controller.rb`: `index` — segmented status filter (all/enrolled/pending/revoked,
+    unknown → all), zone-scoped, ordered by name, includes owner. `show` — scoped lookup (cross-zone 404 pinned),
+    full page or drawer fragment under `X-Drawer: 1`. `revoke` — operator decision 2026-10-22 (permanent revoke,
+    same fail-closed rule as 6c/8b): reason required (blank → re-render with alert, no NS write); one
+    `Publisher.revoke!` for the device ns name; NsError → NOTHING changes in DB, alert "NOT revoked … Nothing
+    changed.", audit `device.revoke` failed; success → status `revoked` + `revoked_at` stamped AFTER the NS write
+    (the NS write is the source of truth; the DB stamp only stands if the NS accepted). Already-revoked → skipped
+    audit + alert. `require_write_access` guards revoke.
+  - Views: `devices/index` (mock toolbar with seg filter, columns name (mono ns_name) / platform / owner (link or
+    "Unassigned") / key source + assurance badge (ok ≥3, warn 2, plain 1, "hardware (unverified)" for 4) / agent
+    version / last seen (honest "never" for pending) / status badge; row drawer-linked; honest empty state; note
+    that there is no create form — devices come from enrollment (Slice 10) or reconcile (Slice 12)).
+    `devices/show` (identity panel: node id + noise pubkey as fingerprints with copy buttons via `data-act=copy`,
+    key source, assurance badge, agent version, platform, enrolled/last seen; Owner panel with link or
+    "Unassigned" note; for a revoked device a "Revoked" panel explaining permanence; for an active device and a
+    write admin, the Revoke form: reason input + danger button with `data-confirm`). No inline script, all output
+    escaped, no CDN.
+  - Tests (`test/controllers/devices_controller_test.rb`, 12, TDD RED first — all 12 errored on missing
+    `devices_path`/`device_path`/`revoke_device_path` route helpers): index columns incl. owner links (minimum 2),
+    Unassigned, assurance badges (ok/warn/plain + "hardware (unverified)" text), agent version, "never" last-seen,
+    status badges (enrolled ok / pending warn / revoked bad); seg filter links + aria-current; status narrowing
+    (enrolled excludes the other two; revoked shows only laptop1); unknown status → all; row drawer link; empty
+    state after destroy_all; show identity (node id + noise pubkey fingerprints present, copy buttons minimum 2),
+    owner link, assurance label + ok badge, Revoke form action + reason input + danger button; revoked device has
+    no Revoke form and says "Revoked"; unowned device shows "Unassigned" and no owner link; X-Drawer fragment has
+    no DOCTYPE/rail; cross-zone 404; read_only 403 on revoke (device untouched).
+  - Evidence: `timeout 300 bin/rails test test/controllers/devices_controller_test.rb` → **12 runs / 103
+    assertions / 0 failures / 0 errors**. `bash scripts/ci-admin.sh` → full suite **258 runs / 1178 assertions /
+    0 failures / 0 errors / 6 skips** (= ZTLP_TEST_NS-gated roundtrip; was 246/1075 after 7b), rubocop clean,
+    brakeman EOL-only, node --check OK, node --test 19/19, `== all gates passed`. `ruby -c` on the new controller:
+    Syntax OK. No test-ns containers started.
+  PENDING: Slice 8b (assign_owner: publishes DEVICE + BOTH users' `devices[]` — see spec §4 slice 8: "assign_owner
+  publishes 3 records in order: device, old owner user, new owner user"). The route exists; no action yet.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 8b (assign_owner: 3-record publish — device, old owner user, new owner user).
+
 - 2026-10-23 00:05Z — **review of Slice 7b** (`5c3e8253`). Membership add/remove publish immediately with
   the warn-don't-500 rule; admins/referenced-group destroy blocks; 403s present. Two NS-staleness bugs
   fixed: (1) **rename**: `ns_name` is rebuilt from the name on save, so a rename published a NEW GROUP

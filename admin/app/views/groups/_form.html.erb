@@ -5,7 +5,7 @@
     <div class="notice"><span class="err"><%= @group.errors.full_messages.to_sentence %></span></div>
   <% end %>
   <div class="panel">
-    <div class="panel-b" style="display:grid;gap:16px">
+    <div class="panel-b form-grid">
       <div class="field">
         <%= f.label :name %>
         <%= f.text_field :name, required: true, readonly: @group.persisted?,

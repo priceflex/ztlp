@@ -8,7 +8,7 @@
       <td><%= l.admin&.username || "-" %></td>
       <td class="sub"><%= [l.target_type, l.target_id].compact.join(" #") %></td>
       <td><span class="badge <%= l.status == "ok" ? "ok" : "bad" %>"><%= l.status %></span></td>
-      <td class="mono sub"><%= l.details&.to_json %> <span style="color:var(--faint)"><%= l.ip %></span></td>
+      <td class="mono sub"><%= l.details&.to_json %> <span class="faint"><%= l.ip %></span></td>
     </tr>
   <% end %>
   <% if logs.empty? %><tr class="empty"><td colspan="6">Nothing yet.</td></tr><% end %>

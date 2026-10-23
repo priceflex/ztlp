@@ -4,7 +4,7 @@
 </div>
 <div class="tally">
   <a class="tally-item" href="<%= admins_path %>"><div class="tally-n"><%= @admins.count %></div><div class="tally-l">Administrators</div><div class="tally-s">who can sign in to this panel</div></a>
-  <a class="tally-item" href="/zone"><div class="tally-n" style="font-size:19px"><span class="mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div></a>
+  <a class="tally-item" href="/zone"><div class="tally-n tally-n--text"><span class="mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div></a>
   <div class="tally-item"><div class="tally-n"><%= @zone&.authority_configured? ? "Yes" : "No" %></div><div class="tally-l">Zone authority</div><div class="tally-s"><%= @zone&.authority_configured? ? "imported — records can be published" : "not imported (users/groups cannot be published yet)" %></div></div>
   <div class="tally-item"><div class="tally-n">v<%= ZtlpAdmin::VERSION %></div><div class="tally-l">Build</div><div class="tally-s">slice 1: claim, key login, admins, audit</div></div>
 </div>

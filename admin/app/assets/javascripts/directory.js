@@ -271,6 +271,7 @@
     escapeHtml: escapeHtml,
     copy: copy,
     shouldConfirm: shouldConfirm,
+    isAutoSubmitTarget: isAutoSubmitTarget,
   }
 
   // Expose for both the browser (data-act handlers below) and node:test.
@@ -572,6 +573,13 @@
       })
   }
 
+  // A control with data-auto-submit re-submits its own form when it changes
+  // (e.g. the audit-log action filter). Replaces an inline onchange handler,
+  // which the CSP (script-src 'self', no nonce) blocks in a real browser.
+  function isAutoSubmitTarget(el) {
+    return !!(el && el.hasAttribute && el.hasAttribute('data-auto-submit'))
+  }
+
   // --- Wire it all up ---------------------------------------------------
   function wire() {
     initTheme()
@@ -596,6 +604,7 @@
     document.addEventListener('change', function (ev) {
       const t = ev.target
       if (t && t.hasAttribute && t.hasAttribute('data-rule-type')) onRuleTypeChange(t)
+      if (isAutoSubmitTarget(t) && t.form && typeof t.form.requestSubmit === 'function') t.form.requestSubmit()
     })
 
     document.addEventListener('keydown', onKeydown)

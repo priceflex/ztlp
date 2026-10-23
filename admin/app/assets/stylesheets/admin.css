@@ -1,0 +1,31 @@
+/* admin.css — site chrome beyond the mock's directory.css (do not edit that file;
+   it is the mock ported verbatim). These classes replace the inline style=""
+   attributes the CSP (style-src 'self', no nonce) silently drops in a real
+   browser. Pinned by test/controllers/no_inline_assets_test.rb. */
+
+/* Centered narrow panels (sign-in, claim) */
+.panel-narrow{max-width:720px;margin:24px auto}
+
+/* Form body with spaced fields */
+.form-grid{display:grid;gap:16px;margin-top:16px}
+
+/* Stacked notices / sub-copy inside a panel */
+.mt-notice{margin-top:14px}
+.mt-m{margin-top:16px}
+.mt-sm{margin-top:10px}
+.mt-xs{margin-top:8px}
+
+/* Bare layout (403/404) centering */
+.wrap-narrow{max-width:560px;margin:12vh auto 0;padding:0 20px}
+
+/* Tally cell that carries text (a zone name) instead of a big number */
+.tally-n--text{font-size:19px}
+
+/* Faint detail in the audit table */
+.faint{color:var(--faint)}
+
+/* Revoke form: reason input grows to fill the actions row */
+.revoke-input{flex:1;min-width:240px}
+
+/* Add-member actions row (groups show) */
+.members-actions{margin-top:12px}

@@ -368,3 +368,16 @@ test('renderTestAccessResult: replaces existing children of the box', () => {
   assert.equal(box.children[0].attrs['data-testid'], 'test-access-result')
 })
 
+// isAutoSubmitTarget (inline-attribute sweep): the audit-log action filter used
+// to re-submit via an inline onchange handler, which the CSP (script-src 'self',
+// no nonce) silently drops. The delegated change listener in wire() calls
+// form.requestSubmit() only for controls carrying data-auto-submit.
+test('isAutoSubmitTarget: true only for a control with the attribute', () => {
+  const withAttr = { hasAttribute: (n) => n === 'data-auto-submit' }
+  const without = { hasAttribute: () => false }
+  assert.equal(Z.isAutoSubmitTarget(withAttr), true)
+  assert.equal(Z.isAutoSubmitTarget(without), false)
+  assert.equal(Z.isAutoSubmitTarget(null), false)
+  assert.equal(Z.isAutoSubmitTarget({}), false)
+})
+

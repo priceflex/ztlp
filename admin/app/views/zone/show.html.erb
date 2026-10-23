@@ -6,7 +6,7 @@
 </div>
 
 <div class="tally">
-  <div class="tally-item"><div class="tally-n" style="font-size:19px"><span class="mono"><%= @zone.name %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <span class="mono"><%= @zone.ns_addr %></span></div></div>
+  <div class="tally-item"><div class="tally-n tally-n--text"><span class="mono"><%= @zone.name %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <span class="mono"><%= @zone.ns_addr %></span></div></div>
   <div class="tally-item"><div class="tally-n"><%= @zone.authority_configured? ? "Yes" : "No" %></div><div class="tally-l">Zone authority</div><div class="tally-s"><%= @zone.authority_configured? ? "imported — records can be published" : "not imported" %></div></div>
   <div class="tally-item"><div class="tally-n"><%= @last_publish ? "Yes" : "No" %></div><div class="tally-l">Last publish</div><div class="tally-s"><%= last.(@last_publish) || "never" %></div></div>
   <div class="tally-item"><div class="tally-n"><%= @last_reconcile ? @last_reconcile.status : "-" %></div><div class="tally-l">Last reconcile</div><div class="tally-s"><%= last.(@last_reconcile) || "never" %></div></div>

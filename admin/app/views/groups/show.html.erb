@@ -35,7 +35,7 @@
     <% else %><div class="empty-note">No members.</div><% end %>
 
     <% if write %><% if @candidates.any? %>
-      <div class="actions" style="margin-top:12px">
+      <div class="actions members-actions">
         <%= form_with url: add_member_group_path(@group), method: :post, class: "inline-form" do %>
           <%= select_tag :user_id,
                 options_for_select(@candidates.map { |u| [ "#{u.display_name} (#{u.username})", u.id ] }),

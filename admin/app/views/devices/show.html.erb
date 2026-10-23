@@ -55,7 +55,7 @@
     <% if current_admin&.write_access? %>
       <div class="actions">
         <%= form_with url: revoke_device_path(@device), method: :post, class: "actions" do %>
-          <input type="text" name="reason" placeholder="Reason (required, e.g. lost, stolen, offboarded)" aria-label="Revocation reason" style="flex:1; min-width: 240px;">
+          <input type="text" name="reason" placeholder="Reason (required, e.g. lost, stolen, offboarded)" aria-label="Revocation reason" class="revoke-input">
           <button type="submit" class="btn danger" data-confirm="Permanently revoke <%= @device.name %>? The name server never lets this device name be used again. This cannot be undone.">Revoke device</button>
         <% end %>
       </div>

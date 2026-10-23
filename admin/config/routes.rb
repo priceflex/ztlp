@@ -75,5 +75,14 @@ Rails.application.routes.draw do
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile
 
+  # Slice 10b sub-slice 3: the SIGNED machine-to-machine redeem endpoint
+  # (spec §7.4). Called over the client's ZTLP tunnel, NOT a browser, so it
+  # extends ActionController::Base directly — no tunnel bundle, no admin
+  # session. Rate-limited by rack-attack's `api/ip` throttle (10/min/IP,
+  # config/initializers/rack_attack.rb).
+  scope "api/v1", module: :api do
+    post "enrollments/:token_id/redeem", to: "enrollments#redeem", as: :redeem_enrollment
+  end
+
   root "dashboard#show"
 end

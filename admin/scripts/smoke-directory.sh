@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # ZTLP Admin panel — local prod-shape smoke (BUILD_LOOP.md Slice 12 + §5 box 3).
 #
-# Runs against a fresh `docker compose -p admintest up -d` stack: db + web +
-# jobs, image ztlp-admin:<ver>, ZTLP_REQUIRE_GATEWAY=0, throwaway zone.
+# Runs against a fresh `docker compose -p admintest up -d` stack (after
+# `docker compose -p admintest down -v` to clear any prior smoke DB): db +
+# web + jobs, image ztlp-admin:<ver>, ZTLP_REQUIRE_GATEWAY=0, throwaway zone.
 #
 # Steps (each prints PASS/FAIL; exits non-zero on the first FAIL):
 #   0. /up responds 200 "ok"
-# 1. claim code -> /claim (REAL signed form POST) -> Overview with the Setup
-#    checklist — via scripts/smoke-claim-login.rb, which additionally proves
-#    the challenge/verify Ed25519 LOGIN round-trip over HTTP
+#   1. claim code -> /claim (REAL signed form POST) -> Overview with the Setup
+#    checklist — via scripts/smoke-claim-login.rb (requires a FRESH panel:
+#    the claim POST 422s on an already-claimed DB because the session cookie
+#    rotates on the /claim bounce; run `down -v` before `up -d`). The real
+#    challenge/verify LOGIN round-trip is proven by the smoke2 admin below.
 #   2. create user -> create group -> add member (the membership shows)
 #   3. /zone renders
 #   4. /search.json?q= returns the created user and group as JSON

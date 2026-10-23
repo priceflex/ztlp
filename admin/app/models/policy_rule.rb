@@ -11,7 +11,7 @@ class PolicyRule < ApplicationRecord
 
   belongs_to :application
 
-  validates :subject_type, inclusion: { in: SUBJECT_TYPES }
+  validates :subject_type, inclusion: { in: SUBJECT_TYPES, message: "is unknown" }
   validate :subject_required_for_typed_rule
 
   before_validation :pin_subject_value
@@ -46,12 +46,22 @@ class PolicyRule < ApplicationRecord
   def pin_subject_value
     entity = subject_entity
     self.subject_value = entity.ns_name if entity && entity.respond_to?(:ns_name)
+    # A cross-zone/missing subject row arrives as subject_id: nil +
+    # subject_value: "not_found" (the controller's seam); pin that sentinel so
+    # the validation can distinguish "not found in this zone" from "no subject".
+    self.subject_value = "not_found" if subject_id.blank? && subject_value == "not_found"
   end
 
   def subject_required_for_typed_rule
     return if subject_type == "any"
-    return if subject_value.present?
+    return if subject_value.present? && subject_value != "not_found"
 
-    errors.add(:subject_value, "is required for this subject type")
+    if subject_type == "role"
+      errors.add(:subject_value, "pick a subject")
+    elsif subject_value == "not_found"
+      errors.add(:subject_value, "not found in this zone")
+    else
+      errors.add(:subject_value, "pick a subject")
+    end
   end
 end

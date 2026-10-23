@@ -1,18 +1,25 @@
 <% drawer = request.headers["X-Drawer"] == "1" %>
-<% unless drawer %><% content_for :title, "#{@application.name} - ZTLP Directory" %><% end %>
+<% write = current_admin&.write_access? %>
+<% kind = @application.gateway.kind %>
+<% unless drawer %><% content_for :title, "#{ @application.name } - ZTLP Directory" %><% end %>
 <div class="page-head">
   <div><h1><%= @application.name %></h1>
     <p class="lede mono"><%= @application.ztlp_name %></p></div>
+  <% if write %><div class="actions"><a class="btn" href="<%= edit_application_path(@application) %>">Edit</a></div><% end %>
 </div>
+
+<% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div>
+<% elsif kind == "elixir" %><div class="notice"><span class="sub">On this elixir gateway group, role and user rules never match a device.</span></div>
+<% else %><div class="notice"><span class="sub">On this <span class="mono"><%= kind %></span> gateway group and role rules never match a device.</span></div><% end %>
 
 <div class="stack">
   <div class="panel">
     <div class="panel-h"><h2>About</h2><span class="badge <%= @application.enabled ? "ok" : "bad" %>"><%= @application.enabled ? "enabled" : "disabled" %></span></div>
     <dl class="kv">
-      <dt>Gateway</dt><dd class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %> (<%= @application.gateway.kind %>)</dd>
+      <dt>Gateway</dt><dd class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %> (<%= kind %>)</dd>
       <dt>Backend</dt><dd class="mono"><%= @application.backend.presence || "—" %></dd>
       <dt>Protocol</dt><dd><%= @application.protocol.presence || "—" %></dd>
-      <dt>Min assurance</dt><dd><%= @application.min_assurance %><% if @application.gateway.kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
+      <dt>Min assurance</dt><dd><%= @application.min_assurance %><% if kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
       <dt>Description</dt><dd><%= @application.description.presence || "—" %></dd>
     </dl>
   </div>
@@ -21,23 +28,94 @@
     <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @application.policy_rules.count %></span></div>
     <% if @application.policy_rules.any? %>
       <div class="table-wrap"><table>
-        <thead><tr><th>#</th><th>Subject type</th><th>Subject</th><th>Rendered literal</th></tr></thead>
+        <thead><tr><th>#</th><th>Subject type</th><th>Subject</th><th>Rendered literal</th><% if write %><th></th><% end %></tr></thead>
         <tbody>
           <% @application.policy_rules.order(:position, :id).each do |rule| %>
             <tr><td class="nowrap"><%= rule.position %></td>
               <td class="nowrap"><%= rule.subject_type %></td>
               <td class="nowrap mono"><%= rule.subject_entity&.ns_name || rule.subject_value || "all" %></td>
-              <td class="nowrap mono"><%= rule.render %></td></tr>
+              <td class="nowrap mono"><%= rule.render %></td>
+              <% if write %><td class="nowrap">
+                <%= form_with url: application_rule_path(@application, rule), method: :delete,
+                              data: { confirm: "Remove #{rule.render} from #{ @application.name }? A gateway restart is needed for it to take effect." } do %>
+                  <button type="submit" class="btn sm">Remove</button>
+                <% end %></td><% end %></tr>
           <% end %>
         </tbody>
       </table></div>
-      <% if @application.gateway.kind == "elixir" %><p class="hint">Note: group, role and user rules never match a device on an elixir gateway — only <span class="mono">*</span> or an exact device name do.</p><% end %>
+      <% if kind == "elixir" %><p class="hint">Note: on this elixir gateway group, role and user rules never match a device — only <span class="mono">*</span> or an exact device name do.</p><% end %>
     <% else %><div class="empty-note">No rules yet — access is default deny.</div><% end %>
-  </div>
 
+    <% if write %>
+      <div class="actions" style="margin-top:12px;display:grid;gap:12px">
+        <%= form_with url: application_rules_path(@application), method: :post, class: "stack" do |f| %>
+          <div class="field" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+            <span>
+              <%= f.label :subject_type, "Add rule" %>
+              <%= f.select :subject_type,
+                    options_for_select(PolicyRule::SUBJECT_TYPES.map { |t| [ t, t ] }),
+                    {}, class: "mono" %>
+            </span>
+            <span id="rule-pick-slot">
+              <%= select_tag :subject_id,
+                    options_for_select((@zone_users || []).map { |u| [ "#{u.display_name} (#{u.username})", u.id ] }),
+                    prompt: "user…", class: "mono", data: { device_options: (@zone_devices || []).map { |d| [ d.name, d.id ] }.to_json,
+                                                             group_options: (@zone_groups || []).map { |g| [ g.name, g.id ] }.to_json } %>
+            </span>
+            <span id="rule-role-slot" hidden>
+              <%= text_field_tag :subject_value, nil, class: "mono", placeholder: "role name (e.g. tech)" %>
+            </span>
+            <%= f.submit "Add rule", class: "btn sm primary" %>
+          </div>
+        <% end %>
+        <% if kind == "elixir" %>
+          <p class="hint">This gateway is <span class="mono">elixir</span>: group, role and user rules never match a device — only <span class="mono">*</span> or an exact device name do.</p>
+        <% elsif kind == "rust_listen" %>
+          <p class="hint">This gateway is <span class="mono">rust_listen</span>: user, device and group rules never match a device (only <span class="mono">*</span> and exact role names do), and the min-assurance floor is not enforced by the gateway.</p>
+        <% end %>
+      </div>
+    <% end %>
+  </div>
   <div class="panel">
-    <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= @application.gateway.kind %></span></div>
+    <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= kind %></span></div>
     <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@application.gateway) %></code></pre>
     <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %></span> and restart the gateway to apply it.</p>
   </div>
 </div>
+
+<% if write %>
+<script>
+(function () {
+  var sel = document.querySelector("form[action$='/rules'] select[name=subject_type]");
+  var pick = document.querySelector("span#rule-pick-slot select[name=subject_id]");
+  var pickSlot = document.getElementById("rule-pick-slot");
+  var roleSlot = document.getElementById("rule-role-slot");
+  if (!sel || !pick || !pickSlot || !roleSlot) return;
+  var userOptions = Array.prototype.map.call(pick.options, function (o) { return [ o.value, o.text ]; });
+  function optionsFor(type) {
+    var src = userOptions;
+    if (type === "device") src = JSON.parse(pick.getAttribute("data-device-options") || "[]");
+    if (type === "group") src = JSON.parse(pick.getAttribute("data-group-options") || "[]");
+    pick.innerHTML = "";
+    var prompt = document.createElement("option");
+    prompt.value = "";
+    prompt.text = (type === "user" ? "user…" : type === "device" ? "device…" : "group…");
+    pick.appendChild(prompt);
+    src.forEach(function (pair) {
+      var o = document.createElement("option");
+      o.value = pair[1];
+      o.text = pair[0];
+      pick.appendChild(o);
+    });
+  }
+  function sync() {
+    var t = sel.value;
+    pickSlot.hidden = !(t === "group" || t === "user" || t === "device");
+    roleSlot.hidden = !(t === "role");
+    if (t === "group" || t === "user" || t === "device") optionsFor(t);
+  }
+  sel.addEventListener("change", sync);
+  sync();
+})();
+</script>
+<% end %>

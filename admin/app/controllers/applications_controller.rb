@@ -30,6 +30,7 @@ class ApplicationsController < ApplicationController
                      .first
     raise ActiveRecord::RecordNotFound, "application" if @application.nil?
 
+    load_rule_subjects
     render :show, layout: false if request.headers["X-Drawer"] == "1"
   end
 
@@ -90,6 +91,13 @@ class ApplicationsController < ApplicationController
     raise ActiveRecord::RecordNotFound, "application" if @application.nil?
 
     @application
+  end
+
+  # The rule form's subject picker (sub-slice 4) lists rows in THIS zone.
+  def load_rule_subjects
+    @zone_users = @zone.users.order(:display_name).limit(500)
+    @zone_devices = @zone.devices.order(:name).limit(500)
+    @zone_groups = @zone.groups.order(:name).limit(500)
   end
 
   # A gateway the form may target must belong to THIS zone; an unknown id or a

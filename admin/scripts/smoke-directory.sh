@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# ZTLP Admin panel — local prod-shape smoke (BUILD_LOOP.md Slice 12 + §5 box 3).
+#
+# Runs against a fresh `docker compose -p admintest up -d` stack: db + web +
+# jobs, image ztlp-admin:<ver>, ZTLP_REQUIRE_GATEWAY=0, throwaway zone.
+#
+# Steps (each prints PASS/FAIL; exits non-zero on the first FAIL):
+#   0. /up responds 200 "ok"
+# 1. claim code -> /claim (REAL signed form POST) -> Overview with the Setup
+#    checklist — via scripts/smoke-claim-login.rb, which additionally proves
+#    the challenge/verify Ed25519 LOGIN round-trip over HTTP
+#   2. create user -> create group -> add member (the membership shows)
+#   3. /zone renders
+#   4. /search.json?q= returns the created user and group as JSON
+#   5. jobs container log names all three recurring tasks (republish_ns,
+#      reconcile_ns, expire_enrollments)
+#   6. break-glass: `bin/rails admin:reset_claim` mints a forced code that /claim
+#      accepts even though an administrator exists — proven by a SECOND real
+#      signed challenge/verify login as the new rescue admin (review-of-11c
+#      fix, pinned against the PRODUCTION entrypoint, not the test env)
+#
+# The claim code is minted with the container's OWN rails runner
+# (/rails/bin/docker-entrypoint — AR encryption keys live in /data/keys.env,
+# G9). It is printed to this script's stdout and therefore into the STATUS
+# evidence: the code is single-use and the smoke DB is thrown away after
+# `docker compose -p admintest down -v`; it is NOT a standing credential.
+#
+# Usage: bash scripts/smoke-directory.sh [admin_port] [web_container]
+#        (defaults: 18081, ztlp-admin-web)
+set -uo pipefail
+
+PORT="${1:-18081}"
+WEB="${2:-ztlp-admin-web}"
+BASE="http://127.0.0.1:${PORT}"
+CJ=/tmp/smoke_cookie
+CODE=0
+FAILED=""
+
+fail() { echo "FAIL: $*"; FAILED=1; exit 1; }
+ok()   { echo "PASS: $*"; }
+
+# tok <body> [form-action-substring] -> authenticity token of (the) form
+tok() {
+  python3 - "$1" "${2:-}" <<'EOF'
+import re, sys, html
+body = sys.stdin.read()
+sub = sys.argv[2]
+forms = re.findall(r'<form[^>]*>.*?</form>', body, re.S)
+if sub:
+    forms = [f for f in forms if sub in f]
+if not forms:
+    sys.exit(0)
+m = re.search(r'name="authenticity_token"[^>]*value="([^"]+)"', forms[0])
+print(html.unescape(m.group(1)) if m else "")
+EOF
+}
+
+get() { # get <path> -> body
+  curl -s -m 20 -b "$CJ" -c "$CJ" -L "${BASE}$1"
+}
+
+# ---- 0. /up ----------------------------------------------------------------
+CODE=$(curl -s -m 15 -o /tmp/smoke_up -w "%{http_code}" "${BASE}/up")
+[ "$CODE" = "200" ] && grep -q ok /tmp/smoke_up \
+  && ok "/up -> 200 $(cat /tmp/smoke_up)" \
+  || fail "/up -> HTTP ${CODE} ($(cat /tmp/smoke_up 2>/dev/null | head -c 120))"
+
+# ---- 1. claim (REAL signed flow via the in-container Ruby script) -----------
+# smoke-claim-login.rb runs INSIDE the web container under the production
+# entrypoint (AR encryption keys from /data/keys.env — G9): it mints a claim
+# code, generates an Ed25519 keypair, POSTs /claim WITH the signature
+# (Claim.perform! verifies it), and then proves the challenge/verify LOGIN
+# round-trip over HTTP, ending on the signed-in Overview. Its stdout is the
+# evidence; the claim code it prints is single-use and the smoke DB is
+# destroyed after the run.
+docker cp scripts/smoke-claim-login.rb "$WEB":/rails/scripts/smoke-claim-login.rb
+docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner scripts/smoke-claim-login.rb
+[ $? -eq 0 ] || fail "smoke-claim-login (signed claim + login round-trip)"
+
+# Steps 2-4 need a signed-in super_admin session to drive the web UI with
+# curl. The claim script's keypair lives in the container, so mint a second
+# admin the same way the operator bootstraps over SSH (entrypoint runner),
+# then sign in over the panel's REAL challenge/verify exchange:
+#   POST /auth/challenge (JSON, unauthenticated) -> nonce
+#   POST /auth/verify    (Ed25519 over login_message(host, nonce)) -> login_url
+#   GET  login_url -> cookie session
+KEYS2=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner \
+  's, p = Ztlp::Ed25519.generate
+   Admin.create!(username: "smoke2", display_name: "Smoke Two", pubkey_hex: p, role: "super_admin")
+   puts "#{p} #{s}"' 2>/dev/null | tail -1)
+PUB2=$(echo "$KEYS2" | awk '{print $1}')
+SIG2=$(echo "$KEYS2" | awk '{print $2}')
+[ ${#PUB2} -eq 64 ] || fail "could not create the smoke2 admin keypair"
+
+NONCE=$(curl -s -m 15 "${BASE}/auth/challenge" -H "Content-Type: application/json" \
+  --data "{\"pubkey_hex\":\"${PUB2}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nonce"])')
+[ ${#NONCE} -eq 64 ] || fail "challenge for the smoke2 admin returned no 64-hex nonce"
+LSIG=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner \
+  "puts Ztlp::Ed25519.sign(seed_hex: '${SIG2}', message: Ztlp::Ed25519.login_message('127.0.0.1', '${NONCE}'))" \
+  2>/dev/null | tail -1)
+[ ${#LSIG} -eq 128 ] || fail "could not sign the login challenge"
+
+LOGINURL=$(curl -s -m 20 "${BASE}/auth/verify" -H "Content-Type: application/json" \
+  --data "{\"pubkey_hex\":\"${PUB2}\",\"nonce\":\"${NONCE}\",\"signature\":\"${LSIG}\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("login_url",""))')
+case "$LOGINURL" in
+  http*) LOGINURL="${LOGINURL#*127.0.0.1:3000}"; LOGINURL="http://127.0.0.1:${PORT}${LOGINURL}" ;;
+esac
+[ -n "$LOGINURL" ] || fail "verify returned no login_url"
+CODE=$(curl -s -m 20 -b "$CJ" -c "$CJ" -o /tmp/smoke_body -w "%{http_code}" -L "$LOGINURL")
+[ "$CODE" = "200" ] && grep -q "Overview" /tmp/smoke_body \
+  && ok "challenge/verify exchange -> signed-in Overview (smoke2)" \
+  || fail "session exchange (HTTP ${CODE})"
+
+# ---- 2. create user / group / member -------------------------------------------
+BODY=$(get /users/new)
+T=$(printf '%s' "$BODY" | tok)
+CODE=$(curl -s -m 20 -b "$CJ" -c "$CJ" -L -o /tmp/smoke_body -w "%{http_code}" "${BASE}/users" \
+  --data-urlencode "user[username]=smoketest" \
+  --data-urlencode "user[display_name]=Smoke Test" \
+  --data-urlencode "user[role]=user" \
+  --data-urlencode "user[kind]=person" \
+  --data-urlencode "authenticity_token=${T}")
+[ "$CODE" = "200" ] && grep -qi "created (invited)" /tmp/smoke_body \
+  && ok "created user smoketest" \
+  || fail "user create (HTTP ${CODE})"
+
+BODY=$(get /groups/new)
+T=$(printf '%s' "$BODY" | tok)
+CODE=$(curl -s -m 20 -b "$CJ" -c "$CJ" -L -o /tmp/smoke_body -w "%{http_code}" "${BASE}/groups" \
+  --data-urlencode "group[name]=smokegrp" \
+  --data-urlencode "group[description]=smoke group" \
+  --data-urlencode "authenticity_token=${T}")
+[ "$CODE" = "200" ] && grep -qi "created" /tmp/smoke_body \
+  && ok "created group smokegrp" \
+  || fail "group create (HTTP ${CODE})"
+
+IDS=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner \
+  'puts [User.where(username: "smoketest").first&.id, Group.where(name: "smokegrp").first&.id].join(" ")' \
+  2>/dev/null | tail -1)
+UID_SMOKE=$(echo "$IDS" | awk '{print $1}')
+GID=$(echo "$IDS" | awk '{print $2}')
+[ -n "$UID_SMOKE" ] && [ -n "$GID" ] || fail "could not read user/group ids from the smoke DB"
+
+BODY=$(get "/groups/${GID}")
+T=$(printf '%s' "$BODY" | tok "" "add_member")
+CODE=$(curl -s -m 20 -b "$CJ" -c "$CJ" -L -o /tmp/smoke_body -w "%{http_code}" \
+  "${BASE}/groups/${GID}/add_member" \
+  --data-urlencode "user_id=${UID_SMOKE}" \
+  --data-urlencode "authenticity_token=${T}")
+[ "$CODE" = "200" ] && grep -qi "added to smokegrp" /tmp/smoke_body \
+  && ok "added smoketest to smokegrp (membership shows)" \
+  || fail "add member (HTTP ${CODE})"
+
+# ---- 3. /zone -------------------------------------------------------------------
+CODE=$(curl -s -m 20 -b "$CJ" -c "$CJ" -o /tmp/smoke_body -w "%{http_code}" "${BASE}/zone")
+[ "$CODE" = "200" ] && grep -qi "zone" /tmp/smoke_body \
+  && ok "/zone renders" \
+  || fail "/zone (HTTP ${CODE})"
+
+# ---- 4. /search.json ---------------------------------------------------------------
+J=$(curl -s -m 15 -b "$CJ" "${BASE}/search.json?q=smoke")
+echo "$J" | grep -q '"name":"smoketest"' && echo "$J" | grep -q '"name":"smokegrp"' \
+  && ok "/search.json returns user+group" \
+  || { echo "FAIL: /search.json"; echo "$J" | head -c 300; exit 1; }
+
+# ---- 5. jobs log names the three recurring tasks ---------------------------------
+JLOG=$(docker logs "${WEB%web}jobs" 2>&1 || docker logs "${WEB%-web}jobs" 2>&1 || true)
+for t in republish_ns reconcile_ns expire_enrollments; do
+  echo "$JLOG" | grep -q "$t" && ok "jobs log names $t" || fail "jobs log missing $t"
+done
+
+# ---- 6. break-glass claim over HTTP (production entrypoint) -----------------------
+BGC=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim 2>/dev/null | tail -1)
+[ ${#BGC} -ge 8 ] || fail "admin:reset_claim printed no claim code"
+echo "admin:reset_claim minted a forced code (single-use; smoke DB is destroyed after the run)"
+CNT=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner 'puts Admin.count' 2>/dev/null | tail -1)
+# A signed-in session is bounced from /claim to root by the controller; the
+# break-glass proof is a SECOND real signed login as the new rescue admin:
+# claim the forced code (fresh keypair, unsigned form — the code is the gate),
+# then sign in with that keypair over challenge/verify.
+KEYS=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner \
+  's, p = Ztlp::Ed25519.generate; puts "#{p} #{s}"' 2>/dev/null | tail -1)
+PUB=$(echo "$KEYS" | awk '{print $1}')
+SIG=$(echo "$KEYS" | awk '{print $2}')
+CODE=$(curl -s -m 20 -o /tmp/smoke_bg -w "%{http_code}" "${BASE}/claim" \
+  --data-urlencode "claim[claim_code]=${BGC}" \
+  --data-urlencode "claim[username]=rescue" \
+  --data-urlencode "claim[display_name]=Rescue" \
+  --data-urlencode "claim[pubkey_hex]=${PUB}")
+NEWCNT=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner 'puts Admin.count' 2>/dev/null | tail -1)
+[ "$NEWCNT" = "$((CNT + 1))" ] && ok "break-glass forced code accepted over HTTP (Admin count ${CNT} -> ${NEWCNT})" \
+  || fail "break-glass claim (HTTP ${CODE}, Admin count ${CNT} -> ${NEWCNT})"
+
+NONCE=$(curl -s -m 15 "${BASE}/auth/challenge" -H "Content-Type: application/json" \
+  --data "{\"pubkey_hex\":\"${PUB}\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["nonce"])')
+[ ${#NONCE} -eq 64 ] || fail "challenge for the rescue admin returned no 64-hex nonce"
+RSIG=$(docker exec "$WEB" /rails/bin/docker-entrypoint ./bin/rails runner \
+  "puts Ztlp::Ed25519.sign(seed_hex: '${SIG}', message: Ztlp::Ed25519.login_message('127.0.0.1', '${NONCE}'))" \
+  2>/dev/null | tail -1)
+[ ${#RSIG} -eq 128 ] || fail "could not sign the rescue admin's login challenge"
+RLOGINURL=$(curl -s -m 20 "${BASE}/auth/verify" -H "Content-Type: application/json" \
+  --data "{\"pubkey_hex\":\"${PUB}\",\"nonce\":\"${NONCE}\",\"signature\":\"${RSIG}\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("login_url",""))')
+case "$RLOGINURL" in
+  http*) RLOGINURL="${RLOGINURL#*127.0.0.1:3000}"; RLOGINURL="http://127.0.0.1:${PORT}${RLOGINURL}" ;;
+esac
+[ -n "$RLOGINURL" ] || fail "rescue verify returned no login_url"
+RCJ=/tmp/smoke_rescue_cj; rm -f "$RCJ"
+CODE=$(curl -s -m 20 -b "$RCJ" -c "$RCJ" -o /tmp/smoke_body -w "%{http_code}" -L "$RLOGINURL")
+[ "$CODE" = "200" ] && grep -q "Overview" /tmp/smoke_body \
+  && ok "rescue admin signed in over the real challenge/verify path" \
+  || fail "rescue session exchange (HTTP ${CODE})"
+
+echo "== smoke-directory done"
+[ -z "$FAILED" ]

@@ -30,7 +30,7 @@ fi
 
 if [ "${1:-}" = "./bin/rails" ] && [ "${2:-}" = "server" ]; then
   for i in $(seq 1 60); do
-    if ./bin/rails runner 'ActiveRecord::Base.connection.execute("SELECT 1")' >/dev/null 2>&1; then break; fi
+    if EXEC_HOME="$PWD" ./bin/rails runner 'ActiveRecord::Base.connection.execute("SELECT 1")' >/dev/null 2>&1; then break; fi
     echo "ztlp-admin: waiting for database ($i)" >&2; sleep 2
   done
   ./bin/rails db:prepare

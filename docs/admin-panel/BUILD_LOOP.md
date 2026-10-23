@@ -533,6 +533,39 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-23 07:02Z — **Slice 9c sub-slice 3 DONE (test-access widget: fetch POST + client-side trace render)** (cron tick). Commit `80a0a1a7`. Slice 9c is now COMPLETE (3/3 sub-slices).
+  - `directory.js` — `renderTestAccessResult(doc, box, result)`: pure helper building the decision
+    badge (`data-testid="test-access-decision"`, ok/bad class), reason, per-rule trace table
+    (`trace-rule-N` rows), warnings panel and the assurance hint with createElement/textContent only
+    (§2.3: no innerHTML with server data; the fake-DOM test pins that `<img>`/`<script>` server strings
+    land as textContent, never as created elements). DOM wiring: the `data-testid="test-access-form"`
+    submit is intercepted (delegated listener), the CSRF token comes from the `csrf-token` meta,
+    `POST /policies/test` as JSON, the result renders into `#test-access-results` without a page
+    reload; no meta token or no selected values → the plain HTML POST goes through (progressive
+    enhancement, the form still works without JS); a fetch failure shows an honest
+    "could not run in the background" note and re-enables the button.
+  - Controller `PoliciesController#test`: JSON requests get the `Ztlp::AccessEvaluator` result as
+    JSON (same audit row `policy.test` as the HTML path); blank params 422 in BOTH formats (JSON
+    `{error: ...}` / HTML flash re-render); `load_overview` moved out of the JSON path (the JSON
+    response needs no page data — this caught a real MissingTemplate error in RED).
+  - View: empty `#test-access-results` box under the widget (the JS target).
+  - TDD: 6 node tests RED first (`renderTestAccessResult is not a function`), 4 controller tests
+    RED first (3x MissingTemplate policies/index in JSON format). Two test-premise fixes (not
+    weakened): the badge lives inside the `.panel-h` head div, so the fake-DOM lookup walks
+    descendants; `post ..., params: {...}, as: :json` is a hash (the `.to_json` form posts a JSON
+    body and the controller saw no params → 422).
+  - Evidence: node 27/27 (was 21). File suite `test/controllers/policies_test_action_controller_test.rb`
+    → 15 runs / 72 assertions / 0 failures (was 11). Full suite `SKIP_CLAIM_BOOT=1 timeout 580
+    bin/rails test` → **413 runs / 1866 assertions / 0 failures / 0 errors / 7 skips** (was 409).
+    `bash scripts/ci-admin.sh` → `== all gates passed` (node 27/27, rubocop clean, brakeman
+    EOL-only). `ruby -c` policies_controller.rb: Syntax OK. No test-ns containers started.
+  PENDING: 9b remainder (gateway `online` reconcile on NS SVC listing) stays blocked on NS access /
+  Slice 12. Still open from the 9b-4 review: move the remaining inline `style=` out of the ERB
+  (devices/show, claims/show, admins/_form, groups/_form, groups/show, users/_form,
+  applications/_form) into a NEW `admin.css` + site-wide `assert_select "script:not([src])", false`
+  + `assert_select "[style]", false` test. Next queue item after that: Slice 10 (Enrollments).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: inline-style extraction sweep (admin.css + no-inline-styles site test) or Slice 10 (Enrollments).
 - 2026-10-23 06:34Z — **Slice 9c sub-slice 2 DONE (POST /policies/test + decision rendering)** (cron tick). Commit `c007d528`.
   - Route `POST /policies/test` (`policies_test_path`). Controller `PoliciesController#test`: blank params →
     422 (`:unprocessable_content`) with flash "Choose a device and an application to check." and NO audit row;

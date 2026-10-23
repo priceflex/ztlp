@@ -8,10 +8,10 @@
 <div class="stack">
   <div class="panel">
     <div class="panel-h"><h2>Identity</h2></div>
-    <dl class="kv"><dt>Node ID</dt><dd class="mono"><span class="fp"><%= @device.node_id_hex[0, 16] %>&hellip;</span>
-      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.node_id_hex %>">Copy</button></dd></dl>
-    <dl class="kv"><dt>Noise public key</dt><dd class="mono"><span class="fp"><%= @device.noise_pubkey_hex[0, 16] %>&hellip;</span>
-      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.noise_pubkey_hex %>">Copy</button></dd></dl>
+    <dl class="kv"><dt>Node ID</dt><dd class="mono"><% if @device.node_id_hex.present? %><span class="fp"><%= @device.node_id_hex[0, 16] %>&hellip;</span>
+      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.node_id_hex %>">Copy</button><% else %><span class="sub">not yet (device has not enrolled)</span><% end %></dd></dl>
+    <dl class="kv"><dt>Noise public key</dt><dd class="mono"><% if @device.noise_pubkey_hex.present? %><span class="fp"><%= @device.noise_pubkey_hex[0, 16] %>&hellip;</span>
+      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.noise_pubkey_hex %>">Copy</button><% else %><span class="sub">not yet (device has not enrolled)</span><% end %></dd></dl>
     <dl class="kv"><dt>Key source</dt><dd><%= @device.key_source %></dd></dl>
     <dl class="kv"><dt>Assurance</dt><dd><span class="badge <%= @device.assurance >= 3 ? "ok" : (@device.assurance == 2 ? "warn" : "") %>"><%= Ztlp::Assurance.label(@device.assurance) %></span>
       <% if @device.assurance == 4 %><span class="sub"> hardware attestation not yet verified</span><% end %></dd></dl>

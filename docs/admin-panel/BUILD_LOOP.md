@@ -533,6 +533,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-23 07:55Z — review of the inline sweep (`3c2a96bc`): good (admin.css, real fix: audit-log filter
+  `onchange` was dead under the CSP → `data-auto-submit`). Fixes: (1) `layout_test` had been WEAKENED
+  without cause (admin.css is a <link>, the page still has exactly one relative <script>) → restored
+  "exactly one /assets/directory script, relative, deferred". (2) the site-wide test covered index pages
+  only; most inline styles lived on show/new/edit → added a test over show/new/edit of users, devices
+  (enrolled AND pending), groups, applications, /apps/new_gateway, /admins/new. It found a real crash:
+  **devices/show 500'd for any device without keys (every PENDING device — Slice 10 creates these)** on
+  `node_id_hex[0, 16]` → renders "not yet (device has not enrolled)"; devices test added.
+  ci-admin: 427 runs, all gates passed. Next: Slice 10.
 - 2026-10-23 07:27Z — **inline-attribute sweep DONE (9b-4 review TODO: inline style= extraction + site-wide no-inline-styles test)** (cron tick). Commit `3c2a96bc`.
   - All 16 inline `style=` across 12 views (sessions/new ×7, claims/show ×4, dashboard/show, zone/show, audit_logs/_table, devices/show, groups/show, admins/_form, users/_form, groups/_form, applications/_form, layouts/bare) moved into NEW `admin/app/assets/stylesheets/admin.css` (classes: panel-narrow, form-grid, mt-notice/mt-m/mt-sm/mt-xs, wrap-narrow, tally-n--text, faint, revoke-input, members-actions). The verbatim mock `directory.css` was NOT edited (skill rule); both layouts load `stylesheet_link_tag "directory", "admin"`.
   - The ONE inline event handler in the site (audit_logs/index action-filter `onchange="this.form.requestSubmit()"` — dead in a real browser, CSP script-src 'self' no nonce) replaced with `data-auto-submit` + a delegated `change` listener in directory.js; pure `isAutoSubmitTarget` helper exported + node test (4 cases).

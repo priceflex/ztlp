@@ -60,4 +60,32 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
       end
     end
   end
+
+  # Most of the inline styles lived on show/new/edit pages, not the indexes: cover every one.
+  test "show, new and edit pages have no inline script, style or on* attributes" do
+    @admin, @seed = make_admin
+    sign_in_as(@admin, @seed)
+    zone = Zone.primary
+    user = zone.users.create!(username: "jane", display_name: "Jane", role: "user", status: "active")
+    device = zone.devices.create!(name: "jane-mbp", user: user, status: "enrolled",
+                                  node_id_hex: "ab" * 16, noise_pubkey_hex: "cd" * 32)
+    pending_dev = zone.devices.create!(name: "fresh-box", status: "pending")
+    group = zone.groups.create!(name: "techs")
+    gw = zone.gateways.create!(name: "gw1", kind: "rust_listen")
+    app = gw.applications.create!(name: "wiki", backend: "10.0.0.5:80")
+    app.policy_rules.create!(subject_type: "group", subject_id: group.id, position: 1)
+    routes = [ "/users/#{user.id}", "/users/new", "/users/#{user.id}/edit",
+               "/devices/#{device.id}", "/devices/#{pending_dev.id}", "/groups/#{group.id}", "/groups/new", "/groups/#{group.id}/edit",
+               "/applications/#{app.id}", "/applications/new", "/applications/#{app.id}/edit",
+               "/apps/new_gateway", "/admins/new" ]
+    routes.each do |route|
+      get route
+      assert_response :success, route
+      offenders = response.body.scan(/<([a-z][a-z0-9-]*)((?:\s[^>]*)?)>/).select do |_t, attrs|
+        attrs.match?(/\sstyle=/) || attrs.match?(/\son[a-z]+=/)
+      end
+      assert offenders.empty?, "inline attributes on #{route}: #{offenders.map { |t, a| "<#{t}>#{a[0, 80]}" }}"
+      assert_select "script:not([src])", false, "inline <script> on #{route}"
+    end
+  end
 end

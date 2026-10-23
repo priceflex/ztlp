@@ -26,16 +26,15 @@ class LayoutTest < ActionDispatch::IntegrationTest
     assert body.include?("brand"), "expected the brand block"
   end
 
-  # Two asset tags (directory.css + admin.css, then directory.js): every <script>
-  # must be a /assets/ tag, there must be no inline <script>, and directory.js
-  # must load with defer. (admin.css was added by the inline-attribute sweep; the
-  # layout used to carry exactly one script tag.)
-  test "only /assets script tags are present and directory.js loads deferred" do
+  # admin.css is a <link>, not a <script>: the layout still carries exactly ONE relative script.
+  test "only the directory.js asset script tag is present and it loads deferred" do
     get root_path
     scripts = response.body.scan(/<script[^>]*>/)
-    assert scripts.all? { |s| s.include?("/assets/directory-") }, "only /assets script tags: #{scripts}"
-    assert response.body.include?('src="/assets/directory-'), "directory.js tag present"
-    assert response.body.include?("defer"), "directory.js must load with defer"
+    assert_equal 1, scripts.size, "expected exactly one <script> tag, got: #{scripts}"
+    src = scripts.first[/src=["']([^"']+)["']/, 1]
+    assert src&.start_with?("/assets/directory"), "script must be the /assets/directory bundle, got #{src}"
+    refute src.match?(/http/), "script src must be relative"
+    assert_match(/defer/, scripts.first)
   end
 
   test "no external stylesheet or script sources" do

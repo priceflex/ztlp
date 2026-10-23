@@ -232,4 +232,12 @@ class DevicesControllerTest < ActionDispatch::IntegrationTest
     post revoke_device_path(@server), params: { reason: "decommissioned" }
     assert_equal "revoked", @server.reload.status
   end
+
+  # Slice 10 creates PENDING devices before they redeem a key: their page must render.
+  test "show renders a pending device that has no keys yet" do
+    pending_dev = @zone.devices.create!(name: "fresh-box", status: "pending")
+    get device_path(pending_dev)
+    assert_response :success
+    assert_select "dd", text: /not yet \(device has not enrolled\)/
+  end
 end

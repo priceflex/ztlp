@@ -10,8 +10,8 @@
       <%= form_with url: (@application.enabled ? disable_application_path(@application) : enable_application_path(@application)),
                     method: :post,
                     data: { confirm: (@application.enabled ?
-                                       "Disable #{ @application.name }? It drops out of the rendered policy until the gateway is restarted." :
-                                       "Enable #{ @application.name }? It re-enters the rendered policy until the gateway is restarted.") } do %>
+                                       "Disable #{ @application.name }? It leaves the rendered policy now; the gateway stops serving it after you deploy the policy and restart the gateway." :
+                                       "Enable #{ @application.name }? It enters the rendered policy now; the gateway serves it after you deploy the policy and restart the gateway.") } do %>
         <button type="submit" class="btn"><%= @application.enabled ? "Disable" : "Enable" %></button>
       <% end %>
       <a class="btn" href="<%= edit_application_path(@application) %>">Edit</a>

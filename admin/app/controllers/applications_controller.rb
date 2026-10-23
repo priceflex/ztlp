@@ -94,6 +94,23 @@ class ApplicationsController < ApplicationController
 
   private
 
+  # One shared toggle so enable/disable can't drift apart. A no-op toggle
+  # (already in the requested state) writes no audit row and just re-renders.
+  def set_enabled(want)
+    @application = zone_application
+    if @application.enabled != want
+      @application.update!(enabled: want)
+      audit!(want ? "application.enable" : "application.disable", target: @application,
+            details: { name: @application.name, enabled: want })
+      redirect_to application_path(@application),
+                  notice: "Application #{@application.name} #{want ? 'enabled' : 'disabled'}. " \
+                          "Deploy the rendered policy and restart the gateway to make it live."
+    else
+      redirect_to application_path(@application),
+                  notice: "Application #{@application.name} is already #{want ? 'enabled' : 'disabled'}."
+    end
+  end
+
   # The show/edit/update target, scoped to the zone's gateways (cross-zone id
   # -> 404, same as show).
   def zone_application
@@ -114,22 +131,6 @@ class ApplicationsController < ApplicationController
     @zone_groups = @zone.groups.order(:name).limit(500)
   end
 
-  # One shared toggle so enable/disable can't drift apart. A no-op toggle
-  # (already in the requested state) writes no audit row and just re-renders.
-  def set_enabled(want)
-    @application = zone_application
-    if @application.enabled != want
-      @application.update!(enabled: want)
-      audit!(want ? "application.enable" : "application.disable", target: @application,
-            details: { name: @application.name, enabled: want })
-      redirect_to application_path(@application),
-                  notice: "Application #{@application.name} #{want ? 'enabled' : 'disabled'}. " \
-                          "Deploy the rendered policy and restart the gateway to make it live."
-    else
-      redirect_to application_path(@application),
-                  notice: "Application #{@application.name} is already #{want ? 'enabled' : 'disabled'}."
-    end
-  end
 
   # A gateway the form may target must belong to THIS zone; an unknown id or a
   # foreign-zone gateway is not a persistence target.

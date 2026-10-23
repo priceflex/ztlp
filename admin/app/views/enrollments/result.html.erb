@@ -28,7 +28,12 @@
   <div class="panel">
     <div class="panel-h"><h2>Command</h2></div>
     <div class="panel-b">
-      <pre class="code-box">ztlp setup --token "<%= @token_uri %>"</pre>
+      <pre class="code-box">ztlp setup --token "<%= @token_uri %>"<% if @relay_secret %> --relay-secret "<%= @relay_secret %>"<% end %></pre>
+      <% if @relay_secret %>
+        <p class="hint" data-relay-warning>This command includes the zone-wide relay secret. Treat it like a password: give it only to this device's owner, over a private channel.</p>
+      <% elsif @relay_missing %>
+        <p class="hint" data-relay-warning>You asked to embed the relay secret, but no relay secret is set for this zone. If its relays run in HMAC prod mode, set it first (<span class="mono">rails zone:set_secret relay</span>) and mint a new token.</p>
+      <% end %>
       <p class="hint">The device enrolls straight against the name server and opens its first tunnel. This panel does not need to approve anything.</p>
     </div>
   </div>

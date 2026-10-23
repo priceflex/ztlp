@@ -534,6 +534,19 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 09:25Z — **review of Slice 10b-2** (`cbbe1179` mint + show-once + QR). Good: session-consumed
+  one-time reveal, audit has no token, filter_parameters covers token/code, expiry clamp 1..24h. Fixes:
+  (1) **"Embed relay secret" (default ON) did nothing** — the v1 token has no relay-secret field and the
+  command was plain `ztlp setup --token …`, so panel-enrolled devices could not route through relays in
+  HMAC prod mode (`ztlp setup --relay-secret`: "Required when the zone's relays run
+  ZTLP_RELAY_HMAC_MODE=prod"). Now the one-time command appends `--relay-secret "<zone relay secret>"`
+  with a zone-wide-secret warning; embed requested but no zone relay secret → explicit warning. Secret
+  never in the audit (test). (2) "shown once" but the URI stayed in `token_uri_ct` forever → wiped
+  (`update_column nil`) after the reveal; test. ci-admin 472 runs, all gates passed.
+  **Slice 12 ops note:** the token carries `zone.ns_addr` + `zone.relay_addrs` — they must be the
+  addresses CLIENTS reach (public NS/relay), and the NS's own enrollment secret must equal the panel's
+  `enrollment_secret_ct` (else every token → 0x08 0x03). Add both to the smoke checklist.
+
 - 2026-10-23 09:06Z — **Slice 10b sub-slice 2 DONE (POST /enrollments mint + show-once result page + QR)** (cron tick). Commit `cbbe1179`.
   - `EnrollmentsController#create`: mints the v1 token via `Ztlp::TokenMinter.mint(@zone, expires_at:)` + `to_uri`, stores the URI in `token_uri_ct`, redirects to `result`. Expiry is **clamped** (not trusted): blank → 1h default, <1h → 1h, >24h → 24h max (spec F8 / Slice 10). `user_device` without a linked user → 400; missing `enrollment` params → 400 (not 500, the publish-failure-must-not-500 rule); `read_only` → 403. If the zone enrollment secret is unset: honest error toast + an `enrollment.mint` audit row `status: "error"` (details `no_zone_enrollment_secret`), no token minted.
   - **Show-once**: `create` stashes a one-time reveal in the session; `GET /enrollments/:id/result` renders the token URI **only** when the reveal matches, then consumes it (second GET, bookmarked URL, or the plain show page all get 404 / no token). Gotcha found + pinned: the session serializer stringifies hash keys on round-trip, so the stored reveal comes back with **string** keys — `result` reads both `[:enrollment_id]` and `["enrollment_id"]`.

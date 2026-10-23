@@ -381,4 +381,41 @@ class EnrollmentsControllerTest < ActionDispatch::IntegrationTest
     get "/enrollments/#{bare.id}/result"
     assert_response :not_found
   end
+
+  # `ztlp setup --relay-secret` (ztlp-cli.rs Setup): "Required when the zone's relays run
+  # ZTLP_RELAY_HMAC_MODE=prod". The v1 token has no relay-secret field, so embedding means the
+  # one-time command carries the flag.
+  test "embed relay secret puts --relay-secret in the one-time setup command, never in the audit" do
+    relay = "Rk3" + "a" * 45
+    @zone.update!(relay_secret_ct: relay)
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1", embed_relay_secret: "1" } }
+    follow_redirect!
+    assert_select "pre.code-box", text: /ztlp setup --token "ztlp:\/\/enroll\/[^"]+" --relay-secret "#{relay}"/
+    assert_select "[data-relay-warning]", /zone-wide/i
+    refute_includes AuditLog.where(action: "enrollment.mint").last.details.to_json, relay
+  end
+
+  test "without embed the command has no relay secret" do
+    @zone.update!(relay_secret_ct: "Rk3" + "a" * 45)
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    follow_redirect!
+    assert_no_match(/--relay-secret/, response.body)
+  end
+
+  test "embed requested but the zone has no relay secret: say so" do
+    @zone.update!(relay_secret_ct: nil)
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1", embed_relay_secret: "1" } }
+    follow_redirect!
+    assert_no_match(/--relay-secret/, response.body)
+    assert_select "[data-relay-warning]", /no relay secret is set/i
+  end
+
+  # Shown once means stored never: after the reveal nothing needs the URI (redeem is keyed by token_id).
+  test "the token URI is wiped from the database after the one-time reveal" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    tok = @zone.enrollments.order(:id).last
+    assert tok.token_uri_ct.present?
+    follow_redirect!
+    assert_nil tok.reload.token_uri_ct
+  end
 end

@@ -129,6 +129,12 @@ class EnrollmentsController < ApplicationController
     session[:enrollment_reveal] = nil # consume: exactly one render carries the token
     @token_uri = @enrollment.token_uri_ct
     @qr_svg = Ztlp::TokenQr.svg(@token_uri)
+    # `ztlp setup --relay-secret` is required when the zone's relays run HMAC prod mode; the v1 token
+    # has no field for it, so "embed" means the one-time command carries the flag.
+    @relay_secret = @zone.relay_secret_ct.presence if @enrollment.embed_relay_secret
+    @relay_missing = @enrollment.embed_relay_secret && @relay_secret.nil?
+    # Shown once, stored never: redeem is keyed by token_id, nothing needs the URI after this render.
+    @enrollment.update_column(:token_uri_ct, nil)
   end
 
   # -------------------------------------------------------------------- show

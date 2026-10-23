@@ -533,6 +533,14 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-23 12:14Z — **Slice 11d DONE (administrators page: inline disable/enable + rail-foot identity)** (cron tick). Commit `b663b11d`.
+  - `POST /admins/:id/toggle` (`AdminsController#toggle`, super_admin only — the existing `require_super_admin` before_action covers it): inline disable/enable from the list. `disabled="1"`/`"0"` body; no-op when already in the requested state (no duplicate `admin.updated` audit row — pinned); the edit form stays as the fallback path (its checkbox). A disabled admin cannot sign in (challenge uses `Admin.active` + the sessions gate — pinned through a full signed challenge→verify round-trip → 401). The index row gains a Disable/Re-enable button in a `form_with` (hidden `disabled` = the opposite state), rendered ONLY for super_admins and never for the current admin's own row (cannot disable self — matches the edit-form self-guard).
+  - Rail-foot identity (`#rail-me`): the spec's `username · role · assurance` — `current_admin.username · role.humanize`, plus for tunnel sessions `· via ZTLP <device> · <assurance label>` where the label is re-resolved from the panel's own `Device` record for `session[:device]` (the DEVICE record is the assurance source of truth, G1/G6) with the header assurance as fallback. Rendered for signed-in users; no-JS safe (plain text, no inline scripts/styles).
+  - TDD: `test/controllers/admins_toggle_test.rb` (6) RED first (NoMethodError `admin_toggle_path` — route did not exist; the route helper resolves to `toggle_admin_path`, fixed in the same GREEN step), then GREEN. Note the route: `member { post :toggle }` yields helper `toggle_admin_path` (verb-first), not `admin_toggle_path`.
+  - Evidence: file suite `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test test/controllers/admins_toggle_test.rb` → **6 runs / 24 assertions / 0 failures / 0 errors**. Full suite `SKIP_CLAIM_BOOT=1 timeout 580 bin/rails test` → **539 runs / 2447 assertions / 0 failures / 0 errors / 7 skips** (was 533/2413 at the 11c review tick). `bash scripts/ci-admin.sh` (from `admin/`) → **== all gates passed** (node 29/29, rubocop clean, brakeman EOL-only). `ruby -c` on admins_controller.rb + routes.rb + the test: Syntax OK. No test-ns containers started.
+  PENDING: Slice 12 (deploy) — the LAST slice; requires the local prod-compose smoke first, then the operator-approved prod ship (web+jobs only). BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 12 — local smoke (docker compose -p admintest up -d, /up, claim/login probe) then prod deploy after operator OK.
+
 
 - 2026-10-23 12:15Z — **review of Slice 11c** (`3642b004` admin:reset_claim). **Break-glass did not work
   end to end**: `Claim.perform!(force:)` existed but ClaimsController never passed it, and its

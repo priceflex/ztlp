@@ -534,6 +534,35 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 05:07Z — **Slice 9b sub-slice 5 DONE (application enable/disable)** (cron tick). Commit `0914d17c`.
+  - Routes: `POST /applications/:id/enable` + `:disable` (member block, `enable_application`/`disable_application`
+    path helpers — the `application_enable_path` shape I first wrote in the test does NOT exist for member
+    routes; `bin/rails routes` is ground truth). Controller: shared private `set_enabled(want)` — a no-op toggle
+    (already in the requested state) writes NO audit row and just redirects with an "already …" notice; a real
+    toggle updates the row, audits `application.enable`/`application.disable` (target = the Application,
+    details `{name, enabled}`), and redirects with the standing "Deploy the rendered policy and restart the
+    gateway to make it live." hint. Same contract as 9b-2/3/4: NOTHING published to the NS — PolicyRenderer
+    only lists enabled applications as `[[services]]`, so disabling takes the service off the rendered
+    allow-list. Show page (full + drawer) now renders a Disable/Enable button (confirm dialog names the effect)
+    alongside Edit, both behind `write`.
+  - TDD: `test/controllers/applications_toggle_controller_test.rb` (7) RED first (route helpers undefined).
+    One real bug found via the test: `enable`/`disable` were accidentally defined BELOW `private`
+    (rails-development-pitfalls #1) — every POST 404'd with "Unknown action: The enable action could not be
+    found for the :require_write_access". The 404 body said it; I had been chasing the wrong layer. Moved
+    above `private` → GREEN.
+  - Evidence: file suite 7 runs / 43 assertions / 0 failures. Full suite `SKIP_CLAIM_BOOT=1 timeout 600
+    bin/rails test` → **378 runs / 1697 assertions / 0 failures / 0 errors / 7 skips** (was 371). `bash
+    scripts/ci-admin.sh` → node 21/21, rubocop clean, brakeman EOL-only, `== all gates passed`. `ruby -c`
+    on the controller + routes: Syntax OK. No test-ns containers started.
+  PENDING: Slice 9b remainder — gateway minimal CRUD ("New gateway" inline from the application form;
+    name, kind, host_note; reconcile marks `online` when SVC seen), then Slice 9c (Policies page +
+    `POST /policies/test` AccessEvaluator wiring + trace JS + node test). Also still open from the 9b-4
+    review: move the remaining inline `style=` out of the ERB (devices/show, claims/show, admins/_form,
+    groups/_form, groups/show, users/_form, applications/_form) into a NEW `admin.css` + site-wide
+    `assert_select "script:not([src])", false` + `assert_select "[style]", false` test.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9b sub-slice 6 (gateway minimal CRUD inline from the application form).
+
 - 2026-10-23 04:55Z — **review of Slice 9b-4** (`5f06c5cb` rule add/remove). The form did NOT work in a
   browser: (1) the type swap was an **inline `<script>`** and the layout used `style=""`, both BLOCKED by
   our CSP (`script-src 'self'`, `style-src 'self'`, no nonce) — tests can't see this; with JS dead the

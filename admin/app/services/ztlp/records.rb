@@ -25,7 +25,7 @@ module Ztlp
       {
         "public_key" => user.signing_pubkey_hex.to_s,
         "role" => user.role.to_s,
-        "devices" => user.devices.order(:name).map(&:ns_name),
+        "devices" => user.devices.where(status: "enrolled").order(:name).map(&:ns_name), # never pending/revoked
         "email" => ""
       }
     end

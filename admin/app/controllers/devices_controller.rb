@@ -57,8 +57,10 @@ class DevicesController < ApplicationController
     end
 
     begin
-      Ztlp::Publisher.revoke!(@zone, name: @device.ns_name, target: @device,
-                                     reason: reason, admin: current_admin)
+      # node_id in the same record: the NS refuses any later registration carrying it, so a
+      # stolen key cannot come back under a different device name.
+      Ztlp::Publisher.revoke!(@zone, name: @device.ns_name, also: [ @device.node_id_hex ].compact,
+                                     target: @device, reason: reason, admin: current_admin)
     rescue Ztlp::NsClient::NsError => e
       audit!("device.revoke", target: @device, status: "failed",
                                details: { name: @device.name, result: format("0x%02X %s", e.code, e.reason) })
@@ -70,8 +72,18 @@ class DevicesController < ApplicationController
     @device.update!(status: "revoked", revoked_at: Time.current)
     audit!("device.revoke", target: @device, status: "ok",
                            details: { name: @device.name, reason: reason })
-    redirect_to device_path(@device),
-                notice: "#{@device.name} revoked permanently. It can never re-enroll under this name."
+    # Drop it from the owner's USER devices[] now (the revocation already stands, so save-and-warn).
+    warning = nil
+    if @device.user
+      begin
+        Ztlp::Publisher.publish_user!(@device.user, admin: current_admin)
+      rescue Ztlp::NsClient::NsError => e
+        warning = format("Revoked, but the owner's record was not republished (0x%02X %s). " \
+                         "The 6-hourly republish will retry.", e.code, e.reason)
+      end
+    end
+    redirect_to device_path(@device), alert: warning,
+                notice: "#{@device.name} revoked permanently. It can never re-enroll under this name or key."
   end
 
   private

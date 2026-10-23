@@ -355,7 +355,8 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
   test "revoke writes ONE REVOKE for the user plus every enrolled device and marks them revoked" do
     Ztlp::Publisher.expects(:revoke!)
                    .with { |zone, kw| zone == @zone && kw[:name] == "alice.users.test.ztlp" &&
-                                      kw[:also] == [ "alice-mbp.test.ztlp" ] && kw[:target].id == @alice.id }
+                                      kw[:also] == [ "alice-mbp.test.ztlp", @alice.devices.first.node_id_hex ] &&
+                                      kw[:target].id == @alice.id }
                    .returns(:ok)
     post revoke_user_path(@alice)
     assert_equal "revoked", @alice.reload.status

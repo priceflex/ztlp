@@ -534,6 +534,18 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 00:40Z — **review of Slice 8a** (`6d34d98d`). Device revoke was fail-closed (good) but had
+  NO tests for success / NS failure / missing reason (only the 403). Added 5. Fixes: (1) the REVOKE now
+  also lists the device **node_id** (`also: [node_id_hex]`); user revoke lists every enrolled device's
+  ns name AND node_id. The NS refuses any later registration carrying a revoked node_id
+  (registration_auth `check_revocation`), so a stolen key cannot return under a new device name;
+  **proved live**: register device → REVOKE [name, node_id] → query `:revoked` → register
+  `renamed-<device>` with the same node_id → 0x07. (2) After a device revoke the owner's USER is
+  republished (save-and-warn: "Revoked, but the owner's record was not republished …"). (3)
+  `Records.user_data` `devices[]` listed ALL devices incl. pending and revoked → enrolled only
+  (records test). ZTLP_TEST_NS 7/7; `bash scripts/ci-admin.sh` → all gates passed.
+  Next: Slice 8b (Assign owner: publishes DEVICE + BOTH users' devices[]; same warn rule).
+
 - 2026-10-23 00:19Z — **Slice 8a DONE (Devices read side: index + show/drawer + permanent revoke)** (cron tick). Commit `6d34d98d`.
   - Routes: `resources :devices, only: %i[index show]` + member `post :revoke` / `post :assign_owner` (assign_owner is a
     placeholder route for 8c — no action yet; the route is there so the helper exists for the next sub-slice's TDD RED).

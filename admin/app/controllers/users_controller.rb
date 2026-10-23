@@ -85,7 +85,9 @@ class UsersController < ApplicationController
 
     devices = @user.devices.where(status: "enrolled").to_a
     begin
-      Ztlp::Publisher.revoke!(@zone, name: @user.ns_name, also: devices.map(&:ns_name), target: @user,
+      # node_ids too: the NS refuses any later registration carrying a revoked node_id.
+      Ztlp::Publisher.revoke!(@zone, name: @user.ns_name, also: devices.flat_map { |d| [ d.ns_name, d.node_id_hex ] }.compact,
+                                     target: @user,
                                      reason: "user revoked", admin: current_admin)
     rescue Ztlp::NsClient::NsError => e
       audit!("user.revoke", target: @user, status: "failed",

@@ -180,4 +180,56 @@ class DevicesControllerTest < ActionDispatch::IntegrationTest
     # and the device is untouched
     assert_equal "enrolled", @laptop.reload.status
   end
+
+  # ------------------------------------------------------- revoke (permanent, fail-closed)
+  #
+  # ONE REVOKE record at revoke.<device ns> listing the device ns name AND its node_id (the NS
+  # indexes both; check_revocation refuses any later registration carrying that node_id, so a
+  # stolen key cannot re-enroll under a new name). Then the owner's USER record is republished so
+  # devices[] drops it (save-and-warn: the revocation itself already happened).
+
+  test "revoke writes one REVOKE with the ns name and node_id, marks revoked, republishes the owner" do
+    Ztlp::Publisher.expects(:revoke!)
+                   .with { |zone, kw| zone == @zone && kw[:name] == "alice-mbp.test.ztlp" &&
+                                      kw[:also] == [ "ab" * 16 ] && kw[:reason] == "stolen" }
+                   .returns(:ok)
+    Ztlp::Publisher.expects(:publish_user!).with { |u, **| u.id == @alice.id }.returns(:ok)
+    post revoke_device_path(@laptop), params: { reason: "stolen" }
+    assert_equal "revoked", @laptop.reload.status
+    refute_nil @laptop.revoked_at
+    assert AuditLog.where(action: "device.revoke", status: "ok").any?
+  end
+
+  test "revoke requires a reason and changes nothing without one" do
+    Ztlp::Publisher.expects(:revoke!).never
+    post revoke_device_path(@laptop), params: { reason: "  " }
+    assert_response :unprocessable_content
+    assert_equal "enrolled", @laptop.reload.status
+  end
+
+  test "revoke is fail-closed: an NS refusal changes nothing" do
+    Ztlp::Publisher.expects(:revoke!).raises(Ztlp::NsClient::NsError.new(0x00, "no_authority"))
+    Ztlp::Publisher.expects(:publish_user!).never
+    post revoke_device_path(@laptop), params: { reason: "stolen" }
+    assert_equal "enrolled", @laptop.reload.status
+    follow_redirect!
+    assert_select "[data-toast]", /NOT revoked.*0x00 no_authority/
+  end
+
+  test "revoke still succeeds and warns when only the owner republish fails" do
+    Ztlp::Publisher.expects(:revoke!).returns(:ok)
+    Ztlp::Publisher.expects(:publish_user!).raises(Ztlp::NsClient::NsError.new(0x0C, "timeout"))
+    post revoke_device_path(@laptop), params: { reason: "stolen" }
+    assert_equal "revoked", @laptop.reload.status
+    follow_redirect!
+    assert_select "[data-toast]", /owner.*not republished.*0x0C timeout/i
+  end
+
+  test "revoke of an unowned device republishes no user" do
+    @server.update!(status: "enrolled")
+    Ztlp::Publisher.expects(:revoke!).returns(:ok)
+    Ztlp::Publisher.expects(:publish_user!).never
+    post revoke_device_path(@server), params: { reason: "decommissioned" }
+    assert_equal "revoked", @server.reload.status
+  end
 end

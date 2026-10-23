@@ -166,4 +166,12 @@ class ZtlpRecordsTest < ActiveSupport::TestCase
       assert_includes Ztlp::Assurance::LEVELS.keys, data["assurance"]
     end
   end
+
+  test "user_data devices[] lists ENROLLED devices only (never pending or revoked)" do
+    user = make_user
+    zone.devices.create!(user: user, name: "a-enrolled", node_id_hex: "01" * 16, noise_pubkey_hex: "02" * 32, status: "enrolled")
+    zone.devices.create!(user: user, name: "b-pending", node_id_hex: "03" * 16, noise_pubkey_hex: "04" * 32, status: "pending")
+    zone.devices.create!(user: user, name: "c-revoked", node_id_hex: "05" * 16, noise_pubkey_hex: "06" * 32, status: "revoked")
+    assert_equal [ "a-enrolled.test.ztlp" ], Ztlp::Records.user_data(user)["devices"]
+  end
 end

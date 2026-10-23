@@ -244,4 +244,23 @@ class NsRoundtripTest < ActiveSupport::TestCase
     assert_equal :ok, client.register(NS_ADDR, TIMEOUT, name: "after-revoke.groups.#{zn}", type: "group",
                                                         data: group_data([]), seed: AUTHORITY[0])
   end
+
+  # Slice 8 device revoke: the REVOKE lists the device ns name AND its node_id. A stolen key must
+  # not come back under a DIFFERENT device name (registration_auth check_revocation on node_id).
+  test "a revoked node_id cannot register under a new device name" do
+    zn = ensure_zone_authority
+    ns = names(zn, "7")
+    node_id_hex = Random.bytes(16).unpack1("H*")
+    noise_pub_hex = Random.bytes(32).unpack1("H*")
+    client.register(NS_ADDR, TIMEOUT, name: ns[:device], type: "device",
+                                      data: device_data(ns[:user], node_id_hex, noise_pub_hex), seed: AUTHORITY[0])
+    client.register(NS_ADDR, TIMEOUT, name: "revoke.#{ns[:device]}", type: "revoke",
+                                      data: Ztlp::Records.revoke_data(ns[:device], "stolen", [ node_id_hex ]),
+                                      seed: AUTHORITY[0])
+    assert_equal :revoked, client.query(NS_ADDR, TIMEOUT, name: ns[:device], type: "device")
+    assert_ns_error(0x07) do
+      client.register(NS_ADDR, TIMEOUT, name: "renamed-#{ns[:device]}", type: "device",
+                                        data: device_data(ns[:user], node_id_hex, noise_pub_hex), seed: AUTHORITY[0])
+    end
+  end
 end

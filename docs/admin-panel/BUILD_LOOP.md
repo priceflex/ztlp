@@ -533,6 +533,34 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-23 16:55Z — **smoke-claim fresh-panel guard test DONE** (cron tick). Commit d15f856e.
+  - The 16:30Z tick left the Slice 12 local smoke BLOCKED on operator fresh-DB reset (stale
+    admintest DB, Admin.count=2; the claim POST 422s on the already-claimed panel because
+    /claim 302s to / and the session rotates on the flash clear). This tick pinned that
+    failure shape hermetically so a regression that made /claim render 200 on a claimed
+    panel — or let the claim POST succeed with a regular code after the bounce — would
+    NOT silently pass the suite.
+  - New test/integration/smoke_claim_fresh_panel_guard_test.rb (2 tests, 19 assertions):
+    (1) fresh panel: GET /claim 200, form present, signed claim POST -> 302 -> Overview,
+    Admin.count=1. (2) already-claimed panel: claim steve first, then replay the stale-DB
+    shape — GET /claim 302s to root (the script's abort point), signed POST with a fresh
+    code 302s to root (ensure_unclaimed, NOT claim success), no smoke admin, Admin.count
+    stays 1. Test env has allow_forgery_protection=false so form_with emits no
+    authenticity_token; the live smoke runs against the production container where the
+    token IS present and the CSRF guard is live.
+  - TDD: wrote the test, ran RED (the first draft used a token regex that matched nothing
+    in the test env — the form_with token is omitted when forgery protection is off; the
+    live smoke's 422 is a CSRF failure, not a missing-form failure). Rewrote the test to
+    assert the correct shape (form present + POST success on fresh; 302 bounce + no-admin
+    on stale). GREEN: 2 runs / 19 assertions / 0 failures.
+  - Full suite: SKIP_CLAIM_BOOT=1 timeout 580 bin/rails test -> 546 runs / 2474 assertions
+    / 0 failures / 0 errors / 10 skips. bash scripts/ci-admin.sh -> == all gates passed
+    (node 29/29, rubocop clean, brakeman EOL-only). No test-ns containers started.
+  PENDING: Slice 12 local smoke (fresh-DB run) — still BLOCKED on operator fresh-DB reset.
+    Prod deploy remains BLOCKED-on-operator.
+  BLOCKED: admintest stale DB (cron cannot reset the compose stack). UNCERTAIN: none.
+  Next: operator resets the admintest stack; next tick re-runs smoke-directory.sh on the
+    fresh DB.
 - 2026-10-23 16:30Z — **smoke-claim-login session-rotation 422 fixed; smoke-directory run (stale-DB)** (cron tick). Commit `a3aef31d`.
   - Root cause of the recurring 422 on `smoke-claim-login.rb`: on an already-claimed panel, `GET /claim` 302s to `/` (302 to `/login`); the Rails CookieStore session ROTATES on every request that consumes a flash (the redirect sets a flash; the landing page clears it, re-issuing the cookie). The CSRF token on the final `/login` page is computed from the PRE-rotation session state, so a `POST /claim` with that token + the POST-rotation cookie 422s with "Can't verify CSRF token authenticity". Proven live (probe scripts run via `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails runner`): the session cookie key changes on every consecutive GET, and the POST 422s regardless of which page's token is used.
   - Fix: `smoke-claim-login.rb` now asserts `GET /claim` -> 200 (fresh panel only) and documents the fresh-DB prerequisite. The challenge/verify LOGIN round-trip (old step 3) is removed: the claim POST already signs the caller in (`sign_in!` in `ClaimsController#create`), and `SessionsController#challenge` issues the challenge for the session that carries the request, so a signed-in session cannot re-prove the login path. The real LOGIN round-trip is proven by `smoke-directory.sh`'s smoke2 admin (challenge -> verify -> exchange -> signed-in Overview), which uses a fresh keypair + session.

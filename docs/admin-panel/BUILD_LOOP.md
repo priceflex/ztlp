@@ -534,6 +534,48 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 02:50Z — **Slice 9b sub-slice 2 DONE (Applications index + show/drawer, read side)** (cron tick). Commit `4344c3bc`.
+  - `config/routes.rb`: `resources :applications, only: %i[index show]`.
+  - `app/controllers/applications_controller.rb` (read-only, no Publisher):
+    `index` = every application across the zone's gateways (flat_map over
+    `gateways.includes(applications: %i[policy_rules])`); `show` = the
+    application scoped to the zone's gateways (cross-zone id → 404),
+    drawer fragment under `X-Drawer: 1` (`render layout: false`, same
+    contract as users/groups show).
+  - `app/views/applications/index.html.erb`: row per application — name +
+    ztlp name `<name>.<zone>`, gateway, backend, protocol, min assurance
+    with "(not enforced by Rust gateways)" note on `rust_listen`, rules
+    count (`td.row-rules`), enabled/disabled badge; drawer-linked rows;
+    empty state "No applications yet".
+  - `app/views/applications/show.html.erb`: About panel (gateway + kind,
+    backend, protocol, min assurance note, description), Rules panel
+    (position-ordered table: type / subject / rendered literal; empty
+    note "No rules yet — access is default deny"; elixir note that
+    group/role/user rules never match a device there), Rendered-policy
+    panel (`Ztlp::PolicyRenderer.render(gateway)` in a `<pre class="code">`
+    block + "Rule changes need a gateway restart; membership changes are
+    live" + deploy hint naming the gateway).
+  - TDD: `test/controllers/applications_controller_test.rb` (10) RED first
+    (NameError on `applications_path`), then GREEN. Two own-bug iterations:
+    `flat_map(&:applications)` returns an Enumerator (`find` raises), and
+    `includes`-tainted associations make `Enumerator#find` return the
+    enumerator (verified via `bin/rails runner` probe) → show uses a plain
+    scoped query; neither a test weakening nor a code-behavior change.
+  - Evidence: `timeout 300 bin/rails test test/controllers/applications_controller_test.rb`
+    → 10 runs / 70 assertions / 0 failures / 0 errors. Full suite
+    `SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test` → **332 runs / 1467
+    assertions / 0 failures / 0 errors / 7 skips** (was 321 before this
+    slice). `bash scripts/ci-admin.sh` → node 19/19, rubocop/brakeman
+    clean, `== all gates passed`. No test-ns containers started.
+  PENDING: Slice 9b remainder — application mutations (new/create with
+    inline gateway pick, edit/update, enable/disable), rule add/remove
+    forms (subject type + picker, gateway-semantics warnings per 9b-1
+    review: group/role/user rules inert on elixir, user rules inert on
+    rust_listen), gateway minimal CRUD, then Slice 9c (Policies page +
+    `POST /policies/test` AccessEvaluator wiring + trace JS + node test).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9b sub-slice 3 (application mutations: new/create + edit/update).
+
 - 2026-10-23 02:40Z — **review of Slice 9b-1** (`bb608e5c` AccessEvaluator). Three divergences from the
   gateways fixed (tests rewritten RED → GREEN, 19/19):
   (1) **Elixir semantics were assumed equal to Rust.** gateway/lib/ztlp_gateway/policy_engine.ex checks

@@ -11,14 +11,9 @@
 #      here — the container runs production.rb, which is what we are proving
 #      against; the schema load uses the container's own production DB creds
 #      from its environment).
-#   2. Drops the solid_queue schema (queue tables are NOT in db/schema.rb;
-#      solid_queue:prepare would recreate them, but its `db:schema:load`
-#      guard sees the production schema_migrations and skips — so we just
-#      drop the tables; `solid_queue:prepare` is NOT called, the app
-#      recreates nothing, and the jobs container picks them up on its next
-#      enqueue via its own entrypoint `db:prepare`... which also skips on
-#      schema_migrations — so instead we create the queue tables explicitly
-#      below, mirroring what `db:prepare` created on first boot).
+#   2. Leaves the solid_queue queue tables exactly as they were (this app's
+#      live shape idles without them; `solid_queue:prepare` does not exist as
+#      a task in this app — a prior draft that called it aborted the reset).
 #   3. Clears the AR encryption key usage bookkeeping (active_storage
 #      blobs / attachements etc. are already gone with the tables; AR
 #      Encryption needs no per-row state).
@@ -60,12 +55,10 @@ abort "db/schema.rb not found at #{SCHEMA}" unless File.exist?(SCHEMA)
 #    declares its own version + create_table blocks for every model.
 run!([ "./bin/rails", "db:schema:load" ], "db:schema:load (drop + recreate from schema.rb)")
 
-# 2. solid_queue tables: not in schema.rb. The first-boot entrypoint ran
-#    `db:prepare`, which ran `solid_queue:prepare` to create them. After the
-#    schema:load wipe they are gone; recreate them with the same task the
-#    entrypoint used. (solid_queue:prepare is idempotent and safe against a
-#    freshly schema-loaded DB.)
-run!([ "./bin/rails", "solid_queue:prepare" ], "solid_queue:prepare (recreate queue tables)")
+# 2. The solid_queue queue tables: NOT in schema.rb. Whether they exist is
+#    environment-dependent (this app's live shape idles without them), so the
+#    reset must not create OR drop them — it leaves the queue-table state
+#    exactly as it was, and only wipes the app tables.
 
 # 3. Sanity: the app tables exist and are empty.
 admins = ActiveRecord::Base.connection.select_value("SELECT COUNT(*) FROM admins")

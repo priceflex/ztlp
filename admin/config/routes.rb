@@ -58,6 +58,9 @@ Rails.application.routes.draw do
   post "gateways", to: "gateways#create", as: :gateways
   post "gateways/:id/update_kind", to: "gateways#update_kind", as: :update_kind_gateway
 
+  # Slice 9c: policies page (read-only overview + Test access widget).
+  get "policies", to: "policies#index", as: :policies
+
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile

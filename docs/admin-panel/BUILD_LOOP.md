@@ -533,6 +533,32 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+- 2026-10-23 05:55Z — **Slice 9c sub-slice 1 DONE (Policies page: read-only overview + Test access widget)** (cron tick). Commit `be230b0c`.
+  - `GET /policies` (`policies#index`): every application across the zone's gateways, each panel showing its rules (subject type + rendered literal), the per-gateway rendered policy code block (`PolicyRenderer`), and a
+    `data-act="copy"` button (`data-testid="policy-copy-<name>"`, CSP-clean — no inline script). Disabled applications are listed (read-only overview). **Test access** widget: device picker (all devices, status shown) +
+    application picker (all applications, gateway shown) in a `form_with` posting to `POST /policies/test`
+    (`data-testid="test-access-form"`) — the action lands in sub-slice 2.
+  - Controller pre-computes `@policy_docs` (`index_with` — one render per gateway, not per application) and
+    `@test_apps` ([gateway, application] pairs) so the view is a pure render pass.
+  - TDD: `test/controllers/policies_controller_test.rb` (5) RED first (`policies_path` undefined). Two test-
+    expectation fixes (not weakened): (1) the rendered policy text is HTML-escaped in the body, so the toml
+    assertions pin the escaped form (`default = &quot;deny&quot;`); (2) the first view draft used `form_tag`
+    which rendered nothing under a blank test `secret_key_base` — `form_with` (the app's established pattern)
+    fixed it, and the controller precomputes the policy docs so the view never calls the renderer inline.
+  - Evidence: file suite 5 runs / 44 assertions / 0 failures. Full suite `SKIP_CLAIM_BOOT=1 timeout 580 bin/rails
+    test` → **398 runs / 1794 assertions / 0 failures / 0 errors / 7 skips** (was 393). `bash scripts/ci-admin.sh`
+    → node 21/21, rubocop clean, brakeman EOL-only, `== all gates passed`. `ruby -c` on routes + controller:
+    Syntax OK. No test-ns containers started.
+  PENDING: Slice 9c sub-slice 2 — `POST /policies/test` (zone-scoped device + application, `Ztlp::
+    AccessEvaluator.evaluate`, result box on the page: decision badge, reason, trace table, warnings; audit
+    `policy.test`), then sub-slice 3 — trace rendering as a pure `directory.js` helper + node test (per §2.3:
+    no innerHTML with server data; the trace rows must be built with createElement/textContent). Also still
+    open from the 9b-4 review: move the remaining inline `style=` out of the ERB (devices/show, claims/show,
+    admins/_form, groups/_form, groups/show, users/_form, applications/_form) into a NEW `admin.css` +
+    site-wide `assert_select "script:not([src])", false` + `assert_select "[style]", false` test.
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9c sub-slice 2 (POST /policies/test + decision rendering).
+
 
 - 2026-10-23 05:34Z — **Slice 9b sub-slice 6 DONE (gateway minimal CRUD inline from the application form)** (cron tick). Commit `c6f9d20c`.
   - Routes: `GET /apps/new_gateway` (`gateways#new`, the inline "New gateway" form), `POST /gateways`

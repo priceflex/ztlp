@@ -39,7 +39,7 @@ class ApplicationsController < ApplicationController
   end
 
   def create
-    gateway = scoped_gateway(params[:application][:gateway_id])
+    gateway = scoped_gateway(params.require(:application)[:gateway_id]) # missing -> 400, not 500
     if gateway.nil?
       @gateways = @zone.gateways.order(:name)
       @application = Application.new(application_params)

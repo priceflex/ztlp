@@ -534,6 +534,12 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 03:25Z — review of Slice 9b-3 (`5d6ab214` application new/create/edit/update): good
+  (write-gated, zone-scoped, name/gateway immutable, form_with). One fix: create with no `application`
+  param 500'd (`params[:application][:gateway_id]` on nil) → `params.require` → 400; test added.
+  ci-admin all gates passed. Next: 9b rules CRUD + Test access panel (show `warnings`; rule form warns
+  that group/role/user do nothing on elixir and user does nothing on rust_listen).
+
 - 2026-10-23 03:14Z — **Slice 9b sub-slice 3 DONE (application mutations: new/create + edit/update)** (cron tick). Commit `5d6ab214`.
   - `config/routes.rb`: `resources :applications, only: %i[index show new create edit update]` (rule add/remove +
     enable/disable remain later sub-slices).

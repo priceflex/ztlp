@@ -207,4 +207,11 @@ class ApplicationsMutationsControllerTest < ActionDispatch::IntegrationTest
     get new_application_path
     assert_redirected_to login_path
   end
+
+  test "create with no application params is a 400, never a 500" do
+    assert_no_difference -> { Application.count } do
+      post applications_path, params: {}
+    end
+    assert_response :bad_request
+  end
 end

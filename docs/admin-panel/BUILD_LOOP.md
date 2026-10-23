@@ -534,6 +534,32 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 01:38Z — **Slice 9a DONE (policy renderer — TOML/YAML, rule literals)** (cron tick). Commit `f669ee30`.
+  - `app/services/ztlp/policy_renderer.rb`: `Ztlp::PolicyRenderer.render(gateway)` returns nil for a gateway
+    with no enabled applications (empty allow-list = default-deny, no document needed). `rust_listen` ->
+    TOML (`default = "deny"`, one `[[services]]` per enabled application, `ztlp = "<name>.<zone>"`,
+    `backends = ["<url>"]`, `allow = ["<literal>", ...]`). `elixir` -> YAML (`default: deny`, one `- ztlp:`
+    entry per application, `backend:` lines, `allow:` list). Backend URL: scheme-carrying backend stands
+    alone; bare address gets `protocol://` prefix. Disabled applications are excluded from the allow-list.
+  - `app/models/policy_rule.rb`: `before_validation :pin_subject_value` pins the subject's ns_name into
+    `subject_value` at create time, so a rule whose group/user/device row was deleted still renders the
+    exact literal the gateway will match (stale but honest). `render` for "group" falls back to
+    `subject_value.presence || "?"` when `subject_entity` is nil. Validation now checks `subject_value`
+    directly (already set by the pinner) instead of re-resolving the entity.
+  - Tests (`test/services/ztlp/policy_renderer_test.rb`, 5, TDD RED first — 5 NameError on uninitialized
+    constant): nil for gateway with no apps; TOML golden (default deny, ztlp name, backend URL, disabled
+    app excluded); every rule rendered in position order (`*`, `group:<ns>.groups.<zone>`, `role:<v>`);
+    deleted-group rule renders the pinned subject_value (stale but honest); YAML golden (default: deny,
+    user ns_name, device ns_name).
+  - Evidence: `timeout 300 bin/rails test test/services/ztlp/policy_renderer_test.rb` → **5 runs / 26
+    assertions / 0 failures / 0 errors**; full suite **288 runs / 1296 assertions / 0 failures / 0 errors /
+    7 skips**. `bash scripts/ci-admin.sh` → rubocop clean, brakeman EOL-only, node --check OK, node --test
+    19/19, `== all gates passed`. `ruby -c` on all three edited files: Syntax OK. No test-ns containers
+    started.
+  PENDING: Slice 9 remainder (Applications directory index/show/drawer, gateways minimal CRUD, policies
+  page, test-access widget + `Ztlp::AccessEvaluator`). BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 9b (Applications index + show/drawer with rules list + rendered policy code block).
+
 - 2026-10-23 01:15Z — **review of Slice 8b** (`c5349caf`). Fixed: (1) **stale owner published** —
   `publish_device!` ran BEFORE the owner changed, and `Records.device_data` reads `device.user`, so the
   DEVICE record carried the OLD owner (the NS never saw the reassignment; tests only checked `d.id`).

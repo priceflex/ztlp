@@ -3,6 +3,10 @@
 Rails.application.routes.draw do
   get "up", to: "health#up"
 
+  # Slice 11b: global search (spec §2.1). JSON only, so the top-bar
+  # search-as-you-type (directory.js) can render it without layout.
+  get "search.json", to: "search#index", as: :search
+
   get  "claim",  to: "claims#show"
   post "claim",  to: "claims#create"
 

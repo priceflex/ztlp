@@ -15,7 +15,9 @@ Rails.application.routes.draw do
   resources :admins, only: %i[index new create edit update]
   resources :audit_logs, only: [ :index ]
 
-  resources :applications, only: %i[index show]
+  # Slice 9b sub-slice 2 (read) + sub-slice 3 (new/create, edit/update).
+  # Rule add/remove + enable/disable are later sub-slices.
+  resources :applications, only: %i[index show new create edit update]
 
   resources :users, only: %i[index show new create edit update] do
     member do

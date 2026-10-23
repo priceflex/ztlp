@@ -1,0 +1,38 @@
+<%# Slice 9b sub-slice 3: shared application form (new + edit). The gateway pick
+    is only active on create; the name is fixed after create (it drives the
+    gateway's service entry and the ztlp name <name>.<zone>). No NS publish
+    happens on save — the rendered policy is deployed at gateway restart. %>
+<%= form_with model: @application, class: "stack" do |f| %>
+  <% if @application.errors.any? %>
+    <div class="notice"><span class="err"><%= @application.errors.full_messages.to_sentence %></span></div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-b" style="display:grid;gap:16px">
+      <div class="field">
+        <%= f.label :gateway_id, "Gateway" %>
+        <%= f.select :gateway_id,
+                     options_for_select(@gateways.map { |g| ["#{g.name}.#{g.zone.name} (#{g.kind})", g.id] }, @application.gateway_id),
+                     { include_blank: false },
+                     disabled: @application.persisted? %><p class="hint">Services on this gateway. On a <span class="mono">rust_listen</span> gateway the min-assurance floor is not enforced by the gateway; on an <span class="mono">elixir</span> gateway group, role and user rules never match a device.</p>
+      </div>
+      <div class="field">
+        <%= f.label :name %>
+        <%= f.text_field :name, required: true, readonly: @application.persisted?,
+                          pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
+                          class: "mono" %><p class="hint">Lowercase DNS label, fixed after create; the full name is <span class="mono">&lt;name&gt;.&lt;zone&gt;</span> and is the service entry the gateway allow-lists.</p>
+      </div>
+      <div class="field">
+        <%= f.label :backend %><%= f.text_field :backend, class: "mono" %><p class="hint">host:port the gateway forwards to (optional http(s):// scheme).</p>
+      </div>
+      <div class="field"><%= f.label :protocol %><%= f.text_field :protocol, class: "mono" %></div>
+      <div class="field">
+        <%= f.label :min_assurance %><%= f.number_field :min_assurance, in: 1..4, step: 1, required: true %><p class="hint">Devices below this assurance get a warning from the panel's test-access; Rust gateways do not enforce a floor.</p>
+      </div>
+      <div class="field"><%= f.label :description %><%= f.text_field :description %></div>
+      <div class="actions">
+        <%= f.submit @application.persisted? ? "Save" : "Create application", class: "btn primary" %>
+        <%= link_to "Cancel", @application.persisted? ? application_path(@application) : applications_path, class: "btn" %>
+      </div>
+    </div>
+  </div>
+<% end %>

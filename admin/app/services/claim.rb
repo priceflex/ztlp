@@ -4,6 +4,9 @@
 class Claim
   KEY_DIGEST = "claim_code_digest"
   KEY_EXPIRES = "claim_code_expires_at"
+  # Set ONLY by `admin:reset_claim` (issue!(force: true)). Server-side state is the sole source of
+  # "force": a request can never ask for it.
+  KEY_FORCED = "claim_code_forced"
   TTL = 24.hours
   SKEW = 300
 
@@ -11,6 +14,14 @@ class Claim
 
   class << self
     def needed? = !Admin.exists_any?
+
+    # /claim is open when nobody has claimed yet, or a break-glass code is pending and unexpired.
+    def open? = needed? || forced_pending?
+
+    def forced_pending?
+      SystemSetting[KEY_FORCED] == "1" && SystemSetting[KEY_DIGEST].present? &&
+        Time.zone.parse(SystemSetting[KEY_EXPIRES].to_s)&.future? == true
+    end
 
     # Idempotent: ensures a live claim code exists when no admin exists.
     # Returns the plaintext code ONLY when a new one was generated.
@@ -26,6 +37,11 @@ class Claim
       code = Base32ish.encode(raw).scan(/.{1,4}/).join("-")
       SystemSetting[KEY_DIGEST] = Digest::SHA256.hexdigest(normalize(code))
       SystemSetting[KEY_EXPIRES] = TTL.from_now.iso8601
+      if force
+        SystemSetting[KEY_FORCED] = "1"
+      else
+        SystemSetting.delete_key(KEY_FORCED)
+      end
       if force
         Rails.logger.warn("ZTLP ADMIN: forced claim reissue (break-glass). Claim code: #{code} (valid 24h)")
         $stdout.puts("ZTLP ADMIN: forced claim reissue (break-glass). Claim code: #{code} (valid 24h)")
@@ -83,7 +99,8 @@ class Claim
         admins_group.group_memberships.create!(user: user, added_by_admin: admin)
         SystemSetting.delete_key(KEY_DIGEST)
         SystemSetting.delete_key(KEY_EXPIRES)
-        break_glass = force && Admin.where(id: admin.id).count < Admin.count
+        SystemSetting.delete_key(KEY_FORCED)
+        break_glass = force && Admin.count > 1
         AuditLog.record!(break_glass ? "system.reset_claim" : "system.claimed",
                                            admin: admin, target: admin, ip: ip,
                                            details: { signed: params[:signature].present? })

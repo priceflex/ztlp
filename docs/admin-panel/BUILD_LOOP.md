@@ -534,6 +534,18 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 12:15Z — **review of Slice 11c** (`3642b004` admin:reset_claim). **Break-glass did not work
+  end to end**: `Claim.perform!(force:)` existed but ClaimsController never passed it, and its
+  `ensure_unclaimed` redirected every /claim request away once any admin existed → a reset_claim code
+  could never be used over HTTP (tests only called `perform!(force: true)` directly). Fix: `issue!(force:
+  true)` stores server-side `claim_code_forced`; `Claim.open?` = needed? || forced_pending? (unexpired);
+  the controller gates on open? and passes `force: Claim.forced_pending?` — derived from server state,
+  NEVER from params; a normal issue! clears the flag; a successful claim deletes digest+expiry+flag
+  (single use). Break-glass welcome text no longer says "first administrator".
+  `test/controllers/break_glass_claim_flow_test.rb` (HTTP): forced code claimable while admins exist →
+  additional super_admin + `system.reset_claim` audit; single use; a normal code / client `force` param
+  does not open /claim; expired forced code does not. ci-admin 533 runs, all gates passed.
+
 - 2026-10-23 11:49Z — **Slice 11c DONE (`admin:reset_claim` break-glass task + Claim force path)** (cron tick). Commit `3642b004`.
   - `lib/tasks/admin.rake` `admin:reset_claim` (spec §4.1 step 6): container-local break-glass, NEVER a web route. Reuses `Claim.issue!(force: true)` to reissue a 24h claim code even when admins exist; audits `system.reset_claim` (actor-less, `details: {via: "rake:admin:reset_claim"}` — the actor does not exist yet; the NEW admin's row is `system.reset_claim` via the force claim). Prints the claim code + the host runbook line `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim`.
   - `Claim.issue!(force: false)`: new kwarg; `force:` logs "forced claim reissue (break-glass)" instead of "no administrator yet". `Claim.perform!(params, ip:, force: false)`: the force path creates an ADDITIONAL `super_admin` (existing admins untouched — the claim still burns the code, creates the directory user + admins-group membership exactly like the first claim) and audits `system.reset_claim` (break-glass = force && new admin is NOT the only admin); non-force behaviour byte-identical (still raises once any admin exists — pinned).

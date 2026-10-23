@@ -10,9 +10,16 @@ class ClaimsController < ApplicationController
   end
 
   def create
-    admin = Claim.perform!(claim_params, ip: request.remote_ip)
+    # force comes from server state (a pending admin:reset_claim code), never from the request.
+    break_glass = Claim.forced_pending?
+    admin = Claim.perform!(claim_params, ip: request.remote_ip, force: break_glass)
     sign_in!(admin)
-    redirect_to root_path, notice: "Welcome, #{admin.display_name}. You are the first administrator."
+    redirect_to root_path, notice: if break_glass
+                                     "Welcome, #{admin.display_name}. Break-glass claim complete: you are an additional " \
+                                       "super administrator. Review the other administrators now."
+                                   else
+                                     "Welcome, #{admin.display_name}. You are the first administrator."
+                                   end
   rescue Claim::Error, ActiveRecord::RecordInvalid => e
     AuditLog.record!("system.claim_failed", ip: request.remote_ip, status: "error", details: { error: e.message })
     flash.now[:alert] = e.message
@@ -22,7 +29,7 @@ class ClaimsController < ApplicationController
   private
 
   def ensure_unclaimed
-    redirect_to root_path, notice: "This panel has already been claimed." unless Claim.needed?
+    redirect_to root_path, notice: "This panel has already been claimed." unless Claim.open?
   end
 
   def claim_params

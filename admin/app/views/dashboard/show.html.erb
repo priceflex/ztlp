@@ -19,6 +19,10 @@
             <div>
               <div class="checklist-label"><%= item["label"] %></div>
               <div class="checklist-sub sub"><%= item["sub"] %></div>
+              <% if item["cmd"] %>
+                <pre class="code-box"><%= item["cmd"] %></pre>
+                <button type="button" class="btn sm" data-act="copy" data-copy="<%= item["cmd"] %>">Copy command</button>
+              <% end %>
             </div>
             <% if item["label"].include?("break-glass") && current_admin&.super_admin? %>
               <%= form_with url: setup_acknowledge_breakglass_path, method: :post do %>

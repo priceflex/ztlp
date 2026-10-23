@@ -107,4 +107,21 @@ class OverviewSetupTest < ActionDispatch::IntegrationTest
     assert_response :forbidden
     assert_nil SystemSetting["breakglass_acknowledged_at"]
   end
+
+  # Spec Slice 11: Admin.active.count >= 2 -- a disabled second admin is not a second key.
+  test "a disabled second administrator does not satisfy the checklist" do
+    @readonly.update!(disabled_at: Time.current) # 2 admins exist, only 1 active
+    sign_in(@steve, @steve_seed)
+    get root_path
+    assert_select ".checklist-label", text: "Add a second administrator"
+  end
+
+  # The operator must be able to run (and check now) the exact command, not reconstruct it in a lockout.
+  test "break-glass item shows the exact copyable reset_claim command" do
+    sign_in(@steve, @steve_seed)
+    get root_path
+    cmd = "docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim"
+    assert_select "pre.code-box", text: cmd
+    assert_select "button[data-act=copy][data-copy=?]", cmd
+  end
 end

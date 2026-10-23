@@ -5,6 +5,8 @@
 # authority/Build; the spec Overview tallies USERS/DEVICES/GROUPS/APPLICATIONS
 # and surfaces the setup checklist + infra status.
 class DashboardController < ApplicationController
+  BREAKGLASS_CMD = "docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim"
+
   def show
     @admins = Admin.order(:username)
     @zone = Zone.primary
@@ -42,12 +44,14 @@ class DashboardController < ApplicationController
   # gate's floor is read from the ENV at request time and is not a zone row).
   def setup_checklist
     min_assurance = ENV["ZTLP_MIN_ASSURANCE"]
-    admins = Admin.count
+    admins = Admin.active.count # spec: a disabled admin is not a second key
     list = [
       { "done" => admins >= 2, "label" => "Add a second administrator",
         "sub" => "one lost key locks the panel out (break-glass covers it, but it is slow)" },
       { "done" => breakglass_acknowledged?, "label" => "Acknowledge the break-glass runbook",
-        "sub" => "SSH to the host and run admin:reset_claim if every administrator key is lost" },
+        "sub" => "If every administrator key is lost, run this on the host over SSH (certificate auth). " \
+                 "Confirm you can SSH to the host now.",
+        "cmd" => BREAKGLASS_CMD },
       { "done" => @zone&.authority_configured? == true, "label" => "Import the zone authority",
         "sub" => "zone:import_authority[/data/identity.json] on the host" },
       { "done" => @zone&.ns_admin_api_secret_ct.present? == true,

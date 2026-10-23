@@ -534,6 +534,14 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 11:30Z — review of Slice 11a (`2fc50287` overview + checklist + break-glass ack): fine
+  except (1) "second administrator" counted ALL admins (`Admin.count`); spec says `Admin.active.count`
+  — a disabled admin is not a second key → fixed + test. (2) the break-glass item did not show the
+  exact command → now the spec's `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails
+  admin:reset_claim` as a copyable code box + test. NOTE: `admin:reset_claim` (lib/tasks/admin.rake +
+  `Claim.issue!(force:)` / `Claim.perform!` force path) is NOT built yet — it must land in Slice 11
+  before 12 (the checklist now points at it). ci-admin 510 runs, all gates passed.
+
 - 2026-10-23 11:05Z — **Slice 11a DONE (Overview root: tally + Setup checklist + break-glass acknowledge)** (cron tick, takeover of a stale 10:17Z tick that died mid-slice). Commit `2fc50287`.
   - Prior tick left an uncommitted in-flight slice (modified dashboard_controller.rb + dashboard/show.html.erb + routes.rb, new setup_controller.rb + overview_setup_test.rb). Classified COMPLETE-per-autonomous-cron-build-loop case 3, finished + committed on its behalf (recovery note in the commit message).
   - `DashboardController#show`: spec Overview — USERS/DEVICES/GROUPS/APPLICATIONS tally strip, Setup checklist (second admin / break-glass acknowledged / zone authority imported / NS admin API secret set — each item hidden once done, plus the ZTLP_MIN_ASSURANCE info-only line), infra panel (NS drift from the 30-minute reconcile + per-gateway status) + recent activity. `SetupController#acknowledge_breakglass` (super_admin only): system_settings timestamp + admin id + `system.breakglass_acknowledged` audit row; read_only → 403, no timestamp.

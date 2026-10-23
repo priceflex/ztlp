@@ -20,6 +20,11 @@
 # refused. If the NS publish fails the whole transaction rolls back and the
 # device is NOT shown as enrolled.
 class Api::EnrollmentsController < ActionController::Base
+  # Machine-to-machine JSON: there is no browser session or CSRF token. The device's Ed25519
+  # signature over the body is the request authentication (spec §7.4).
+  skip_forgery_protection
+
+  class NameConflict < StandardError; end
   # Timestamp tolerance (spec §7.4): ±300 s.
   MAX_TIMESTAMP_DRIFT = 300
   # Fields the canonical-JSON signature covers (spec §7.4 body).
@@ -50,6 +55,12 @@ class Api::EnrollmentsController < ActionController::Base
     return render_unprocessable("Timestamp is stale (outside ±300 s).") if
       (Time.current.to_i - body["timestamp"].to_i).abs > MAX_TIMESTAMP_DRIFT
 
+    label = device_label(body["name"], token.zone)
+    return render_unprocessable("Device name is not a valid label.") if label.nil?
+    if token.device_name.present? && label != token.device_name.to_s.downcase
+      return render_unprocessable("Device name does not match this token.")
+    end
+
     owner = token.user
     # Spec §7.4: ONE transaction. The device upsert, the token flip, the user
     # activation AND the NS publish are atomic with each other: a failure
@@ -57,7 +68,11 @@ class Api::EnrollmentsController < ActionController::Base
     # enroll leaves the panel DB exactly as it was (fail-closed). The NS write
     # is the authority — if it refuses, nothing in the panel is committed.
     Device.transaction do
-      device = upsert_device(token, body, owner)
+      # Row lock + re-check: two concurrent redeems of a one-use token cannot both pass.
+      token.lock!
+      raise NameConflict, "token is no longer redeemable" unless token.pending? && token.uses < token.max_uses.to_i
+
+      device = upsert_device(token, label, body, owner)
       token.update_columns(uses: token.uses + 1, status: "redeemed",
                            redeemed_at: Time.current, redeemed_device_id: device.id)
       Ztlp::Publisher.publish_device!(device)
@@ -70,6 +85,10 @@ class Api::EnrollmentsController < ActionController::Base
                      details: { code: token.code, device: token.device_name || @redeem_reply["device"],
                                 user: (owner && owner.username) })
     render json: @redeem_reply
+  rescue NameConflict => e
+    AuditLog.record!("enrollment.redeem", ip: request.remote_ip, status: "denied",
+                     details: { code: token&.code, device: body && body["name"].to_s, reason: e.message })
+    render json: { "status" => "error", "error" => e.message }, status: :conflict
   rescue ActiveRecord::RecordNotSaved, ActiveRecord::RecordInvalid
     render json: { "status" => "error", "error" => "device could not be saved" },
            status: :unprocessable_entity
@@ -110,9 +129,20 @@ class Api::EnrollmentsController < ActionController::Base
   # Create-or-upsert the DEVICE row. Upserting by (zone, name) makes a second
   # token for the same device idempotent (one row, re-enrolled) rather than a
   # uniqueness 500. The device's identity fields come from the signed body.
-  def upsert_device(token, body, owner)
-    name = body["name"].to_s.strip.downcase
+  # Spec §7.4 sends the device NS name ("alice-mbp.<zone>"); the row stores the label.
+  def device_label(raw, zone)
+    name = raw.to_s.strip.downcase.delete_suffix(".#{zone.name}")
+    name.match?(Admin::USERNAME) ? name : nil
+  end
+
+  # Only a NEW name, or THIS token's own key-less pending row, may be written. Anything else
+  # (someone's enrolled device, a revoked name, another token's row) is a takeover attempt.
+  def upsert_device(token, name, body, owner)
     existing = token.zone.devices.find_by(name: name)
+    if existing && !(existing.status == "pending" && existing.node_id_hex.blank? &&
+                     [ nil, token.id ].include?(existing.enrollment_id))
+      raise NameConflict, "device name #{name} is already taken"
+    end
     device = existing || token.zone.devices.build(name: name)
     device.update!(
       node_id_hex: body["node_id"].to_s.strip,

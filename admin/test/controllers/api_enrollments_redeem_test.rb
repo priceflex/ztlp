@@ -222,7 +222,10 @@ class ApiEnrollmentsRedeemTest < ActionDispatch::IntegrationTest
   end
 
   # ------------------------------------------------------- idempotent upsert
-  test "redeeming a second token for the same device name upserts the device row" do
+  # An enrolled name cannot be re-keyed through redeem: the NS itself refuses a different key for an
+  # existing name (enrollment.ex register_device -> 0x05) and revoked names never come back. A second
+  # token for the same name is refused (409) and leaves the first enrollment intact.
+  test "a second token for an already-enrolled device name is refused (409), the device keeps its keys" do
     stub_publishers!
     @token2 = @zone.enrollments.create!(
       kind: "user_device", user: @alice, device_name: "alice-mbp",
@@ -232,8 +235,67 @@ class ApiEnrollmentsRedeemTest < ActionDispatch::IntegrationTest
     )
     post_redeem(@token, @body, @device_seed)
     assert_response :success
-    post_redeem(@token2, @body, @device_seed)
-    assert_response :success
+    first_node = @body["node_id"]
+    post_redeem(@token2, @body.merge("node_id" => SecureRandom.hex(16)), @device_seed)
+    assert_response :conflict
     assert_equal 1, @zone.devices.where(name: "alice-mbp").count
+    assert_equal first_node, @zone.devices.find_by(name: "alice-mbp").node_id_hex
+    assert_equal "pending", @token2.reload.status
+  end
+
+  # ------------------------------------------------ review 10b-3 (security)
+
+  # TAKEOVER: any valid token + name of someone else's enrolled device must NOT overwrite its keys
+  # (and must never publish a DEVICE record carrying the attacker's key under the victim's name).
+  test "a token cannot overwrite another enrolled device's keys (409, nothing published)" do
+    bob = @zone.users.create!(username: "bob", display_name: "Bob", role: "admin", status: "active")
+    victim = @zone.devices.create!(name: "ceo-laptop", user: bob, status: "enrolled",
+                                   node_id_hex: "11" * 16, noise_pubkey_hex: "22" * 32)
+    open_token = @zone.enrollments.create!(kind: "device_only", max_uses: 1, uses: 0, expires_at: 1.hour.from_now,
+                                           status: "pending", code: "QWERTYUP", token_id: "dd" * 16,
+                                           created_by_admin: @admin, embed_relay_secret: false)
+    Ztlp::Publisher.expects(:publish_device!).never
+    post_redeem(open_token, @body.merge("name" => "ceo-laptop"), @device_seed)
+    assert_response :conflict
+    assert_equal "11" * 16, victim.reload.node_id_hex
+    assert_equal bob, victim.user
+    assert_equal "pending", open_token.reload.status
+  end
+
+  test "the body name must match the token's device name when the token names one" do
+    Ztlp::Publisher.expects(:publish_device!).never
+    post_redeem(@token, @body.merge("name" => "other-box"), @device_seed)
+    assert_response :unprocessable_entity
+    assert_equal "pending", @token.reload.status
+  end
+
+  # Spec §7.4: "name" is the device NS name. "alice-mbp.<zone>" must become the label "alice-mbp",
+  # not a device whose ns_name is "alice-mbp.<zone>.<zone>".
+  test "a fully qualified device name is accepted and stored as the label" do
+    stub_publishers!
+    post_redeem(@token, @body.merge("name" => "alice-mbp.#{@zone.name}"), @device_seed)
+    assert_response :success, response.body
+    assert_equal "alice-mbp.#{@zone.name}", response.parsed_body["device"]
+    assert @zone.devices.exists?(name: "alice-mbp")
+  end
+
+  test "the token's own key-less pending device is filled in (legacy / pre-created row)" do
+    stub_publishers!
+    pre = @zone.devices.create!(name: "alice-mbp", status: "pending", enrollment: @token)
+    post_redeem(@token, @body, @device_seed)
+    assert_response :success, response.body
+    assert_equal "enrolled", pre.reload.status
+    assert_equal @body["node_id"], pre.node_id_hex
+  end
+
+  # Machine-to-machine JSON POST: no CSRF token exists. Test env disables forgery protection,
+  # production does not -- run with it ON.
+  test "redeem works with forgery protection enabled (no CSRF token on an API call)" do
+    stub_publishers!
+    ActionController::Base.allow_forgery_protection = true
+    post_redeem(@token, @body, @device_seed)
+    assert_response :success, response.body
+  ensure
+    ActionController::Base.allow_forgery_protection = false
   end
 end

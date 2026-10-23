@@ -534,6 +534,23 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 09:55Z — **review of Slice 10b-3** (`bb6932c8` signed redeem API). SECURITY fixes, RED → GREEN:
+  (1) **Device takeover**: `upsert_device` found the row by the CALLER-chosen `name` and overwrote its
+  keys + published it → any valid token could re-key someone else's enrolled device (e.g. "ceo-laptop")
+  and push the attacker's key to the NS under the victim's name/owner. Now only a NEW name or THIS
+  token's own key-less pending row may be written; anything else → 409 + audit `denied`, nothing
+  published. The tick's "second token upserts the same device" test encoded the hole; replaced (the
+  NS also refuses a different key for an existing name: enrollment.ex 0x05). Body `name` must equal
+  `token.device_name` when set. (2) **CSRF**: extends ActionController::Base, which has
+  protect_from_forgery under load_defaults 7.1 → every real JSON POST would 422 in production (test env
+  disables it) → `skip_forgery_protection` (the Ed25519 body signature is the auth) + test with
+  forgery protection ON. (3) **Spec name shape**: body sends the NS name `alice-mbp.<zone>`; it was stored
+  as the label (ns_name `…<zone>.<zone>`) → suffix stripped, label validated. (4) **Race**: `token.lock!`
+  + re-check inside the transaction (one-use token can't redeem twice concurrently).
+  Kept deliberately: `key_source`/`assurance` are NOT taken from the body (spec says to) — they are
+  self-asserted by the client, so honoring them lets a device claim "hardware". Operator decision
+  pending. ci-admin: 488 runs, all gates passed.
+
 - 2026-10-23 09:35Z — **Slice 10b sub-slice 3 DONE (the signed redeem endpoint)** (cron tick). Commit `bb6932c8`.
   - `config/routes.rb`: `scope "api/v1", module: :api do post "enrollments/:token_id/redeem", to: "enrollments#redeem"`. New `app/controllers/api/enrollments_controller.rb` (`Api::EnrollmentsController < ActionController::Base` — machine-to-machine, so it does NOT inherit the tunnel bundle or admin session from ApplicationController). Rack-attack's existing `api/ip` throttle (10/min/IP, `config/initializers/rack_attack.rb`) rate-limits the path — no new throttle config needed.
   - **Signature contract (spec §7.4)**: `Ed25519(sha256(canonical JSON of the body WITHOUT signature))`, verified via the existing `Ztlp::Ed25519.verify` + `claim_message` (the claim-flow canonical-JSON helper: keys sorted, no whitespace). The signature covers exactly the 7 device fields (`node_id name noise_pubkey_hex signing_pubkey_hex platform agent_version timestamp`) — `signable_body` rebuilds that shape so the signature is over the wire form, not the raw body.

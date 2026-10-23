@@ -1,0 +1,57 @@
+<% content_for :title, "New enrollment token - ZTLP Directory" %>
+<div class="page-head"><div><h1>New enrollment token</h1><p class="lede">Mint a single-use token. The token is shown <strong>once</strong> on the next page &mdash; copy it there; it is never shown again.</p></div></div>
+
+<% if @enrollment.errors.any? %>
+  <div class="notice"><span class="err"><%= @enrollment.errors.full_messages.to_sentence %></span></div>
+<% end %>
+
+<%= form_with model: @enrollment, url: enrollments_path, class: "stack" do %>
+  <div class="panel">
+    <div class="panel-h"><h2>Token</h2></div>
+    <div class="panel-b form-grid">
+      <div class="field">
+        <label for="enrollment_user_id">Link to an existing user</label>
+        <select id="enrollment_user_id" name="enrollment[user_id]">
+          <option value="">Device only (no user)</option>
+          <% @users.each do |u| %>
+            <option value="<%= u.id %>"><%= u.display_name %> (<%= u.username %>) &middot; <%= u.status %></option>
+          <% end %>
+        </select>
+        <p class="hint">The redeeming device is assigned to this user. Leave empty for a headless / service device.</p>
+      </div>
+      <div class="field">
+        <label for="enrollment_device_name">Device name <span class="sub">(optional)</span></label>
+        <input type="text" id="enrollment_device_name" name="enrollment[device_name]"
+               pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" class="mono"
+               placeholder="e.g. alice-mbp" aria-describedby="device-name-hint"
+               value="<%= @enrollment.device_name %>">
+        <p class="hint" id="device-name-hint">Lowercase DNS label. If empty, the enrolling machine picks its own name.</p>
+      </div>
+      <div class="grid2">
+        <div class="field">
+          <label for="enrollment_expiry_hours">Expires in (hours)</label>
+          <input type="number" id="enrollment_expiry_hours" name="enrollment[expiry_hours]"
+                 value="1" min="1" max="24" step="1" class="mono">
+          <p class="hint">1 hour default, 24 hours maximum.</p>
+        </div>
+        <div class="field">
+          <label class="check"><input type="checkbox" id="enrollment_embed_relay_secret"
+                name="enrollment[embed_relay_secret]" value="1" <%= "checked" if @enrollment.embed_relay_secret %>> Embed the zone relay secret in the token</label>
+          <p class="hint">Recommended: a new device needs the relay secret to reach the relay. Without it the device enrolls but cannot open a tunnel until the secret is added by hand.</p>
+        </div>
+      </div>
+      <div class="field">
+        <label for="enrollment_kind">Kind</label>
+        <select id="enrollment_kind" name="enrollment[kind]">
+          <option value="user_device" <%= "selected" if @enrollment.kind == "user_device" %>>User + device</option>
+          <option value="device_only" <%= "selected" if @enrollment.kind == "device_only" %>>Device only</option>
+        </select>
+        <p class="hint">User + device requires a linked user; the selection above drives both.</p>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn primary">Mint token</button>
+        <a class="btn" href="<%= enrollments_path %>">Cancel</a>
+      </div>
+    </div>
+  </div>
+<% end %>

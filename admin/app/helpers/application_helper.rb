@@ -61,7 +61,7 @@ module ApplicationHelper
     when "groups" then groups_path
     when "apps" then "/apps"
     when "policies" then "/policies"
-    when "enrollments" then "/enrollments"
+    when "enrollments" then enrollments_path
     when "zone" then "/zone"
     when "admins" then admins_path
     when "audit_logs" then audit_logs_path

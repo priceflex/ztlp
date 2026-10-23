@@ -62,6 +62,14 @@ Rails.application.routes.draw do
   get "policies", to: "policies#index", as: :policies
   post "policies/test", to: "policies#test", as: :policies_test
 
+  # Slice 10b sub-slice 1: Enrollments page (read side + revoke). The mint
+  # (POST /enrollments) and show-once result land in sub-slice 2.
+  resources :enrollments, only: %i[index show new], path: "enrollments" do
+    member do
+      post :revoke
+    end
+  end
+
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile

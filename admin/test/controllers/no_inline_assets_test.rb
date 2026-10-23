@@ -13,11 +13,13 @@ require "test_helper"
 class NoInlineAssetsTest < ActionDispatch::IntegrationTest
   # /login is the no-auth sign-in page; /claim 302s a signed-in admin (an admin
   # already exists in the test DB). Test both unauthenticated, like a first visitor
-  # over the tunnel. There is no /enrollments page yet (Slice 10) — the route is
-  # not in this list.
+  # over the tunnel. /enrollments landed in Slice 10b (the mint result page
+  # /enrollments/:id lands in sub-slice 2 and is added to the device/show
+  # list below when it exists).
   PAGE_ROUTES = [
     "/", "/users", "/devices", "/groups", "/applications", "/policies",
-    "/zone", "/admins", "/audit_logs", "/login", "/claim"
+    "/zone", "/admins", "/audit_logs", "/login", "/claim", "/enrollments",
+    "/enrollments/new"
   ].freeze
 
   PAGE_ROUTES.each do |route|

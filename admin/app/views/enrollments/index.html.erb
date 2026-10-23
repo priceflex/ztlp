@@ -1,0 +1,38 @@
+<% content_for :title, "Enrollments - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Enrollments</h1><p class="lede">Single-use tokens that let a new person or device join the zone. Each code is shown once and redeems into a device.</p></div>
+  <% if current_admin&.write_access? %><div class="actions"><%= link_to "New token", new_enrollment_path, class: "btn primary" %></div><% end %>
+</div>
+
+<% unless @zone.enrollment_secret_ct.present? %>
+  <div class="warn">The zone <strong>enrollment secret</strong> is not configured, so no tokens can be minted yet.
+    Run <code class="mono">bin/rake zone:set_secret[enrollment]</code> on the host (value from STDIN, 64 hex characters) and reload this page.</div>
+<% end %>
+
+<div class="toolbar">
+  <div class="seg" role="group" aria-label="Filter by status">
+    <% EnrollmentsController::FILTERS.each do |key, label| %>
+      <a href="<%= enrollments_path(status: key) %>"<% if @status == key %> aria-current="page"<% end %>> <%= label %></a>
+    <% end %>
+  </div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Code</th><th>Kind</th><th>User</th><th>Device</th><th>Expiry</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>
+      <% @enrollments.each do |en| %>
+        <tr data-act="open" data-drawer="<%= enrollment_path(en) %>" tabindex="0">
+          <td class="mono"><a href="<%= enrollment_path(en) %>"><%= en.code %></a></td>
+          <td class="nowrap"><%= en.kind == "user_device" ? "User + device" : "Device only" %></td>
+          <td class="nowrap"><%= en.user&.display_name || "&mdash;".html_safe %></td>
+          <td class="mono nowrap"><%= en.device_name || "&mdash;".html_safe %></td>
+          <td class="nowrap"><%= en.expires_at ? en.expires_at.utc.strftime("%Y-%m-%d %H:%M") : "&mdash;".html_safe %></td>
+          <td class="nowrap"><%= status_badge(en.status) %></td>
+          <td class="nowrap"><%= en.created_at&.utc&.strftime("%Y-%m-%d %H:%M") %></td>
+        </tr>
+      <% end %>
+      <% if @enrollments.empty? %><tr class="empty"><td colspan="7">No enrollment tokens<%= " match this filter" if @status != "all" %>.</td></tr><% end %>
+    </tbody>
+  </table>
+</div>

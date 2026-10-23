@@ -3,7 +3,7 @@
 # An enrollment token that a new person/device redeems to join the zone.
 class Enrollment < ApplicationRecord
   KINDS = %w[user_device device_only].freeze
-  STATUSES = %w[pending redeemed expired revoked].freeze
+  STATUSES = %w[pending redeemed redeemed_unverified expired revoked].freeze
   TOKEN_ID = /\A[0-9a-f]{32}\z/ # 16 bytes, hex
   CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" # no I/O/0/1/L
 
@@ -44,6 +44,7 @@ class Enrollment < ApplicationRecord
   end
 
   def pending? = status == "pending"
+  def revoked? = status == "revoked"
   def expired? = status == "expired" || (expires_at.present? && expires_at < Time.current)
   def revocable? = pending?
 

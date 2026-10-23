@@ -84,5 +84,14 @@ Rails.application.routes.draw do
     post "enrollments/:token_id/redeem", to: "enrollments#redeem", as: :redeem_enrollment
   end
 
+  # Slice 10b sub-slice 4: the LEGACY confirm endpoint (spec §7.4 "Legacy
+  # clients"): older clients still call the token's legacy `callback_url`
+  # shape — a form POST, unauthenticated, no signed identity. It may NOT
+  # enroll: it marks the enrollment `redeemed_unverified` and creates the
+  # device as `pending` for an administrator to adopt. Machine-to-machine:
+  # extends ActionController::Base directly; rate-limited by the same
+  # rack-attack `api/ip` throttle as the signed redeem path.
+  post "enrollment/confirm", to: "api/enrollment_legacy#confirm", as: :enrollment_confirm
+
   root "dashboard#show"
 end

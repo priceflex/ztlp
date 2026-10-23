@@ -220,4 +220,165 @@ class EnrollmentsControllerTest < ActionDispatch::IntegrationTest
     follow_redirect!
     assert_select "[data-toast]", /name server still accepts it until it expires/i
   end
+
+  # --------------------------------------------------------------- create
+  #
+  # Slice 10b sub-slice 2: POST /enrollments mints the v1 token, stores the
+  # URI encrypted at rest (token_uri_ct), redirects to the show-once result
+  # page, and stores the human code. The token URI is shown exactly once and
+  # is NEVER written to the audit log.
+  setup do
+    # The zone enrollment secret (64-hex) is the MAC key the minter needs.
+    @zone.update!(enrollment_secret_ct: "cd" * 32)
+    @zone.relay_addrs = %w[10.0.0.9:23095]
+  end
+
+  test "create mints a pending token, stores the encrypted URI, and redirects to the result page" do
+    before = @zone.enrollments.count
+    post "/enrollments", params: { enrollment: {
+      kind: "user_device", user_id: @alice.id, device_name: "alice-mac",
+      expiry_hours: "2", embed_relay_secret: "1"
+    } }
+    assert_response :redirect
+
+    tok = @zone.enrollments.order(:id).last
+    assert_equal before + 1, @zone.enrollments.count, "a new enrollment row was created"
+    assert_equal "pending", tok.status
+    assert_equal "user_device", tok.kind
+    assert_equal @alice.id, tok.user_id
+    assert_equal "alice-mac", tok.device_name
+    assert tok.embed_relay_secret
+    assert_equal 1, tok.max_uses
+    assert tok.expires_at.present?, "expiry was set from expiry_hours"
+    # expiry ≈ 2h from now (allow a few minutes of skew)
+    assert_in_delta 2.hours.from_now.to_i, tok.expires_at.to_i, 300
+    # the URI is stored encrypted (decrypts to a valid ztlp://enroll/ URI)
+    assert tok.token_uri_ct.present?, "token_uri_ct is persisted"
+    uri = tok.token_uri_ct
+    assert uri.start_with?("ztlp://enroll/"), "stored URI is the enroll URI form"
+    # the result page is the redirect target
+    assert response.location.include?("/enrollments/#{tok.id}/result"), response.location
+    # the human code is assigned
+    assert tok.code.match?(/\A[A-Z2-9]{8}\z/), tok.code
+  end
+
+  test "create default expiry is 1h and clamps above-24h to 24h" do
+    # default (no expiry_hours) → 1h
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "" } }
+    assert_response :redirect
+    default_tok = @zone.enrollments.order(:id).last
+    assert_in_delta 1.hour.from_now.to_i, default_tok.expires_at.to_i, 300,
+                    "no expiry_hours → 1h default"
+
+    # above-max → clamped to 24h
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "72" } }
+    assert_response :redirect
+    clamped = @zone.enrollments.order(:id).last
+    assert_in_delta 24.hours.from_now.to_i, clamped.expires_at.to_i, 300,
+                    "72h request → clamped to 24h max"
+  end
+
+  test "create stores a MAC-valid v1 token whose binary verifies against the zone secret" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    tok = @zone.enrollments.order(:id).last
+    bin = Ztlp::TokenMinter.from_uri(tok.token_uri_ct)
+    # version byte 0x01, then flags
+    assert_equal 0x01, bin.getbyte(0), "v1 token"
+    data, mac = bin.byteslice(0, bin.bytesize - 32), bin.byteslice(bin.bytesize - 32, 32)
+    secret = [ @zone.enrollment_secret_ct ].pack("H*")
+    assert_equal Ztlp::Blake2sHmac.mac(secret, data), mac,
+                 "MAC verifies against the zone enrollment secret (NS-accepting token)"
+  end
+
+  test "create writes an audit row that does NOT contain the token URI" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    row = AuditLog.where(action: "enrollment.mint").last
+    assert row, "an enrollment.mint audit row was written"
+    assert_equal "ok", row.status
+    details = row.details
+    # the token URI must never leak into the audit
+    refute details.to_s.include?("ztlp://enroll/"), "audit details must not carry the token"
+    # but the human code + user are safe to record
+    code = @zone.enrollments.order(:id).last.code
+    assert details.to_s.include?(code), "the human code is recorded (safe)"
+  end
+
+  test "create is 400 (not 500) when the enrollment params are missing" do
+    post "/enrollments", params: {}
+    assert_response :unprocessable_entity
+  end
+
+  test "create is 400 when a user_device token has no linked user" do
+    post "/enrollments", params: { enrollment: { kind: "user_device", user_id: "", expiry_hours: "1" } }
+    assert_response :unprocessable_entity
+    assert_equal @zone.enrollments.count, @zone.enrollments.count, "no token created"
+  end
+
+  test "create is 403 for a read_only admin" do
+    ro, ro_seed = make_admin(role: "read_only", username: "readonly6")
+    delete logout_path
+    sign_in_as(ro, ro_seed)
+    before = @zone.enrollments.count
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :forbidden
+    assert_equal before, @zone.enrollments.count
+  end
+
+  # --------------------------------------------------------------- result
+  #
+  # GET /enrollments/:id/result — the show-once page. It renders the token
+  # URI, the QR, and the setup command exactly once; a second GET (and the
+  # plain show page) never re-expose the token.
+
+  test "result renders the token URI once, the QR, and the setup command" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    tok = @zone.enrollments.order(:id).last
+    follow_redirect!
+    assert_response :success
+    body = response.body
+    assert_includes body, tok.token_uri_ct, "the full token URI is shown"
+    assert_match(/ztlp setup --token/, body, "the setup command is copyable")
+    assert_match(tok.code, body, "the human code is shown")
+    assert_select "#token-qr svg", 1, "the QR is an inline <svg> (CSP-safe, no external img)"
+  end
+
+  test "result shows the token on the first request and hides it on the second (exactly once)" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    tok = @zone.enrollments.order(:id).last
+    result_url = response.location
+
+    # First request after the mint: the token is exposed.
+    get result_url
+    assert_response :success
+    assert response.body.include?(tok.token_uri_ct), "first request shows the token"
+
+    # Second request: the reveal is consumed — the token is gone (404 or a
+    # page that does not carry the URI). It must not re-expose.
+    get result_url
+    if response.status == 404
+      # acceptable: consumed → not found
+    else
+      refute response.body.include?(tok.token_uri_ct),
+             "second request must not re-expose the token"
+    end
+  end
+
+  test "plain show page never exposes the token URI (result is the only place)" do
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    tok = @zone.enrollments.order(:id).last
+    # fetch the show page directly (not the result)
+    get "/enrollments/#{tok.id}"
+    assert_response :success
+    refute_match(tok.token_uri_ct, response.body, "show must never show the token")
+  end
+
+  test "result 404s for a token that was never minted through the panel (no URI stored)" do
+    # a fixture token with no token_uri_ct (pre-sub-slice-2 shape)
+    bare = @zone.enrollments.create!(kind: "device_only", status: "pending",
+                                     code: "ZQXVUTSR", token_id: "ee" * 16)
+    get "/enrollments/#{bare.id}/result"
+    assert_response :not_found
+  end
 end

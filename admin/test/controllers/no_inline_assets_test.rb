@@ -90,4 +90,27 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
       assert_select "script:not([src])", false, "inline <script> on #{route}"
     end
   end
+
+  # The mint result page is only reachable immediately after minting (a bare GET
+  # 404s — the token is shown exactly once), so it is not in PAGE_ROUTES. Check
+  # it through the real mint flow: it renders raw @qr_svg (trusted rqrcode
+  # output), which must still carry no inline style/ on* attributes and no inline
+  # <script>.
+  test "the mint result page (shown once) has no inline script or style" do
+    @admin, @seed = make_admin
+    sign_in_as(@admin, @seed)
+    zone = Zone.primary
+    zone.update!(enrollment_secret_ct: "cd" * 32, relay_addrs: %w[10.0.0.9:23095])
+    user = zone.users.create!(username: "qruser", display_name: "QR User", role: "user", status: "active")
+    post "/enrollments", params: { enrollment: { kind: "user_device", user_id: user.id, expiry_hours: "1", embed_relay_secret: "1" } }
+    assert_response :redirect
+    follow_redirect!
+    assert_response :success, "the result page renders after the mint"
+    assert_select "#token-qr svg", 1, "the QR is an inline <svg>"
+    offenders = response.body.scan(/<([a-z][a-z0-9-]*)((?:\s[^>]*)?)>/).select do |_t, attrs|
+      attrs.match?(/\sstyle=/) || attrs.match?(/\son[a-z]+=/)
+    end
+    assert offenders.empty?, "inline attributes (CSP-blocked) on the result page:\n#{offenders.map { |t, a| "  <#{t}> #{a[0, 90]}" }.join("\n")}"
+    assert_select "script:not([src])", false, "inline <script> on the result page"
+  end
 end

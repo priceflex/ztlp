@@ -62,11 +62,12 @@ Rails.application.routes.draw do
   get "policies", to: "policies#index", as: :policies
   post "policies/test", to: "policies#test", as: :policies_test
 
-  # Slice 10b sub-slice 1: Enrollments page (read side + revoke). The mint
-  # (POST /enrollments) and show-once result land in sub-slice 2.
-  resources :enrollments, only: %i[index show new], path: "enrollments" do
+  # Slice 10b sub-slice 1: Enrollments page (read side + revoke). Sub-slice 2
+  # adds the mint (POST /enrollments → create) and the show-once result page.
+  resources :enrollments, only: %i[index show new create], path: "enrollments" do
     member do
       post :revoke
+      get :result
     end
   end
 

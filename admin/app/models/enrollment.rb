@@ -7,6 +7,10 @@ class Enrollment < ApplicationRecord
   TOKEN_ID = /\A[0-9a-f]{32}\z/ # 16 bytes, hex
   CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" # no I/O/0/1/L
 
+  # The token URI is shown exactly once (the result page) and then never
+  # rendered again. It is encrypted at rest so a DB read is not a token leak.
+  encrypts :token_uri_ct
+
   belongs_to :zone
   belongs_to :user, optional: true
   belongs_to :created_by_admin, class_name: "Admin", optional: true

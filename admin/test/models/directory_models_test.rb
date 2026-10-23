@@ -220,7 +220,8 @@ class GatewayApplicationPolicyRuleTest < ActiveSupport::TestCase
     device = @zone.devices.create!(name: "laptop2")
     entity = { "group" => group, "user" => user, "device" => device }
     PolicyRule::SUBJECT_TYPES.each_with_index do |st, i|
-      assert make(st, subject: entity[st], subject_value: "x", app: "a#{i}").valid?, st
+      value = st == "role" ? "tech" : "x" # role rules must name a User::ROLES role
+      assert make(st, subject: entity[st], subject_value: value, app: "a#{i}").valid?, st
     end
     refute make("tenant", app: "b1").valid?
   end

@@ -80,9 +80,9 @@ class ApplicationRulesController < ApplicationController
 
     case type
     when "role"
-      { subject_type: type, subject_value: params[:subject_value].to_s.strip, position: @application.policy_rules.count.to_i + 1 }
+      { subject_type: type, subject_value: params[:subject_value].to_s.strip, position: next_position }
     when "any"
-      { subject_type: type, position: @application.policy_rules.count.to_i + 1 }
+      { subject_type: type, position: next_position }
     else
       subject = subject_entity(type, params[:subject_id])
       if subject.nil?
@@ -93,12 +93,17 @@ class ApplicationRulesController < ApplicationController
         end
       end
 
-      { subject_type: type, subject_id: subject.id, position: @application.policy_rules.count.to_i + 1 }
+      { subject_type: type, subject_id: subject.id, position: next_position }
     end
   end
 
   # A picked subject must be a row in THIS zone; a subject id from another
   # zone (or a missing row) is not a rule target.
+  # max + 1, not count + 1: after a removal count + 1 collides with the unique (application, position).
+  def next_position
+    @application.policy_rules.maximum(:position).to_i + 1
+  end
+
   def subject_entity(type, id)
     klass = PolicyRule::SUBJECT_CLASS[type]
     return nil unless klass && id.to_s.present?

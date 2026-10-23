@@ -118,11 +118,13 @@ class PolicyRendererTest < ActiveSupport::TestCase
   end
 
   test "a literal that would corrupt the line parsers is omitted (fail-closed) and reported" do
-    @app1.policy_rules.create!(subject_type: "role", subject_value: "tech\", \"*", position: 0)
-    @app1.policy_rules.create!(subject_type: "role", subject_value: "ops", position: 1)
+    # The model now refuses non-role values; write the bad one past it to prove the renderer's own guard.
+    @app1.policy_rules.create!(subject_type: "role", subject_value: "tech", position: 0)
+         .update_column(:subject_value, "tech\", \"*")
+    @app1.policy_rules.create!(subject_type: "role", subject_value: "admin", position: 1)
     out = Ztlp::PolicyRenderer.render(@gw)
     _d, rules = RustPolicyPort.parse(out)
-    assert_equal [ "role:ops" ], rules["comms"], "the injected '*' must never reach the allow list"
+    assert_equal [ "role:admin" ], rules["comms"], "the injected '*' must never reach the allow list"
     assert_includes out, "# OMITTED unsafe rule literal"
   end
 
@@ -151,10 +153,10 @@ class PolicyRendererTest < ActiveSupport::TestCase
   # line-based Rust parser reads (here: allow everyone). Anything unsafe must never be emitted.
   test "a backend with a newline cannot inject an allow line" do
     @app1.update_column(:backend, "10.0.0.5:80\nallow = [\"*\"]")
-    @app1.policy_rules.create!(subject_type: "role", subject_value: "ops")
+    @app1.policy_rules.create!(subject_type: "role", subject_value: "admin")
     out = Ztlp::PolicyRenderer.render(@gw)
     _d, rules = RustPolicyPort.parse(out)
-    assert_equal [ "role:ops" ], rules["comms"]
+    assert_equal [ "role:admin" ], rules["comms"]
     refute_match(/^allow = \["\*"\]/, out)
   end
 end

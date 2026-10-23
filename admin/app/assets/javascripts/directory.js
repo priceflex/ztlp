@@ -144,8 +144,27 @@
     return !!(text && String(text).trim() !== '')
   }
 
+  // Rule form (Slice 9b-4): which controls a subject type needs. Pure.
+  function ruleSubjectView(type) {
+    if (type === 'group' || type === 'user' || type === 'device') return { pick: true, role: false, list: type }
+    if (type === 'role') return { pick: false, role: true, list: null }
+    return { pick: false, role: false, list: null }
+  }
+
+  // Rule form: the <option>s for a type. lists = { user|device|group: [[label, id], ...] }. Pure.
+  function ruleOptions(type, lists) {
+    const view = ruleSubjectView(type)
+    if (!view.list) return []
+    const pairs = (lists && lists[view.list]) || []
+    return [{ value: '', label: view.list + '\u2026' }].concat(pairs.map(function (p) {
+      return { value: String(p[1]), label: String(p[0]) }
+    }))
+  }
+
   const api = {
     THEME_KEY: THEME_KEY,
+    ruleSubjectView: ruleSubjectView,
+    ruleOptions: ruleOptions,
     nextTheme: nextTheme,
     searchUrl: searchUrl,
     rankSearch: rankSearch,
@@ -371,6 +390,36 @@
     rows[idx].setAttribute('aria-selected', 'true')
   }
 
+  // --- Rule form type swap (delegated: works in the drawer too) ----------
+  function parseList(el, attr) {
+    try { return JSON.parse(el.getAttribute(attr) || '[]') } catch (e) { return [] }
+  }
+
+  function onRuleTypeChange(sel) {
+    const form = sel.form
+    if (!form) return
+    const pick = form.querySelector('[data-rule-pick]')
+    const pickSlot = form.querySelector('[data-rule-pick-slot]')
+    const roleSlot = form.querySelector('[data-rule-role-slot]')
+    if (!pick || !pickSlot || !roleSlot) return
+    const view = ruleSubjectView(sel.value)
+    pickSlot.hidden = !view.pick
+    roleSlot.hidden = !view.role
+    pick.disabled = !view.pick
+    const lists = {
+      user: parseList(pick, 'data-user-options'),
+      device: parseList(pick, 'data-device-options'),
+      group: parseList(pick, 'data-group-options'),
+    }
+    while (pick.firstChild) pick.removeChild(pick.firstChild)
+    ruleOptions(sel.value, lists).forEach(function (o) {
+      const opt = document.createElement('option')
+      opt.value = o.value
+      opt.textContent = o.label
+      pick.appendChild(opt)
+    })
+  }
+
   // --- Wire it all up ---------------------------------------------------
   function wire() {
     initTheme()
@@ -389,6 +438,11 @@
 
     document.addEventListener('submit', function (ev) {
       if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-confirm')) onFormSubmit(ev)
+    })
+
+    document.addEventListener('change', function (ev) {
+      const t = ev.target
+      if (t && t.hasAttribute && t.hasAttribute('data-rule-type')) onRuleTypeChange(t)
     })
 
     document.addEventListener('keydown', onKeydown)

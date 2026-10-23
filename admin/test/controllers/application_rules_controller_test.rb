@@ -49,20 +49,17 @@ class ApplicationRulesControllerTest < ActionDispatch::IntegrationTest
     %w[group role user device any].each { |t| assert_includes body, ">#{t}<" }
   end
 
-  test "show page explains the gateway semantics of each rule type" do
-    # rust_listen page: the elixir note is NOT present (wrong gateway), but the
-    # per-kind hint for rust_listen is.
-    get application_path(@app)
-    assert_response :success
-    body = response.body
-    assert_includes body, "user, device and group rules never match a device"
-    refute_includes body, "On this elixir gateway"
+  # Ground truth (proto/src/policy.rs, gateway policy_engine.ex), see STATUS 2026-10-23 02:40Z.
+  test "show page explains what each rule type can match on THIS gateway kind" do
+    get application_path(@app) # rust_listen
+    hint = css_select("[data-rule-hint]").text
+    assert_match(/user rules never match/i, hint)
+    assert_match(/group and role rules match through the device's owner/i, hint)
+    refute_match(/group.{0,30}never match/i, response.body, "group rules DO work on rust_listen")
 
-    # elixir page: the elixir note IS present (table note + form hint).
     elixir_app = @gw_elixir.applications.create!(name: "portal", min_assurance: 1)
     get application_path(elixir_app)
-    assert_response :success
-    assert_includes response.body, "group, role and user rules never match a device"
+    assert_match(/group, role and user rules never match a device/i, css_select("[data-rule-hint]").text)
   end
 
   test "add a group rule pins the group ns_name and renders the group literal" do
@@ -188,38 +185,47 @@ class ApplicationRulesControllerTest < ActionDispatch::IntegrationTest
 
   # -------------------------------------------------------------- form wiring
 
-  test "show page carries the rule form with zone-scoped subject options" do
-    page = get_and_body(application_path(@app))
-    doc, form = parse_rule_form!(page)
+  # The CSP is script-src 'self' / style-src 'self' with no nonce: a browser BLOCKS inline
+  # <script> and style="" attributes. Tests cannot run the browser, so pin their absence.
+  test "show page has no inline script or style attributes (blocked by the CSP)" do
+    get application_path(@app)
+    assert_select "script:not([src])", false
+    assert_select "[style]", false
+  end
 
-    # all five subject types are options
-    assert_equal PolicyRule::SUBJECT_TYPES, form.css("select[name=subject_type] option").map { |o| o[:value] }
-
-    # the pick select is seeded with the zone's users
-    pick = form.at_css("span#rule-pick-slot select[name=subject_id]")
-    raise "user pick missing" if pick.nil?
-    assert_includes pick.css("option").map { |o| o[:value] }, @user.id.to_s
-
-    # device and group option lists ride as data-attrs (JS swaps them in)
-    device_opts = JSON.parse(pick.attr("data-device-options").to_s)
-    group_opts = JSON.parse(pick.attr("data-group-options").to_s)
-    assert_includes device_opts.map(&:first), @dev.name
-    assert_includes group_opts.map(&:first), @group.name
-
-    # initial state: role slot hidden, pick slot visible (user type).
-    # Nokogiri returns "" for a valueless HTML5 attribute like `hidden`, so
-    # check presence with `!nil?` — not `.present?` (empty string is falsy).
-    assert pick[:hidden].nil?
-    role_slot = form.at_css("span#rule-role-slot")
-    raise "role slot missing" if role_slot.nil?
-    assert role_slot[:hidden] != nil, "role slot should be hidden initially"
-
-    # the swap script is present and names both slots + the type select
-    script = doc.search("script").map(&:text).find { |s| s.include?("subject_type") }
-    raise "swap script missing" if script.nil?
-    %w[rule-pick-slot rule-role-slot optionsFor].each do |needle|
-      assert_includes script, needle
+  # Without JS the form must still be coherent: the initial type and the picker agree.
+  test "rule form: initial type is group and the picker lists this zone's groups by id" do
+    get application_path(@app)
+    assert_select "form[action=?]", application_rules_path(@app) do
+      assert_select "select[name=subject_type][data-rule-type] option[selected][value=group]"
+      assert_select "select[name=subject_id][data-rule-pick] option[value=?]", @group.id.to_s, text: @group.name
+      assert_select "select[name=subject_id] option[value=?]", @user.id.to_s, false
+      assert_select "[data-rule-role-slot][hidden]"
     end
+  end
+
+  test "rule form: every option list rides as [label, id] pairs" do
+    get application_path(@app)
+    pick = css_select("select[data-rule-pick]").first
+    assert_includes JSON.parse(pick["data-user-options"]), [ "Jane (jane)", @user.id ]
+    assert_includes JSON.parse(pick["data-device-options"]), [ "jane-mbp", @dev.id ]
+    assert_includes JSON.parse(pick["data-group-options"]), [ "techs", @group.id ]
+  end
+
+  test "a new rule after a removal never collides on position (unique index)" do
+    r1 = @app.policy_rules.create!(subject_type: "any", position: 1)
+    @app.policy_rules.create!(subject_type: "role", subject_value: "tech", position: 2)
+    r1.destroy!
+    post application_rules_path(@app), params: { subject_type: "role", subject_value: "admin" }
+    assert_redirected_to application_path(@app)
+    assert_equal [ 2, 3 ], @app.reload.policy_rules.order(:position).pluck(:position)
+  end
+
+  test "a role rule must name a real role" do
+    assert_no_difference -> { @app.policy_rules.count } do
+      post application_rules_path(@app), params: { subject_type: "role", subject_value: "wizard" }
+    end
+    assert_response :unprocessable_content
   end
 
   # -------------------------------------------------------------- access control

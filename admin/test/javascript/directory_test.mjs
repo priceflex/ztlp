@@ -235,3 +235,23 @@ test('shouldConfirm: returns false for empty/nil text', () => {
   assert.equal(Z.shouldConfirm(null), false)
   assert.equal(Z.shouldConfirm(undefined), false)
 })
+
+// Rule form (Slice 9b-4 review): the swap lives here, not inline (CSP blocks inline scripts).
+test('ruleSubjectView: picker for group/user/device, role box for role, neither for any', () => {
+  const v = window.ZtlpDirectory.ruleSubjectView
+  assert.deepEqual(v('group'), { pick: true, role: false, list: 'group' })
+  assert.deepEqual(v('user'), { pick: true, role: false, list: 'user' })
+  assert.deepEqual(v('device'), { pick: true, role: false, list: 'device' })
+  assert.deepEqual(v('role'), { pick: false, role: true, list: null })
+  assert.deepEqual(v('any'), { pick: false, role: false, list: null })
+})
+
+test('ruleOptions: prompt first, then [label, id] pairs as {value: id, label}', () => {
+  const lists = { user: [['Jane (jane)', 7]], device: [['jane-mbp', 3]], group: [['techs', 9]] }
+  assert.deepEqual(window.ZtlpDirectory.ruleOptions('user', lists),
+    [{ value: '', label: 'user…' }, { value: '7', label: 'Jane (jane)' }])
+  assert.deepEqual(window.ZtlpDirectory.ruleOptions('group', lists),
+    [{ value: '', label: 'group…' }, { value: '9', label: 'techs' }])
+  assert.deepEqual(window.ZtlpDirectory.ruleOptions('role', lists), [])
+})
+

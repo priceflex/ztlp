@@ -534,6 +534,24 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 04:55Z — **review of Slice 9b-4** (`5f06c5cb` rule add/remove). The form did NOT work in a
+  browser: (1) the type swap was an **inline `<script>`** and the layout used `style=""`, both BLOCKED by
+  our CSP (`script-src 'self'`, `style-src 'self'`, no nonce) — tests can't see this; with JS dead the
+  picker stayed on USERS while the type defaulted to GROUP → submitting sent a user id as a group id
+  (wrong-group rule if ids collide). Moved to `directory.js` (`ruleSubjectView`/`ruleOptions` pure +
+  node tests; delegated `change` on `[data-rule-type]`, works in the drawer). Server now renders a
+  coherent no-JS state: type `group` selected + group options; all lists `[label, id]` (the inline
+  script had user pairs reversed → value = display text). (2) **Wrong semantics text**: rust hint said
+  "user, device and group rules never match" (false — only USER never matches; group/role via owner;
+  device exact) and the tick test pinned it; replaced with `[data-rule-hint]` per kind. (3) positions
+  used `count + 1` → after a removal collided with unique (application, position) → 500; now `max + 1`.
+  (4) role rules must name `User::ROLES` (role is now a select). ci-admin: 371 runs, node 21/21, all gates.
+  **TODO (next free tick, before Slice 12): inline `style=` remains in devices/show, claims/show,
+  admins/_form, groups/_form, groups/show, users/_form, applications/_form — CSP blocks them (cosmetic).
+  Move to classes in a NEW `admin.css` (do not edit the verbatim mock CSS) and add a site-wide test:
+  render each page, `assert_select "script:not([src])", false` and `assert_select "[style]", false`.**
+  **RULE: never inline `<script>`/`style=`/`on*=` — the CSP blocks them in a real browser.**
+
 - 2026-10-23 04:37Z — **Slice 9b sub-slice 4 DONE (policy-rule add/remove on the application show page) — recovered from an interrupted tick** (cron tick). Commit `5f06c5cb`.
   - Recovery: the prior tick (started 2026-10-23T03:30:56Z, stale heartbeat, plus a leftover 90×60s wait-loop process pid 3845831 killed) left a coherent, mostly-green in-flight design (14/17 tests green; routes + controller + views + test file, 486 insertions). Per the BUILD_LOOP.md recovery protocol (case 3 with fixes): the design was complete and the four failures were nameable bugs, so it was fixed forward, not reverted. Bugs found + fixed:
     (1) **`params[:rule_id]` vs the route's `:id`** — the nested `resources :rules` route binds the rule's id to `params[:id]`; `find(params[:rule_id])` was always nil → EVERY `DELETE /applications/:id/rules/:rule_id` 404'd before touching the row. Verified live: a scoped `destroy` from a `bin/rails runner` probe worked; the integration 404 came from the nil id.

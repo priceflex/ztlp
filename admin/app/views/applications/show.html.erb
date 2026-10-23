@@ -8,9 +8,7 @@
   <% if write %><div class="actions"><a class="btn" href="<%= edit_application_path(@application) %>">Edit</a></div><% end %>
 </div>
 
-<% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div>
-<% elsif kind == "elixir" %><div class="notice"><span class="sub">On this elixir gateway group, role and user rules never match a device.</span></div>
-<% else %><div class="notice"><span class="sub">On this <span class="mono"><%= kind %></span> gateway group and role rules never match a device.</span></div><% end %>
+<% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>
 
 <div class="stack">
   <div class="panel">
@@ -43,37 +41,41 @@
           <% end %>
         </tbody>
       </table></div>
-      <% if kind == "elixir" %><p class="hint">Note: on this elixir gateway group, role and user rules never match a device — only <span class="mono">*</span> or an exact device name do.</p><% end %>
     <% else %><div class="empty-note">No rules yet — access is default deny.</div><% end %>
 
+    <% hint = if kind == "elixir"
+                "This gateway is elixir: group, role and user rules never match a device (the gateway does not look up owners). Only * or an exact device name do."
+              else
+                "This gateway is rust_listen: user rules never match (the gateway checks the device, so use a group). Group and role rules match through the device's owner; device rules match that device exactly. The min-assurance floor is not enforced by the gateway."
+              end %>
+    <p class="hint" data-rule-hint><%= hint %></p>
     <% if write %>
-      <div class="actions" style="margin-top:12px;display:grid;gap:12px">
-        <%= form_with url: application_rules_path(@application), method: :post, class: "stack" do |f| %>
-          <div class="field" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
-            <span>
-              <%= f.label :subject_type, "Add rule" %>
-              <%= f.select :subject_type,
-                    options_for_select(PolicyRule::SUBJECT_TYPES.map { |t| [ t, t ] }),
-                    {}, class: "mono" %>
-            </span>
-            <span id="rule-pick-slot">
-              <%= select_tag :subject_id,
-                    options_for_select((@zone_users || []).map { |u| [ "#{u.display_name} (#{u.username})", u.id ] }),
-                    prompt: "user…", class: "mono", data: { device_options: (@zone_devices || []).map { |d| [ d.name, d.id ] }.to_json,
-                                                             group_options: (@zone_groups || []).map { |g| [ g.name, g.id ] }.to_json } %>
-            </span>
-            <span id="rule-role-slot" hidden>
-              <%= text_field_tag :subject_value, nil, class: "mono", placeholder: "role name (e.g. tech)" %>
-            </span>
-            <%= f.submit "Add rule", class: "btn sm primary" %>
-          </div>
-        <% end %>
-        <% if kind == "elixir" %>
-          <p class="hint">This gateway is <span class="mono">elixir</span>: group, role and user rules never match a device — only <span class="mono">*</span> or an exact device name do.</p>
-        <% elsif kind == "rust_listen" %>
-          <p class="hint">This gateway is <span class="mono">rust_listen</span>: user, device and group rules never match a device (only <span class="mono">*</span> and exact role names do), and the min-assurance floor is not enforced by the gateway.</p>
-        <% end %>
-      </div>
+      <% pairs = ->(rows, &label) { rows.map { |r| [ label.call(r), r.id ] } } %>
+      <% user_pairs = pairs.call(@zone_users || []) { |u| "#{u.display_name} (#{u.username})" } %>
+      <% device_pairs = pairs.call(@zone_devices || [], &:name) %>
+      <% group_pairs = pairs.call(@zone_groups || [], &:name) %>
+      <%= form_with url: application_rules_path(@application), method: :post, class: "actions" do %>
+        <label for="rule_subject_type">Add rule</label>
+        <select name="subject_type" id="rule_subject_type" class="mono" data-rule-type>
+          <% PolicyRule::SUBJECT_TYPES.each do |t| %>
+            <option value="<%= t %>" <%= "selected" if t == "group" %>><%= t %></option>
+          <% end %>
+        </select>
+        <span data-rule-pick-slot>
+          <select name="subject_id" class="mono" aria-label="Subject" data-rule-pick
+                  data-user-options="<%= user_pairs.to_json %>" data-device-options="<%= device_pairs.to_json %>"
+                  data-group-options="<%= group_pairs.to_json %>">
+            <option value="">group…</option>
+            <% group_pairs.each do |label, id| %><option value="<%= id %>"><%= label %></option><% end %>
+          </select>
+        </span>
+        <span data-rule-role-slot hidden>
+          <select name="subject_value" class="mono" aria-label="Role">
+            <% User::ROLES.each do |r| %><option value="<%= r %>"><%= r %></option><% end %>
+          </select>
+        </span>
+        <button type="submit" class="btn sm primary">Add rule</button>
+      <% end %>
     <% end %>
   </div>
   <div class="panel">
@@ -82,40 +84,3 @@
     <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %></span> and restart the gateway to apply it.</p>
   </div>
 </div>
-
-<% if write %>
-<script>
-(function () {
-  var sel = document.querySelector("form[action$='/rules'] select[name=subject_type]");
-  var pick = document.querySelector("span#rule-pick-slot select[name=subject_id]");
-  var pickSlot = document.getElementById("rule-pick-slot");
-  var roleSlot = document.getElementById("rule-role-slot");
-  if (!sel || !pick || !pickSlot || !roleSlot) return;
-  var userOptions = Array.prototype.map.call(pick.options, function (o) { return [ o.value, o.text ]; });
-  function optionsFor(type) {
-    var src = userOptions;
-    if (type === "device") src = JSON.parse(pick.getAttribute("data-device-options") || "[]");
-    if (type === "group") src = JSON.parse(pick.getAttribute("data-group-options") || "[]");
-    pick.innerHTML = "";
-    var prompt = document.createElement("option");
-    prompt.value = "";
-    prompt.text = (type === "user" ? "user…" : type === "device" ? "device…" : "group…");
-    pick.appendChild(prompt);
-    src.forEach(function (pair) {
-      var o = document.createElement("option");
-      o.value = pair[1];
-      o.text = pair[0];
-      pick.appendChild(o);
-    });
-  }
-  function sync() {
-    var t = sel.value;
-    pickSlot.hidden = !(t === "group" || t === "user" || t === "device");
-    roleSlot.hidden = !(t === "role");
-    if (t === "group" || t === "user" || t === "device") optionsFor(t);
-  }
-  sel.addEventListener("change", sync);
-  sync();
-})();
-</script>
-<% end %>

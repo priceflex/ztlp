@@ -13,6 +13,8 @@ class PolicyRule < ApplicationRecord
 
   validates :subject_type, inclusion: { in: SUBJECT_TYPES, message: "is unknown" }
   validate :subject_required_for_typed_rule
+  validates :subject_value, inclusion: { in: User::ROLES, message: "must be one of #{User::ROLES.join(", ")}" },
+                            if: -> { subject_type == "role" }
 
   before_validation :pin_subject_value
 

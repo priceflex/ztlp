@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+
 #
 # scripts/smoke-claim-login.rb (Slice 12 local smoke) — claim the panel over the
 # production entrypoint using the REAL Ed25519 claim path (form POST /claim
@@ -24,7 +25,7 @@ require "json"
 # The session cookie the app sets on GET /claim must ride into the claim POST
 # (the CSRF token binds to the session). Net::HTTP does not follow Set-Cookie
 # across requests, so capture it explicitly and send it back.
-SESSION_COOKIE = [nil]
+SESSION_COOKIE = [ nil ]
 
 BASE = ENV.fetch("SMOKE_BASE", "http://127.0.0.1:3000")
 HOST = URI(BASE).host

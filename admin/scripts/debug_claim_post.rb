@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+
 # DEBUG probe: replicate smoke-claim-login.rb's claim POST and dump the
 # response body + request state. Run:
 #   docker exec ztlp-admin-web-smoke2 /rails/bin/docker-entrypoint \
@@ -7,7 +8,7 @@ require "net/http"
 require "json"
 
 BASE = "http://127.0.0.1:3000"
-SESSION_COOKIE = [nil]
+SESSION_COOKIE = [ nil ]
 
 def store_cookie(resp)
   Array(resp.get_fields("Set-Cookie")).each do |c|

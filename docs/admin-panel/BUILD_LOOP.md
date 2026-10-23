@@ -534,6 +534,33 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 01:44Z — **Slice 9a remainder DONE (groups directory surfaces policy-rule references)** (cron tick). Commit `e649d298`.
+  - `Ztlp::PolicyRenderer.apps_for_group(gateway, group)` (service seam): the gateway's applications —
+    enabled AND disabled — that carry a `group:` rule with `subject_value == group.ns_name` (the pinned
+    ns_name, not the DB id, so a rule whose group row was deleted still resolves). Unit-tested in
+    `test/services/ztlp/policy_renderer_apps_for_group_test.rb` (7): enabled+disabled found, disabled
+    counts, other-group rules excluded, non-group-only rules excluded, no cross-gateway leak, match on
+    pinned ns_name, empty when unreferenced. TDD: implementation green on first run of the suite; the
+    one RED was a wrong assertion shape in my own test (records vs names) — fixed the test, not the code.
+  - Groups index "Applications" column (7a placeholder `0`) is now live data: `group_refs_by_ns_name`
+    (one `PolicyRule` query per zone gateway, dedup per ns_name) → `td.row-apps`. Groups show page
+    "Policies" panel (7a placeholder) now lists the referencing applications (ztlp name + gateway) in
+    page AND drawer fragment, with a remove-the-rule-first note; `@referencing` = flat_map over
+    `PolicyRenderer.apps_for_group` per gateway.
+  - Controller tests (5 new, groups_controller_test.rb): index counts per row (eng 1 / hr 0 via
+    at_css on the row element); show lists referencing app, excludes role-rule apps, placeholder kept
+    for unreferenced group; drawer fragment carries the app; index does not crash / ghost-row on a
+    stale rule (deleted group row); destroy refused while a rule references the group (row survives).
+  - Evidence: `timeout 300 bin/rails test test/controllers/groups_controller_test.rb` → 36 runs /
+    195 assertions / 0F/0E. Full suite `SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test` → **302 runs /
+    1331 assertions / 0 failures / 0 errors / 7 skips** (was 288 before this slice).
+    `bash scripts/ci-admin.sh` → node 19/19, rubocop/brakeman clean, `== all gates passed`.
+    `ruby -c` on both edited .rb files: Syntax OK. No test-ns containers started.
+  PENDING: Slice 9 proper (Applications index/show/drawer + gateway CRUD, policy_rules add/remove,
+  rendered-policy code block, Policies page + `Ztlp::AccessEvaluator` test-access). BLOCKED: none.
+  UNCERTAIN: none.
+  Next: Slice 9b (Applications index + show/drawer with rules list + rendered policy code block).
+
 - 2026-10-23 01:55Z — **review of Slice 9a** (`f669ee30`): the renderer's output was NOT what either
   gateway parses. Ground truth (priceflex/ztlp HEAD): Rust `ztlp listen --policy` = proto/src/policy.rs
   `from_toml`, LINE-BASED, reads only `default`, `[[services]]`, `name = "<service>"`, single-line

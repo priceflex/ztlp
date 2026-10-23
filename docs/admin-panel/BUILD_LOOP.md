@@ -534,6 +534,17 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 08:25Z — **review of Slice 10a** (`6f49f086` token minter): code ACCEPTED unchanged. Layout
+  matches proto/src/enrollment.rs `to_bytes` field-for-field; MAC = RFC 2104 HMAC-BLAKE2s (64-byte block)
+  as in ns enrollment.ex / proto admission.rs, = OpenSSL::HMAC("BLAKE2s256"); golden independently
+  re-derived with Python `hmac.new(b"\x42"*32, b"hello world", hashlib.blake2s)` → 0128d0eb…e8c0.
+  **Round-trip method (spec asks to record it): end-to-end through the NS's own `process_enroll/1`** on
+  the test NS (`ztlp-ns:v0.35.20`, require_registration_auth=true) via `docker exec … /app/bin/ztlp_ns rpc`
+  after `ZtlpNs.Enrollment.set_zone_secret/1`: a Ruby-minted token → **0x08 0x00** (enrolled, 20-byte
+  config reply); last byte flipped → **0x08 0x03** invalid_mac; replay → **0x08 0x02** exhausted. (An
+  enrollment name outside the token zone → 0x04 zone mismatch, i.e. the NS parsed our zone field.)
+  Container stopped. Next: 10b. For the 10 test suite, make this a `ZTLP_TEST_NS`-gated integration test.
+
 - 2026-10-23 08:20Z — **Slice 10a DONE (v1 enrollment token minter + HMAC-BLAKE2s)** (cron tick). Commit `6f49f086`.
   - New `app/services/ztlp/token_minter.rb` (`Ztlp::TokenMinter`): `mint(zone, expires_at:, nonce:, max_uses: 1, gateway_addr:, callback_url:)` emits the **current v1 binary token** byte-for-byte per spec F8 — version 0x01, flags (0x01 gw / 0x02 cb), zone, ns_addr, relays (from `zone.relay_addrs`), optional gateway/callback (flag-gated), max_uses (u16, default 1), expires_at (u64 BE), nonce (16B), then a 32-byte MAC. `to_uri`/`from_uri` handle `ztlp://enroll/<base64url>`; `from_uri` normalizes base64 padding and trims Unicode-aware to match the Rust `from_base64url` consumer. No identity flag yet (the 0x08 flag is a later ZTLP release per spec §7.1).
   - New `app/services/ztlp/blake2s_hmac.rb` (`Ztlp::Blake2sHmac.mac`): HMAC-BLAKE2s-256 via `OpenSSL::HMAC` keyed with the 32-byte zone enrollment secret. **Cross-checked LIVE against the NS:** a running `ztlp-ns:v0.35.20` container evaluated `hmac_blake2s/2` (ns/lib/ztlp_ns/enrollment.ex, manual ipad/opad over the key zero-padded to 64) on key=32×0x42, data="hello world" → `0128d0eb05c551a625495a3a946b57329aea31a6fc8845e1e54768dd3526e8c0`, byte-identical to Ruby's `OpenSSL::HMAC` on the same vector (pinned as `GOLDEN_VECTOR_MAC`). Gotcha found: `:crypto.exor` requires equal-length inputs, so the NS's own `hmac_blake2s` pads the key to 64 **before** the exor — calling `:crypto.exor(32B_key, 64B_ipad)` raises ArgumentError.

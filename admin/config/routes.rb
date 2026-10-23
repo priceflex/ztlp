@@ -21,6 +21,14 @@ Rails.application.routes.draw do
     end
   end
 
+  # Slice 8: Devices directory (read side 8a; revoke 8b; assign_owner 8c).
+  resources :devices, only: %i[index show] do
+    member do
+      post :revoke
+      post :assign_owner
+    end
+  end
+
   # Slice 7a read side + 7b mutations (new/create, edit/update, destroy,
   # add_member/remove_member).
   resources :groups do

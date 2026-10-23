@@ -1,0 +1,43 @@
+<% content_for :title, "Devices - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Devices</h1><p class="lede">Machine identities enrolled in this zone. A device's owner is the person (or service user) it belongs to; groups and access follow the owner.</p></div>
+</div>
+
+<div class="toolbar">
+  <div class="seg" role="group" aria-label="Filter by status">
+    <% DevicesController::FILTERS.each do |key, label| %>
+      <a href="<%= devices_path(status: key) %>"<% if @status == key %> aria-current="page"<% end %>><%= label %></a>
+    <% end %>
+  </div>
+  <span class="sub">No create form: devices enroll with a code (the Enrollments page, Slice 10) or are adopted from the name server (Slice 12 reconcile).</span>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Name</th><th>Platform</th><th>Owner</th><th>Key source &middot; Assurance</th><th>Agent</th><th>Last seen</th><th>Status</th></tr></thead>
+    <tbody>
+      <% @devices.each do |d| %>
+        <tr data-act="open" data-drawer="<%= device_path(d) %>" tabindex="0">
+          <td><div class="strong mono"><a href="<%= device_path(d) %>"><%= d.name %></a></div>
+              <div class="sub mono"><%= d.ns_name %></div></td>
+          <td class="nowrap"><%= d.platform.present? ? d.platform : "—" %></td>
+          <td class="nowrap">
+            <% if d.user %>
+              <a href="<%= user_path(d.user) %>"><%= d.user.display_name %></a>
+            <% else %>
+              <span class="sub">Unassigned</span>
+            <% end %>
+          </td>
+          <td class="nowrap">
+            <span class="sub"><%= d.key_source %></span>
+            <span class="badge <%= d.assurance >= 3 ? "ok" : (d.assurance == 2 ? "warn" : "") %>"><%= Ztlp::Assurance.label(d.assurance) %></span>
+          </td>
+          <td class="nowrap"><%= d.agent_version.presence || "—" %></td>
+          <td class="nowrap"><%= d.last_seen_at ? l(d.last_seen_at, format: :short) : "never" %></td>
+          <td class="nowrap"><%= status_badge(d.status) %></td>
+        </tr>
+      <% end %>
+      <% if @devices.empty? %><tr class="empty"><td colspan="7">No devices. Enroll one from the Enrollments page.</td></tr><% end %>
+    </tbody>
+  </table>
+</div>

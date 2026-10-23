@@ -1,0 +1,51 @@
+<% content_for :title, "#{@device.name} - ZTLP Directory" %>
+<div class="page-head">
+  <div class="who"><span class="avatar lg"><%= initials(@device.name) %></span>
+    <div><h1><%= @device.name %></h1>
+    <p class="lede mono"><%= @device.ns_name %> &middot; <%= status_badge(@device.status) %></p></div></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Identity</h2></div>
+    <dl class="kv"><dt>Node ID</dt><dd class="mono"><span class="fp"><%= @device.node_id_hex[0, 16] %>&hellip;</span>
+      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.node_id_hex %>">Copy</button></dd></dl>
+    <dl class="kv"><dt>Noise public key</dt><dd class="mono"><span class="fp"><%= @device.noise_pubkey_hex[0, 16] %>&hellip;</span>
+      <button type="button" class="btn sm" data-act="copy" data-copy="<%= @device.noise_pubkey_hex %>">Copy</button></dd></dl>
+    <dl class="kv"><dt>Key source</dt><dd><%= @device.key_source %></dd></dl>
+    <dl class="kv"><dt>Assurance</dt><dd><span class="badge <%= @device.assurance >= 3 ? "ok" : (@device.assurance == 2 ? "warn" : "") %>"><%= Ztlp::Assurance.label(@device.assurance) %></span>
+      <% if @device.assurance == 4 %><span class="sub"> hardware attestation not yet verified</span><% end %></dd></dl>
+    <dl class="kv"><dt>Agent version</dt><dd><%= @device.agent_version.presence || "unknown" %></dd></dl>
+    <dl class="kv"><dt>Platform</dt><dd><%= @device.platform.presence || "unknown" %></dd></dl>
+    <dl class="kv"><dt>Enrolled</dt><dd><%= @device.enrolled_at ? @device.enrolled_at.strftime("%Y-%m-%d %H:%M UTC") : "—" %></dd></dl>
+    <dl class="kv"><dt>Last seen</dt><dd><%= @device.last_seen_at ? l(@device.last_seen_at, format: :short) : "never" %></dd></dl>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Owner</h2></div>
+    <% if @device.user %>
+      <p><a href="<%= user_path(@device.user) %>"><%= @device.user.display_name %></a>
+        <span class="sub mono"><%= @device.user.ns_name %></span></p>
+      <p class="sub">Groups and access policies follow the owner (assigning a new owner lands in Slice 8c).</p>
+    <% else %>
+      <p class="empty-note">Unassigned. Adopting it from the name server (reconcile, Slice 12) can set an owner.</p>
+    <% end %>
+  </div>
+
+  <% if @device.status == "revoked" %>
+    <div class="panel">
+      <div class="panel-h"><h2>Revoked</h2></div>
+      <p class="sub"><%= @device.name %> was revoked<%= @device.revoked_at ? " on #{@device.revoked_at.strftime('%Y-%m-%d %H:%M UTC')}" : "" %>.
+        A name-server revocation is permanent: this name can never re-enroll. To onboard the machine again, create a new enrollment under a new device name.</p>
+    </div>
+  <% else %>
+    <% if current_admin&.write_access? %>
+      <div class="actions">
+        <%= form_with url: revoke_device_path(@device), method: :post, class: "actions" do %>
+          <input type="text" name="reason" placeholder="Reason (required, e.g. lost, stolen, offboarded)" aria-label="Revocation reason" style="flex:1; min-width: 240px;">
+          <button type="submit" class="btn danger" data-confirm="Permanently revoke <%= @device.name %>? The name server never lets this device name be used again. This cannot be undone.">Revoke device</button>
+        <% end %>
+      </div>
+    <% end %>
+  <% end %>
+</div>

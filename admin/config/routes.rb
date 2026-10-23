@@ -60,6 +60,7 @@ Rails.application.routes.draw do
 
   # Slice 9c: policies page (read-only overview + Test access widget).
   get "policies", to: "policies#index", as: :policies
+  post "policies/test", to: "policies#test", as: :policies_test
 
   get "zone", to: "zone#show", as: :zone
   post "zone/publish", to: "zone#publish", as: :zone_publish

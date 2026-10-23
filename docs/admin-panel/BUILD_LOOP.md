@@ -534,6 +534,17 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 13:10Z — review of `85629b3c` (enrollment roundtrip "skeleton", BLOCKED on "restricted rpc
+  eval"): **not blocked** — `rpc` evaluates ELIXIR; the tick wrote ERLANG (`Secret = …`,
+  `hex_pair(A,B) -> …` clauses), which is why `->` and `List` "failed". Also wrong: name_len sent as
+  1 byte (it is ::16), name outside the token zone, one NONCE per process (the success test burns it →
+  the replay test's first enroll would 0x02), relay length asserted as 1 byte (it is ::16), and
+  `SECRET_HEX = ENV.fetch(...)` at class load. Rewritten with the proven 08:25Z Elixir recipe and a
+  test-local random enrollment secret (`set_zone_secret/1`). **LIVE: 3 runs, 5 assertions, 0 failures,
+  0 skips** (0x08 0x00 + relay config; 0x03 flipped MAC; 0x02 replay); test-ns down, 0 containers.
+  Hermetic ci-admin: all gates passed (file skips without ZTLP_TEST_NS). The BLOCKED line in the 12:50Z
+  entry is void. **Next: Slice 12 local smoke** (see the 12:40Z reminders).
+
 - 2026-10-23 12:50Z — **Slice 12 prep: enrollment roundtrip test skeleton** (cron tick). Commit `85629b3c`.
   - New `test/integration/enrollment_ns_roundtrip_test.rb` (3 tests, ZTLP_TEST_NS-gated): the 08:25Z STATUS entry proved by hand that a Ruby-minted v1 token (Ztlp::TokenMinter) round-trips through the NS's own `ZtlpNs.Enrollment.process_enroll/1` (0x08 0x00 success, 0x08 0x03 on a flipped MAC, 0x08 0x02 on replay) and asked to pin this as a ZTLP_TEST_NS-gated integration test. This commit adds the test file with the three test cases and the `process_enroll` helper.
   - **BLOCKED on the NS release's restricted `rpc` eval mode**: the helper cannot hex-decode the token/secret in the NS process. The `rpc` eval environment (probed extensively this tick) cannot parse Erlang `->` clauses (function definitions), cannot call `List.to_string/2` (the `List` module is shadowed by Erlang's `binary` BIF), and cannot `Code.compile_file`. The `escript` path fails with `cannot get bootfile` (no standalone Erlang runtime in the release image). The `erlc`/`erl` binaries exist at `/app/erts-14.2.5/bin/` but cannot boot without a boot file.

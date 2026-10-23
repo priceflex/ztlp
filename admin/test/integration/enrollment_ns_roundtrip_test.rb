@@ -1,154 +1,72 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "shellwords"
 
-# Real-wire enrollment proof against a live local NS (ztlp-ns:v0.35.20).
+# A panel-minted v1 enrollment token, verified by the REAL name server's own
+# `ZtlpNs.Enrollment.process_enroll/1` (the code path `ztlp setup --token` hits),
+# via `docker exec <test-ns> /app/bin/ztlp_ns rpc '<ELIXIR>'` on the
+# scripts/test-ns.sh container. Pins the 2026-10-23 08:25Z hand proof:
+#   genuine -> 0x08 0x00 + config; flipped MAC byte -> 0x08 0x03; replay -> 0x08 0x02.
 #
-# The 2026-10-23 08:25Z STATUS entry proved, by hand, that a Ruby-minted v1
-# token (Ztlp::TokenMinter) round-trips through the NS's own
-# ZtlpNs.Enrollment.process_enroll/1 (0x08 0x00 success, 0x08 0x03 on a
-# flipped MAC, 0x08 0x02 on replay) and asked to pin this as a
-# ZTLP_TEST_NS-gated integration test. This is that pin, run the SAME way
-# (docker exec rpc into the scripts/test-ns.sh NS; the NS image ships no
-# 0x07 UDP enrollment path, so the NS's own module is the only real wire).
+# `rpc` evaluates ELIXIR (Base.decode16!, fn ... end, <<x::16>> all work).
+# Erlang syntax (Capitalised vars, `name(X) -> ...` clauses) does NOT -- that is
+# what made an earlier skeleton of this file look "blocked".
 #
-# The token is minted in-process through Ztlp::TokenMinter against a REAL
-# Zone row whose ns_addr points at the test NS. The token's MAC key is the
-# throwaway secret the test NS was started with (scripts/test-ns.sh env
-# file, 64 hex chars = 32 raw bytes); the NS process is told the same bytes
-# via its own documented test seam (set_zone_secret/1, enrollment.ex) so the
-# MAC check runs against the real key. The secret is never printed; it is
-# written once to the NS's writable layer (/tmp/ns_enroll_secret.hex) and
-# never re-read — the NS layer is discarded with the throwaway container at
-# scripts/test-ns.sh down, and the env file that still holds it is deleted.
-#
-# Gated on ZTLP_TEST_NS exactly like ns_roundtrip_test.rb: skipped unless
-# scripts/test-ns.sh up has exported the env file. The NS is stopped by
-# scripts/test-ns.sh down in the same tick.
+# Gated like ns_roundtrip_test.rb: skipped unless ZTLP_TEST_NS=1
+# (bash scripts/test-ns.sh up; set -a; . <scratch>/test_ns.env; set +a).
 class EnrollmentNsRoundtripTest < ActiveSupport::TestCase
-  def self.enabled?
-    ENV["ZTLP_TEST_NS"] == "1"
+  CONTAINER = "ztlp-admin-test-ns"
+  ZONE_NAME = "rt.test.ztlp"
+  RELAY = "10.0.0.9:23095"
+
+  setup do
+    skip "set ZTLP_TEST_NS=1 and run scripts/test-ns.sh up first" unless ENV["ZTLP_TEST_NS"] == "1"
+    # Test-local throwaway enrollment secret, set on the NS by the test itself
+    # (ZtlpNs.Enrollment.set_zone_secret/1). No real secret is involved.
+    @secret_hex = SecureRandom.hex(32)
   end
 
-  def setup
-    unless self.class.enabled?
-      raise Minitest::Skip, "set ZTLP_TEST_NS=1 and run scripts/test-ns.sh up first"
-    end
-  end
-
-  NS_ADDR = ENV.fetch("ZTLP_TEST_NS_ADDR", "127.0.0.1:23196").freeze
-  ZONE_NAME = "test.ztlp".freeze
-  RELAY = "127.0.0.1:23195".freeze
-
-  # The throwaway 64-hex secret the test NS was started with. It doubles as
-  # the zone enrollment secret so the MAC the minter computes and the MAC
-  # the NS validate share one key. Never printed.
-  SECRET_HEX = ENV.fetch("ZTLP_TEST_NS_ADMIN_API_SECRET").freeze
-
-  # Per-process nonce so re-runs against a persistent NS never replay the
-  # same ETS usage entry (the NS tracks token uses per nonce).
-  NONCE = Random.bytes(16).freeze
-
-  # Build the in-process zone exactly the way the panel builds one: the
-  # secret is stored encrypted (AR encryption), the token's MAC key is the
-  # raw 32 bytes.
   def mint_token
-    zone = Zone.new(name: ZONE_NAME, ns_addr: NS_ADDR, relay_addrs: [ RELAY ])
-    zone.enrollment_secret_ct = SECRET_HEX
-    binary = Ztlp::TokenMinter.mint(zone, expires_at: 1.hour.from_now.to_i, nonce: NONCE, max_uses: 1)
-    binary
+    zone = Zone.new(name: ZONE_NAME, ns_addr: "127.0.0.1:23096")
+    zone.enrollment_secret_ct = @secret_hex
+    zone.relay_addrs = [ RELAY ]
+    Ztlp::TokenMinter.mint(zone, expires_at: 1.hour.from_now, max_uses: 1) # fresh random nonce per mint
   end
 
-  # Run the NS's own Enrollment module on the token bytes.
-  #
-  # The NS's `rpc` eval mode is RESTRICTED: Elixir's String/Binary/Code
-  # modules are shadowed there (require fails, List.to_string/2 is
-  # undefined, Code.all_loaded_modules is unavailable), so the rpc code is
-  # Erlang-terms-only. The token, node_id, pubkey and secret all travel as
-  # hex STRING LITERALS in the rpc code (the proven 2026-10-23 08:25Z
-  # recipe); the NS decodes them with Erlang builtins (hd/tl/byte_size on
-  # charlists) before calling the documented test seam set_zone_secret/1
-  # (enrollment.ex) and the real wire entry process_enroll/1.
-  #
-  # The secret is the throwaway test-ns value scripts/test-ns.sh generated
-  # (it is already in this process's env and in the NS's own env), so no
-  # secret crosses the box boundary; it is never printed to stdout or the
-  # test output. The token/node/pubkey are random per call.
-  def process_enroll(token_hex, node_id_hex, pubkey_hex)
-    rpc = +""
-    rpc << "Secret = <<\"#{SECRET_HEX}\">>\n"
-    rpc << "Token_hex = <<\"#{token_hex}\">>\n"
-    rpc << "Node_hex = <<\"#{node_id_hex}\">>\n"
-    rpc << "Pub_hex = <<\"#{pubkey_hex}\">>\n"
-    rpc << "Secret_bin = hex_bytes(Secret)\n"
-    rpc << "ZtlpNs.Enrollment.set_zone_secret(Secret_bin)\n"
-    rpc << "T = hex_bytes(Token_hex)\n"
-    rpc << "N = hex_bytes(Node_hex)\n"
-    rpc << "P = hex_bytes(Pub_hex)\n"
-    rpc << "Name = [101, 110, 114, 111, 108, 108, 45, 116, 101, 115, 116]\n"
-    rpc << "Body = iolist_to_binary([ Integer.div(byte_size(T), 256), Integer.mod(byte_size(T), 256), T, P, N, byte_size(Name), Name, 0 ])\n"
-    rpc << "ZtlpNs.Enrollment.process_enroll(Body) |> :binary.bin_to_list() |> IO.inspect(label: \"REPLY=\")\n"
-    # Helper defs (Erlang builtins only — the restricted rpc env has no
-    # Elixir String/Binary modules). hex_bytes/1: charlist of hex digits →
-    # list of byte integers.
-    helpers = +""
-    helpers << "hex_pair(A, B) -> (digit_val(A) * 16 + digit_val(B)).\n"
-    helpers << "digit_val(D) when D >= 48, D =< 57 -> D - 48.\n"
-    helpers << "digit_val(D) when D >= 97, D =< 102 -> D - 87.\n"
-    helpers << "hex_bytes(Hex) when is_list(Hex) -> [ hex_pair(A, B) || [A, B] <- pairs(Hex) ].\n"
-    helpers << "pairs([]) -> [].\n"
-    helpers << "pairs([H | T]) when length(T) =< 0 -> [].\n"
-    helpers << "pairs([H | T]) -> [[H | [hd(T)]] | pairs(tl(T))].\n"
-    full = helpers + rpc
-    out = `docker exec ztlp-admin-test-ns /app/bin/ztlp_ns rpc #{full.shellescape} 2>/dev/null`.strip
-    # The NS prints REPLY=[ 8, 0, ... ] — parse the integers after REPLY=.
-    # (String#sub takes (pattern, replacement); the single-arg form is
-    # sub!, so extract manually.)
-    tail = out.include?("REPLY=") ? out.split("REPLY=", 2).last.to_s : out
-    tail.scan(/\d+/).map { |n| n.to_i }
+  # The NS reply as an Array of byte integers. Packet (enrollment.ex
+  # process_enroll): token_len::16, token, pubkey(32), node_id(16), name_len::16, name, 0::16.
+  def process_enroll(token, device_label)
+    elixir = <<~EX
+      ZtlpNs.Enrollment.set_zone_secret(Base.decode16!("#{@secret_hex.upcase}"))
+      tok = Base.decode16!("#{token.unpack1('H*').upcase}")
+      name = "#{device_label}.#{ZONE_NAME}"
+      pkt = <<byte_size(tok)::16, tok::binary, :crypto.strong_rand_bytes(32)::binary,
+              :crypto.strong_rand_bytes(16)::binary, byte_size(name)::16, name::binary, 0::16>>
+      IO.puts("REPLY=" <> Enum.join(:binary.bin_to_list(ZtlpNs.Enrollment.process_enroll(pkt)), ","))
+    EX
+    out = `timeout 60 docker exec #{CONTAINER} /app/bin/ztlp_ns rpc #{elixir.shellescape} 2>&1`
+    line = out.lines.find { |l| l.start_with?("REPLY=") }
+    flunk "no REPLY from the NS rpc: #{out.lines.last(5).join}" if line.nil?
+    line.delete_prefix("REPLY=").strip.split(",").map(&:to_i)
   end
 
-  def node_id_hex
-    Random.bytes(16).unpack1("H*")
+  test "a panel-minted v1 token enrolls against the real NS (0x08 0x00) and gets the token's relay back" do
+    reply = process_enroll(mint_token, "rt-ok-#{SecureRandom.hex(3)}")
+    assert_equal [ 0x08, 0x00 ], reply[0, 2], "reply #{reply.inspect}"
+    # config: relay_count::8, relay_len::16 big-endian, relay bytes
+    assert_equal [ 1, 0, RELAY.bytesize, *RELAY.bytes ], reply[2, 3 + RELAY.bytesize], "reply #{reply.inspect}"
   end
 
-  def pubkey_hex
-    Random.bytes(32).unpack1("H*")
+  test "a token with a flipped MAC byte is rejected 0x08 0x03 (invalid MAC)" do
+    bad = mint_token.dup
+    bad.setbyte(-1, bad.getbyte(-1) ^ 0x01)
+    assert_equal [ 0x08, 0x03 ], process_enroll(bad, "rt-bad-#{SecureRandom.hex(3)}")[0, 2]
   end
 
-  def self.assert_status(bytes, expected, msg)
-    assert_equal [ expected ], bytes[0, 1], msg
-  end
-
-  test "a panel-minted v1 token enrolls against the real NS (0x08 0x00)" do
-    binary = mint_token
-    refute binary.empty?
-    bytes = process_enroll(binary.unpack1("H*"), node_id_hex, pubkey_hex)
-    # 0x08 0x00 = success, then the config block (relay count 1 + addr,
-    # gateway count 0) follows. A parse failure or MAC mismatch would come
-    # back 0x08 0x06/0x03.
-    assert_equal 0x08, bytes[0], "expected 0x08 type, got #{bytes.inspect}"
-    assert_equal 0x00, bytes[1], "expected 0x00 success status, got 0x#{bytes[1].to_s(16)}"
-    # The config must advertise the relay the token carried: relay_count 01,
-    # then the 16-bit BE length of RELAY, then the relay bytes.
-    assert_equal [ 1, RELAY.bytesize, *RELAY.bytes ], bytes[2, 3 + RELAY.bytesize],
-                 "config should carry the token's relay, got #{bytes[2, 8].inspect}"
-  end
-
-  test "a token with a flipped MAC byte is rejected 0x08 0x03 (invalid_mac)" do
-    binary = mint_token
-    bad = +binary
-    bad[-2] = (bad[-2].ord ^ 0xFF).chr # flip a MAC byte
-    bytes = process_enroll(bad.unpack1("H*"), node_id_hex, pubkey_hex)
-    assert_equal 0x08, bytes[0], "expected 0x08 type"
-    assert_equal 0x03, bytes[1], "expected 0x03 invalid_mac, got 0x#{bytes[1].to_s(16)}"
-  end
-
-  test "a used token replayed is rejected 0x08 0x02 (uses exhausted)" do
-    binary = mint_token
-    first = process_enroll(binary.unpack1("H*"), node_id_hex, pubkey_hex)
-    assert_equal 0x00, first[1], "first enroll must succeed, got 0x#{first[1].to_s(16)}"
-    replay = process_enroll(binary.unpack1("H*"), node_id_hex, pubkey_hex)
-    assert_equal 0x02, replay[1], "replay must be 0x08 0x02 exhausted, got 0x#{replay[1].to_s(16)}"
+  test "a one-use token replayed is rejected 0x08 0x02 (exhausted)" do
+    tok = mint_token
+    assert_equal [ 0x08, 0x00 ], process_enroll(tok, "rt-a-#{SecureRandom.hex(3)}")[0, 2]
+    assert_equal [ 0x08, 0x02 ], process_enroll(tok, "rt-b-#{SecureRandom.hex(3)}")[0, 2]
   end
 end

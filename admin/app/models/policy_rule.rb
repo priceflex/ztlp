@@ -14,6 +14,8 @@ class PolicyRule < ApplicationRecord
   validates :subject_type, inclusion: { in: SUBJECT_TYPES }
   validate :subject_required_for_typed_rule
 
+  before_validation :pin_subject_value
+
   def subject_entity
     klass = SUBJECT_CLASS[subject_type]
     return nil unless klass && subject_id
@@ -23,7 +25,10 @@ class PolicyRule < ApplicationRecord
   def render
     case subject_type
     when "group"
-      "group:#{subject_entity&.ns_name || subject_value}"
+      # subject_entity is nil when the group row was deleted; the ns_name
+      # pinned in subject_value at rule-create time is the literal the
+      # gateway will match (stale but honest).
+      "group:#{subject_entity&.ns_name || subject_value.presence || "?"}"
     when "role"
       "role:#{subject_value}"
     when "user", "device"
@@ -35,10 +40,17 @@ class PolicyRule < ApplicationRecord
 
   private
 
+  # Pin the subject's ns_name into subject_value at create time so the rule
+  # keeps rendering a literal after the entity row is deleted (the gateway
+  # matches on the ns_name string, not the DB id).
+  def pin_subject_value
+    entity = subject_entity
+    self.subject_value = entity.ns_name if entity && entity.respond_to?(:ns_name)
+  end
+
   def subject_required_for_typed_rule
     return if subject_type == "any"
-    return if subject_entity&.ns_name.present?
-    return if subject_type == "role" && subject_value.present?
+    return if subject_value.present?
 
     errors.add(:subject_value, "is required for this subject type")
   end

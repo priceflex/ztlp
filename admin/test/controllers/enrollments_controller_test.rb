@@ -418,4 +418,89 @@ class EnrollmentsControllerTest < ActionDispatch::IntegrationTest
     follow_redirect!
     assert_nil tok.reload.token_uri_ct
   end
+  # ------------------------------------------------- callback_url wiring
+  #
+  # The 10b-4 follow-up: minted tokens must carry a callback_url pointing at
+  # the panel's OWN unauthenticated legacy endpoint (/api/enrollment/confirm)
+  # so the CLI's post-enrollment confirmation (ztlp-cli.rs confirm_enrollment)
+  # lands on the panel. The token is self-locating (no token_id in the
+  # binary; the callback body carries it). The panel's public URL comes from
+  # ZTLP_PANEL_PUBLIC_URL (prod: https://admin.trs.ztlp; the local smoke
+  # stack uses its own published address). When unset, the controller falls
+  # back to request.host_with_port (dev/test host).
+
+  def _parse_callback(bin)
+    pos = 2
+    zlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + zlen
+    nlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + nlen
+    rc = bin.getbyte(pos); pos += 1
+    (1..rc).each { |_| _r = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + _r }
+    clen = bin.byteslice(pos, 2).unpack1("n"); pos += 2
+    [ bin.getbyte(1), bin.byteslice(pos, clen) ]
+  end
+
+  def _last_minted_token
+    @zone.enrollments.order(:id).last
+  end
+
+  test "create embeds the callback_url pointing at the panel legacy endpoint when the public URL is set" do
+    ENV["ZTLP_PANEL_PUBLIC_URL"] = "https://admin.trs.ztlp"
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    tok = _last_minted_token
+    bin = Ztlp::TokenMinter.from_uri(tok.token_uri_ct)
+    flag, cb = _parse_callback(bin)
+    assert_equal 0x02, flag, "callback flag set"
+    assert_equal "https://admin.trs.ztlp/api/enrollment/confirm", cb
+  ensure
+    ENV.delete("ZTLP_PANEL_PUBLIC_URL")
+  end
+
+  test "create embeds a different public URL host when the env is set to it" do
+    ENV["ZTLP_PANEL_PUBLIC_URL"] = "https://panel.example.ztlp"
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    tok = _last_minted_token
+    bin = Ztlp::TokenMinter.from_uri(tok.token_uri_ct)
+    flag, cb = _parse_callback(bin)
+    assert_equal 0x02, flag
+    assert_equal "https://panel.example.ztlp/api/enrollment/confirm", cb
+  ensure
+    ENV.delete("ZTLP_PANEL_PUBLIC_URL")
+  end
+
+  test "create falls back to request.host_with_port when the public URL is unset" do
+    ENV.delete("ZTLP_PANEL_PUBLIC_URL")
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    tok = _last_minted_token
+    bin = Ztlp::TokenMinter.from_uri(tok.token_uri_ct)
+    flag, cb = _parse_callback(bin)
+    assert_equal 0x02, flag, "callback is always embedded (self-locating token)"
+    assert cb.end_with?("/api/enrollment/confirm"), "callback targets the legacy endpoint"
+    assert cb.start_with?("http"), "callback is a scheme-qualified absolute URL"
+  end
+
+  test "create with a malformed public URL falls back to a scheme-qualified URL" do
+    ENV["ZTLP_PANEL_PUBLIC_URL"] = "not a url"
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    assert_response :redirect
+    tok = _last_minted_token
+    bin = Ztlp::TokenMinter.from_uri(tok.token_uri_ct)
+    flag, cb = _parse_callback(bin)
+    assert_equal 0x02, flag
+    assert_match(%r{\Ahttps?://}, cb, "callback is a scheme-qualified absolute URL")
+  ensure
+    ENV.delete("ZTLP_PANEL_PUBLIC_URL")
+  end
+
+  test "the callback_url is never written to the audit log" do
+    ENV["ZTLP_PANEL_PUBLIC_URL"] = "https://admin.trs.ztlp"
+    post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    row = AuditLog.where(action: "enrollment.mint").last
+    refute row.details.to_s.include?("https://admin.trs.ztlp"),
+           "callback URL stays out of the audit"
+  ensure
+    ENV.delete("ZTLP_PANEL_PUBLIC_URL")
+  end
 end

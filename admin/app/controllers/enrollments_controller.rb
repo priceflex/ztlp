@@ -87,9 +87,21 @@ class EnrollmentsController < ApplicationController
     )
     enrollment.token_id = Enrollment.generate_token_id
 
+    # The callback_url points the CLI (ztlp-cli.rs confirm_enrollment) at the
+    # panel's OWN unauthenticated legacy endpoint so the post-enrollment
+    # confirmation lands here. The panel's public URL comes from
+    # ZTLP_PANEL_PUBLIC_URL (prod: https://admin.trs.ztlp; the local smoke
+    # stack uses its own published address). When unset, fall back to
+    # request.host_with_port (dev/test host). A malformed env value
+    # (no http:// or https:// scheme) is treated as unset.
+    raw_public_url = ENV.fetch("ZTLP_PANEL_PUBLIC_URL", "").to_s.strip
+    base = raw_public_url.match?(%r{\Ahttps?://}) ? raw_public_url : "http://#{request.host_with_port}"
+    callback_url = "#{base.chomp("/")}/api/enrollment/confirm"
+
     begin
       uri = Ztlp::TokenMinter.to_uri(
-        Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i)
+        Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i,
+                               callback_url: callback_url)
       )
     rescue Ztlp::TokenMinter::EnrollmentSecretMissing
       audit!("enrollment.mint", status: "error",

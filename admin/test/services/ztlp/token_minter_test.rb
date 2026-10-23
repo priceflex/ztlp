@@ -140,4 +140,66 @@ class TokenMinterTest < ActiveSupport::TestCase
     assert_equal bin, Ztlp::TokenMinter.from_uri(b64)
     assert_raises(ArgumentError) { Ztlp::TokenMinter.from_uri("!!!notbase64###") }
   end
+  # ----------------------------------------------------- callback field
+  #
+  # The flag-0x02 callback_url exists for the CLI's post-enrollment
+  # confirmation POST (ztlp-cli.rs confirm_enrollment → the panel's
+  # unauthenticated /api/enrollment/confirm). The binary token itself
+  # carries NO token_id — the callback body's token_id is the 32-char hex
+  # the PUBLISHER knows (proto/src/enrollment.rs: "Binary tokens don't
+  # carry token IDs"). The MAC covers the callback, so a minted-with-
+  # callback token must be parseable and tamper-proof.
+
+  test "mint with a callback_url writes flag 0x02 and the URL at the documented position" do
+    cb = "https://panel.example/api/enrollment/confirm"
+    bin = Ztlp::TokenMinter.mint(zone, expires_at: 1_900_000_000, nonce: NONCE16,
+                                 callback_url: cb)
+    assert_equal 0x02, bin.getbyte(1), "flag bit 1 (callback) set"
+
+    pos = 2
+    zlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + zlen
+    nlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + nlen
+    rc = bin.getbyte(pos); pos += 1
+    (1..rc).each { _rlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + _rlen }
+    # no gateway flag → callback comes next
+    clen = bin.byteslice(pos, 2).unpack1("n"); pos += 2
+    assert_equal cb, bin.byteslice(pos, clen), "callback url bytes"
+    pos += clen
+    assert_equal 1, bin.byteslice(pos, 2).unpack1("n"), "max_uses follows the callback"
+    exp = bin.byteslice(pos + 2, 8).unpack1("Q>")
+    assert_equal 1_900_000_000, exp
+    assert_equal NONCE16, bin.byteslice(pos + 10, 16), "nonce"
+    pos += 26
+    assert_equal 32, bin.bytesize - pos, "MAC is the final 32 bytes"
+  end
+
+  test "mint with a callback_url MAC-verifies and flips a single bit fails verification" do
+    cb = "https://panel.example/api/enrollment/confirm"
+    bin = Ztlp::TokenMinter.mint(zone, expires_at: 1_900_000_000, nonce: NONCE16,
+                                 callback_url: cb)
+    data, mac = bin.byteslice(0, bin.bytesize - 32), bin.byteslice(bin.bytesize - 32, 32)
+    assert_equal mac, Ztlp::Blake2sHmac.mac(SECRET_RAW, data), "MAC covers the callback"
+
+    # Tamper the last byte of the callback URL (it is at a known offset:
+    # find it by parsing).
+    pos = 2
+    zlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + zlen
+    nlen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + nlen
+    rc = bin.getbyte(pos); pos += 1
+    (1..rc).each { _r = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + _r }
+    clen = bin.byteslice(pos, 2).unpack1("n"); pos += 2 + clen - 1
+    tampered = bin.dup
+    tampered[clen] = (tampered.getbyte(clen) ^ 0x01).chr
+    tdata = tampered.byteslice(0, tampered.bytesize - 32)
+    refute_equal mac, Ztlp::Blake2sHmac.mac(SECRET_RAW, tdata), "callback is MAC-covered"
+  end
+
+  test "mint without a callback_url keeps flag 0 (back-compat, zero-byte delta)" do
+    bin = Ztlp::TokenMinter.mint(zone, expires_at: 1_900_000_000, nonce: NONCE16)
+    assert_equal 0x00, bin.getbyte(1)
+    bin2 = Ztlp::TokenMinter.mint(zone, expires_at: 1_900_000_000, nonce: NONCE16,
+                                  callback_url: nil)
+    assert_equal bin.byteslice(0, bin.bytesize - 16), bin2.byteslice(0, bin2.bytesize - 16),
+                 "explicit nil callback is byte-identical to no callback (except nonce)"
+  end
 end

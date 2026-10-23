@@ -534,6 +534,39 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 02:15Z — **Slice 9b sub-slice 1 DONE (`Ztlp::AccessEvaluator`)** (cron tick). Commit `bb608e5c`.
+  - `app/services/ztlp/access_evaluator.rb`: `Ztlp::AccessEvaluator.evaluate(device, application, ns_client:)`
+    returns `{decision: "allow"|"deny", reason, trace: [{rule, result, why}], assurance_enforced: bool}`.
+    Mirrors proto/src/policy.rs (read-only HEAD): plain literals match the DEVICE ns name exactly
+    (`*` = all, `*.suffix` = suffix via `literal_matches?`); `user:` rules NEVER match a device
+    identity on rust_listen (reason: "user rules don't match devices … use a group"); only `group:`
+    and `role:` resolve device→owner. min_assurance is the panel gate (not the gateway): denied when
+    below, `assurance_enforced: false` always (Rust gateway has no assurance check; the elixir gate
+    is the panel's mandatory gate). Pre-rule denies: device not enrolled, no owner, owner revoked/
+    disabled, application disabled — each with a named reason. Group membership resolves from the NS
+    GROUP record via the admin API (same `ns_client.list(port, secret, type:, zone:)` seam as
+    Reconciler) with a fail-closed fallback to the panel Group row; a deleted group row denies with
+    "no longer exists in the panel". The deny `reason` surfaces the last rule's `why` when a rule
+    was the specific blocker (honest trace, not just "default deny").
+  - Tests (`test/services/ztlp/access_evaluator_test.rb`, 18, TDD RED first — 18 NameError on the
+    missing constant): any-rule allow, default deny, revoked/pending/disabled-owner/unassigned
+    denies, application-disabled deny, device exact match, user-rule deny + gateway-semantics
+    reason, role allow/deny, group member/non-member, deleted-group stale-rule deny, elixir
+    gateway same resolution, min_assurance deny + `enforced: false` on both gateway kinds,
+    min-assurance-met allow + `enforced: true`, `literal_matches?` golden (suffix/exact/wildcard),
+    ordered trace with per-rule why, NS-seam injection (fake `list` returns group members: member
+    allow / non-member deny).
+  - Evidence: `timeout 300 bin/rails test test/services/ztlp/access_evaluator_test.rb` → 18 runs /
+    60 assertions / 0 failures / 0 errors. Full suite `SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test`
+    → **321 runs / 1392 assertions / 0 failures / 0 errors / 7 skips** (was 302 before this slice).
+    `bash scripts/ci-admin.sh` → node 19/19, rubocop clean, brakeman EOL-only, `== all gates passed`.
+    `ruby -c` on the new service: Syntax OK. No test-ns containers started.
+  PENDING: Slice 9b remainder (Applications index/show/drawer with rules list + add/remove rule
+  forms + rendered-policy code block via PolicyRenderer; gateways minimal CRUD; Policies page +
+  POST /policies/test wiring the evaluator; trace-rendering JS + node test). BLOCKED: none.
+  UNCERTAIN: none.
+  Next: Slice 9b sub-slice 2 (Applications index + show/drawer with rules list + rendered policy).
+
 - 2026-10-23 02:00Z — review of `e649d298` (groups rule references): fine except `refs.merge!` per
   gateway overwrote earlier gateways' apps for the same group (index count 1 instead of 2) → accumulate
   with `|=`; test added (RED "1" → GREEN). ci-admin all gates passed. Next: Slice 9b.

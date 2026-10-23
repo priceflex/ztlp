@@ -534,6 +534,15 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 11:27Z — **Slice 11b DONE (global search `/search.json?q=`)** (cron tick). Commit `2d8a2cff`.
+  - New `app/controllers/search_controller.rb` + route `get "search.json", to: "search#index"`: ILIKE over users (username/display_name/ns_name + deterministic exact email via the Users-index ciphertext trick — `where(email: [q, q.downcase])`, a non-address query matches nobody), devices (name/node_id), groups (name/description), applications (name/backend). JSON `{type,id,name,sub,url}` only, type-ordered (users, devices, groups, applications), capped at 20, `layout: false`, no audit row (a search is not a mutation; the query string never reaches the audit log). read_only may search (pinned).
+  - The endpoint is what the top-bar `#gs-input` in directory.js was ALREADY wired to (fetch + textContent-only rendering + safeUrl same-origin gate, node-tested) — nothing to change in JS.
+  - TDD: `test/controllers/search_controller_test.rb` (9) RED first (404 — no route), then GREEN. One test-premise fix (not weakened): media_type is `application/json` without the charset suffix in this Rails/test harness. The spec's "query `<script>` returns escaped JSON and no HTML" is pinned by the JSON-only render + a markup-q test.
+  - Evidence: file suite `SKIP_CLAIM_BOOT=1 timeout 300 bin/rails test test/controllers/search_controller_test.rb` → **9 runs / 36 assertions / 0 failures / 0 errors**. Full suite `SKIP_CLAIM_BOOT=1 timeout 580 bin/rails test` → **519 runs / 2364 assertions / 0 failures / 0 errors / 7 skips** (was 510/2322 at the 11a tick… 508 at the prior 11a commit; the delta is this file + the 11a review fixes). `bash scripts/ci-admin.sh` → **== all gates passed**. `ruby -c` on controller + test: Syntax OK. No test-ns containers started.
+  PENDING: Slice 11 remainder — (1) the `bin/rails admin:reset_claim` break-glass task (`lib/tasks/admin.rake`, `Claim.issue!(force:)` / `Claim.perform!` force path: extra super_admin instead of failing; audits `system.reset_claim`) — the Overview checklist already points at this command, so it must land before Slice 12; (2) administrators page under Operations (list/disable — the spec's "Move Administrators into the Operations rail section" + rail-foot `username · role · assurance`).
+  BLOCKED: none. UNCERTAIN: none.
+  Next: Slice 11c — `admin:reset_claim` rake task + Claim force path (TDD the `Claim.perform!` force branch first).
+
 - 2026-10-23 11:30Z — review of Slice 11a (`2fc50287` overview + checklist + break-glass ack): fine
   except (1) "second administrator" counted ALL admins (`Admin.count`); spec says `Admin.active.count`
   — a disabled admin is not a second key → fixed + test. (2) the break-glass item did not show the

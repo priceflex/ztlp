@@ -17,8 +17,8 @@
 # endpoint exists (route + action) and is tested, and Assign owner is a
 # plain link to the user's page (no form, no fake button).
 class DevicesController < ApplicationController
-  before_action :set_device, only: %i[show revoke]
-  before_action :require_write_access, only: %i[revoke]
+  before_action :set_device, only: %i[show revoke assign_owner]
+  before_action :require_write_access, only: %i[revoke assign_owner]
 
   FILTERS = [ %w[all All], %w[enrolled Enrolled], %w[pending Pending],
               %w[revoked Revoked] ].freeze
@@ -84,6 +84,71 @@ class DevicesController < ApplicationController
     end
     redirect_to device_path(@device), alert: warning,
                 notice: "#{@device.name} revoked permanently. It can never re-enroll under this name or key."
+  end
+
+  # ------------------------------------------------- slice 8b: assign_owner
+  #
+  # Spec Slice 8: the owner select publishes the DEVICE record plus BOTH
+  # users' `devices[]` — three records in order: device, new owner user,
+  # old owner user (the new owner's devices[] must gain the device name and
+  # the old owner's must lose it; order matters only in that the DEVICE
+  # write stands before the user records are re-published).
+  # Fail-closed: if the DEVICE write is refused by the NS, NOTHING changes
+  # in the DB (the old ownership stands in the NS too). After the device
+  # write stands, the two user republishes are save-and-warn (the
+  # ownership change already happened; the 6-hourly republish retries).
+  def assign_owner
+    new_user = params[:user_id].to_s.strip
+    new_user = @device.user if new_user == @device.user&.id.to_s
+    target = new_user.blank? ? nil : @zone.users.find_by(id: new_user)
+
+    if target.nil? && !new_user.blank?
+      audit!("device.assign_owner", target: @device, status: "skipped",
+                                details: { name: @device.name, owner: new_user, reason: "unknown_user" })
+      return redirect_to device_path(@device),
+                         alert: "No such user (#{new_user})."
+    end
+
+    if target == @device.user
+      audit!("device.assign_owner", target: @device, status: "skipped",
+                                details: { name: @device.name, owner: new_user, reason: "no_change" })
+      return redirect_to device_path(@device),
+                         notice: target ? "#{target.display_name} is already the owner." : "The device has no owner."
+    end
+
+    old_user = @device.user
+    begin
+      # 1. the DEVICE record: owner field changes in the NS — this is the
+      #    security-critical write; a refusal changes nothing below.
+      Ztlp::Publisher.publish_device!(@device, admin: current_admin)
+    rescue Ztlp::NsClient::NsError => e
+      audit!("device.assign_owner", target: @device, status: "failed",
+                                 details: { name: @device.name, owner: new_user,
+                                           result: format("0x%02X %s", e.code, e.reason) })
+      return redirect_to device_path(@device),
+                         alert: format("%s was NOT reassigned: the name server refused (0x%02X %s). Nothing changed.",
+                                        @device.name, e.code, e.reason)
+    end
+
+    @device.update!(user: target)
+    audit!("device.assign_owner", target: @device, status: "ok",
+                           details: { name: @device.name,
+                                     from: old_user&.ns_name, to: target&.ns_name })
+
+    # 2 + 3. republish the two USER records so their devices[] agree.
+    # save-and-warn: the ownership already stands in the NS.
+    warnings = []
+    [ target, old_user ].compact.each do |u|
+      begin
+        Ztlp::Publisher.publish_user!(u, admin: current_admin)
+      rescue Ztlp::NsClient::NsError => e
+        warnings << format("%s's record was not republished (0x%02X %s). The 6-hourly republish will retry.",
+                           u.display_name, e.code, e.reason)
+      end
+    end
+    redirect_to device_path(@device), alert: warnings.presence,
+                notice: old_user ? "Owner changed: #{old_user.display_name} → #{target ? target.display_name : 'Unassigned'}."
+                                 : "Owner set: #{target.display_name}."
   end
 
   private

@@ -25,11 +25,12 @@
   <div class="actions">
     <a class="btn" href="<%= enrollments_path %>">Back to enrollments</a>
     <% if @enrollment.pending? && current_admin&.write_access? %>
-      <%= form_with url: revoke_enrollment_path(@enrollment), method: :post, class: "actions" do %>
-        <button type="submit" class="btn danger" data-confirm="Revoke token <%= @enrollment.code %>? It can no longer be redeemed.">Revoke token</button>
+      <%= form_with url: revoke_enrollment_path(@enrollment), method: :post, class: "actions",
+                    data: { confirm: "Revoke token #{@enrollment.code}? The panel will refuse it, but the name server still accepts it until it expires or is used (ZTLP tokens cannot be revoked individually; rotating the zone enrollment secret kills every outstanding token)." } do %>
+        <button type="submit" class="btn danger">Revoke token</button>
       <% end %>
     <% elsif @enrollment.status == "revoked" %>
-      <span class="sub">Revoked &mdash; this token can no longer be redeemed.</span>
+      <span class="sub">Revoked in the panel. The name server still accepts it until it expires or is used.</span>
     <% end %>
   </div>
 </div>

@@ -107,8 +107,11 @@ class ApplicationController < ActionController::Base
     @zone ||= Zone.primary
   end
 
-  def audit!(action, target: nil, status: "ok", **details)
-    AuditLog.record!(action, admin: current_admin, target: target, status: status, details: details,
+  # Accepts both styles: audit!(..., details: { a: 1 }) and audit!(..., a: 1). Both land at the TOP
+  # level of the row's details (a `details:` kwarg used to be nested under details.details).
+  def audit!(action, target: nil, status: "ok", details: nil, **extra)
+    payload = (details || {}).to_h.merge(extra)
+    AuditLog.record!(action, admin: current_admin, target: target, status: status, details: payload,
                              ip: request.remote_ip)
   end
 end

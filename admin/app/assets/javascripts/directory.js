@@ -258,8 +258,19 @@
     return panel
   }
 
+  // confirmTextFor(form, submitter) — pure: the confirm prompt for a submit, from data-confirm on
+  // the submit button (wins) or on the form; null when neither carries non-blank text.
+  function confirmTextFor(form, submitter) {
+    for (const el of [submitter, form]) {
+      const t = el && el.getAttribute ? el.getAttribute('data-confirm') : null
+      if (shouldConfirm(t)) return t
+    }
+    return null
+  }
+
   const api = {
     THEME_KEY: THEME_KEY,
+    confirmTextFor: confirmTextFor,
     ruleSubjectView: ruleSubjectView,
     ruleOptions: ruleOptions,
     nextTheme: nextTheme,
@@ -355,8 +366,8 @@
   function onFormSubmit(ev) {
     const form = ev.target
     if (!form || !form.getAttribute) return
-    const text = form.getAttribute('data-confirm')
-    if (shouldConfirm(text)) {
+    const text = confirmTextFor(form, ev.submitter)
+    if (text) {
       const ok = window.confirm(text)
       if (!ok) ev.preventDefault()
     }
@@ -597,7 +608,7 @@
     })
 
     document.addEventListener('submit', function (ev) {
-      if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-confirm')) onFormSubmit(ev)
+      if (ev.target && ev.target.getAttribute) onFormSubmit(ev) // form OR submitter data-confirm
       if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-testid') && ev.target.getAttribute('data-testid') === 'test-access-form') onTestAccessSubmit(ev)
     })
 

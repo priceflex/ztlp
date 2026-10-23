@@ -381,3 +381,15 @@ test('isAutoSubmitTarget: true only for a control with the attribute', () => {
   assert.equal(Z.isAutoSubmitTarget({}), false)
 })
 
+// data-confirm may sit on the FORM or on the SUBMIT BUTTON (users/devices permanent revoke put it on
+// the button, which the old handler ignored -> irreversible actions fired without a prompt).
+test('confirmTextFor: the submitter button wins, then the form, else null', () => {
+  const el = (v) => ({ getAttribute: (n) => (n === 'data-confirm' ? v : null) })
+  const f = window.ZtlpDirectory.confirmTextFor
+  assert.equal(f(el('form text'), el('button text')), 'button text')
+  assert.equal(f(el('form text'), el(null)), 'form text')
+  assert.equal(f(el(null), el('button text')), 'button text')
+  assert.equal(f(el(null), null), null)
+  assert.equal(f(el('  '), el('')), null)
+})
+

@@ -199,4 +199,25 @@ class EnrollmentsControllerTest < ActionDispatch::IntegrationTest
     assert_response :forbidden
     assert_equal "pending", @token2.reload.status
   end
+
+  # The audit helper takes **details; a `details: {}` kwarg used to land under details.details.
+  test "revoke audit stores the code at the top level of details (no double nesting)" do
+    post "/enrollments/#{@token2.id}/revoke"
+    row = AuditLog.where(action: "enrollment.revoke").last
+    assert_equal @token2.code, row.details["code"], row.details.inspect
+    refute row.details.key?("details"), row.details.inspect
+  end
+
+  # Today a device enrolls straight against the NS (ztlp setup --token -> NS process_enroll), which
+  # validates the MAC/expiry/uses only: a panel revoke cannot stop that. Say so, never overclaim.
+  test "revoke tells the truth about the name server" do
+    get "/enrollments/#{@token2.id}"
+    assert_select "form[action=?][data-confirm]", "/enrollments/#{@token2.id}/revoke" do |forms|
+      assert_match(/name server still accepts it until it expires/i, forms.first["data-confirm"])
+    end
+    refute_match(/can no longer be redeemed/i, response.body)
+    post "/enrollments/#{@token2.id}/revoke"
+    follow_redirect!
+    assert_select "[data-toast]", /name server still accepts it until it expires/i
+  end
 end

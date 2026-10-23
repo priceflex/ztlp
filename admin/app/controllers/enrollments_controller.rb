@@ -67,6 +67,8 @@ class EnrollmentsController < ApplicationController
     @enrollment.update!(status: "revoked", revoked_at: Time.current)
     audit!("enrollment.revoke", target: @enrollment, status: "ok",
                                details: { code: @enrollment.code })
-    redirect_to enrollments_path, notice: "Token #{@enrollment.code} revoked."
+    redirect_to enrollments_path,
+                notice: "Token #{@enrollment.code} revoked in the panel. The name server still accepts it until it " \
+                        "expires or is used; rotate the zone enrollment secret to kill every outstanding token."
   end
 end

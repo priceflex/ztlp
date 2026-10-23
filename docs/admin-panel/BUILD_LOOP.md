@@ -534,6 +534,20 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 08:55Z — **review of Slice 10b-1** (`5aa970e8` enrollments list/new/show/revoke). Fixes:
+  (1) **Revoke overclaimed** ("can no longer be redeemed"). Devices enroll today via `ztlp setup --token`
+  → NS `process_enroll`, which checks only MAC/expiry/uses — the NS has NO per-token revocation, so a
+  panel revoke cannot stop it. Confirm text, status line and toast now say: the panel refuses it, the NS
+  still accepts it until it expires or is used; rotating the zone enrollment secret kills every
+  outstanding token. (10b-2: keep default expiry 1h, and the redeem API MUST refuse revoked tokens.)
+  (2) **Confirmations never fired on users/devices PERMANENT revoke**: `data-confirm` sat on the
+  <button> but directory.js only read it from the form → irreversible actions with no prompt in a real
+  browser. directory.js `confirmTextFor(form, ev.submitter)` (button wins, then form) + node test; the
+  submit listener now runs for every form. (3) **`audit!` double nesting everywhere** — the helper took
+  `**details`, so every `audit!(…, details: {…})` (users, groups, applications, enrollments) stored
+  details.details. Helper now takes `details:` + `**extra` and merges at the top level; test added.
+  ci-admin 456 runs, node 29/29, all gates passed.
+
 - 2026-10-23 08:36Z — **Slice 10b sub-slice 1 DONE (enrollments page: list + mint form + token detail + revoke)** (cron tick). Commit `5aa970e8`.
   - New `app/controllers/enrollments_controller.rb`: `GET /enrollments` (status filter all/pending/redeemed/expired/revoked, honest empty state, a warning when the zone enrollment secret is unset), `GET /enrollments/new` (the mint form), `GET /enrollments/:id` (token detail + revoke affordance for a pending token), `POST /enrollments/:id/revoke` (flip a pending token to revoked; audit `enrollment.revoke`; 403 for read_only). The mint (POST /enrollments) + show-once result page are sub-slice 2.
   - New views `app/views/enrollments/{index,new,show}.html.erb`: index = the mock's table (code/kind/user/device/expiry/status/created) + segmented status filter + an enrollment-secret warning; new = the mint form (user pick, optional device name, expiry-in-hours number input 1h-default/24h-max, embed-relay-secret checkbox default-on with guardrail text); show = the token facts + a revoke affordance for a pending token (none on redeemed/expired/revoked). All server-rendered + ERB-escaped, no inline script/style (the no-inline site test covers /enrollments + /enrollments/new).

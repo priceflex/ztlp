@@ -8,6 +8,8 @@
 # is the source of truth: an NS failure never 500s after the save, it is a
 # warning toast and the 6-hourly republish retries. Destroy is blocked while
 # any policy rule references the group and for the default `admins` group.
+# Slice 9a seam: index "Applications" column + show "Policies" panel are
+# computed from policy_rules (Ztlp::PolicyRenderer.apps_for_group).
 class GroupsController < ApplicationController
   before_action :set_group, only: %i[show edit update destroy add_member remove_member]
   before_action :require_write_access, only: %i[new create edit update destroy add_member remove_member]
@@ -18,11 +20,13 @@ class GroupsController < ApplicationController
 
   def index
     @groups = @zone.groups.includes(:users).order(:name)
+    @group_refs = group_refs_by_ns_name
   end
 
   def show
     @members = @group.users.includes(:devices).order(:username)
     @candidates = @zone.users.where.not(id: @group.users.select(:id)).order(:username)
+    @referencing = @zone.gateways.flat_map { |gw| Ztlp::PolicyRenderer.apps_for_group(gw, @group) }
     render layout: false if drawer_request?
   end
 
@@ -125,6 +129,28 @@ class GroupsController < ApplicationController
   end
 
   private
+
+  # { ns_name => [Application, ...] } for every `group:` policy rule in the
+  # zone's gateways. A rule whose group row was deleted still shows (stale but
+  # honest — the ns_name is pinned in subject_value at rule-create time).
+  def group_refs_by_ns_name
+    refs = Hash.new { |h, k| h[k] = [] }
+    @zone.gateways.each do |gw|
+      refs.merge!(group_refs_for_gateway(gw))
+    end
+    refs
+  end
+
+  def group_refs_for_gateway(gateway)
+    app_ids = gateway.applications.pluck(:id)
+    refs = {}
+    PolicyRule.where(subject_type: "group", application_id: app_ids).each do |rule|
+      refs[rule.subject_value] = Array(refs[rule.subject_value])
+      app = rule.application
+      refs[rule.subject_value] << app unless refs[rule.subject_value].include?(app)
+    end
+    refs
+  end
 
   # 6b rule: the DB save stands; an NS failure is a warning, never a 500.
   def publish_group!(group)

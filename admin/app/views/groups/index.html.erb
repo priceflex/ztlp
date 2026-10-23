@@ -14,7 +14,7 @@
             <div class="sub mono"><%= g.ns_name %></div></div></div></td>
           <td><span class="sub"><%= g.description.presence || "—" %></span></td>
           <td class="nowrap row-members"><%= g.users.count %></td>
-          <td class="nowrap"><span class="sub">0</span></td>
+          <td class="nowrap row-apps"><%= @group_refs[g.ns_name]&.size || 0 %></td>
         </tr>
       <% end %>
       <% if @groups.empty? %><tr class="empty"><td colspan="4">No groups yet. Add a group to start organizing access.</td></tr><% end %>

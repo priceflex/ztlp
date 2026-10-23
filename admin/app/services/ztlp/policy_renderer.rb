@@ -26,6 +26,16 @@ module Ztlp
       gateway.kind == "elixir" ? render_elixir(gateway, apps) : render_toml(gateway, apps)
     end
 
+    # Applications (all of the gateway's) that carry a `group:` rule pointing at
+    # `group` — regardless of the application's enabled state, because a disabled
+    # app's rule is still stored and re-appears if it is re-enabled. Powers the
+    # Groups directory's "Applications referencing this group" (7a placeholder) and
+    # the pre-destroy guard on the group page.
+    def self.apps_for_group(gateway, group)
+      rule_app_ids = PolicyRule.where(subject_type: "group", subject_value: group.ns_name).select(:application_id)
+      gateway.applications.where(id: rule_app_ids).order(:name).to_a
+    end
+
     class << self
       private
 

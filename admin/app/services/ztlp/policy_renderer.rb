@@ -45,12 +45,20 @@ module Ztlp
         all.partition { |l| l.match?(SAFE_LITERAL) }
       end
 
+      # Free text never reaches a rendered line unless it matches the strict format: a newline in
+      # a "# comment" would start a real line the line-based Rust parser reads.
       def forward_flag(app)
-        app.backend.present? ? "--forward #{app.name}:#{app.backend.to_s.sub(%r{\Ahttps?://}, "")}" : nil
+        return nil unless app.backend.to_s.match?(Application::BACKEND_FORMAT)
+
+        "--forward #{app.name}:#{app.backend.to_s.sub(%r{\Ahttps?://}, "")}"
+      end
+
+      def label(gateway)
+        gateway.name.to_s.match?(SAFE_SERVICE) ? gateway.name : "(unsafe name)"
       end
 
       def render_toml(gateway, apps)
-        lines = [ "# policy.toml for gateway #{gateway.name} (ztlp listen --policy)",
+        lines = [ "# policy.toml for gateway #{label(gateway)} (ztlp listen --policy)",
                   "# Rule changes need a gateway restart; group membership changes are live.",
                   "default = \"deny\"" ]
         apps.each do |app|
@@ -80,7 +88,7 @@ module Ztlp
           omitted.each { notes << "# OMITTED unsafe rule literal (fix the rule) on #{app.name}" }
           notes << "# #{app.name}: no rules (denied)" if safe.empty?
         end
-        [ "# Elixir gateway #{gateway.name}: set in its environment, then restart it.",
+        [ "# Elixir gateway #{label(gateway)}: set in its environment, then restart it.",
           *notes,
           "ZTLP_GATEWAY_POLICIES=#{entries.join(",")}" ].join("\n") + "\n"
       end

@@ -103,7 +103,7 @@ class ApplicationsControllerTest < ActionDispatch::IntegrationTest
     assert_includes body, "eng.groups.test.ztlp"
 
     # rendered policy = the gateway's TOML document from the renderer
-    assert_includes body, 'default = "deny"'
+    assert_select "pre.code code", text: /default = "deny"/ # decoded text, never raw markup
     assert_includes body, "Rule changes need a gateway restart"
     assert_includes body, "membership changes are live"
   end
@@ -112,7 +112,7 @@ class ApplicationsControllerTest < ActionDispatch::IntegrationTest
     get application_path(@app), headers: { "X-Drawer" => "1" }
     assert_response :success
     assert_includes response.body, "comms-blitz"
-    assert_includes response.body, "default = \"deny\""
+    assert_select "pre.code code", text: /default = "deny"/
     # drawer fragments do not carry the app layout chrome
     assert_not_includes response.body, '<div class="rail"'
   end
@@ -141,5 +141,13 @@ class ApplicationsControllerTest < ActionDispatch::IntegrationTest
     delete logout_path
     get applications_path
     assert_redirected_to login_path
+  end
+
+  test "the rendered policy is HTML-escaped (operator text is never markup)" do
+    @gw.update_column(:name, "gw<b>x</b>")
+    get application_path(@app)
+    assert_response :success
+    assert_select "pre.code b", false
+    assert_includes response.body, "gw&lt;b&gt;x&lt;/b&gt;"
   end
 end

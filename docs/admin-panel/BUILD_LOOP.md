@@ -534,6 +534,18 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 03:05Z — **review of Slice 9b-2** (`4344c3bc` Applications index/show). SECURITY fixes:
+  (1) **policy-line injection** — `Application#backend` had no validation and the renderer interpolated
+  it into a `# --forward …` comment; a newline (`10.0.0.5:80\nallow = ["*"]`) started a REAL line the
+  line-based Rust parser reads → allow-everyone. Now: `Application::BACKEND_FORMAT` (host:port, optional
+  http(s)://, [IPv6]) model validation, AND the renderer only interpolates a backend matching it and a
+  gateway name matching SAFE_SERVICE (defence in depth; renderer test uses update_column to bypass the
+  model). (2) **stored XSS** — show rendered the policy with `.html_safe`; removed. Two tick tests only
+  passed BECAUSE of html_safe (raw `default = "deny"` in body) → now `assert_select "pre.code code",
+  text:`. New tests RED → GREEN. ci-admin: 335 runs, all gates passed.
+  **RULE: no `.html_safe`/`raw` on anything containing DB text; any free-text field that reaches a
+  rendered gateway policy/env line needs a strict format validation AND a renderer-side check.**
+
 - 2026-10-23 02:50Z — **Slice 9b sub-slice 2 DONE (Applications index + show/drawer, read side)** (cron tick). Commit `4344c3bc`.
   - `config/routes.rb`: `resources :applications, only: %i[index show]`.
   - `app/controllers/applications_controller.rb` (read-only, no Publisher):

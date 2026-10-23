@@ -146,4 +146,15 @@ class PolicyRendererTest < ActiveSupport::TestCase
                  elixir_parse(line))
     refute_includes out, "vault"
   end
+
+  # A newline in a free-text field interpolated into a comment would start a REAL line the
+  # line-based Rust parser reads (here: allow everyone). Anything unsafe must never be emitted.
+  test "a backend with a newline cannot inject an allow line" do
+    @app1.update_column(:backend, "10.0.0.5:80\nallow = [\"*\"]")
+    @app1.policy_rules.create!(subject_type: "role", subject_value: "ops")
+    out = Ztlp::PolicyRenderer.render(@gw)
+    _d, rules = RustPolicyPort.parse(out)
+    assert_equal [ "role:ops" ], rules["comms"]
+    refute_match(/^allow = \["\*"\]/, out)
+  end
 end

@@ -37,7 +37,7 @@
 
   <div class="panel">
     <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= @application.gateway.kind %></span></div>
-    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@application.gateway).html_safe %></code></pre>
+    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@application.gateway) %></code></pre>
     <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %></span> and restart the gateway to apply it.</p>
   </div>
 </div>

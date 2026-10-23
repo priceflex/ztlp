@@ -3,12 +3,57 @@
   <div><h1>Overview</h1><p class="lede">Directory status for <%= @zone&.name || "this zone" %>.</p></div>
 </div>
 <div class="tally">
-  <a class="tally-item" href="<%= admins_path %>"><div class="tally-n"><%= @admins.count %></div><div class="tally-l">Administrators</div><div class="tally-s">who can sign in to this panel</div></a>
-  <a class="tally-item" href="/zone"><div class="tally-n tally-n--text"><span class="mono"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "not configured") %></span></div><div class="tally-l">Zone</div><div class="tally-s">NS <%= @zone&.ns_addr || ENV["ZTLP_NS_ADDR"] %></div></a>
-  <div class="tally-item"><div class="tally-n"><%= @zone&.authority_configured? ? "Yes" : "No" %></div><div class="tally-l">Zone authority</div><div class="tally-s"><%= @zone&.authority_configured? ? "imported — records can be published" : "not imported (users/groups cannot be published yet)" %></div></div>
-  <div class="tally-item"><div class="tally-n">v<%= ZtlpAdmin::VERSION %></div><div class="tally-l">Build</div><div class="tally-s">slice 1: claim, key login, admins, audit</div></div>
+  <a class="tally-item" href="<%= users_path %>"><div class="tally-n"><%= @tally["users"] %></div><div class="tally-l">Users</div><div class="tally-s">directory identities</div></a>
+  <a class="tally-item" href="/devices"><div class="tally-n"><%= @tally["devices"] %></div><div class="tally-l">Devices</div><div class="tally-s">enrolled + pending</div></a>
+  <a class="tally-item" href="<%= groups_path %>"><div class="tally-n"><%= @tally["groups"] %></div><div class="tally-l">Groups</div><div class="tally-s">shared subjects for policy</div></a>
+  <a class="tally-item" href="/apps"><div class="tally-n"><%= @tally["applications"] %></div><div class="tally-l">Applications</div><div class="tally-s">behind the gateways</div></a>
 </div>
 <div class="stack">
+  <% if @checklist_open %>
+    <div class="panel" id="setup-checklist">
+      <div class="panel-h"><h2>Setup checklist</h2><span class="sub">hidden once every item is done</span></div>
+      <ul class="checklist">
+        <% @checklist.each do |item| %>
+          <li class="checklist-item<%= item["done"] ? " done" : "" %>">
+            <span class="checkmark" aria-hidden="true"><%= item["done"] ? "check" : "" %></span>
+            <div>
+              <div class="checklist-label"><%= item["label"] %></div>
+              <div class="checklist-sub sub"><%= item["sub"] %></div>
+            </div>
+            <% if item["label"].include?("break-glass") && current_admin&.super_admin? %>
+              <%= form_with url: setup_acknowledge_breakglass_path, method: :post do %>
+                <button type="submit" class="btn sm" data-confirm="Confirm you can SSH to this host right now and would run admin:reset_claim if every administrator key is lost.">Acknowledge</button>
+              <% end %>
+            <% end %>
+          </li>
+        <% end %>
+      </ul>
+    </div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-h"><h2>Infrastructure</h2><a class="link" href="<%= zone_path %>">Name server</a></div>
+    <div class="infra-grid">
+      <div class="infra-row">
+        <span class="dot <%= (@drift && @drift["status"] == "ok") ? "ok" : "" %>"></span>
+        <div>
+          <div>Name server <%= @zone&.ns_addr %></div>
+          <div class="sub"><% if @drift %>
+            last reconcile <%= @drift["checked_at"] %> &middot; status <%= @drift["status"] %>
+            <% else %>never reconciled (the 30-minute job has not run yet, or authority is not imported)<% end %></div>
+        </div>
+      </div>
+      <% @gateways.each do |gw| %>
+        <div class="infra-row">
+          <span class="dot <%= gw.status == "online" ? "ok" : (gw.status == "stale" ? "bad" : "") %>"></span>
+          <div>
+            <div><span class="mono"><%= gw.name %></span> &middot; <%= gw.kind %></div>
+            <div class="sub">status <%= gw.status %><% if gw.host_note.present? %> &middot; <%= gw.host_note %><% end %></div>
+          </div>
+        </div>
+      <% end %>
+      <% if @gateways.empty? %><div class="sub">No gateways registered yet (Slice 9c: add one from the Applications page).</div><% end %>
+    </div>
+  </div>
   <div class="panel">
     <div class="panel-h"><h2>Recent activity</h2><a class="link" href="<%= audit_logs_path %>">Full audit log</a></div>
     <%= render "audit_logs/table", logs: @recent_audit %>

@@ -75,6 +75,10 @@ Rails.application.routes.draw do
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile
 
+  # Slice 11a: Setup checklist break-glass acknowledgement (super_admin only).
+  post "setup/acknowledge_breakglass", to: "setup#acknowledge_breakglass",
+       as: :setup_acknowledge_breakglass
+
   # Slice 10b sub-slice 3: the SIGNED machine-to-machine redeem endpoint
   # (spec §7.4). Called over the client's ZTLP tunnel, NOT a browser, so it
   # extends ActionController::Base directly — no tunnel bundle, no admin

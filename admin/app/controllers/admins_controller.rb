@@ -14,6 +14,8 @@ class AdminsController < ApplicationController
   def toggle
     @admin = set_admin
     want = params[:disabled] == "1"
+    # Same rule as update: a sole super_admin disabling themselves would lock the panel.
+    return redirect_to(admins_path, alert: "You cannot disable your own account.") if @admin == current_admin
     if @admin.disabled? != want
       @admin.update!(disabled_at: want ? Time.current : nil)
       audit!("admin.updated", target: @admin,

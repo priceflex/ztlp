@@ -533,6 +533,20 @@ All true, each verified by a command or a real click and recorded in STATUS with
 ---
 
 ## STATUS (newest first; the next tick reads this)
+
+- 2026-10-23 12:40Z — review of Slice 11d (`b663b11d` admin toggle + rail identity): the index hid the
+  toggle with `@admin != a`, but @admin is nil on index → every super_admin got "Disable" on their OWN
+  row, and `toggle` lacked update's self-guard → a sole super_admin could lock the panel in one click.
+  Fixed view (`a != current_admin`) + controller guard; tests (no own-row toggle, POST refused, still
+  signed in). Disabled sessions already end (current_admin uses Admin.active). 541 runs, all gates
+  passed. **Slice 11 DONE.**
+  **Slice 12 reminders for the tick:** LOCAL docker build + smoke ONLY (§6: no prod SSH from a tick
+  without the steps below being operator-cleared; never recreate the prod gateway container; never push
+  tags). Smoke must check: jobs container logs 3 recurring tasks; `ZTLP_REQUIRE_GATEWAY=0` locally;
+  a minted token → test NS `process_enroll` 0x08 0x00 (method in the 08:25Z entry); break-glass
+  reset_claim → /claim works over HTTP. Then mark BLOCKED-on-operator: identity.json on the NS box,
+  prod .env (ZTLP_ZONE=trs.ztlp, ZTLP_NS_ADDR, public relay addrs, NS enrollment secret == panel's),
+  gateway recreate approval, Chrome click-through of http://admin.trs.ztlp/.
 - 2026-10-23 12:14Z — **Slice 11d DONE (administrators page: inline disable/enable + rail-foot identity)** (cron tick). Commit `b663b11d`.
   - `POST /admins/:id/toggle` (`AdminsController#toggle`, super_admin only — the existing `require_super_admin` before_action covers it): inline disable/enable from the list. `disabled="1"`/`"0"` body; no-op when already in the requested state (no duplicate `admin.updated` audit row — pinned); the edit form stays as the fallback path (its checkbox). A disabled admin cannot sign in (challenge uses `Admin.active` + the sessions gate — pinned through a full signed challenge→verify round-trip → 401). The index row gains a Disable/Re-enable button in a `form_with` (hidden `disabled` = the opposite state), rendered ONLY for super_admins and never for the current admin's own row (cannot disable self — matches the edit-form self-guard).
   - Rail-foot identity (`#rail-me`): the spec's `username · role · assurance` — `current_admin.username · role.humanize`, plus for tunnel sessions `· via ZTLP <device> · <assurance label>` where the label is re-resolved from the panel's own `Device` record for `session[:device]` (the DEVICE record is the assurance source of truth, G1/G6) with the header assurance as fallback. Rendered for signed-in users; no-JS safe (plain text, no inline scripts/styles).

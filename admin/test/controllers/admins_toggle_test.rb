@@ -80,4 +80,24 @@ class AdminsToggleTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_not_includes response.body, "data-admin-toggle"
   end
+
+  # A sole super_admin disabling themselves locks the panel (break-glass only). update refuses
+  # it; toggle must too, and the index must not offer the button on your own row.
+  test "you cannot disable yourself via toggle (and get no toggle on your own row)" do
+    get admins_path
+    assert_select "[data-admin-toggle=?]", @admin.id.to_s, count: 0
+    post toggle_admin_path(@admin), params: { disabled: "1" }
+    assert_redirected_to admins_path
+    refute @admin.reload.disabled?
+    follow_redirect!
+    assert_response :success, "still signed in"
+  end
+
+  test "a disabled admin's existing session ends on the next request" do
+    _s, pub = Ztlp::Ed25519.generate
+    dana = Admin.create!(username: "dana2", display_name: "Dana", role: "admin", pubkey_hex: pub)
+    post toggle_admin_path(dana), params: { disabled: "1" }
+    assert dana.reload.disabled?
+    refute Admin.active.exists?(id: dana.id)
+  end
 end

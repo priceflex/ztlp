@@ -534,6 +534,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 12:50Z — **Slice 12 prep: enrollment roundtrip test skeleton** (cron tick). Commit `85629b3c`.
+  - New `test/integration/enrollment_ns_roundtrip_test.rb` (3 tests, ZTLP_TEST_NS-gated): the 08:25Z STATUS entry proved by hand that a Ruby-minted v1 token (Ztlp::TokenMinter) round-trips through the NS's own `ZtlpNs.Enrollment.process_enroll/1` (0x08 0x00 success, 0x08 0x03 on a flipped MAC, 0x08 0x02 on replay) and asked to pin this as a ZTLP_TEST_NS-gated integration test. This commit adds the test file with the three test cases and the `process_enroll` helper.
+  - **BLOCKED on the NS release's restricted `rpc` eval mode**: the helper cannot hex-decode the token/secret in the NS process. The `rpc` eval environment (probed extensively this tick) cannot parse Erlang `->` clauses (function definitions), cannot call `List.to_string/2` (the `List` module is shadowed by Erlang's `binary` BIF), and cannot `Code.compile_file`. The `escript` path fails with `cannot get bootfile` (no standalone Erlang runtime in the release image). The `erlc`/`erl` binaries exist at `/app/erts-14.2.5/bin/` but cannot boot without a boot file.
+  - The test skips cleanly when `ZTLP_TEST_NS` is unset (hermetic CI, no NS container needed). When set, it will exercise the real wire once the `rpc` helper is fixed — either by finding a working hex-decode path in the restricted eval, or by adding a proper escript/elixir entry point to the NS release image.
+  - The core proof (0x08 0x00 / 0x03 / 0x02) is already established by the 08:25Z hand-recipe; this test is the automated pin.
+  PENDING: Slice 12 (deploy) — the LAST slice; requires the local prod-compose smoke first, then the operator-approved prod ship (web+jobs only). The enrollment roundtrip test skeleton is committed but BLOCKED on the NS `rpc` eval limitation.
+  BLOCKED: the `process_enroll` helper in `enrollment_ns_roundtrip_test.rb` cannot hex-decode in the NS's restricted `rpc` eval environment. Options: (a) find a working hex-decode path in the restricted eval (e.g. `:crypto` hash trick, `Enum.map` with a pre-computed lookup table), (b) add a proper escript/elixir entry point to the NS release image (requires a ZTLP release), (c) accept the 08:25Z hand-recipe as the proof and skip the automated pin.
+  UNCERTAIN: none.
+  Next: Slice 12 — local smoke (docker compose -p admintest up -d, /up, claim/login probe) then prod deploy after operator OK. The enrollment roundtrip test skeleton is committed but BLOCKED on the NS `rpc` eval limitation.
+
 - 2026-10-23 12:40Z — review of Slice 11d (`b663b11d` admin toggle + rail identity): the index hid the
   toggle with `@admin != a`, but @admin is nil on index → every super_admin got "Disable" on their OWN
   row, and `toggle` lacked update's self-guard → a sole super_admin could lock the panel in one click.

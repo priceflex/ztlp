@@ -21,13 +21,17 @@
 require "test_helper"
 
 class ApiEnrollmentConfirmTest < ActionDispatch::IntegrationTest
-  CONFIRM_URL = "/enrollment/confirm"
+  CONFIRM_URL = "/api/enrollment/confirm" # spec §7.4
 
   # The legacy client identifies the token by the human CODE (that is all a
   # form body has — the token_id is inside the token itself, and the code is
   # the human-facing half of it, like the signed redeem path's audit shape).
-  def post_confirm(code, **extra)
-    post CONFIRM_URL, params: { code: code, device_name: "old-pc" }.merge(extra)
+  # Spec F10 legacy callback body: token_id=&node_id=&name=&pubkey_hex= (form POST). Tests name the
+  # enrollment by its human code for readability; the WIRE carries the secret token_id.
+  def post_confirm(code, device_name: "old-pc", **extra)
+    token_id = code && (Enrollment.find_by(code: code)&.token_id || "00" * 16) # unknown -> well-formed, absent
+    post CONFIRM_URL, params: { token_id: token_id, name: device_name,
+                                node_id: SecureRandom.hex(16), pubkey_hex: SecureRandom.hex(32) }.merge(extra)
   end
 
   setup do
@@ -123,7 +127,7 @@ class ApiEnrollmentConfirmTest < ActionDispatch::IntegrationTest
     post_confirm(nil)
     assert_response :unprocessable_entity
     assert_equal before, AuditLog.count
-    post CONFIRM_URL, params: { code: "   " }
+    post CONFIRM_URL, params: { token_id: "   ", name: "old-pc" }
     assert_response :unprocessable_entity
     assert_equal before, AuditLog.count
     assert_equal "pending", @token.reload.status
@@ -171,5 +175,25 @@ class ApiEnrollmentConfirmTest < ActionDispatch::IntegrationTest
     assert_response :success
   ensure
     ActionController::Base.allow_forgery_protection = false
+  end
+
+  # The 8-char human code is shown to every admin and written to the audit log: it must not be a
+  # credential. Only the secret token_id works.
+  test "the human code alone does not confirm anything" do
+    post CONFIRM_URL, params: { code: "KJKQ5PNM", name: "old-pc" }
+    assert_includes [ 404, 422 ], response.status
+    assert_equal "pending", @token.reload.status
+  end
+
+  test "a fully qualified legacy name is accepted as the label" do
+    post_confirm("KJKQ5PNM", device_name: "old-pc.#{@zone.name}")
+    assert_response :success, response.body
+    assert @zone.devices.exists?(name: "old-pc", status: "pending")
+  end
+
+  test "the rack-attack api throttle covers the legacy confirm path" do
+    req = Rack::Attack::Request.new(Rack::MockRequest.env_for(CONFIRM_URL, method: "POST", "REMOTE_ADDR" => "1.2.3.4"))
+    throttle = Rack::Attack.throttles["api/ip"]
+    assert_equal "1.2.3.4", throttle.block.call(req)
   end
 end

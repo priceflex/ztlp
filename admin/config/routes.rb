@@ -91,7 +91,7 @@ Rails.application.routes.draw do
   # device as `pending` for an administrator to adopt. Machine-to-machine:
   # extends ActionController::Base directly; rate-limited by the same
   # rack-attack `api/ip` throttle as the signed redeem path.
-  post "enrollment/confirm", to: "api/enrollment_legacy#confirm", as: :enrollment_confirm
+  post "api/enrollment/confirm", to: "api/enrollment_legacy#confirm", as: :enrollment_confirm # spec §7.4
 
   root "dashboard#show"
 end

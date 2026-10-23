@@ -26,14 +26,18 @@ class Api::EnrollmentLegacyController < ActionController::Base
   # The legacy form identifies the token by the human CODE (the token_id is
   # inside the token itself; the code is the human-facing half of it).
   def confirm
-    code = params[:code].to_s.strip
-    return render_unprocessable("Missing code.") if code.empty?
+    # Spec F10 legacy callback body: token_id=&node_id=&name=&pubkey_hex=. The secret token_id is the
+    # capability (the 8-char human code is shown to admins and in the audit log, so it never is).
+    token_id = params[:token_id].to_s.strip
+    return render_unprocessable("Missing token_id.") if token_id.empty?
 
-    token = Enrollment.find_by(code: code)
+    token = Enrollment.find_by(token_id: token_id)
     return render_404 if token.nil?
 
-    device_name = params[:device_name].to_s.strip.downcase
-    return render_unprocessable("Missing device_name.") if device_name.empty?
+    # "name" is the device NS name ("old-pc.<zone>") or the bare label. node_id/pubkey_hex are
+    # unverified here (no signature), so they are NOT stored: the device stays pending for adoption.
+    device_name = params[:name].to_s.strip.downcase.delete_suffix(".#{token.zone.name}")
+    return render_unprocessable("Missing name.") if device_name.empty?
     return render_unprocessable("Device name is not a valid label.") unless device_name.match?(Admin::USERNAME)
     if token.device_name.present? && device_name != token.device_name.to_s.downcase
       return render_unprocessable("Device name does not match this enrollment.")
@@ -76,7 +80,7 @@ class Api::EnrollmentLegacyController < ActionController::Base
     render json: @reply
   rescue NameConflict => e
     AuditLog.record!("enrollment.confirm", ip: request.remote_ip, status: "denied",
-                     details: { code: params[:code].to_s, device: params[:device_name].to_s,
+                     details: { code: token&.code, device: params[:name].to_s,
                                 reason: e.message })
     render json: { "status" => "error", "error" => e.message }, status: :conflict
   rescue ActiveRecord::RecordNotSaved, ActiveRecord::RecordInvalid

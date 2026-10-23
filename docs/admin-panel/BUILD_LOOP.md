@@ -534,6 +534,16 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-23 10:20Z — **review of Slice 10b-4** (`8b4a8588` legacy confirm). Good bones (CSRF skipped,
+  takeover guard, lock, pending-only). Fixes: (1) the request body was invented (`code`, `device_name`);
+  spec F10's legacy callback sends `token_id=&node_id=&name=&pubkey_hex=` → now that shape, so a real
+  legacy client can reach it. (2) the 8-char HUMAN code was the credential — it is shown to every admin
+  and written to the audit log → lookup by the secret `token_id` only; test that `code` alone does nothing.
+  (3) path `/enrollment/confirm` → spec `/api/enrollment/confirm`; rack-attack throttle path updated +
+  test that the `api/ip` throttle covers it. Name accepted as label or `<label>.<zone>`; claimed
+  node_id/pubkey are unsigned so NOT stored (device stays pending for adoption). ci-admin 502 runs, all
+  gates passed. **Slice 10 DONE.** Next: Slice 11.
+
 - 2026-10-23 10:05Z — **Slice 10b sub-slice 4 DONE (legacy `POST /enrollment/confirm` pending-adoption path)** (cron tick). Commit `8b4a8588`.
   - Spec §7.4 "Legacy clients": older clients call the token's legacy `callback_url` shape — a form POST, unauthenticated, no signed identity. New `app/controllers/api/enrollment_legacy_controller.rb` (`Api::EnrollmentLegacyController < ActionController::Base`, `skip_forgery_protection` — machine-to-machine form body, no browser CSRF token).
   - **Route**: `post "enrollment/confirm"` → `/enrollment/confirm` (NOT under `/api/` — the route file is inside a `scope module: :api` block; a literal `api/enrollment/confirm` path would produce the helper `enrollment_confirm_path` = `/api/enrollment/confirm` but the module prefix makes the controller `Api::EnrollmentLegacyController`. The spec calls it `POST /api/enrollment/confirm` but the actual legacy client path is whatever the token's `callback_url` carries — the minter's `callback_url` field is what the client uses. For the panel's own wiring, `/enrollment/confirm` is the canonical path. NOTE: the minter currently sets `callback_url` to whatever the operator passes; the slice does not yet wire the callback_url to this path — that is a follow-up.)

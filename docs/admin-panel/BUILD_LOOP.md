@@ -540,6 +540,20 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-24 05:50Z — **v0.2.0 DEPLOYED to prod** (operator "go"; cron PAUSED by operator OK). Reviewed
+  `1d5d4bc8` (callback_url in tokens): NS >= v0.35.12 skips FLAG_HAS_CALLBACK (prod NS 0.35.19); CLI
+  confirm_enrollment returns silently without token_id; live test added (`477ab9fc`, 4/4 live). Image
+  b942fb552145 built from 477ab9fc. On 44.227.148.151 ~/ztlp-admin-site: DB backup
+  `backups/ztlp_admin-pre-0.2.0-20261024T054351Z.sql.gz` (8 tables, complete) + compose copy; web+jobs
+  image bumped, `docker compose up -d --no-deps web jobs`; gateway container UNTOUCHED (same Id/start).
+  Migration CreateDirectoryTables ran; /up ok; no-tunnel `curl 127.0.0.1:8081/` → **403**; AI computer via
+  tunnel: /up 200, / 200 (no login redirect); audit `auth.login_ztlp` admin=steve 05:45:51Z.
+  **FOUND: solid_queue tables exist NOWHERE** (no schema.rb entries, no migration) → jobs container logs
+  "solid_queue not installed yet; idling" on EVERY stack; the 3 recurring tasks never ran anywhere (earlier
+  "jobs log 3 recurring tasks" smoke claims were false). Needs a migration with the solid_queue schema +
+  production queue_adapter check — operator OK pending. Also: login_ztlp audit `device`/`assurance` blank.
+  Zone trs.ztlp row created, authority NOT imported (identity.json operator item).
+
 - 2026-10-24 05:38Z — **re-verify/re-affirm tick (queue exhausted; Slice 12 prod deploy still BLOCKED-on-operator)** (cron tick). No code slice: the 05:16Z tick's explicit `Next:` was re-verify/re-affirm unless the operator supplies the prod-ship prerequisites. No operator input appeared; no new code slice exists (0-11 DONE, Slice 12 local smoke DONE). No `## COMPLETE` yet (Slice 12 prod deploy is the last unchecked §5 box and remains blocked).
   - Fresh evidence (suite + gate run ALONE; smoke `.env` vars `unset` first per the 00:04Z ENV HYGIENE NOTE): full suite `SKIP_CLAIM_BOOT=1 timeout 580 bin/rails test` → **554 runs, 2499 assertions, 0 failures, 0 errors, 10 skips** (byte-identical to the 05:16Z baseline; SUITE_EXIT=0). `bash scripts/ci-admin.sh` (standalone after the suite) → **== all gates passed** (GATE_EXIT=0; node 0 skipped / 0 todo, rubocop clean, brakeman EOL-only; the in-gate suite leg is part of the same single gate process, so no parallel-suite collision this tick).
   - §5 box 2 re-probed this tick: CDN/external-URL grep in `admin/app` (cdnjs/googleapis/unpkg/jsdelivr/`<script src="http`, excluding localhost/127.0.0.1) → NO MATCHES (APP_CLEAN); Gemfile tailwind/importmap/turbo/stimulus → NO-MATCH (GEMFILE_CLEAN). Live smoke12 stack (the operator's hands-on panel — probes read-only; web+jobs+db Up ~1h (healthy; consistent with the ~04:40Z (re)start noted 05:16Z, no tick action): `GET /up` → 200; `GET /claim` → 302 (claimed shape); `GET /` unauthenticated → 302 (login gate holds). Running test-ns containers: 0. No stray rails-test processes (orient pgrep clean).

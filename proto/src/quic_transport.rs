@@ -584,38 +584,47 @@ pub mod tokio_endpoint {
                 Err(msg) => Err(rustls::Error::General(msg)),
             }
         }
-        // Signature verification here is intentionally a no-op assertion,
-        // same as NoCertVerifier: the actual cryptographic authentication
-        // of the peer happens in the Noise_XX handshake tunneled inside
-        // this QUIC stream (see noise_stream module), not at the X.509
-        // layer. This verifier's job is narrowly to pin the leaf cert's
-        // fingerprint (verify_server_cert above), not to validate a
-        // certificate chain that doesn't exist in this self-signed,
-        // no-PKI deployment model.
+        // CertificateVerify MUST be checked against the presented leaf. The
+        // leaf cert is public (every client sees it), so the fingerprint
+        // check above proves nothing by itself: without this an on-path
+        // attacker presents the pinned cert, signs the handshake with its
+        // own key and passes. The TLS 1.3 CertificateVerify signature is the
+        // only proof the server holds the cert's private key. Noise does not
+        // cover this gap on desktop clients (it is not bound to the TLS
+        // channel and the gateway's static key is not checked there), so
+        // this check is the gateway authentication. Chain validation is
+        // still skipped on purpose: there is no PKI, trust comes from the
+        // fingerprint (pin today, NS-signed record later).
         fn verify_tls12_signature(
             &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &rustls::DigitallySignedStruct,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
         ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            rustls::crypto::verify_tls12_signature(message, cert, dss, &signature_algorithms())
         }
         fn verify_tls13_signature(
             &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &rustls::DigitallySignedStruct,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
         ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+            rustls::crypto::verify_tls13_signature(message, cert, dss, &signature_algorithms())
         }
         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-            vec![
-                rustls::SignatureScheme::RSA_PKCS1_SHA256,
-                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-                rustls::SignatureScheme::ED25519,
-            ]
+            signature_algorithms().supported_schemes()
         }
+    }
+
+    /// Signature algorithms of the process crypto provider (ring, installed
+    /// by [`ensure_crypto`]). Used to verify the server's CertificateVerify.
+    fn signature_algorithms() -> rustls::crypto::WebPkiSupportedAlgorithms {
+        ensure_crypto();
+        rustls::crypto::CryptoProvider::get_default()
+            .map(|p| p.signature_verification_algorithms)
+            .unwrap_or_else(|| {
+                rustls::crypto::ring::default_provider().signature_verification_algorithms
+            })
     }
 
     fn generate_self_signed() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
@@ -667,6 +676,8 @@ pub mod tokio_endpoint {
     fn load_or_generate_self_signed_in(
         dir: &std::path::Path,
     ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        // ServerConfig::builder() below needs a process crypto provider.
+        ensure_crypto();
         let cert_path = dir.join(QUIC_CERT_FILE);
         let key_path = dir.join(QUIC_KEY_FILE);
 
@@ -1562,6 +1573,208 @@ pub mod tokio_endpoint {
             assert_eq!(cleanup_legacy_pin_for(&tmp, "localhost", &done), 0);
             assert!(tmp.join("localhost.pin").exists());
             let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        // ── Phase 1 (NS-anchored trust plan): the TLS CertificateVerify
+        // signature must really be checked. Without it the pin proves
+        // nothing: the cert is public, so a MITM can present the pinned
+        // cert and sign the handshake with its own key.
+
+        /// Sign `msg` with an rcgen key pair through the installed rustls
+        /// provider (same code path a real QUIC server uses for
+        /// CertificateVerify). Returns the scheme and signature bytes.
+        fn sign_with(kp: &rcgen::KeyPair, msg: &[u8]) -> (rustls::SignatureScheme, Vec<u8>) {
+            ensure_crypto();
+            let provider = rustls::crypto::CryptoProvider::get_default().unwrap();
+            let key = PrivateKeyDer::Pkcs8(kp.serialize_der().into());
+            let signing_key = provider.key_provider.load_private_key(key).unwrap();
+            let signer = signing_key
+                .choose_scheme(&[rustls::SignatureScheme::ECDSA_NISTP256_SHA256])
+                .expect("rcgen default key is ECDSA P-256");
+            (signer.scheme(), signer.sign(msg).unwrap())
+        }
+
+        /// rustls keeps `DigitallySignedStruct::new` crate-private; build one
+        /// from its TLS wire form (scheme u16 | len u16 | sig), exactly as a
+        /// CertificateVerify message arrives off the network.
+        fn dss_from(
+            scheme: rustls::SignatureScheme,
+            sig: Vec<u8>,
+        ) -> rustls::DigitallySignedStruct {
+            use rustls::internal::msgs::codec::Codec;
+            let mut wire = Vec::with_capacity(4 + sig.len());
+            wire.extend_from_slice(&u16::from(scheme).to_be_bytes());
+            wire.extend_from_slice(&(sig.len() as u16).to_be_bytes());
+            wire.extend_from_slice(&sig);
+            rustls::DigitallySignedStruct::read_bytes(&wire).unwrap()
+        }
+
+        fn real_cert_and_key() -> (CertificateDer<'static>, rcgen::KeyPair) {
+            let real = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            (real.cert.der().clone(), real.key_pair)
+        }
+
+        #[test]
+        fn tls13_signature_from_a_different_key_is_rejected() {
+            let (cert, _real_key) = real_cert_and_key();
+            let attacker = rcgen::KeyPair::generate().unwrap();
+            let msg = b"tls13 transcript stand-in";
+            let (scheme, sig) = sign_with(&attacker, msg);
+            let dss = dss_from(scheme, sig);
+            let v = TofuCertVerifier::with_pin_dir("sig.example", tempfile_dir());
+            assert!(
+                v.verify_tls13_signature(msg, &cert, &dss).is_err(),
+                "a CertificateVerify signed by a key other than the cert's must be rejected"
+            );
+        }
+
+        #[test]
+        fn tls12_signature_from_a_different_key_is_rejected() {
+            let (cert, _real_key) = real_cert_and_key();
+            let attacker = rcgen::KeyPair::generate().unwrap();
+            let msg = b"tls12 transcript stand-in";
+            let (scheme, sig) = sign_with(&attacker, msg);
+            let dss = dss_from(scheme, sig);
+            let v = TofuCertVerifier::with_pin_dir("sig.example", tempfile_dir());
+            assert!(v.verify_tls12_signature(msg, &cert, &dss).is_err());
+        }
+
+        #[test]
+        fn tls13_signature_from_the_cert_key_is_accepted() {
+            let (cert, real_key) = real_cert_and_key();
+            let msg = b"tls13 transcript stand-in";
+            let (scheme, sig) = sign_with(&real_key, msg);
+            let dss = dss_from(scheme, sig);
+            let v = TofuCertVerifier::with_pin_dir("sig.example", tempfile_dir());
+            assert!(v.verify_tls13_signature(msg, &cert, &dss).is_ok());
+        }
+
+        #[test]
+        fn tls13_signature_over_a_different_message_is_rejected() {
+            let (cert, real_key) = real_cert_and_key();
+            let (scheme, sig) = sign_with(&real_key, b"what the server signed");
+            let dss = dss_from(scheme, sig);
+            let v = TofuCertVerifier::with_pin_dir("sig.example", tempfile_dir());
+            assert!(v
+                .verify_tls13_signature(b"what the client hashed", &cert, &dss)
+                .is_err());
+        }
+
+        #[test]
+        fn supported_schemes_come_from_the_provider() {
+            ensure_crypto();
+            let v = TofuCertVerifier::with_pin_dir("sig.example", tempfile_dir());
+            let schemes = v.supported_verify_schemes();
+            assert!(schemes.contains(&rustls::SignatureScheme::ECDSA_NISTP256_SHA256));
+            let provider = rustls::crypto::CryptoProvider::get_default().unwrap();
+            assert_eq!(
+                schemes,
+                provider
+                    .signature_verification_algorithms
+                    .supported_schemes()
+            );
+        }
+
+        /// Loopback server serving exactly what a gateway with
+        /// `ZTLP_QUIC_CERT_DIR=<dir>` serves (no env mutation in tests).
+        fn loopback_server(cert_dir: &std::path::Path) -> quinn::Endpoint {
+            ensure_crypto();
+            let (certs, key) = load_or_generate_self_signed_in(cert_dir);
+            let mut sc = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap();
+            sc.alpn_protocols = vec![b"ztlp-test".to_vec()];
+            let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+                quinn::crypto::rustls::QuicServerConfig::try_from(sc).unwrap(),
+            ));
+            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap()
+        }
+
+        async fn loopback_dial(
+            server: &quinn::Endpoint,
+            pin_dir: std::path::PathBuf,
+        ) -> Result<(), String> {
+            let mut cc = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::with_pin_dir(
+                    "loopback.example",
+                    pin_dir,
+                )))
+                .with_no_client_auth();
+            cc.alpn_protocols = vec![b"ztlp-test".to_vec()];
+            let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+                .map_err(|e| e.to_string())?;
+            client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(cc).unwrap(),
+            )));
+            let addr = server.local_addr().unwrap();
+            let srv = server.clone();
+            let accept = tokio::spawn(async move {
+                if let Some(inc) = srv.accept().await {
+                    let _ = inc.await;
+                }
+            });
+            let res = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client
+                    .connect(addr, "localhost")
+                    .map_err(|e| e.to_string())?,
+            )
+            .await
+            .map_err(|_| "handshake timed out".to_string())?
+            .map(|c| c.close(0u32.into(), b"done"))
+            .map_err(|e| e.to_string());
+            accept.abort();
+            client.wait_idle().await;
+            res
+        }
+
+        /// Task 1.4: with the CertificateVerify check now real, a genuine
+        /// handshake against the gateway's persisted rcgen cert must still
+        /// succeed (provider accepts rcgen's ECDSA P-256 leaf), both on first
+        /// contact and on the pinned second contact. If this fails, every
+        /// QUIC dial in the fleet would fail.
+        #[tokio::test]
+        async fn real_quic_handshake_passes_signature_check_twice() {
+            let cert_dir = tempfile_dir();
+            std::fs::create_dir_all(&cert_dir).unwrap();
+            let pin_dir = tempfile_dir();
+            let server = loopback_server(&cert_dir);
+            loopback_dial(&server, pin_dir.clone())
+                .await
+                .expect("first contact must handshake");
+            loopback_dial(&server, pin_dir.clone())
+                .await
+                .expect("pinned second contact must handshake");
+            // And a restarted gateway on the same cert dir keeps the pin.
+            drop(server);
+            let server2 = loopback_server(&cert_dir);
+            loopback_dial(&server2, pin_dir.clone())
+                .await
+                .expect("restart with persisted cert must keep working");
+            let _ = std::fs::remove_dir_all(&cert_dir);
+            let _ = std::fs::remove_dir_all(&pin_dir);
+        }
+
+        /// A gateway that comes back with a different cert is still refused
+        /// by a real handshake (legacy pin behavior unchanged in Phase 1).
+        #[tokio::test]
+        async fn real_quic_handshake_rejects_a_changed_cert() {
+            let pin_dir = tempfile_dir();
+            let dir_a = tempfile_dir();
+            let dir_b = tempfile_dir();
+            std::fs::create_dir_all(&dir_a).unwrap();
+            std::fs::create_dir_all(&dir_b).unwrap();
+            let a = loopback_server(&dir_a);
+            loopback_dial(&a, pin_dir.clone())
+                .await
+                .expect("pins cert A");
+            let b = loopback_server(&dir_b);
+            assert!(loopback_dial(&b, pin_dir.clone()).await.is_err());
+            for d in [pin_dir, dir_a, dir_b] {
+                let _ = std::fs::remove_dir_all(d);
+            }
         }
 
         fn tempfile_dir() -> std::path::PathBuf {

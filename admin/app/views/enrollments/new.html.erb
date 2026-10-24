@@ -14,7 +14,7 @@
         <select id="enrollment_user_id" name="enrollment[user_id]">
           <option value="">Device only (no user)</option>
           <% @users.each do |u| %>
-            <option value="<%= u.id %>"><%= u.display_name %> (<%= u.username %>) &middot; <%= u.status %></option>
+            <option value="<%= u.id %>"<%= " selected" if @enrollment.user_id == u.id %>><%= u.display_name %> (<%= u.username %>) &middot; <%= u.status %></option>
           <% end %>
         </select>
         <p class="hint">The redeeming device is assigned to this user. Leave empty for a headless / service device.</p>

@@ -26,4 +26,9 @@ class Zone < ApplicationRecord
   end
 
   def authority_configured? = authority_seed_ct.present?
+
+  # zone.ns_addr is the PUBLIC NS address (devices dial it; enrollment tokens embed it). The panel
+  # may reach the NS on an internal address instead (prod: ztlp-ns:23096 on a docker network):
+  # ZTLP_NS_PUBLISH_ADDR. Publishing uses this; tokens never do.
+  def ns_publish_addr = ENV["ZTLP_NS_PUBLISH_ADDR"].presence || ns_addr
 end

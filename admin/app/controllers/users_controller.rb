@@ -10,6 +10,7 @@
 # never publishes, and update publishes only for an active user. All
 # mutations require write access and audit their own action.
 class UsersController < ApplicationController
+  include EnrollmentMinting
   before_action :set_user, only: %i[show edit update revoke]
   before_action :require_write_access, only: %i[new create edit update revoke]
 
@@ -44,6 +45,8 @@ class UsersController < ApplicationController
     if @user.save
       warning = publish_if_active!(@user)
       audit!("user.create", target: @user, status: "ok", details: { username: @user.username })
+      return enroll_new_user(warning) if params.dig(:enroll, :now) == "1"
+
       redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).", alert: warning
     else
       render :new, status: :unprocessable_content
@@ -158,6 +161,22 @@ class UsersController < ApplicationController
   # create path can build it, but update explicitly drops it (immutable).
   # `status` is NOT in the allowlist: it is managed by the lifecycle actions
   # (invited on create, revoked by the permanent revoke action), never by a free-form field.
+  # "Enroll a device now" on the new-user form: mint the user's first token and land on the
+  # show-once result page. The user is already saved; a mint failure keeps it and says why.
+  def enroll_new_user(warning)
+    e = params[:enroll]
+    enrollment = mint_enrollment!(kind: "user_device", user: @user, device_name: e[:device_name],
+                                  expiry_hours: e[:expiry_hours].presence || 24, embed_relay_secret: "1")
+    redirect_to result_enrollment_path(enrollment),
+                notice: "#{@user.display_name} created (invited). Enrollment token below.", alert: warning
+  rescue Ztlp::TokenMinter::EnrollmentSecretMissing
+    redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).",
+                                  alert: "No enrollment token: #{ENROLLMENT_SECRET_MISSING}"
+  rescue ActiveRecord::RecordInvalid => err
+    redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).",
+                                  alert: "No enrollment token: #{err.record.errors.full_messages.to_sentence}"
+  end
+
   def user_params
     params.require(:user).permit(
       :username, :display_name, :first_name, :last_name,

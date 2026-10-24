@@ -29,7 +29,7 @@
   </div>
 
   <div class="panel">
-    <div class="panel-h"><h2>Devices</h2></div>
+    <div class="panel-h"><h2>Devices</h2><% if current_admin&.write_access? %><a class="btn sm" href="<%= new_enrollment_path(user_id: @user.id) %>">Enroll a device</a><% end %></div>
     <% if @user.devices.any? %>
       <div class="table-wrap"><table>
         <thead><tr><th>Name</th><th>Assurance</th><th>Status</th></tr></thead>

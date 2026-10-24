@@ -202,4 +202,17 @@ class TokenMinterTest < ActiveSupport::TestCase
     assert_equal bin.byteslice(0, bin.bytesize - 16), bin2.byteslice(0, bin2.bytesize - 16),
                  "explicit nil callback is byte-identical to no callback (except nonce)"
   end
+
+  test "the token always embeds the PUBLIC zone.ns_addr, never ZTLP_NS_PUBLISH_ADDR" do
+    zone = Zone.new(name: "t.ztlp", ns_addr: "203.0.113.5:23096")
+    zone.enrollment_secret_ct = "ab" * 32
+    zone.relay_addrs = [ "203.0.113.5:23095" ]
+    old = ENV["ZTLP_NS_PUBLISH_ADDR"]
+    ENV["ZTLP_NS_PUBLISH_ADDR"] = "ztlp-ns:23096"
+    bin = Ztlp::TokenMinter.mint(zone, expires_at: 1.hour.from_now.to_i)
+    assert_includes bin, "203.0.113.5:23096"
+    refute_includes bin, "ztlp-ns"
+  ensure
+    old.nil? ? ENV.delete("ZTLP_NS_PUBLISH_ADDR") : ENV["ZTLP_NS_PUBLISH_ADDR"] = old
+  end
 end

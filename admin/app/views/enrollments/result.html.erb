@@ -1,7 +1,7 @@
 <% content_for :title, "Token #{@enrollment.code} - ZTLP Directory" %>
 <div class="page-head">
   <div><h1>Token <span class="mono"><%= @enrollment.code %></span></h1>
-    <p class="lede"><%= status_badge(@enrollment.status) %> &middot; <strong>shown once</strong> &mdash; copy it now.</p></div>
+    <p class="lede"><%= status_badge(@enrollment.status) %><% if @enrollment.user %> &middot; for <strong><%= @enrollment.user.display_name %></strong><% end %><% if @enrollment.device_name.present? %> &middot; device <span class="mono"><%= @enrollment.device_name %></span><% end %> &middot; <strong>shown once</strong> &mdash; copy it now.</p></div>
 </div>
 
 <div class="stack">
@@ -21,7 +21,7 @@
     <div class="panel-h"><h2>Or scan this QR code</h2></div>
     <div class="panel-b">
       <div id="token-qr"><%= raw @qr_svg %></div>
-      <p class="hint">Scan with the device camera and paste the code into <span class="mono">ztlp setup</span>.</p>
+      <p class="hint">On a phone or tablet: open the <strong>ZTLP app</strong>, choose to enroll, and scan this code. On a computer, use the token or the command instead.</p>
     </div>
   </div>
 

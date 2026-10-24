@@ -21,6 +21,7 @@
 # Every mutation requires write access (the read_only role is blocked from
 # the new/revoke paths, mirroring the Users controller).
 class EnrollmentsController < ApplicationController
+  include EnrollmentMinting
   before_action :require_write_access, only: %i[new create revoke]
 
   FILTERS = [ %w[all All], %w[pending Pending], %w[redeemed Redeemed],
@@ -41,6 +42,8 @@ class EnrollmentsController < ApplicationController
   def new
     @enrollment = @zone.enrollments.build(kind: "user_device", embed_relay_secret: true)
     @users = @zone.users.order(:username)
+    # "Enroll a device" on a user page pre-selects that user (only a user of THIS zone).
+    @enrollment.user = @users.find_by(id: params[:user_id]) if params[:user_id].present?
   end
 
   # ------------------------------------------------------------------ create
@@ -57,12 +60,6 @@ class EnrollmentsController < ApplicationController
     attrs = enrollment_params
     return render_unprocessable("Choose a token kind (and a user for a user+device token).") if attrs.nil?
 
-    hours = attrs[:expiry_hours].to_s.strip
-    hours = 1 if hours.empty?
-    hours = hours.to_i
-    hours = 1 if hours < 1
-    hours = 24 if hours > Ztlp::TokenMinter::MAX_EXPIRY_SECONDS / 3600
-
     kind = attrs[:kind]
     user = nil
     if kind == "user_device"
@@ -70,54 +67,13 @@ class EnrollmentsController < ApplicationController
       return render_unprocessable("A user+device token needs a linked user.") if user.nil?
     end
 
-    # embed_relay_secret is a NOT NULL boolean column (default false). The form
-    # posts "1" when checked and nothing when unchecked — cast to a real boolean
-    # (nil would 500 on the NOT NULL column).
-    embed_relay = %w[1 true on yes].include?(attrs[:embed_relay_secret].to_s.strip.downcase)
-
-    enrollment = @zone.enrollments.build(
-      kind: kind,
-      user: user,
-      device_name: attrs[:device_name].to_s.strip.presence,
-      embed_relay_secret: embed_relay,
-      max_uses: 1,
-      status: "pending",
-      expires_at: hours.hours.from_now,
-      created_by_admin: current_admin
-    )
-    enrollment.token_id = Enrollment.generate_token_id
-
-    # The callback_url points the CLI (ztlp-cli.rs confirm_enrollment) at the
-    # panel's OWN unauthenticated legacy endpoint so the post-enrollment
-    # confirmation lands here. The panel's public URL comes from
-    # ZTLP_PANEL_PUBLIC_URL (prod: https://admin.trs.ztlp; the local smoke
-    # stack uses its own published address). When unset, fall back to
-    # request.host_with_port (dev/test host). A malformed env value
-    # (no http:// or https:// scheme) is treated as unset.
-    raw_public_url = ENV.fetch("ZTLP_PANEL_PUBLIC_URL", "").to_s.strip
-    base = raw_public_url.match?(%r{\Ahttps?://}) ? raw_public_url : "http://#{request.host_with_port}"
-    callback_url = "#{base.chomp("/")}/api/enrollment/confirm"
-
     begin
-      uri = Ztlp::TokenMinter.to_uri(
-        Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i,
-                               callback_url: callback_url)
-      )
+      enrollment = mint_enrollment!(kind: kind, user: user, device_name: attrs[:device_name],
+                                    expiry_hours: attrs[:expiry_hours],
+                                    embed_relay_secret: attrs[:embed_relay_secret])
     rescue Ztlp::TokenMinter::EnrollmentSecretMissing
-      audit!("enrollment.mint", status: "error",
-                               details: { error: "no_zone_enrollment_secret" })
-      return redirect_to enrollments_path,
-                         alert: "The zone enrollment secret is not set. Run `rails zone:set_secret enrollment` (stdin) first."
+      return redirect_to enrollments_path, alert: ENROLLMENT_SECRET_MISSING
     end
-    enrollment.token_uri_ct = uri
-
-    enrollment.save!
-    # The audit row records the HUMAN code + user — never the token URI.
-    audit!("enrollment.mint", target: enrollment, status: "ok",
-                               details: { code: enrollment.code, kind: enrollment.kind,
-                                          user: (user&.username), embed_relay_secret: enrollment.embed_relay_secret })
-    # One-time reveal: the result page will render the URI once, then clear this.
-    session[:enrollment_reveal] = { enrollment_id: enrollment.id, nonce: SecureRandom.hex(16) }
     redirect_to result_enrollment_path(enrollment)
   end
 

@@ -172,4 +172,20 @@ class PublisherTest < ActiveSupport::TestCase
     assert_raises(Ztlp::NsClient::NsError) { publish_user(u) }
     assert_empty @fake.calls
   end
+
+  # zone.ns_addr is the PUBLIC NS address (embedded in enrollment tokens for devices). The panel
+  # itself may reach the NS on an internal address (prod: ztlp-ns:23096 on a docker network), set
+  # by ZTLP_NS_PUBLISH_ADDR. Publishing must use that; tokens must keep the public one.
+  test "publishing uses ZTLP_NS_PUBLISH_ADDR when set, zone.ns_addr otherwise" do
+    ns = FakeNs.new
+    old = ENV["ZTLP_NS_PUBLISH_ADDR"]
+    ENV["ZTLP_NS_PUBLISH_ADDR"] = "ztlp-ns:23096"
+    Ztlp::Publisher.publish_user!(@user, ns_client: ns)
+    assert_equal "ztlp-ns:23096", ns.calls.last[:ns_addr]
+    ENV.delete("ZTLP_NS_PUBLISH_ADDR")
+    Ztlp::Publisher.publish_user!(@user, ns_client: ns)
+    assert_equal "127.0.0.1:23096", ns.calls.last[:ns_addr]
+  ensure
+    old.nil? ? ENV.delete("ZTLP_NS_PUBLISH_ADDR") : ENV["ZTLP_NS_PUBLISH_ADDR"] = old
+  end
 end

@@ -45,7 +45,7 @@ module Ztlp
 
       result = begin
         # REVOKE records live at "revoke.<name>" (ztlp-cli.rs:11293 `admin revoke`).
-        call_register(ns_client, zone.ns_addr, name: "revoke.#{name}", type: "revoke",
+        call_register(ns_client, zone.ns_publish_addr, name: "revoke.#{name}", type: "revoke",
                       data: data, seed: seed, **kw)
         :ok
       rescue NsClient::NsError => e
@@ -71,7 +71,7 @@ module Ztlp
       name = zone.name # the zone name IS the KEY record's name
 
       result = begin
-        call_register(ns_client, zone.ns_addr, name: name, type: "key",
+        call_register(ns_client, zone.ns_publish_addr, name: name, type: "key",
                       data: Records.authority_data(zone), seed: seed, **kw)
         :ok
       rescue NsClient::NsError => e
@@ -97,7 +97,7 @@ module Ztlp
       seed = zone.authority_seed_ct
 
       result = begin
-        call_register(ns_client, zone.ns_addr, name: name, type: type, data: data,
+        call_register(ns_client, zone.ns_publish_addr, name: name, type: type, data: data,
                       seed: seed, **kw)
         entity.update_column(:ns_published_at, Time.current)
         :ok

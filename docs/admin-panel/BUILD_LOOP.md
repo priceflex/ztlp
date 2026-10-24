@@ -540,6 +540,17 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-24 07:50Z — prod **v0.2.5** (`fd001099`): "Enroll a device now" on Add user (mints a
+  user_device token, lands on the show-once result page with string + QR + command), user-page
+  "Enroll a device" button (enrollments/new?user_id=), result-page ZTLP-app hint; mint logic moved
+  to `EnrollmentMinting` concern. **Split NS addresses:** `zone.ns_addr` = PUBLIC (tokens embed it),
+  `Zone#ns_publish_addr` = ENV ZTLP_NS_PUBLISH_ADDR || ns_addr (Publisher). Prod compose: ZTLP_NS_ADDR
+  44.227.148.151:23096, ZTLP_NS_PUBLISH_ADDR ztlp-ns:23096, ZTLP_PANEL_PUBLIC_URL http://admin.trs.ztlp.
+  Zone row: ns_addr 44.227.148.151:23096, relay_addrs [44.227.148.151:23095] (audited). Secrets piped
+  container->container (never printed): enrollment (ztlp-ns ZTLP_ENROLLMENT_SECRET), relay (ztlp-relay
+  ZTLP_HMAC_SECRET_TRS_ZTLP). Verified: in-memory test token embeds public NS + relay, no internal
+  name; NS query via publish addr ok; reconcile ok. NOT yet proven: a real phone/CLI redeem in prod.
+
 - 2026-10-24 06:40Z — prod now **v0.2.4** (operator "go" each step; cron still PAUSED). Shipped since 0.2.0:
   0.2.1 `d2924765` SSO maps `<u>@<zone>` subject (NS device owner) to admin `<u>`; gateway recreated with a
   2nd `--admin-pubkey-email` (Steve's MBP 3a7ee137…=steve), AI computer pin cleared. 0.2.2 `6e750719`

@@ -5,7 +5,23 @@
 > Steven's explicit OK first, one step at a time. Phases 1-6 are code on a branch
 > off `main`. Do not push tags or rotate secrets without asking.
 
-Status: PLAN ONLY (v2, 2026-10-22, after design review with Steven). Nothing implemented yet.
+Status (2026-10-24): Phase 1 and Phase 2 DONE on `feat/ns-anchored-gateway-trust` (local, not pushed):
+`82d9c76c` (1.x), `ebc39c3c` (2.1-2.3), `cd32ebd5` (2.4), `c47f0923` (2.5), 2.6 next commit. Phase 0 not
+started (needs Steven's OK per step). Next: Phase 3.
+
+Deviations from v2 found while implementing (code facts, see commits):
+- 2.4 `ns_cache::put(dir, raw, anchors, now)` re-verifies the raw bytes itself (no separate
+  `VerifiedRecord` arg, so cache content can never disagree with what was verified). Serial watermark
+  is its own file and survives expiry (replay of an older unexpired record stays refused).
+- 2.5 `ns_query_verified` also rejects a genuinely signed record for a different name/type
+  (`WrongRecord`). NS silent -> cached record; lower serial -> newer cached record.
+- 2.6 Trusted keys live in `~/.ztlp/ns_trust.toml` (`[[server]]`), NOT `agent.toml`: `[ns] servers`
+  is already a string list, `agent.toml` is template-generated + hand-tuned (NSSET would rewrite it
+  hourly), and `AgentConfig::load_from_path` falls back to defaults on any parse error (would quietly
+  drop strict mode). Malformed trust file = error, never "no trust". Phase 3.3/4.3 write this file.
+- Pre-existing issues seen (not fixed here): `proto/tests/quic_handshake_vector_test.rs` rewrites
+  `gateway/test/fixtures/quic_handshake_vector.json` with random keys on every `cargo test`
+  (never stage it); `--no-default-features --features ios-sync` fails on `r3_pool_consult.rs` (tokio).
 Code branch: `feat/ns-anchored-gateway-trust` (create from `origin/main`, v0.35.20 `b7875708`).
 
 v2 changes vs v1: no per-gateway pin files at all (signed-record cache instead); the name-server
@@ -115,7 +131,7 @@ client dial:
 ### 3.2 What a device stores
 | Item | Lifetime | Source |
 |---|---|---|
-| Trusted NS keys: `[[ns.servers]] addr, key, zones` in `agent.toml` | permanent (updated by signed NSSET) | enrollment token (home), NSSET records (others) |
+| Trusted NS keys: `[[server]] addr, key, zones, home` in `~/.ztlp/ns_trust.toml` (see status note) | permanent (updated by signed NSSET) | enrollment token (home), NSSET records (others) |
 | Signed-record cache `~/.ztlp/ns_cache/<name>.<type>.rec` (raw `Record.encode` bytes) | until `created_at + ttl`; replaced by higher serial | every verified lookup |
 | `~/.ztlp/quic_pins/*.pin` | **removed** for gateways with a published fingerprint; legacy only | n/a |
 

@@ -112,7 +112,7 @@ module Ztlp
     def self.list(ns_admin_api_port, ns_admin_api_secret, type: nil, zone: nil, http: nil, ts: nil, headers: nil)
       ts ||= Time.now.to_i
       headers ||= admin_headers(ns_admin_api_secret, ts, path_for(type: type, zone: zone))
-      http ||= Net::HTTP.new("127.0.0.1", ns_admin_api_port)
+      http ||= Net::HTTP.new(ns_admin_host, ns_admin_api_port)
       # Test seams (mocha doubles) reject setter invocations; real
       # sockets get a 5 s read + open budget.
       http.read_timeout = 5 if http.is_a?(Net::HTTP)
@@ -125,6 +125,13 @@ module Ztlp
 
       parsed = JSON.parse(resp.body)
       Array(parsed["records"]).map { |r| symbolize_record(r) }
+    end
+
+    # Host of the NS admin API, from ZTLP_NS_ADMIN_BASE_URL ("http://ztlp-ns:9103" in prod, where
+    # the panel reaches the NS container by name on a shared docker network; 127.0.0.1 inside the
+    # panel container is the container itself). Defaults to 127.0.0.1.
+    def self.ns_admin_host
+      ENV["ZTLP_NS_ADMIN_BASE_URL"].to_s[%r{\Ahttps?://([^:/\s]+)}, 1] || "127.0.0.1"
     end
 
     # ── wire helpers (public for tests) ────────────────────────────

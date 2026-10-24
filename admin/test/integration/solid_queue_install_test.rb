@@ -14,8 +14,17 @@ class SolidQueueInstallTest < ActiveSupport::TestCase
 
   test "bin/jobs starts solid_queue (not the idle branch) once the tables exist" do
     src = File.read(Rails.root.join("bin/jobs"))
-    assert_match(/table_exists\?\('solid_queue_jobs'\)/, src)
+    assert_match(/table_exists\?\(["']solid_queue_jobs["']\)/, src)
     assert ActiveRecord::Base.connection.table_exists?("solid_queue_jobs")
+  end
+
+  # The jobs container can start before the web container finishes db:prepare. It must WAIT for
+  # the tables and then start, never idle forever (seen in prod on the 0.2.2 swap).
+  test "bin/jobs waits for the solid_queue tables instead of idling forever" do
+    src = File.read(Rails.root.join("bin/jobs"))
+    assert_match(/until\b.*table_exists\?/m, src)
+    refute_match(/^\s*sleep\s*$/, src, "a bare `sleep` idles forever")
+    assert_match(/exec 'bundle', 'exec', 'rake', 'solid_queue:start'/, src)
   end
 
   test "production enqueues to solid_queue (durable), not the in-process async adapter" do

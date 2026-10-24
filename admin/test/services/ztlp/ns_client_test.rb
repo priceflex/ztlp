@@ -220,4 +220,25 @@ class NsClientTest < ActiveSupport::TestCase
     assert_equal "timeout", Ztlp::NsClient::REASON_CODES[0x0C]
     assert_equal "refused", Ztlp::NsClient::REASON_CODES[0x0D]
   end
+
+  # Prod: the panel container reaches the NS container by name on a shared docker network
+  # (ZTLP_NS_ADMIN_BASE_URL=http://ztlp-ns:9103). 127.0.0.1 inside the panel container is the
+  # container itself, so the host must come from the setting, not be hard-coded.
+  test "the admin API host comes from ZTLP_NS_ADMIN_BASE_URL (default 127.0.0.1)" do
+    with_env("ZTLP_NS_ADMIN_BASE_URL" => "http://ztlp-ns:9103") do
+      assert_equal "ztlp-ns", Ztlp::NsClient.ns_admin_host
+      Net::HTTP.expects(:new).with("ztlp-ns", 9103).returns(FakeHttp.new("200", '{"records":[]}'))
+      assert_equal [], Ztlp::NsClient.list(9103, "s" * 32, type: "group", ts: 1)
+    end
+    with_env("ZTLP_NS_ADMIN_BASE_URL" => nil) { assert_equal "127.0.0.1", Ztlp::NsClient.ns_admin_host }
+    with_env("ZTLP_NS_ADMIN_BASE_URL" => "garbage") { assert_equal "127.0.0.1", Ztlp::NsClient.ns_admin_host }
+  end
+
+  def with_env(vars)
+    old = vars.keys.to_h { |k| [ k, ENV[k] ] }
+    vars.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    yield
+  ensure
+    old.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  end
 end

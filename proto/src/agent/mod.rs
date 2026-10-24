@@ -43,6 +43,7 @@ pub mod local_tls;
 #[cfg(unix)]
 pub mod macos_daemon;
 pub mod ns_checkin;
+pub mod ns_trust;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;

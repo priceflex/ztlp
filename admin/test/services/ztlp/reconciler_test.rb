@@ -166,4 +166,18 @@ class ReconcilerTest < ActiveSupport::TestCase
     # /zone "Reconcile now" button works without an inject.
     assert_equal Ztlp::NsClient, Ztlp::Reconciler.default_ns_client
   end
+
+  # `match?` does not set Regexp.last_match, so the old code returned 0 whenever
+  # ZTLP_NS_ADMIN_BASE_URL was set (always, in prod): every list call dialled port 0.
+  def test_ns_admin_port_parses_the_base_url
+    old = ENV["ZTLP_NS_ADMIN_BASE_URL"]
+    ENV["ZTLP_NS_ADMIN_BASE_URL"] = "http://ztlp-ns:9103"
+    assert_equal 9103, Ztlp::Reconciler.ns_admin_port(@zone)
+    ENV["ZTLP_NS_ADMIN_BASE_URL"] = "http://127.0.0.1:19103"
+    assert_equal 19_103, Ztlp::Reconciler.ns_admin_port(@zone)
+    ENV.delete("ZTLP_NS_ADMIN_BASE_URL")
+    assert_equal 9103, Ztlp::Reconciler.ns_admin_port(@zone)
+  ensure
+    old.nil? ? ENV.delete("ZTLP_NS_ADMIN_BASE_URL") : ENV["ZTLP_NS_ADMIN_BASE_URL"] = old
+  end
 end

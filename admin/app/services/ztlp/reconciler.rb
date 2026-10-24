@@ -59,12 +59,9 @@ module Ztlp
     # ZTLP_NS_ADMIN_BASE_URL (docker-compose sets it to the metrics port)
     # and falls back to the NS UDP port's sibling (9103).
     def self.ns_admin_port(zone)
-      base = ENV["ZTLP_NS_ADMIN_BASE_URL"].to_s
-      if base.match?(%r{\Ahttps?://[^:/]+:(\d+)})
-        Regexp.last_match(1).to_i
-      else
-        9103
-      end
+      # (`match?` does not set Regexp.last_match: the old form returned 0 whenever the URL was set.)
+      port = ENV["ZTLP_NS_ADMIN_BASE_URL"].to_s[%r{\Ahttps?://[^:/\s]+:(\d+)}, 1]
+      port ? port.to_i : 9103
     end
 
     # Only rows the panel PUBLISHES (same sets as Republisher): active users, enrolled devices,

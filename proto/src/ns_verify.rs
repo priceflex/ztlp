@@ -43,6 +43,8 @@ pub enum NsVerifyError {
     BadSignature,
     /// `created_at + ttl <= now`.
     Expired,
+    /// A valid record, but for a different name or type than was asked.
+    WrongRecord,
 }
 
 impl fmt::Display for NsVerifyError {
@@ -56,6 +58,7 @@ impl fmt::Display for NsVerifyError {
             Self::UntrustedSigner => write!(f, "NS record signed by an untrusted key"),
             Self::BadSignature => write!(f, "NS record signature does not verify"),
             Self::Expired => write!(f, "NS record expired"),
+            Self::WrongRecord => write!(f, "NS record is for a different name or type"),
         }
     }
 }
@@ -269,6 +272,32 @@ mod tests {
         assert_eq!(v.data_str("address").as_deref(), Some("10.42.42.112:23097"));
         assert_eq!(v.data_str("zone").as_deref(), Some("chooseforce.ztlp"));
         assert_eq!(v.data_str("missing"), None);
+    }
+
+    #[test]
+    fn verifies_a_record_captured_from_a_live_name_server() {
+        // Real KEY record reply from the live demo NS (web.demo.spongebob.ztlp,
+        // 2026-08-30 capture, same bytes as proxy.rs's truncation-flag test).
+        // Independent of the golden vector: proves the parser + verifier
+        // match what a production NS really sends.
+        let hex = "020100177765622e64656d6f2e73706f6e6765626f622e7a746c70000000bca567616464726573737433342e3232312e3136352e3234343a3234303935676e6f64655f69647820316236663535636661383563636630383032393236336433343865366361373769616c676f726974686d67456432353531396a7075626c69635f6b657978403464666533613937353466623466326166326135616134626239636132663139623730376431303262326362366264666435633366636165393739653663646473726567697374657265645f756e7369676e6564f5000000006a93b76900015180000000006a93b76900408339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a798cb2ae06391da17aedef3d311fdc01ed4805b42236294decd84eec0ebf8209002073193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9";
+        let rec = parse_query_reply(&bytes(hex)).unwrap();
+        assert_eq!(rec.type_byte, 1);
+        assert_eq!(rec.name, "web.demo.spongebob.ztlp");
+        let demo_ns: [u8; 32] =
+            bytes("73193631c65c8252184a64b419dc1b5007021ba70eb531697f9b816596d986c9")
+                .try_into()
+                .unwrap();
+        let v = verify(&rec, &[demo_ns], rec.created_at + 60).unwrap();
+        assert_eq!(
+            v.data_str("address").as_deref(),
+            Some("34.221.165.244:24095")
+        );
+        // Same bytes are untrusted without the demo NS key.
+        assert_eq!(
+            verify(&rec, &[anchor()], rec.created_at + 60),
+            Err(NsVerifyError::UntrustedSigner)
+        );
     }
 
     #[test]

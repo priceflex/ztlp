@@ -58,6 +58,9 @@ Rails.application.configure do
 
   # Use a real queuing backend for Active Job (and separate queues per environment).
   # config.active_job.queue_adapter = :resque
+  # Durable jobs: enqueued rows are worked by the `jobs` container (bin/jobs -> solid_queue:start),
+  # which also runs config/recurring.yml.
+  config.active_job.queue_adapter = :solid_queue
   # config.active_job.queue_name_prefix = "admin_production"
 
   # Enable locale fallbacks for I18n (makes lookups for any locale fall back to

@@ -80,13 +80,18 @@ class ApplicationController < ActionController::Base
   end
 
   # The gateway subject is either the --admin-pubkey-email value ("steve") or the device's NS owner
-  # ("steve@trs.ztlp"). An owner in the panel's OWN zone maps to the local admin name; any other
+  # ("steve@trs.ztlp" legacy CLI form, or "steve.users.trs.ztlp" once the panel publishes). An owner in the panel's OWN zone maps to the local admin name; any other
   # zone stays as-is and therefore matches no admin (usernames cannot contain "@").
   def sso_username(subject)
     name = subject.to_s.strip.downcase
     zone = Zone.primary&.name.to_s.downcase
+    return name if zone.empty?
+
     local, domain = name.split("@", 2)
-    domain.present? && domain == zone ? local : name
+    return local if domain.present? && domain == zone
+
+    users_suffix = ".users.#{zone}" # panel-published owner form (spec F4)
+    name.end_with?(users_suffix) ? name.delete_suffix(users_suffix) : name
   end
 
   def sign_in!(admin)

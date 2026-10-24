@@ -82,4 +82,17 @@ class GatewaySsoTest < ActionDispatch::IntegrationTest
     get root_path, headers: tunnel_headers(email: "steve@#{Zone.primary.name}.evil")
     assert_redirected_to login_path
   end
+
+  # Once the panel publishes device owners they are "<user>.users.<zone>" (spec F4), so the
+  # gateway subject takes that form. It must keep signing the same admin in.
+  test "subject <user>.users.<panel zone> signs in as admin <user>" do
+    get root_path, headers: tunnel_headers(email: "steve.users.#{Zone.primary.name}")
+    assert_response :success
+    assert_select "h1", "Overview"
+  end
+
+  test "a .users. subject in ANOTHER zone never maps" do
+    get root_path, headers: tunnel_headers(email: "steve.users.evil.ztlp")
+    assert_redirected_to login_path
+  end
 end

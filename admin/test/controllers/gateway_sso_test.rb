@@ -66,4 +66,20 @@ class GatewaySsoTest < ActionDispatch::IntegrationTest
     get root_path, headers: tunnel_headers
     assert_redirected_to login_path
   end
+
+  # Devices enrolled with an NS owner arrive as "<user>@<zone>" (gateway http_injector uses the
+  # DEVICE record's owner when it is set). In the panel's OWN zone that is the admin "<user>".
+  test "subject <user>@<panel zone> signs in as admin <user>" do
+    get root_path, headers: tunnel_headers(email: "steve@#{Zone.primary.name}")
+    assert_response :success
+    assert_select "h1", "Overview"
+    assert AuditLog.exists?(action: "auth.login_ztlp", admin_id: @admin.id)
+  end
+
+  test "a subject in ANOTHER zone never maps to a local admin" do
+    get root_path, headers: tunnel_headers(email: "steve@evil.ztlp")
+    assert_redirected_to login_path
+    get root_path, headers: tunnel_headers(email: "steve@#{Zone.primary.name}.evil")
+    assert_redirected_to login_path
+  end
 end

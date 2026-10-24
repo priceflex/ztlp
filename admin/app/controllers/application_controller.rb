@@ -68,7 +68,7 @@ class ApplicationController < ActionController::Base
     r = Ztlp::GatewayIdentity.verify(request.headers)
     return unless r.ok
 
-    admin = Admin.active.find_by(username: r.subject.to_s.downcase)
+    admin = Admin.active.find_by(username: sso_username(r.subject))
     return unless admin
 
     sign_in!(admin)
@@ -77,6 +77,16 @@ class ApplicationController < ActionController::Base
     session[:assurance] = r.assurance
     AuditLog.record!("auth.login_ztlp", admin: admin, ip: request.remote_ip,
                      details: { device: r.device_name, zone: r.zone, assurance: r.assurance })
+  end
+
+  # The gateway subject is either the --admin-pubkey-email value ("steve") or the device's NS owner
+  # ("steve@trs.ztlp"). An owner in the panel's OWN zone maps to the local admin name; any other
+  # zone stays as-is and therefore matches no admin (usernames cannot contain "@").
+  def sso_username(subject)
+    name = subject.to_s.strip.downcase
+    zone = Zone.primary&.name.to_s.downcase
+    local, domain = name.split("@", 2)
+    domain.present? && domain == zone ? local : name
   end
 
   def sign_in!(admin)

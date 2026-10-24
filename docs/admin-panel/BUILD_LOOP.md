@@ -540,6 +540,15 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-24 08:10Z — prod **v0.3.0** (`c90664e7`): multi-zone (rail zone picker, admins.default_zone_id,
+  Add zone [super_admin], per-zone drift key `ns_drift_json:<zone>` (home zone keeps `ns_drift_json`),
+  recurring jobs over every zone returning {zone=>result}, Zone#ns_admin_secret falls back to the home
+  zone's (one NS), rake `ZONE=`) + Register application (Ztlp::AppRegistrar: zone from FQDN longest
+  whole-label suffix, NS SVC lookup, discovered list, planned-gateway command naming
+  ZTLP_HMAC_SECRET_<ZONE>, never values). Prod: zone chooseforce.ztlp added (ns 44.227.148.151:23096,
+  relay :23095, NO secrets/authority). Discovered: admin.trs.ztlp, blitz.trs.ztlp, www.chooseforce.ztlp.
+  ReconcileNsJob {"trs.ztlp"=>:ok, "chooseforce.ztlp"=>:ok}. Plan: docs/admin-panel/PLAN-multizone-and-app-registration.md.
+
 - 2026-10-24 07:50Z — prod **v0.2.5** (`fd001099`): "Enroll a device now" on Add user (mints a
   user_device token, lands on the show-once result page with string + QR + command), user-page
   "Enroll a device" button (enrollments/new?user_id=), result-page ZTLP-app hint; mint logic moved

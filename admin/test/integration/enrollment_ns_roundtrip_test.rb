@@ -69,4 +69,15 @@ class EnrollmentNsRoundtripTest < ActiveSupport::TestCase
     assert_equal [ 0x08, 0x00 ], process_enroll(tok, "rt-a-#{SecureRandom.hex(3)}")[0, 2]
     assert_equal [ 0x08, 0x02 ], process_enroll(tok, "rt-b-#{SecureRandom.hex(3)}")[0, 2]
   end
+
+  # 1d5d4bc8: panel tokens carry FLAG_HAS_CALLBACK (0x02) + callback_url. NS >= v0.35.12 skips it;
+  # an older NS would reject the whole token (0x08 0x06). Prove the real NS accepts it.
+  test "a token carrying a callback_url still enrolls (0x08 0x00)" do
+    zone = Zone.new(name: ZONE_NAME, ns_addr: "127.0.0.1:23096")
+    zone.enrollment_secret_ct = @secret_hex
+    zone.relay_addrs = [ RELAY ]
+    tok = Ztlp::TokenMinter.mint(zone, expires_at: 1.hour.from_now, max_uses: 1,
+                                       callback_url: "http://admin.trs.ztlp/api/enrollment/confirm")
+    assert_equal [ 0x08, 0x00 ], process_enroll(tok, "rt-cb-#{SecureRandom.hex(3)}")[0, 2]
+  end
 end

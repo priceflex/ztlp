@@ -540,6 +540,21 @@ All true, each verified by a command or a real click and recorded in STATUS with
 
 ## STATUS (newest first; the next tick reads this)
 
+- 2026-10-24 06:40Z — prod now **v0.2.4** (operator "go" each step; cron still PAUSED). Shipped since 0.2.0:
+  0.2.1 `d2924765` SSO maps `<u>@<zone>` subject (NS device owner) to admin `<u>`; gateway recreated with a
+  2nd `--admin-pubkey-email` (Steve's MBP 3a7ee137…=steve), AI computer pin cleared. 0.2.2 `6e750719`
+  solid_queue tables migration + prod `queue_adapter = :solid_queue`; `ns:import` (Ztlp::NsImporter,
+  read-only NS -> panel in PANEL convention per F4: steve@trs.ztlp -> user steve, blitz@ -> group blitz);
+  SSO also maps `<u>.users.<zone>`. 0.2.3 `b4fd7306` NS admin host from ZTLP_NS_ADMIN_BASE_URL; bin/jobs
+  waits for tables. 0.2.4 `f1240a3b` **ns_admin_port returned 0 whenever ZTLP_NS_ADMIN_BASE_URL was set**
+  (`match?` sets no last_match) — Reconciler/AccessEvaluator/import were all dialling port 0 in prod.
+  Prod compose: web+jobs joined external network `ztlp-trs_default`, ZTLP_NS_ADDR=ztlp-ns:23096,
+  ZTLP_NS_ADMIN_BASE_URL=http://ztlp-ns:9103; zone.ns_addr updated (audited); NS admin API secret piped
+  ztlp-ns -> zone:set_secret (never printed). Backups in ~/ztlp-admin-site/backups/ (pre-0.2.0/0.2.2/0.2.3
+  sql + compose copies). Import: 3 users (admin, aipc, steve), 2 devices (both Macs, owner steve), 1 group
+  (blitz[steve]). Reconcile ok: devices match; users/groups differ only by naming (@ vs .users./.groups.)
+  until the authority is imported and the panel publishes. Jobs: 4 solid_queue processes, 3 recurring.
+
 - 2026-10-24 05:50Z — **v0.2.0 DEPLOYED to prod** (operator "go"; cron PAUSED by operator OK). Reviewed
   `1d5d4bc8` (callback_url in tokens): NS >= v0.35.12 skips FLAG_HAS_CALLBACK (prod NS 0.35.19); CLI
   confirm_enrollment returns silently without token_id; live test added (`477ab9fc`, 4/4 live). Image

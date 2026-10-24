@@ -27,7 +27,7 @@ namespace :zone do
     abort "identity.json has no 64-hex signing_key_seed" unless seed.is_a?(String) && seed.match?(/\A\h{64}\z/)
 
     pubkey = OpenSSL::PKey.new_raw_private_key("ED25519", [ seed ].pack("H*")).raw_public_key.unpack1("H*")
-    zone = Zone.primary
+    zone = Zone.resolve!(ENV["ZONE"])
     different = zone.authority_seed_ct.present? && zone.authority_seed_ct != seed
     if different && ENV["FORCE"] != "1"
       abort "zone #{zone.name} already has authority #{zone.authority_pubkey_hex.to_s[0, 16]}...; " \
@@ -51,7 +51,7 @@ namespace :zone do
     abort "empty value on stdin; nothing stored" if value.empty?
     abort "#{which} secret must be #{rule_text}; nothing stored" unless value.match?(rule)
 
-    zone = Zone.primary
+    zone = Zone.resolve!(ENV["ZONE"])
     zone.update!("#{which}_secret_ct" => value)
     AuditLog.record!("zone.#{which}_secret_set", target: zone, details: { length: value.length })
     puts "zone #{zone.name}: #{which} secret set"
@@ -59,7 +59,7 @@ namespace :zone do
 
   desc "Print the zone authority seed for the backup runbook (CONFIRM=1 required; audited)"
   task export_authority: :environment do
-    zone = Zone.primary
+    zone = Zone.resolve!(ENV["ZONE"])
     abort "zone #{zone.name} has no authority imported" if zone.authority_seed_ct.blank?
     abort "This prints the zone authority SEED. Re-run with CONFIRM=1 on the host terminal only." unless ENV["CONFIRM"] == "1"
 

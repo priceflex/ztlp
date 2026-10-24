@@ -19,11 +19,16 @@ module Ztlp
     # Always records an outcome in ns_drift_json["status"]: "ok", "failed" (+ "error") or
     # "not_configured" (no NS admin API secret yet). Never raises on an NS failure: the
     # overview's NS dot and the /zone page read this status.
+    # One drift record per zone. The home zone keeps the original key (existing rows + readers).
+    def self.drift_key(zone)
+      zone.nil? || zone == Zone.default ? "ns_drift_json" : "ns_drift_json:#{zone.name}"
+    end
+
     def self.run(zone, admin: nil, ns_client: default_ns_client, now: Time.now.to_i)
       port = ns_admin_port(zone)
-      secret = zone.ns_admin_api_secret_ct
+      secret = zone.ns_admin_secret
       if secret.blank?
-        SystemSetting[("ns_drift_json")] = { "zone" => zone.name, "checked_at" => now, "status" => "not_configured" }.to_json
+        SystemSetting[drift_key(zone)] = { "zone" => zone.name, "checked_at" => now, "status" => "not_configured" }.to_json
         return :not_configured
       end
 
@@ -43,13 +48,13 @@ module Ztlp
         end
       rescue NsClient::NsError => e
         error = format("0x%02X %s", e.code, e.reason)
-        SystemSetting[("ns_drift_json")] = { "zone" => zone.name, "checked_at" => now, "status" => "failed",
+        SystemSetting[drift_key(zone)] = { "zone" => zone.name, "checked_at" => now, "status" => "failed",
                                              "error" => error }.to_json
         AuditLog.record!("ns.reconcile", admin: admin, target: zone, status: "failed", details: { error: error })
         return :failed
       end
 
-      SystemSetting[("ns_drift_json")] = drift.to_json
+      SystemSetting[drift_key(zone)] = drift.to_json
       AuditLog.record!("ns.reconcile", admin: admin, target: zone, status: "ok",
                         details: audit_counts(drift))
       :ok

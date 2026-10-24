@@ -46,7 +46,7 @@ module Ztlp
 
       zone = device.zone
       ns_port = Reconciler.ns_admin_port(zone)
-      ns_secret = zone.ns_admin_api_secret_ct
+      ns_secret = zone.ns_admin_secret
       application.policy_rules.order(:position, :id).each do |rule|
         res, why = rule_result(rule, device: device, owner: owner, zone: zone, kind: kind,
                                      ns_client: ns_client, ns_port: ns_port, ns_secret: ns_secret)

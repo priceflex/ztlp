@@ -28,9 +28,7 @@ class ZoneController < ApplicationController
   private
 
   def drift_record
-    raw = SystemSetting[(
-      "ns_drift_json"
-    )]
+    raw = SystemSetting[Ztlp::Reconciler.drift_key(@zone)]
     return {} if raw.blank?
 
     JSON.parse(raw)

@@ -1,6 +1,6 @@
 # Plan: multi-zone switcher + one-click application registration
 
-Status: PROPOSED 2026-10-24 (operator ask: "a pulldown on the left where we can choose the zone and
+Status: BUILT 2026-10-24 (v0.3.0) —  (operator ask: "a pulldown on the left where we can choose the zone and
 have our default zone"; "an easy way to register applications like www.chooseforce.ztlp and
 blitz.trs.ztlp").
 

@@ -24,11 +24,11 @@ class JobsTest < ActiveSupport::TestCase
   end
 
   def test_republish_ns_job_delegates_to_republisher_for_primary_zone
-    # The job must call Ztlp::Republisher.run(Zone.primary, admin: nil).
+    # The job calls Ztlp::Republisher.run(zone, admin: nil) for every zone; result per zone name.
     Ztlp::Republisher.expects(:run).with(@zone, admin: nil).returns(:ok)
     # perform_now returns the job's return value directly (the service's
     # :ok). The mocha expectation above IS the proof of the wiring.
-    assert_equal :ok, perform(RepublishNsJob)
+    assert_equal({ @zone.name => :ok }, perform(RepublishNsJob))
   end
 
   def test_republish_ns_job_surfaces_ns_error_as_job_error
@@ -39,7 +39,7 @@ class JobsTest < ActiveSupport::TestCase
 
   def test_reconcile_ns_job_delegates_to_reconciler
     Ztlp::Reconciler.expects(:run).with(@zone, admin: nil).returns(:ok)
-    assert_equal :ok, perform(ReconcileNsJob)
+    assert_equal({ @zone.name => :ok }, perform(ReconcileNsJob))
   end
 
   def test_reconcile_ns_job_surfaces_ns_error_as_job_error
@@ -62,5 +62,13 @@ class JobsTest < ActiveSupport::TestCase
     assert_equal "expired", due.reload.status
     assert_equal "pending", not_due.reload.status
     assert_equal "redeemed", redeemed.reload.status
+  end
+
+  def test_one_zones_ns_error_does_not_stop_the_other_zones
+    other = Zone.create!(name: "other.test", ns_addr: "203.0.113.20:23096")
+    err = Ztlp::NsClient::NsError.new(0x0C, "timeout")
+    Ztlp::Reconciler.expects(:run).with(@zone, admin: nil).raises(err)
+    Ztlp::Reconciler.expects(:run).with(other, admin: nil).returns(:ok)
+    assert_raises(Ztlp::NsClient::NsError) { perform(ReconcileNsJob) }
   end
 end

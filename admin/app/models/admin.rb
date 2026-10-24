@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 class Admin < ApplicationRecord
+  belongs_to :default_zone, class_name: "Zone", optional: true
   ROLES = %w[super_admin admin helpdesk read_only].freeze
   USERNAME = /\A[a-z0-9]([a-z0-9-]*[a-z0-9])?\z/
 

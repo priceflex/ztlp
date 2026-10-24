@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_24_000001) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_24_000002) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -23,6 +23,8 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_24_000001) do
     t.datetime "disabled_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.bigint "default_zone_id"
+    t.index ["default_zone_id"], name: "idx_admins_default_zone"
     t.index ["pubkey_hex"], name: "idx_admins_pubkey", unique: true
     t.index ["user_id"], name: "idx_admins_user"
     t.index ["username"], name: "idx_admins_username", unique: true
@@ -379,6 +381,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_24_000001) do
     t.index ["name"], name: "idx_zones_name", unique: true
   end
 
+  add_foreign_key "admins", "zones", column: "default_zone_id", on_delete: :nullify
   add_foreign_key "solid_queue_batch_executions", "solid_queue_batches", column: "batch_id", on_delete: :cascade
   add_foreign_key "solid_queue_batch_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade
   add_foreign_key "solid_queue_blocked_executions", "solid_queue_jobs", column: "job_id", on_delete: :cascade

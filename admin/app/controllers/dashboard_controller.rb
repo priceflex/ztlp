@@ -9,7 +9,6 @@ class DashboardController < ApplicationController
 
   def show
     @admins = Admin.order(:username)
-    @zone = Zone.primary
     @recent_audit = AuditLog.order(created_at: :desc).limit(20).includes(:admin)
     @tally = {
       "users" => zone_users.count,
@@ -19,7 +18,7 @@ class DashboardController < ApplicationController
     }
     @checklist = setup_checklist
     @checklist_open = @checklist.any? { |i| !i["done"] }
-    @drift = parse_drift(SystemSetting["ns_drift_json"])
+    @drift = parse_drift(SystemSetting[Ztlp::Reconciler.drift_key(@zone)])
     @gateways = @zone ? @zone.gateways.order(:name) : []
   end
 
@@ -54,7 +53,7 @@ class DashboardController < ApplicationController
         "cmd" => BREAKGLASS_CMD },
       { "done" => @zone&.authority_configured? == true, "label" => "Import the zone authority",
         "sub" => "zone:import_authority[/data/identity.json] on the host" },
-      { "done" => @zone&.ns_admin_api_secret_ct.present? == true,
+      { "done" => @zone&.ns_admin_secret.present? == true,
         "label" => "Set the NS admin API secret", "sub" => "zone:set_secret[ns_admin_api] reads it from stdin" }
     ].reject { |item| item["done"] }
     list << { "done" => true, "label" => "ZTLP_MIN_ASSURANCE=#{min_assurance.presence || 'unknown'} (info only)",

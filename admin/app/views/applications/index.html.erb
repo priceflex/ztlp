@@ -1,6 +1,7 @@
 <% content_for :title, "Applications - ZTLP Directory" %>
 <div class="page-head">
   <div><h1>Applications</h1><p class="lede">Services exposed on the zone's gateways. Each one's allow-list is its policy rules; the default is deny.</p></div>
+  <% if current_admin.write_access? %><div class="actions"><a class="btn primary" href="<%= register_applications_path %>">Register application</a></div><% end %>
 </div>
 
 <div class="table-wrap">

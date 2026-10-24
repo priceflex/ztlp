@@ -607,6 +607,14 @@
       if (el.hasAttribute('data-drawer')) onDrawerClick(el)
     })
 
+    // Rail zone picker: switch as soon as a zone is chosen (the <noscript> button is the fallback).
+    document.addEventListener('change', function (ev) {
+      var el = ev.target
+      if (!el || !el.hasAttribute || !el.hasAttribute('data-autosubmit') || !el.form) return
+      if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit()
+      else el.form.submit()
+    })
+
     document.addEventListener('submit', function (ev) {
       if (ev.target && ev.target.getAttribute) onFormSubmit(ev) // form OR submitter data-confirm
       if (ev.target && ev.target.hasAttribute && ev.target.hasAttribute('data-testid') && ev.target.getAttribute('data-testid') === 'test-access-form') onTestAccessSubmit(ev)

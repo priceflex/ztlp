@@ -22,6 +22,15 @@
 <% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>
 
 <div class="stack">
+  <% if @application.gateway.status == "planned" %>
+    <div class="panel" data-start-gateway>
+      <div class="panel-h"><h2>Start the gateway</h2><span class="badge warn">planned</span></div>
+      <div class="panel-b">
+        <p class="hint">This application is not on the name server yet. Run this on the box next to the service.</p>
+        <pre class="code-box"><%= Ztlp::AppRegistrar.gateway_command(@application) %></pre>
+      </div>
+    </div>
+  <% end %>
   <div class="panel">
     <div class="panel-h"><h2>About</h2><span class="badge <%= @application.enabled ? "ok" : "bad" %>"><%= @application.enabled ? "enabled" : "disabled" %></span></div>
     <dl class="kv">

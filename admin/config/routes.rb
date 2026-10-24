@@ -25,6 +25,9 @@ Rails.application.routes.draw do
 
   # Slice 9b sub-slice 2 (read) + sub-slice 3 (new/create, edit/update) +
   # sub-slice 4 (policy-rule add/remove, handled by ApplicationRulesController).
+  # Register an application by its full name (must precede resources: "register" is not an :id).
+  get  "applications/register", to: "application_registrations#new", as: :register_applications
+  post "applications/register", to: "application_registrations#create"
   resources :applications, only: %i[index show new create edit update] do
     member do
       post :enable
@@ -80,6 +83,10 @@ Rails.application.routes.draw do
   end
 
   get "zone", to: "zone#show", as: :zone
+  post "zone/switch", to: "zones#switch", as: :zone_switch
+  post "zone/default", to: "zones#make_default", as: :zone_default
+  get  "zones/new", to: "zones#new", as: :new_zone
+  post "zones", to: "zones#create", as: :zones
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile
 

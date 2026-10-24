@@ -90,7 +90,7 @@ class Claim
 
         admin = Admin.create!(username: params[:username], display_name: params[:display_name],
                               email: params[:email].presence, pubkey_hex: pub, role: "super_admin")
-        zone = Zone.primary
+        zone = Zone.default
         user = zone.users.create!(username: params[:username], display_name: params[:display_name],
                                   kind: "person", role: "admin", status: "active")
         admin.update!(user_id: user.id)

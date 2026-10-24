@@ -1,0 +1,33 @@
+<% content_for :title, "Add zone - ZTLP Directory" %>
+<div class="page-head"><div><h1>Add zone</h1><p class="lede">A zone is a name space on the name server (for example <span class="mono">chooseforce.ztlp</span>). Its secrets and signing key are set on the server, never in this form.</p></div></div>
+
+<% if @new_zone.errors.any? %>
+  <div class="notice"><span class="err"><%= @new_zone.errors.full_messages.to_sentence %></span></div>
+<% end %>
+
+<%= form_with model: @new_zone, url: zones_path, scope: :zone, class: "stack" do |f| %>
+  <div class="panel">
+    <div class="panel-h"><h2>Zone</h2></div>
+    <div class="panel-b form-grid">
+      <div class="field">
+        <%= f.label :name, "Zone name" %>
+        <%= f.text_field :name, class: "mono", placeholder: "chooseforce.ztlp", required: true %>
+        <p class="hint">Lowercase dotted DNS name, exactly as on the name server.</p>
+      </div>
+      <div class="field">
+        <%= f.label :ns_addr, "Public name server address" %>
+        <%= f.text_field :ns_addr, class: "mono", placeholder: "44.227.148.151:23096", required: true %>
+        <p class="hint">What devices dial. Enrollment tokens for this zone carry it.</p>
+      </div>
+      <div class="field">
+        <%= f.label :relay_addrs_text, "Relay addresses" %>
+        <%= f.text_field :relay_addrs_text, class: "mono", placeholder: "44.227.148.151:23095" %>
+        <p class="hint">host:port, comma separated.</p>
+      </div>
+      <div class="actions">
+        <%= f.submit "Add zone", class: "btn primary" %>
+        <a class="btn" href="<%= zone_path %>">Cancel</a>
+      </div>
+    </div>
+  </div>
+<% end %>

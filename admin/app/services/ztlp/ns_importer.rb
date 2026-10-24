@@ -19,7 +19,7 @@ module Ztlp
     TYPES = %w[user device group].freeze
 
     def self.run(zone, admin: nil, ns_client: NsClient)
-      secret = zone.ns_admin_api_secret_ct
+      secret = zone.ns_admin_secret
       return :not_configured if secret.blank?
 
       new(zone, admin).run(ns_client, secret)

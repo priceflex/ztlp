@@ -84,7 +84,7 @@ class ApplicationController < ActionController::Base
   # zone stays as-is and therefore matches no admin (usernames cannot contain "@").
   def sso_username(subject)
     name = subject.to_s.strip.downcase
-    zone = Zone.primary&.name.to_s.downcase
+    zone = Zone.default&.name.to_s.downcase
     return name if zone.empty?
 
     local, domain = name.split("@", 2)
@@ -118,8 +118,12 @@ class ApplicationController < ActionController::Base
     head :forbidden unless current_admin&.super_admin?
   end
 
+  # Current zone: the one picked in the rail (session), else the admin's default zone, else the
+  # deployment's home zone. A stale session id (zone removed) silently falls back.
   def load_zone
-    @zone ||= Zone.primary
+    @zone ||= (session[:zone_id] && Zone.find_by(id: session[:zone_id])) ||
+              current_admin&.default_zone || Zone.default
+    @zones ||= Zone.order(:name).to_a
   end
 
   # Accepts both styles: audit!(..., details: { a: 1 }) and audit!(..., a: 1). Both land at the TOP

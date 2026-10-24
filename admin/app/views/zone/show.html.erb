@@ -1,8 +1,14 @@
 <% content_for :title, "Name server - ZTLP Directory" %>
-<% secrets = { "Enrollment secret" => @zone.enrollment_secret_ct.present?, "Relay secret" => @zone.relay_secret_ct.present?, "NS admin API secret" => @zone.ns_admin_api_secret_ct.present? } %>
+<% secrets = { "Enrollment secret" => @zone.enrollment_secret_ct.present?, "Relay secret" => @zone.relay_secret_ct.present?, "NS admin API secret" => @zone.ns_admin_secret.present? } %>
 <% last = ->(l) { l&.created_at&.utc&.strftime("%Y-%m-%d %H:%M:%S") } %>
 <div class="page-head">
-  <div><h1>Name server</h1><p class="lede">Zone <span class="mono"><%= @zone.name %></span> and its NS publication state.</p></div>
+  <div><h1>Name server</h1><p class="lede">Zone <span class="mono"><%= @zone.name %></span> and its NS publication state.<% if current_admin.default_zone_id == @zone.id %> &middot; <span class="badge ok">your default zone</span><% end %></p></div>
+  <div class="actions">
+    <% unless current_admin.default_zone_id == @zone.id %>
+      <%= button_to "Make #{@zone.name} my default", zone_default_path, method: :post, class: "btn" %>
+    <% end %>
+    <% if current_admin.super_admin? %><a class="btn" href="<%= new_zone_path %>">Add zone</a><% end %>
+  </div>
 </div>
 
 <div class="tally">

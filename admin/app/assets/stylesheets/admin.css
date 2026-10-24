@@ -29,3 +29,13 @@
 
 /* Add-member actions row (groups show) */
 .members-actions{margin-top:12px}
+
+/* Rail zone picker (multi-zone) */
+.zone-pick { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 4px; }
+.zone-pick select { width: 100%; font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 8px;
+  border: 1px solid var(--line, #d9dde3); background: var(--panel, #fff); color: inherit; }
+
+/* Register application lookup */
+.inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-form input[type=text] { flex: 1 1 320px; font: inherit; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line, #d9dde3); }

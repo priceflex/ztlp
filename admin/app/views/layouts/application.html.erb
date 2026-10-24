@@ -15,6 +15,18 @@
           <%= image_tag "ztlp-logo.png", alt: "ZTLP", width: 34, height: 34 %>
           <div><div class="brand-name">ZTLP Directory</div><div class="brand-zone"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "") %></div></div>
         </div>
+        <% if signed_in? && @zones.present? %>
+          <form class="zone-pick" action="<%= zone_switch_path %>" method="post" aria-label="Zone">
+            <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+            <label for="zone-pick" class="nav-label">Zone</label>
+            <select id="zone-pick" name="zone_id" data-autosubmit>
+              <% @zones.each do |z| %>
+                <option value="<%= z.id %>"<%= " selected" if z.id == @zone&.id %>><%= z.name %></option>
+              <% end %>
+            </select>
+            <noscript><button type="submit" class="btn sm">Switch</button></noscript>
+          </form>
+        <% end %>
         <% if signed_in? %>
           <nav class="nav" id="nav">
             <% route = current_route %>

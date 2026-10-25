@@ -125,6 +125,7 @@ defmodule ZtlpNs.RegistrationError do
   def from_internal(:not_in_zone), do: :unauthorized
   def from_internal(:zone_not_allowed), do: :unauthorized
   def from_internal(:wrong_zone), do: :unauthorized
+  def from_internal(:reserved_type), do: :unauthorized
 
   # Key overwrite protection
   def from_internal(:key_overwrite_rejected), do: :key_overwrite

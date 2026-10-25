@@ -80,6 +80,7 @@ defmodule ZtlpNs.Server do
   def init(:ok) do
     # Persist or load the registration signing key on startup
     ensure_registration_key()
+    log_registration_public_key()
 
     # Read port at runtime (not compile time) so config changes take effect
     listen_port = ZtlpNs.Config.port()
@@ -572,7 +573,8 @@ defmodule ZtlpNs.Server do
     # 1. Validate name format
     suffix = ZtlpNs.Config.name_suffix()
 
-    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+    with :ok <- reject_reserved_type(type),
+         :ok <- NameValidator.validate_with_suffix(name, suffix),
          # 2. Decode CBOR data
          {:ok, data} <- decode_data(data_bin),
          # 2b. Validate record type-specific fields
@@ -686,7 +688,8 @@ defmodule ZtlpNs.Server do
   defp handle_unsigned_registration(name, type, data_bin) do
     suffix = ZtlpNs.Config.name_suffix()
 
-    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+    with :ok <- reject_reserved_type(type),
+         :ok <- NameValidator.validate_with_suffix(name, suffix),
          {:ok, data} <- decode_data(data_bin) do
       server_priv = get_registration_key()
 
@@ -876,6 +879,12 @@ defmodule ZtlpNs.Server do
   end
 
   # Validate type-specific record data fields
+  # OPERATOR records (0x07) are authored by the NS itself (NSSET: the
+  # signed list of name servers clients may trust). Nobody may register
+  # one, or a zone admin could get the NS to sign a forged server list.
+  defp reject_reserved_type(:operator), do: {:error, :reserved_type}
+  defp reject_reserved_type(_type), do: :ok
+
   defp validate_record_data(:device, data), do: Record.validate_device(data)
   defp validate_record_data(:user, data), do: Record.validate_user(data)
   defp validate_record_data(:group, data), do: Record.validate_group(data)
@@ -892,6 +901,20 @@ defmodule ZtlpNs.Server do
   # enrollment path (ZtlpNs.Enrollment.register_device/5) cannot drift from
   # the canonical table — see record_defaults.ex for the v0.33.0 history.
   defp default_ttl(type), do: ZtlpNs.RecordDefaults.default_ttl(type)
+
+  # NS-anchored gateway trust: operators embed this PUBLIC key in enrollment
+  # tokens (`ztlp admin enroll --ns-key <hex>`); it is the fleet's trust root
+  # for NS answers. Logging the public half is safe.
+  defp log_registration_public_key do
+    case Application.get_env(:ztlp_ns, :registration_private_key) do
+      nil ->
+        :ok
+
+      priv ->
+        pub = ZtlpNs.Crypto.public_key_from_private(priv)
+        Logger.info("[ztlp-ns] NS registration public key: #{Base.encode16(pub, case: :lower)}")
+    end
+  end
 
   # Persist registration signing key on startup.
   # Loads from file if configured, generates and saves if not found.

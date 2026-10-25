@@ -1030,6 +1030,15 @@ enum AdminCommands {
         /// is set: keep `--expires` short and `--max-uses` at 1.
         #[arg(long, value_name = "FILE")]
         relay_secret_file: Option<PathBuf>,
+
+        /// Home name server's Ed25519 PUBLIC key (64 hex) to embed in the
+        /// token (flag 0x10). The enrolling device then trusts only answers
+        /// signed by this key (and by servers this key vouches for), so a
+        /// gateway restart or cert change needs no user action and a forged
+        /// NS answer is refused. Get it from the NS host:
+        /// `ztlp-ns` logs it at startup ("NS registration public key").
+        #[arg(long, value_name = "HEX")]
+        ns_key: Option<String>,
     },
 
     /// Create a user identity in the ZTLP namespace
@@ -7161,6 +7170,50 @@ fn compute_advertised_svc(
     (best, addresses)
 }
 
+/// SVC record fields published by `ztlp listen` (pure, tested).
+///
+/// Stage 2: the full ICE candidate set rides in `addresses` alongside the
+/// single `address`. Old clients read `address`; new clients split
+/// `addresses`, rank against their own subnets, and dial/failover. Empty/None
+/// list → legacy single-address SVC (no `addresses` key) for exact back-compat.
+///
+/// NS-anchored trust (task 3.4): `quic_cert_sha256` = hex SHA-256 of the QUIC
+/// cert this gateway serves. The NS re-signs the record, so clients can check
+/// the presented cert against an NS-signed value instead of a TOFU pin. Old
+/// clients ignore the unknown key.
+fn svc_record_pairs<'a>(
+    address: &'a str,
+    node_id_hex: &'a str,
+    zone: &'a str,
+    addresses: Option<&'a str>,
+    quic_cert_sha256: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut pairs = vec![
+        ("address", address),
+        ("node_id", node_id_hex),
+        ("zone", zone),
+    ];
+    if let Some(list) = addresses.filter(|l| !l.is_empty()) {
+        pairs.push(("addresses", list));
+    }
+    if let Some(fp) = quic_cert_sha256.filter(|f| !f.is_empty()) {
+        pairs.push(("quic_cert_sha256", fp));
+    }
+    pairs
+}
+
+/// Fingerprint of this process's bound QUIC server cert, if any.
+fn published_quic_cert_sha256() -> Option<String> {
+    #[cfg(feature = "quic-transport")]
+    {
+        ztlp_proto::quic_transport::tokio_endpoint::published_server_cert_sha256()
+    }
+    #[cfg(not(feature = "quic-transport"))]
+    {
+        None
+    }
+}
+
 async fn ns_publish_self(
     name: &str,
     zone: &str,
@@ -7254,20 +7307,14 @@ async fn ns_publish_self(
             .parse()
             .map_err(|e| format!("invalid address '{}': {} (expected ip:port)", addr_str, e))?;
 
-        let mut svc_pairs = vec![
-            ("address", addr_str.as_str()),
-            ("node_id", node_id_hex.as_str()),
-            ("zone", zone),
-        ];
-        // Stage 2: publish the full ICE candidate set alongside the single
-        // `address`. Old clients read `address`; new clients split `addresses`,
-        // rank against their own subnets, and dial/failover. Empty/None list →
-        // legacy single-address SVC (no `addresses` key) for exact back-compat.
-        if let Some(list) = addresses {
-            if !list.is_empty() {
-                svc_pairs.push(("addresses", list));
-            }
-        }
+        let quic_fp = published_quic_cert_sha256();
+        let mut svc_pairs = svc_record_pairs(
+            addr_str.as_str(),
+            node_id_hex.as_str(),
+            zone,
+            addresses,
+            quic_fp.as_deref(),
+        );
         let svc_data_bin = cbor_map(&mut svc_pairs);
 
         // Signed (v2): NS authorizes SVC via the KEY owner (same pubkey) or a
@@ -9177,6 +9224,68 @@ async fn setup_join(
                     // Parse config from response
                     let (relay_addrs, gateway_addrs) = parse_enroll_config(config)?;
 
+                    // NS-anchored gateway trust: a token minted with --ns-key
+                    // makes the device trust only answers signed by that key.
+                    // Establish (and prove) that trust BEFORE writing any
+                    // config; a reply that does not verify aborts setup.
+                    let ns_trust_store = match token.ns_key {
+                        Some(ns_key) => {
+                            use ztlp_proto::agent::enroll_trust;
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let nsset = enroll_trust::nsset_from_enroll_config(config)?;
+                            let store = enroll_trust::initial_trust_store(
+                                &token.ns_addr,
+                                &token.zone,
+                                ns_key,
+                                nsset,
+                                now,
+                            )?;
+                            enroll_trust::confirm_home_key(
+                                &ns_addr.to_string(),
+                                &full_name,
+                                ns_key,
+                                &hex::encode(pubkey_bytes),
+                            )
+                            .await
+                            .map_err(|e| {
+                                format!(
+                                    "enrollment could not be verified: {e}. The device is NOT configured; \
+                                     if this persists, ask for a new enrollment token."
+                                )
+                            })?;
+                            eprintln!(
+                                "  {} name server verified against the token's key ({} trusted server{})",
+                                c_green("✓"),
+                                store.servers.len(),
+                                if store.servers.len() == 1 { "" } else { "s" }
+                            );
+                            Some(store)
+                        }
+                        None => {
+                            eprintln!(
+                                "  {} token has no name-server key: this device cannot verify name-server \
+                                 answers (legacy trust). Ask for a token made with `ztlp admin enroll --ns-key`.",
+                                c_yellow("⚠")
+                            );
+                            None
+                        }
+                    };
+                    if let Some(ref store) = ns_trust_store {
+                        let trust_path = agent_config_path
+                            .parent()
+                            .map(|d| d.join(ztlp_proto::agent::ns_trust::FILE_NAME))
+                            .unwrap_or_else(ztlp_proto::agent::ns_trust::default_path);
+                        store.save(&trust_path)?;
+                        eprintln!(
+                            "  {} name-server trust written to {}",
+                            c_green("✓"),
+                            trust_path.display()
+                        );
+                    }
+
                     // Write config file
                     write_config_file(
                         &config_path,
@@ -10276,6 +10385,17 @@ fn cmd_admin_init_zone(
 
 /// `ztlp admin enroll` — Generate enrollment tokens
 #[allow(clippy::too_many_arguments)]
+/// Parse a 64-hex Ed25519 public key (`--ns-key`).
+fn parse_ns_key_hex(h: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(h.trim()).map_err(|e| format!("--ns-key must be 64 hex chars: {e}"))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "--ns-key must be 64 hex chars (32 bytes)".to_string())?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map_err(|_| "--ns-key is not a valid Ed25519 public key".to_string())?;
+    Ok(key)
+}
+
 fn cmd_admin_enroll(
     zone: &str,
     secret_path: &Option<PathBuf>,
@@ -10287,9 +10407,16 @@ fn cmd_admin_enroll(
     count: usize,
     show_qr: bool,
     relay_secret_file: &Option<PathBuf>,
+    ns_key: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{SystemTime, UNIX_EPOCH};
     use ztlp_proto::enrollment::{parse_duration_secs, EnrollmentToken};
+
+    // Optional home NS public key (flag 0x10, NS-anchored gateway trust).
+    let ns_key: Option<[u8; 32]> = match ns_key {
+        Some(h) => Some(parse_ns_key_hex(h)?),
+        None => None,
+    };
 
     // Optional relay registration secret to embed (ZT-01).
     let relay_secret: Option<String> = match relay_secret_file {
@@ -10376,6 +10503,13 @@ fn cmd_admin_enroll(
         }
     );
     eprintln!("  {} {}", c_cyan("Count:"), count);
+    match ns_key {
+        Some(k) => eprintln!("  {} {}", c_cyan("NS key:"), hex::encode(k)),
+        None => eprintln!(
+            "  {} no --ns-key: devices enrolled with this token cannot verify name-server answers (legacy trust)",
+            c_yellow("Warning:")
+        ),
+    }
     if relay_secret.is_some() {
         eprintln!(
             "  {} embeds the relay secret: treat the token as a credential (short expiry, single use)",
@@ -10395,6 +10529,10 @@ fn cmd_admin_enroll(
             &secret,
             relay_secret.as_deref(),
         );
+        let token = match ns_key {
+            Some(k) => token.with_ns_key(k, &secret),
+            None => token,
+        };
 
         let uri = token.to_uri();
 
@@ -14433,6 +14571,7 @@ async fn main() {
                 count,
                 qr,
                 relay_secret_file,
+                ns_key,
             } => cmd_admin_enroll(
                 zone,
                 secret,
@@ -14444,6 +14583,7 @@ async fn main() {
                 *count,
                 *qr,
                 relay_secret_file,
+                ns_key,
             ),
             AdminCommands::CreateUser {
                 name,
@@ -16328,6 +16468,50 @@ mod tests {
     /// the SVC record is what `ns lookup` ultimately returns, so losing
     /// `node_id` here would break the operator-identity binding even if
     /// the KEY record stayed intact.
+    #[test]
+    fn parse_ns_key_hex_accepts_a_real_key_and_rejects_junk() {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            parse_ns_key_hex(&format!(" {} ", hex::encode(k))).unwrap(),
+            k
+        );
+        assert!(parse_ns_key_hex("abcd").is_err());
+        assert!(parse_ns_key_hex(&"zz".repeat(32)).is_err());
+        assert!(parse_ns_key_hex(&"ab".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn svc_record_pairs_publish_the_quic_fingerprint_when_known() {
+        let fp = "ab".repeat(32);
+        let p = svc_record_pairs("10.0.0.1:23097", "00ff", "z.ztlp", None, Some(&fp));
+        assert_eq!(
+            p,
+            vec![
+                ("address", "10.0.0.1:23097"),
+                ("node_id", "00ff"),
+                ("zone", "z.ztlp"),
+                ("quic_cert_sha256", fp.as_str()),
+            ]
+        );
+    }
+
+    #[test]
+    fn svc_record_pairs_are_legacy_identical_without_fp_or_addresses() {
+        let p = svc_record_pairs("10.0.0.1:23097", "00ff", "z.ztlp", Some(""), None);
+        assert_eq!(
+            p,
+            vec![
+                ("address", "10.0.0.1:23097"),
+                ("node_id", "00ff"),
+                ("zone", "z.ztlp")
+            ]
+        );
+        let p = svc_record_pairs("a:1", "n", "z", Some("a:1,b:2"), Some(""));
+        assert_eq!(p.last(), Some(&("addresses", "a:1,b:2")));
+    }
+
     #[test]
     fn ns_register_svc_record_includes_node_id() {
         let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";

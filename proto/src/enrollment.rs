@@ -72,7 +72,16 @@ const FLAG_HAS_RELAY_SECRET: u8 = 0x08;
 /// Flags this build understands. Any other bit set means a newer token format;
 /// reading it anyway would misparse the new field as `max_uses`/`expires_at`,
 /// so it is rejected with a clear message instead.
-const KNOWN_FLAGS: u8 = FLAG_HAS_GATEWAY | FLAG_HAS_CALLBACK | FLAG_HAS_RELAY_SECRET;
+/// Flag bit 4: the token carries the home name server's Ed25519 public key
+/// (32 raw bytes, covered by the MAC). NS-anchored gateway trust: this key is
+/// the device's only trust root for name-server answers, delivered out of
+/// band with the token (no trust on first use). The NS parser must skip the
+/// field too (`ns/lib/ztlp_ns/enrollment.ex`), or enrollment breaks the way
+/// the 0x02 skew did.
+const FLAG_HAS_NS_KEY: u8 = 0x10;
+
+const KNOWN_FLAGS: u8 =
+    FLAG_HAS_GATEWAY | FLAG_HAS_CALLBACK | FLAG_HAS_RELAY_SECRET | FLAG_HAS_NS_KEY;
 
 /// Upper bound on the embedded relay secret (hex or raw text). Real secrets
 /// are 48-64 bytes; the cap stops a hostile token from bloating the parser.
@@ -99,6 +108,8 @@ pub struct EnrollmentToken {
     /// Relay registration secret the device must sign `CLIENT_ROUTE` with
     /// (ZT-01, flag `0x08`). Covered by the MAC. Never printed by `Debug`.
     pub relay_secret: Option<String>,
+    /// Home name server's Ed25519 public key (flag 0x10), if minted with one.
+    pub ns_key: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for EnrollmentToken {
@@ -120,6 +131,7 @@ impl std::fmt::Debug for EnrollmentToken {
                 "relay_secret",
                 &self.relay_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field("ns_key", &self.ns_key.map(hex::encode))
             .finish()
     }
 }
@@ -202,12 +214,20 @@ impl EnrollmentToken {
             token_id: None,
             callback_url: None,
             relay_secret: relay_secret.map(|s| s.trim().to_string()),
+            ns_key: None,
         };
 
         // Serialize everything except the MAC field, then compute MAC
         let data = token.serialize_without_mac();
         token.mac = hmac_blake2s(secret, &data);
         token
+    }
+
+    /// Embed the home name server's public key (flag 0x10) and re-MAC.
+    pub fn with_ns_key(mut self, ns_key: [u8; 32], secret: &[u8; 32]) -> Self {
+        self.ns_key = Some(ns_key);
+        self.mac = hmac_blake2s(secret, &self.serialize_without_mac());
+        self
     }
 
     /// Serialize the token to binary wire format.
@@ -305,6 +325,19 @@ impl EnrollmentToken {
             None
         };
 
+        // Home NS public key (optional) — 32 raw bytes, covered by the MAC
+        let ns_key = if flags & FLAG_HAS_NS_KEY != 0 {
+            if pos + 32 > data.len() {
+                return Err("truncated at ns key".to_string());
+            }
+            let mut k = [0u8; 32];
+            k.copy_from_slice(&data[pos..pos + 32]);
+            pos += 32;
+            Some(k)
+        } else {
+            None
+        };
+
         // Max uses
         if pos + 2 > data.len() {
             return Err("truncated at max_uses".to_string());
@@ -356,6 +389,7 @@ impl EnrollmentToken {
             token_id: None, // Binary tokens don't carry token IDs
             callback_url,   // Parsed from wire format if flag bit 1 set
             relay_secret,   // Parsed from wire format if flag bit 3 set (ZT-01)
+            ns_key,         // Parsed from wire format if flag bit 4 set
         })
     }
 
@@ -480,6 +514,7 @@ impl EnrollmentToken {
             // Query-param (Bootstrap) tokens never carried one; the signed
             // binary form is the only carrier (ZT-01).
             relay_secret: None,
+            ns_key: None,
         })
     }
 
@@ -564,6 +599,9 @@ impl EnrollmentToken {
         if self.relay_secret.is_some() {
             flags |= FLAG_HAS_RELAY_SECRET;
         }
+        if self.ns_key.is_some() {
+            flags |= FLAG_HAS_NS_KEY;
+        }
         buf.push(flags);
 
         // Zone
@@ -591,6 +629,11 @@ impl EnrollmentToken {
         // Relay registration secret (if present) — covered by the MAC (ZT-01)
         if let Some(ref rs) = self.relay_secret {
             write_len_prefixed_string(&mut buf, rs);
+        }
+
+        // Home NS public key (if present) — covered by the MAC
+        if let Some(ref k) = self.ns_key {
+            buf.extend_from_slice(k);
         }
 
         // Max uses
@@ -875,6 +918,115 @@ mod tests {
     // writes it for the user.
 
     const RELAY_SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    // ── 0x10 FLAG_HAS_NS_KEY (NS-anchored gateway trust) ──────────────
+
+    fn ns_key_token() -> (EnrollmentToken, [u8; 32]) {
+        let secret = [7u8; 32];
+        let t = EnrollmentToken::create_with_relay_secret(
+            "trs.ztlp",
+            "44.227.148.151:23096",
+            &["44.227.148.151:23095".to_string()],
+            None,
+            1,
+            0,
+            &secret,
+            Some("ab".repeat(32).as_str()),
+        )
+        .with_ns_key([0x42; 32], &secret);
+        (t, secret)
+    }
+
+    #[test]
+    fn ns_key_round_trips_and_is_covered_by_the_mac() {
+        let (t, secret) = ns_key_token();
+        let bytes = t.serialize();
+        assert_eq!(bytes[1] & FLAG_HAS_NS_KEY, FLAG_HAS_NS_KEY);
+        let parsed = EnrollmentToken::deserialize(&bytes).expect("test value");
+        assert_eq!(parsed.ns_key, Some([0x42; 32]));
+        assert_eq!(parsed.relay_secret, t.relay_secret);
+        assert_eq!(parsed.validate(&secret), TokenValidation::Valid);
+        // Tamper with one key byte: MAC must fail.
+        let pos = bytes
+            .windows(32)
+            .position(|w| w == [0x42; 32])
+            .expect("test value");
+        let mut bad = bytes.clone();
+        bad[pos] ^= 1;
+        let tampered = EnrollmentToken::deserialize(&bad).expect("test value");
+        assert_eq!(tampered.validate(&secret), TokenValidation::InvalidMac);
+    }
+
+    #[test]
+    fn token_without_ns_key_is_byte_identical_to_the_legacy_layout() {
+        let secret = [7u8; 32];
+        let t = EnrollmentToken::create("trs.ztlp", "1.2.3.4:23096", &[], None, 1, 0, &secret);
+        assert_eq!(t.ns_key, None);
+        let bytes = t.serialize();
+        assert_eq!(bytes[1] & FLAG_HAS_NS_KEY, 0);
+        // version, flags, zone, ns, relay count, max_uses, expires, nonce, mac
+        let expected_len = 1 + 1 + (2 + 8) + (2 + 13) + 1 + 2 + 8 + 16 + 32;
+        assert_eq!(bytes.len(), expected_len);
+        assert_eq!(
+            EnrollmentToken::deserialize(&bytes)
+                .expect("test value")
+                .ns_key,
+            None
+        );
+    }
+
+    #[test]
+    fn truncated_ns_key_is_rejected() {
+        let (t, _) = ns_key_token();
+        let bytes = t.serialize_without_mac();
+        // Cut inside the key: everything after relay secret is shorter than 32.
+        let pos = bytes
+            .windows(32)
+            .position(|w| w == [0x42; 32])
+            .expect("test value");
+        let err = EnrollmentToken::deserialize(&bytes[..pos + 10]).expect_err("must fail");
+        assert!(err.contains("ns key"), "{err}");
+    }
+
+    #[test]
+    fn uri_round_trip_keeps_the_ns_key() {
+        let (t, secret) = ns_key_token();
+        let parsed = EnrollmentToken::from_base64url(&t.to_uri()).expect("test value");
+        assert_eq!(parsed.ns_key, Some([0x42; 32]));
+        assert_eq!(parsed.validate(&secret), TokenValidation::Valid);
+    }
+
+    /// Cross-language vector: the NS enrollment test enrolls with these exact
+    /// bytes (`ns/test/ztlp_ns/enrollment_test.exs`), so a parser skew on
+    /// either side (the 0x02 bug class) fails a test. Regenerate only for an
+    /// intentional format change: `ZTLP_WRITE_GOLDEN=1 cargo test --lib
+    /// enrollment::tests::token_with_every_flag_matches_the_shared_vector`.
+    #[test]
+    fn token_with_every_flag_matches_the_shared_vector() {
+        let secret = [7u8; 32];
+        let mut t = EnrollmentToken::create_with_relay_secret(
+            "trs.ztlp",
+            "127.0.0.1:23096",
+            &["127.0.0.1:23095".to_string()],
+            Some("127.0.0.1:23097"),
+            0,
+            0,
+            &secret,
+            Some("cd".repeat(32).as_str()),
+        );
+        t.callback_url = Some("https://example.invalid/cb".to_string());
+        t.nonce = [0x5a; 16];
+        let t = t.with_ns_key([0x42; 32], &secret);
+        let hex_now = hex::encode(t.serialize());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/enrollment_token_all_flags.hex");
+        if std::env::var("ZTLP_WRITE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, format!("{hex_now}\n")).expect("test value");
+        }
+        let committed = std::fs::read_to_string(&path).expect("test value");
+        assert_eq!(committed.trim(), hex_now);
+        assert_eq!(t.serialize()[1], 0x01 | 0x02 | 0x08 | 0x10);
+    }
 
     fn token_with_relay_secret(secret: Option<&str>) -> EnrollmentToken {
         EnrollmentToken::create_with_relay_secret(

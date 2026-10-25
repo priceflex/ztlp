@@ -66,7 +66,9 @@ pub mod metrics;
 pub mod multi_candidate_dial;
 #[cfg(feature = "ios-sync")]
 pub mod mux;
+pub mod ns_cache;
 pub mod ns_cbor;
+pub mod ns_verify;
 pub mod packet;
 pub mod packet_router;
 pub mod pipeline;

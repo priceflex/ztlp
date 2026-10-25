@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.36.0 — 2026-10-24
+
+Gateway trust anchored in ZTLP-NS. A gateway rebuild, restart or certificate
+change no longer needs any end-user action, and the client now really
+authenticates the gateway. Plan: `docs/NS-ANCHORED-GATEWAY-TRUST-PLAN.md`.
+
+- **Security fix: the QUIC pin now proves something.** The client verified
+  the gateway's certificate fingerprint but skipped the TLS CertificateVerify
+  signature, so an on-path attacker could present the (public) pinned cert
+  and sign with their own key. The signature is now verified with the crypto
+  provider; schemes come from the provider.
+- **Signed NS answers on the client.** New `ns_verify` (parse + Ed25519
+  verify of `Record.encode` bytes, expiry, trusted signer), `ns_cache`
+  (signed-record cache, replay guard that survives expiry) and
+  `ns_query_verified`. Golden vectors are produced by the NS encoder and
+  shared by both test suites. Records from unauthenticated (dev-mode)
+  registrations are refused.
+- **Gateways publish `quic_cert_sha256`** (SHA-256 of the QUIC leaf they
+  serve) in their SVC record; `ZTLP_QUIC_CERT_DIR` keeps it stable across
+  restarts, and the startup log shows the fingerprint (WARN when ephemeral).
+- **NSSET.** The home NS (`ZTLP_NS_NSSET_ZONES`, `ZTLP_NS_SELF_ADDR`,
+  optional `ZTLP_NS_PEERS`) publishes a signed OPERATOR (0x07) record per
+  zone listing the name servers clients may trust. OPERATOR registrations
+  are now refused. Agents refresh it at every hourly check-in; dropping a
+  server from the list removes its trust fleet-wide within an hour.
+- **Enrollment carries the NS key.** Token flag `0x10` holds the home NS
+  public key (MAC-covered); NS and client parsers learned it together, with a
+  shared cross-language token vector. `ztlp admin enroll --ns-key <hex>`
+  mints it (the NS logs its registration public key at startup). The ENROLL
+  reply carries the zone's NSSET. `ztlp setup` writes `~/.ztlp/ns_trust.toml`
+  and refuses to configure the device unless the NS proves it holds the key.
+- **Dialing.** A device that trusts a key for a zone resolves that zone's
+  gateways only from verified records and accepts a gateway only if its cert
+  matches the NS-signed fingerprint (no TOFU pin read or written; stale pins
+  are retired). A mismatch triggers one fresh lookup and redial (covers a
+  gateway restarted with a new cert). Unverified answers are refused with no
+  fallback. Devices enrolled with old tokens keep the old behavior and warn
+  at every agent start; `status` shows `ns_trust`.
+- Compatibility: old clients ignore the new SVC field, token flag-free tokens
+  are byte-identical, old NS replies parse, gateways without a published
+  fingerprint keep pin-as-cache behavior.
+- Versions: proto/ns/relay/gateway 0.36.0, desktop 1.3.0.
+
 ## v0.35.20 — 2026-10-20
 
 Remote clients behind a relay were slow or stalled whenever more than one

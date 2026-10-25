@@ -105,6 +105,68 @@ pub(crate) fn forget_peer_candidates(ztlp_name: &str) {
     if let Ok(mut g) = candidate_cache().write() {
         g.remove(&ztlp_name.to_ascii_lowercase());
     }
+    forget_peer_cert(ztlp_name);
+}
+
+// ── Per-name certificate expectation (NS-anchored gateway trust) ─────────
+//
+// Same process-wide pattern as the candidate cache: the resolver publishes
+// what the verified NS record says about each gateway's QUIC certificate;
+// `connect_tunnel` dials with it on a cache hit.
+static PEER_CERTS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashMap<String, crate::quic_transport::CertExpectation>>,
+> = std::sync::OnceLock::new();
+
+fn cert_cache() -> &'static std::sync::RwLock<
+    std::collections::HashMap<String, crate::quic_transport::CertExpectation>,
+> {
+    PEER_CERTS.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Record the certificate expectation for `ztlp_name` (resolver).
+pub(crate) fn set_peer_cert(ztlp_name: &str, expect: &crate::quic_transport::CertExpectation) {
+    if let Ok(mut g) = cert_cache().write() {
+        g.insert(ztlp_name.to_ascii_lowercase(), expect.clone());
+    }
+}
+
+fn forget_peer_cert(ztlp_name: &str) {
+    if let Ok(mut g) = cert_cache().write() {
+        g.remove(&ztlp_name.to_ascii_lowercase());
+    }
+}
+
+fn cached_peer_cert(ztlp_name: &str) -> Option<crate::quic_transport::CertExpectation> {
+    cert_cache()
+        .read()
+        .ok()
+        .and_then(|g| g.get(&ztlp_name.to_ascii_lowercase()).cloned())
+}
+
+/// Should a cache hit be dialed as-is, or resolved fresh first? A device
+/// strict for the name must not dial without a verified record (it would be
+/// refused anyway), so a missing / unverified cached expectation forces a
+/// fresh resolution. Pure.
+fn cache_hit_usable(
+    cached: Option<&crate::quic_transport::CertExpectation>,
+    strict_for_name: bool,
+) -> bool {
+    use crate::quic_transport::RecordState;
+    if !strict_for_name {
+        return true;
+    }
+    matches!(
+        cached,
+        Some(c) if matches!(c.record, RecordState::Verified { .. })
+    )
+}
+
+/// The dial failed because the NS-signed certificate expectation did not
+/// hold (gateway restarted with a new cert before re-registering, or a
+/// stale cached record): worth exactly one fresh resolution + redial.
+fn is_ns_cert_failure(err: &str) -> bool {
+    err.contains(crate::quic_transport::NS_MISMATCH_MARKER)
+        || err.contains(crate::quic_transport::UNVERIFIED_MARKER)
 }
 
 fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
@@ -627,6 +689,18 @@ pub async fn run_daemon(
         env!("CARGO_PKG_VERSION"),
         identity.node_id
     );
+
+    // NS-anchored gateway trust (task 4.4): say at every start whether this
+    // device verifies name-server answers; legacy devices are told to
+    // re-enroll.
+    {
+        use super::ns_trust::{NsTrustStore, TrustStatus};
+        let st = TrustStatus::of(&NsTrustStore::load(&super::ns_trust::default_path()));
+        match st {
+            TrustStatus::Verified { .. } => info!("{}", st.message()),
+            _ => warn!("{}", st.message()),
+        }
+    }
 
     // v0.35.19: hourly NS check-in. Keeps this enrolled device's KEY record
     // alive for a sliding year (each accepted check-in restarts the window),
@@ -2376,6 +2450,57 @@ pub fn get_agent_pid() -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    // ── NS-anchored trust: cache + retry helpers ───────────────────────
+
+    #[test]
+    fn cache_hit_is_used_freely_on_legacy_devices() {
+        assert!(super::cache_hit_usable(None, false));
+    }
+
+    #[test]
+    fn strict_device_needs_a_verified_cached_expectation() {
+        use crate::quic_transport::{CertExpectation, RecordState};
+        assert!(!super::cache_hit_usable(None, true));
+        let unverified = CertExpectation {
+            record: RecordState::Unverified,
+            strict: false,
+        };
+        assert!(!super::cache_hit_usable(Some(&unverified), true));
+        let verified = CertExpectation {
+            record: RecordState::Verified { fp: None },
+            strict: true,
+        };
+        assert!(super::cache_hit_usable(Some(&verified), true));
+    }
+
+    #[test]
+    fn ns_cert_failures_are_recognised_through_error_text() {
+        use crate::quic_transport::{NS_MISMATCH_MARKER, UNVERIFIED_MARKER};
+        assert!(super::is_ns_cert_failure(&format!(
+            "all 1 dial attempts failed: the cryptographic handshake failed: error 42: {NS_MISMATCH_MARKER} gateway"
+        )));
+        assert!(super::is_ns_cert_failure(UNVERIFIED_MARKER));
+        assert!(!super::is_ns_cert_failure(
+            "QUIC certificate fingerprint ... does not match the pinned value"
+        ));
+        assert!(!super::is_ns_cert_failure("timed out"));
+    }
+
+    #[test]
+    fn peer_cert_cache_round_trip_and_forget() {
+        use crate::quic_transport::{CertExpectation, RecordState};
+        let e = CertExpectation {
+            record: RecordState::Verified {
+                fp: Some("ab".repeat(32)),
+            },
+            strict: true,
+        };
+        super::set_peer_cert("Cert.Cache.ztlp", &e);
+        assert_eq!(super::cached_peer_cert("cert.cache.ztlp"), Some(e));
+        super::forget_peer_candidates("cert.CACHE.ztlp");
+        assert_eq!(super::cached_peer_cert("cert.cache.ztlp"), None);
+    }
     use std::time::Duration;
 
     // ── Direct-first dial plan, step B3 (2026-10-05) ────────────────────────
@@ -3079,15 +3204,77 @@ async fn connect_tunnel(
     // resolver published for this name (falls back to the single cached
     // best address for entries that predate the list); otherwise resolve
     // fresh via NS.
+    let strict = super::ns_trust::load_cached()
+        .map(|s| s.strict_for(ztlp_name))
+        // A broken trust file must not silently downgrade to legacy.
+        .unwrap_or(true);
     let cached = candidates_for_dial(peer_addr, &cached_peer_candidates(ztlp_name));
-    let (candidates, resolved_node_id): (Vec<SocketAddr>, Option<NodeId>) = if !cached.is_empty() {
-        (cached, peer_node_id)
+    let cached_cert = cached_peer_cert(ztlp_name);
+    let from_cache = !cached.is_empty() && cache_hit_usable(cached_cert.as_ref(), strict);
+    let (candidates, resolved_node_id, expect) = if from_cache {
+        (cached, peer_node_id, cached_cert.unwrap_or_default())
     } else {
         let r = proxy::ns_resolve(ztlp_name, ns_server).await?;
         set_peer_candidates(ztlp_name, &r.candidates);
-        (r.candidates, r.node_id)
+        set_peer_cert(ztlp_name, &r.cert);
+        (r.candidates, r.node_id, r.cert)
     };
 
+    match walk_dial_plan(
+        ztlp_name,
+        port,
+        &candidates,
+        resolved_node_id,
+        &expect,
+        identity,
+        bind_addr,
+        relay_addr,
+    )
+    .await
+    {
+        Err(e) if is_ns_cert_failure(&e.to_string()) => {
+            // Task 5.4: the gateway's cert no longer matches what we
+            // dialed with. Drop the cached view, resolve fresh from the NS
+            // (a restarted gateway re-registers its new fingerprint), and
+            // redial exactly once. No fallback to weaker checks.
+            warn!(
+                "{}: gateway certificate does not match its name-server record; re-resolving once",
+                ztlp_name
+            );
+            forget_peer_candidates(ztlp_name);
+            crate::ns_cache::evict(&crate::ns_cache::default_dir(), ztlp_name, 2);
+            let r = proxy::ns_resolve(ztlp_name, ns_server).await?;
+            set_peer_candidates(ztlp_name, &r.candidates);
+            set_peer_cert(ztlp_name, &r.cert);
+            walk_dial_plan(
+                ztlp_name,
+                port,
+                &r.candidates,
+                r.node_id,
+                &r.cert,
+                identity,
+                bind_addr,
+                relay_addr,
+            )
+            .await
+        }
+        other => other,
+    }
+}
+
+/// Build the dial plan for one resolution and walk it (see
+/// [`connect_tunnel`]).
+#[allow(clippy::too_many_arguments)]
+async fn walk_dial_plan(
+    ztlp_name: &str,
+    port: u16,
+    candidates: &[SocketAddr],
+    resolved_node_id: Option<NodeId>,
+    expect: &crate::quic_transport::CertExpectation,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    relay_addr: Option<&str>,
+) -> Result<ConnectedTunnel, Box<dyn std::error::Error + Send + Sync>> {
     let relay: Option<SocketAddr> = match relay_addr {
         Some(r) => Some(
             r.parse()
@@ -3096,7 +3283,7 @@ async fn connect_tunnel(
         None => None,
     };
 
-    let plan = dial_plan(&candidates, relay, prefer_relay());
+    let plan = dial_plan(candidates, relay, prefer_relay());
     if plan.is_empty() {
         return Err(format!("no dialable endpoint for '{}'", ztlp_name).into());
     }
@@ -3132,6 +3319,7 @@ async fn connect_tunnel(
             service_hash,
             identity,
             bind_addr,
+            expect,
         );
         let result = match attempt_timeout(attempt, i + 1 < n) {
             Some(budget) => match tokio::time::timeout(budget, one).await {
@@ -3180,6 +3368,7 @@ async fn connect_tunnel(
 }
 
 /// One attempt: (CLIENT_ROUTE when via relay) + QUIC connect + Noise handshake.
+#[allow(clippy::too_many_arguments)]
 async fn connect_one(
     attempt: DialAttempt,
     service_name: &str,
@@ -3188,6 +3377,7 @@ async fn connect_one(
     service_hash: [u8; 16],
     identity: &NodeIdentity,
     bind_addr: &str,
+    expect: &crate::quic_transport::CertExpectation,
 ) -> Result<
     (
         crate::quic_transport::tokio_endpoint::QuicConnection,
@@ -3239,6 +3429,7 @@ async fn connect_one(
             "localhost",
             std_socket,
             relayed_pin_service(attempt.via, service_name),
+            expect.clone(),
         )
         .await?;
 

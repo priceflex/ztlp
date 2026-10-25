@@ -250,10 +250,10 @@ defmodule ZtlpNs.Enrollment do
         throw({:error, :bad_version})
       end
 
-      # Known flags: 0x01 gateway, 0x02 callback, 0x08 relay secret. A token
+      # Known flags: 0x01 gateway, 0x02 callback, 0x08 relay secret, 0x10 NS key. A token
       # with any other bit set is from a newer format; reading it anyway would
       # misparse the unknown field as max_uses/expires_at, so refuse it.
-      if Bitwise.band(flags, Bitwise.bnot(0x0B)) != 0 do
+      if Bitwise.band(flags, Bitwise.bnot(0x1B)) != 0 do
         throw({:error, :bad_version})
       end
 
@@ -308,8 +308,20 @@ defmodule ZtlpNs.Enrollment do
           rest7
         end
 
+      # Home NS public key (if flag set — FLAG_HAS_NS_KEY = 0x10, NS-anchored
+      # gateway trust). 32 raw bytes, covered by the MAC. The client uses it
+      # as its trust root for NS answers; the NS only skips the bytes so the
+      # fields after it parse (the same skew the 0x02 / 0x08 flags caused).
+      rest9 =
+        if Bitwise.band(flags, 0x10) != 0 do
+          <<_ns_key::binary-size(32), r::binary>> = rest8
+          r
+        else
+          rest8
+        end
+
       # max_uses, expires_at, nonce, mac
-      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest8
+      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest9
 
       {:ok,
        %{

@@ -1030,6 +1030,15 @@ enum AdminCommands {
         /// is set: keep `--expires` short and `--max-uses` at 1.
         #[arg(long, value_name = "FILE")]
         relay_secret_file: Option<PathBuf>,
+
+        /// Home name server's Ed25519 PUBLIC key (64 hex) to embed in the
+        /// token (flag 0x10). The enrolling device then trusts only answers
+        /// signed by this key (and by servers this key vouches for), so a
+        /// gateway restart or cert change needs no user action and a forged
+        /// NS answer is refused. Get it from the NS host:
+        /// `ztlp-ns` logs it at startup ("NS registration public key").
+        #[arg(long, value_name = "HEX")]
+        ns_key: Option<String>,
     },
 
     /// Create a user identity in the ZTLP namespace
@@ -10314,6 +10323,17 @@ fn cmd_admin_init_zone(
 
 /// `ztlp admin enroll` — Generate enrollment tokens
 #[allow(clippy::too_many_arguments)]
+/// Parse a 64-hex Ed25519 public key (`--ns-key`).
+fn parse_ns_key_hex(h: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(h.trim()).map_err(|e| format!("--ns-key must be 64 hex chars: {e}"))?;
+    let key: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "--ns-key must be 64 hex chars (32 bytes)".to_string())?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map_err(|_| "--ns-key is not a valid Ed25519 public key".to_string())?;
+    Ok(key)
+}
+
 fn cmd_admin_enroll(
     zone: &str,
     secret_path: &Option<PathBuf>,
@@ -10325,9 +10345,16 @@ fn cmd_admin_enroll(
     count: usize,
     show_qr: bool,
     relay_secret_file: &Option<PathBuf>,
+    ns_key: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{SystemTime, UNIX_EPOCH};
     use ztlp_proto::enrollment::{parse_duration_secs, EnrollmentToken};
+
+    // Optional home NS public key (flag 0x10, NS-anchored gateway trust).
+    let ns_key: Option<[u8; 32]> = match ns_key {
+        Some(h) => Some(parse_ns_key_hex(h)?),
+        None => None,
+    };
 
     // Optional relay registration secret to embed (ZT-01).
     let relay_secret: Option<String> = match relay_secret_file {
@@ -10414,6 +10441,13 @@ fn cmd_admin_enroll(
         }
     );
     eprintln!("  {} {}", c_cyan("Count:"), count);
+    match ns_key {
+        Some(k) => eprintln!("  {} {}", c_cyan("NS key:"), hex::encode(k)),
+        None => eprintln!(
+            "  {} no --ns-key: devices enrolled with this token cannot verify name-server answers (legacy trust)",
+            c_yellow("Warning:")
+        ),
+    }
     if relay_secret.is_some() {
         eprintln!(
             "  {} embeds the relay secret: treat the token as a credential (short expiry, single use)",
@@ -10433,6 +10467,10 @@ fn cmd_admin_enroll(
             &secret,
             relay_secret.as_deref(),
         );
+        let token = match ns_key {
+            Some(k) => token.with_ns_key(k, &secret),
+            None => token,
+        };
 
         let uri = token.to_uri();
 
@@ -14471,6 +14509,7 @@ async fn main() {
                 count,
                 qr,
                 relay_secret_file,
+                ns_key,
             } => cmd_admin_enroll(
                 zone,
                 secret,
@@ -14482,6 +14521,7 @@ async fn main() {
                 *count,
                 *qr,
                 relay_secret_file,
+                ns_key,
             ),
             AdminCommands::CreateUser {
                 name,
@@ -16366,6 +16406,20 @@ mod tests {
     /// the SVC record is what `ns lookup` ultimately returns, so losing
     /// `node_id` here would break the operator-identity binding even if
     /// the KEY record stayed intact.
+    #[test]
+    fn parse_ns_key_hex_accepts_a_real_key_and_rejects_junk() {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32])
+            .verifying_key()
+            .to_bytes();
+        assert_eq!(
+            parse_ns_key_hex(&format!(" {} ", hex::encode(k))).unwrap(),
+            k
+        );
+        assert!(parse_ns_key_hex("abcd").is_err());
+        assert!(parse_ns_key_hex(&"zz".repeat(32)).is_err());
+        assert!(parse_ns_key_hex(&"ab".repeat(33)).is_err());
+    }
+
     #[test]
     fn svc_record_pairs_publish_the_quic_fingerprint_when_known() {
         let fp = "ab".repeat(32);

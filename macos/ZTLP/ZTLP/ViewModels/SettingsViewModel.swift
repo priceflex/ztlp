@@ -92,7 +92,15 @@ final class SettingsViewModel: ObservableObject {
     /// /Library/Application Support/ZTLP (root-owned; see
     /// AgentServiceInstaller.unregister for why that stays a separate step).
     func factoryReset() async {
-        AgentServiceInstaller.shared.unregister()
+        // Remove the background service first, and erase nothing unless that
+        // worked: otherwise the daemon could keep running (or finish an
+        // in-flight install) behind an app that says "All data cleared".
+        let installer = AgentServiceInstaller.shared
+        guard await installer.unregisterAsync() else {
+            statusMessage = "Could not remove the background service "
+                + "(\(installer.lastError ?? "unknown error")). Nothing was deleted."
+            return
+        }
         try? KeychainService.shared.deleteIdentity()
         if let path = defaultIdentityPath() {
             try? FileManager.default.removeItem(atPath: path)

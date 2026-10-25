@@ -51,7 +51,7 @@ final class AgentServiceInstaller: ObservableObject {
     static let shared = AgentServiceInstaller()
 
     /// Must match Contents/Library/LaunchDaemons/<this>.plist exactly.
-    static let plistName = "org.ztlp.agent.plist"
+    nonisolated static let plistName = "org.ztlp.agent.plist"
 
     @Published private(set) var state: AgentServiceState = .notRegistered
     @Published private(set) var lastError: String?
@@ -112,5 +112,64 @@ final class AgentServiceInstaller: ObservableObject {
     /// has no programmatic "approve" — this is the documented Apple flow.
     func openLoginItemsSettings() {
         SMAppService.openSystemSettingsLoginItems()
+    }
+
+    // MARK: - Off-main variants (v0.35.18 freeze fix)
+    //
+    // `SMAppService.register()` / `.unregister()` are synchronous XPC calls
+    // into launchd/BTM. The first register can take seconds (background-item
+    // approval, notarization check), and they ran on the main actor from
+    // button handlers and installService(), freezing the window. These hop
+    // the blocking call to a global queue and publish state back on main.
+
+    @Published private(set) var operationInFlight = false
+
+    /// The register/unregister currently running. The task clears this (and
+    /// publishes state) itself before it completes, so anyone awaiting its
+    /// value resumes with it already cleared.
+    private var inFlight: Task<String?, Never>?
+
+    private func startOperation(_ op: @escaping @Sendable () throws -> Void) -> Task<String?, Never> {
+        operationInFlight = true
+        let task = Task { [weak self] () -> String? in
+            let err = await Self.runOffMain(op)
+            if let self {
+                self.inFlight = nil
+                self.operationInFlight = false
+                self.lastError = err
+                self.refreshState()
+            }
+            return err
+        }
+        inFlight = task
+        return task
+    }
+
+    nonisolated private static func runOffMain(_ body: @escaping @Sendable () throws -> Void) async -> String? {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do { try body(); cont.resume(returning: nil) }
+                catch { cont.resume(returning: error.localizedDescription) }
+            }
+        }
+    }
+
+    func registerAsync() async {
+        guard inFlight == nil else { return }  // a second click while busy is a no-op
+        let plist = Self.plistName
+        _ = await startOperation { try SMAppService.daemon(plistName: plist).register() }.value
+    }
+
+    /// Waits for any register/unregister already running, then unregisters.
+    /// Returns true when the daemon is not registered afterwards (including
+    /// "was never registered"), so callers like factory reset can refuse to
+    /// continue while the service is still installed.
+    @discardableResult
+    func unregisterAsync() async -> Bool {
+        while let pending = inFlight { _ = await pending.value }
+        let plist = Self.plistName
+        let err = await startOperation { try SMAppService.daemon(plistName: plist).unregister() }.value
+        let status = service.status
+        return err == nil || status == .notRegistered || status == .notFound
     }
 }

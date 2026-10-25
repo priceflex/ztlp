@@ -66,6 +66,10 @@ pub struct ControlCommand {
     /// `ztlp setup --relay-secret`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_secret: Option<String>,
+    /// Optional relay address for the `"enroll"` command, used only when the
+    /// token and NS carry none. Mirrors `ztlp setup --relay` (2026-10-13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// A control response to the CLI.
@@ -115,6 +119,11 @@ pub struct StatusInfo {
     pub vip_capacity: u32,
     pub ns_server: String,
     pub domain_mappings: usize,
+    /// First configured relay (`[tunnel] relays`), empty when none. Shown
+    /// read-only in the desktop apps' Settings so a user can see what the
+    /// enrollment token configured (2026-10-13). Additive: older UIs ignore it.
+    #[serde(default)]
+    pub relay: String,
     /// NS-anchored gateway trust: "verified" | "legacy" | "invalid".
     #[serde(default)]
     pub ns_trust: String,
@@ -580,6 +589,11 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
     }
 }
 
+/// First configured relay address, or "" when the agent has none.
+pub(crate) fn first_relay(cfg: &crate::agent::config::AgentConfig) -> String {
+    cfg.tunnel.relays.0.first().cloned().unwrap_or_default()
+}
+
 async fn cmd_status(state: &AgentState) -> ControlResponse {
     let dns = state.dns_state.lock().await;
     let status = StatusInfo {
@@ -591,6 +605,7 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         vip_capacity: dns.vip_pool.capacity(),
         ns_server: dns.ns_server.clone(),
         domain_mappings: dns.domain_mapper.len(),
+        relay: String::new(),
         ns_trust: super::ns_trust::TrustStatus::of(&super::ns_trust::NsTrustStore::load(
             &super::ns_trust::default_path(),
         ))
@@ -598,6 +613,8 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         .to_string(),
     };
     drop(dns);
+    let mut status = status;
+    status.relay = first_relay(&crate::agent::config::AgentConfig::load());
 
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
 }
@@ -717,6 +734,16 @@ pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, St
     if let Some(secret) = cmd.relay_secret.as_deref().filter(|s| !s.trim().is_empty()) {
         args.push("--relay-secret".to_string());
         args.push(secret.to_string());
+    }
+
+    if let Some(relay) = cmd
+        .relay
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.push("--relay".to_string());
+        args.push(relay.to_string());
     }
 
     Ok(EnrollExecPlan { args })
@@ -1628,7 +1655,29 @@ mod tests {
             token: None,
             enrollment_uri: enrollment_uri.map(String::from),
             relay_secret: relay_secret.map(String::from),
+            relay: None,
         }
+    }
+
+    #[test]
+    fn enroll_plan_passes_relay_override_when_present() {
+        let mut c = cmd(Some("ztlp://enroll/abc"), None, None);
+        c.relay = Some(" 44.230.7.100:23095 ".into());
+        let plan = build_enroll_exec_plan(&c).unwrap();
+        let i = plan
+            .args
+            .iter()
+            .position(|a| a == "--relay")
+            .expect("--relay present");
+        assert_eq!(plan.args[i + 1], "44.230.7.100:23095");
+    }
+
+    #[test]
+    fn enroll_plan_omits_blank_relay_override() {
+        let mut c = cmd(Some("ztlp://enroll/abc"), None, None);
+        c.relay = Some("  ".into());
+        let plan = build_enroll_exec_plan(&c).unwrap();
+        assert!(!plan.args.iter().any(|a| a == "--relay"));
     }
 
     #[test]
@@ -1834,6 +1883,50 @@ mod tests {
     //
     // Fix: the slow probes run on a blocking thread and the result is
     // cached for a few seconds, so polls are answered in microseconds.
+    mod status_relay {
+        use super::super::first_relay;
+        use crate::agent::config::AgentConfig;
+
+        #[test]
+        fn first_relay_from_array() {
+            let cfg: AgentConfig =
+                toml::from_str("[tunnel]\nrelays = [\"44.230.7.100:23095\", \"1.2.3.4:23095\"]\n")
+                    .unwrap();
+            assert_eq!(first_relay(&cfg), "44.230.7.100:23095");
+        }
+
+        #[test]
+        fn first_relay_from_single_string() {
+            let cfg: AgentConfig =
+                toml::from_str("[tunnel]\nrelay = \"44.230.7.100:23095\"\n").unwrap();
+            assert_eq!(first_relay(&cfg), "44.230.7.100:23095");
+        }
+
+        #[test]
+        fn first_relay_empty_when_unset() {
+            let cfg: AgentConfig = toml::from_str("").unwrap();
+            assert_eq!(first_relay(&cfg), "");
+        }
+
+        #[test]
+        fn status_json_carries_relay_field() {
+            let s = super::super::StatusInfo {
+                pid: 1,
+                uptime_secs: 0,
+                version: "x".into(),
+                dns_listen: "".into(),
+                vip_allocated: 0,
+                vip_capacity: 0,
+                ns_server: "".into(),
+                domain_mappings: 0,
+                relay: "44.230.7.100:23095".into(),
+                ns_trust: "legacy".into(),
+            };
+            let v = serde_json::to_value(s).unwrap();
+            assert_eq!(v["relay"], "44.230.7.100:23095");
+        }
+    }
+
     mod setup_probe_cache {
         use super::super::{SetupProbeCache, SetupProbes, SETUP_PROBE_TTL};
         use std::sync::atomic::{AtomicUsize, Ordering};

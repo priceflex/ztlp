@@ -83,12 +83,14 @@ enum AgentControlClient {
         name: String? = nil,
         enrollmentURI: String? = nil,
         relaySecret: String? = nil,
+        relay: String? = nil,
         timeout: TimeInterval = 30
     ) async throws -> AgentControlResponse {
         var payload: [String: Any] = ["cmd": cmd]
         if let name { payload["name"] = name }
         if let enrollmentURI { payload["enrollment_uri"] = enrollmentURI }
         if let relaySecret { payload["relay_secret"] = relaySecret }
+        if let relay { payload["relay"] = relay }
         if let token = readDaemonToken() { payload["token"] = token }
 
         let requestData = try JSONSerialization.data(withJSONObject: payload)
@@ -208,5 +210,75 @@ enum JSONValue: Decodable {
     var stringValue: String? {
         if case .string(let s) = self { return s }
         return nil
+    }
+}
+
+// MARK: - BackgroundProcess (v0.35.18 freeze fix)
+
+/// Runs a child process OFF the main thread (v0.35.18 parity with the
+/// Windows ZT-10 fix: "commands off the window thread").
+///
+/// Why this exists: `Process.waitUntilExit()` and `readDataToEndOfFile()`
+/// block the calling thread. The view models are `@MainActor`, so calling
+/// them there froze the whole menu-bar UI (beachball) for as long as
+/// `/usr/bin/security` took, every 2 s poll. Endpoint security agents make
+/// that seconds, not milliseconds.
+///
+/// Every caller in the app goes through `run(...)`, which hops to a global
+/// queue and resumes the awaiting task when the child exits. A watchdog
+/// terminates a child that outlives `timeout` so a wedged tool can never
+/// pin a poll forever.
+enum BackgroundProcess {
+    struct Result: Equatable {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+        let timedOut: Bool
+        var ok: Bool { status == 0 && !timedOut }
+    }
+
+    static func run(
+        _ executable: String,
+        _ arguments: [String],
+        timeout: TimeInterval = 10
+    ) async -> Result {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: runBlocking(executable, arguments, timeout: timeout))
+            }
+        }
+    }
+
+    /// Synchronous body. NEVER call from the main thread; `run` is the API.
+    /// Internal (not private) only so XCTest can assert the watchdog.
+    static func runBlocking(_ executable: String, _ arguments: [String], timeout: TimeInterval) -> Result {
+        precondition(!Thread.isMainThread, "BackgroundProcess.runBlocking on the main thread freezes the UI")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
+        let outPipe = Pipe(), errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        do { try p.run() } catch {
+            return Result(status: -1, stdout: "", stderr: error.localizedDescription, timedOut: false)
+        }
+
+        var timedOut = false
+        let watchdog = DispatchWorkItem { if p.isRunning { timedOut = true; p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
+        // Drain pipes before waiting so a chatty child can't deadlock on a
+        // full pipe buffer.
+        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        watchdog.cancel()
+
+        return Result(
+            status: p.terminationStatus,
+            stdout: String(data: out, encoding: .utf8) ?? "",
+            stderr: (String(data: err, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+            timedOut: timedOut
+        )
     }
 }

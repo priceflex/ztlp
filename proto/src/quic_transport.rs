@@ -2320,14 +2320,20 @@ pub mod tokio_endpoint {
         }
 
         fn tempfile_dir() -> std::path::PathBuf {
+            // A per-process counter makes every name unique. The timestamp
+            // alone collided on macOS (microsecond clock): two back-to-back
+            // calls returned the SAME dir, so "two different certs" were one
+            // cert and the NS-mismatch test passed or failed by chance.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let mut dir = std::env::temp_dir();
             dir.push(format!(
-                "ztlp_quic_pin_test_{}_{}",
+                "ztlp_quic_pin_test_{}_{}_{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             dir
         }

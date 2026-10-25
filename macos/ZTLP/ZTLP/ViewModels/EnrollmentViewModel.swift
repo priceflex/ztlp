@@ -34,6 +34,10 @@ struct EnrollmentTokenInfo: Equatable {
     let tokenId: String?
     /// The server callback URL for enrollment confirmation.
     let callbackURL: String?
+    /// True when the token itself carries the relay secret (flag 0x08,
+    /// ZT-01). The value never leaves the token: the daemon reads it from
+    /// the URI during `ztlp setup`; the UI only needs to know it is there.
+    var hasRelaySecret: Bool = false
 
     var isExpired: Bool {
         expiresAt < Date()
@@ -63,6 +67,8 @@ final class EnrollmentViewModel: ObservableObject {
     /// would. NOT part of the enrollment token itself (see §4a option A,
     /// not implemented — Task 5.9 was cancelled by Steven 2026-09-19).
     @Published var relaySecret: String = ""
+    /// Manual relay (host:port), only offered when the token carries none.
+    @Published var relayOverride: String = ""
 
     /// Non-fatal warning after a successful daemon enrollment (e.g. the
     /// daemon could not create its HTTPS certificate). `nil` = no warning.
@@ -123,16 +129,13 @@ final class EnrollmentViewModel: ObservableObject {
             // straight to the daemon. Server-side verification (the
             // [CWE-287] callback confirm) is done by the daemon's `ztlp
             // setup`, which refuses to persist without a real 2xx.
-            guard tokenInfo.callbackURL != nil else {
-                state = .error(
-                    "This enrollment URI has no server callback — it cannot be verified and was rejected."
-                )
-                return
-            }
-            guard tokenInfo.tokenId != nil else {
-                state = .error("Enrollment token is missing its identifier — rejected.")
-                return
-            }
+            // 2026-10-13: tokens from `ztlp admin enroll` (binary, the prod
+            // path) carry neither a callback nor a token id; their integrity
+            // is the HMAC the NS verifies. The daemon's `ztlp setup` treats
+            // the callback as optional (confirms only when present). The old
+            // Swift guards here rejected every prod token before the daemon
+            // ever saw it. Only query-param URIs still need a token id (that
+            // shape has no MAC; enforced in parseQueryParamEnrollment).
 
             let result = await enrollDaemon(tokenInfo)
             switch result {
@@ -162,6 +165,24 @@ final class EnrollmentViewModel: ObservableObject {
 
     enum DaemonEnrollResult { case success, failure(String) }
 
+    /// Pure, unit-tested: send a typed relay secret only when the token
+    /// carries none. The secret field is hidden for such tokens, but a value
+    /// typed for an earlier token survives reset(); the CLI gives an explicit
+    /// secret priority over the token's, so a stale hidden value would win.
+    nonisolated static func relaySecretToSend(token: EnrollmentTokenInfo, typed: String) -> String? {
+        let t = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.hasRelaySecret, !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// Pure, unit-tested: send a manual relay only when the token has none
+    /// and the user typed something.
+    nonisolated static func relayOverrideToSend(token: EnrollmentTokenInfo, typed: String) -> String? {
+        let t = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard token.relayAddresses.isEmpty, !t.isEmpty else { return nil }
+        return t
+    }
+
     /// Ask the root daemon to enroll ITSELF via its "enroll" control command
     /// (proto/src/agent/control.rs cmd_enroll), which re-execs the daemon's
     /// binary through `ztlp setup --token ... --yes` so identity.json /
@@ -173,9 +194,8 @@ final class EnrollmentViewModel: ObservableObject {
                 cmd: "enroll",
                 name: hostNameForEnrollment(),
                 enrollmentURI: tokenInfo.rawURI,
-                relaySecret: relaySecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? nil
-                    : relaySecret.trimmingCharacters(in: .whitespacesAndNewlines)
+                relaySecret: Self.relaySecretToSend(token: tokenInfo, typed: relaySecret),
+                relay: Self.relayOverrideToSend(token: tokenInfo, typed: relayOverride)
             )
             if !response.ok {
                 return .failure(Self.userFacingEnrollError(response.error ?? "unknown error"))
@@ -326,6 +346,31 @@ final class EnrollmentViewModel: ObservableObject {
             gateway = readLenPrefixedString(data, &pos)
         }
 
+        // Field order MUST match proto/src/enrollment.rs: gateway (0x01),
+        // callback (0x02), relay secret (0x08, ZT-01, v0.35.17), name-server
+        // key (0x10, v0.36.0). The old parser skipped 0x02/0x08, so every
+        // field after them was read at the wrong offset (wrong expiry) and
+        // the relay secret was lost.
+        var callback: String?
+        if flags & 0x02 != 0 {
+            guard let cb = readLenPrefixedString(data, &pos) else { return nil }
+            callback = cb
+        }
+        var tokenRelaySecret: String?
+        if flags & 0x08 != 0 {
+            guard let rs = readLenPrefixedString(data, &pos), !rs.isEmpty else { return nil }
+            tokenRelaySecret = rs
+        }
+        // Home name-server Ed25519 public key: 32 raw bytes, no length
+        // prefix, covered by the MAC. The daemon's `ztlp setup` uses it; the
+        // app only has to step over it to read max_uses/expiry correctly.
+        if flags & 0x10 != 0 {
+            guard data.count >= pos + 32 else { return nil }
+            pos += 32
+        }
+        // Unknown flag bits = token from a newer ZTLP; the daemon will say so.
+        guard flags & ~UInt8(0x01 | 0x02 | 0x08 | 0x10) == 0 else { return nil }
+
         guard data.count >= pos + 2 else { return nil }
         let maxUses = Int(UInt16(data[pos]) << 8 | UInt16(data[pos + 1]))
         pos += 2
@@ -346,7 +391,8 @@ final class EnrollmentViewModel: ObservableObject {
             maxUses: maxUses,
             rawURI: rawURI,
             tokenId: nil,
-            callbackURL: nil
+            callbackURL: callback,
+            hasRelaySecret: tokenRelaySecret != nil
         )
     }
 

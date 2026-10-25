@@ -222,9 +222,11 @@ final class ZTLPTests: XCTestCase {
         XCTAssertTrue(TunnelViewModel.loginKeychainPath().hasSuffix("/Library/Keychains/login.keychain-db"))
     }
 
-    func testRootTrustedCheckIsFalseForMissingFile() {
-        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: ""))
-        XCTAssertFalse(TunnelViewModel.rootIsTrustedForThisUser(pemPath: "/nonexistent/root.pem"))
+    func testRootTrustedCheckIsFalseForMissingFile() async {
+        let empty = await TunnelViewModel.rootIsTrustedForThisUser(pemPath: "")
+        let missing = await TunnelViewModel.rootIsTrustedForThisUser(pemPath: "/nonexistent/root.pem")
+        XCTAssertFalse(empty)
+        XCTAssertFalse(missing)
     }
 
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {
@@ -334,5 +336,217 @@ final class ZTLPTests: XCTestCase {
             tags: []
         )
         XCTAssertEqual(service.endpoint, "host.ztlp:443")
+    }
+}
+
+// MARK: - v0.35.18 UI-freeze fix (parity with Windows ZT-10/ZT-11)
+
+final class FreezeFixTests: XCTestCase {
+
+    /// The child process runs off the main thread and the awaiting task
+    /// gets its exit status + output.
+    func testBackgroundProcessReturnsStatusAndOutput() async {
+        let ok = await BackgroundProcess.run("/bin/echo", ["hello"], timeout: 5)
+        XCTAssertTrue(ok.ok)
+        XCTAssertEqual(ok.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "hello")
+
+        let bad = await BackgroundProcess.run("/usr/bin/false", [], timeout: 5)
+        XCTAssertFalse(bad.ok)
+        XCTAssertEqual(bad.status, 1)
+    }
+
+    /// A missing executable is an error result, never a crash or a hang.
+    func testBackgroundProcessMissingExecutable() async {
+        let r = await BackgroundProcess.run("/nonexistent/ztlp-no-such-tool", [], timeout: 5)
+        XCTAssertFalse(r.ok)
+        XCTAssertEqual(r.status, -1)
+    }
+
+    /// The watchdog kills a wedged child so a poll can never hang forever.
+    func testBackgroundProcessWatchdogKillsWedgedChild() async {
+        let start = Date()
+        let r = await BackgroundProcess.run("/bin/sleep", ["30"], timeout: 1)
+        XCTAssertTrue(r.timedOut)
+        XCTAssertFalse(r.ok)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    /// The core freeze guarantee: while a slow child runs, the main thread
+    /// keeps servicing work. Before the fix, the 2 s poll ran Process +
+    /// waitUntilExit() on the main actor and nothing else could run.
+    @MainActor
+    func testMainThreadStaysResponsiveDuringSlowChild() async {
+        let slow = Task { await BackgroundProcess.run("/bin/sleep", ["2"], timeout: 5) }
+        var ticks = 0
+        let start = Date()
+        while Date().timeIntervalSince(start) < 1.0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)   // yields the main actor
+            ticks += 1
+        }
+        XCTAssertGreaterThan(ticks, 10, "main actor was blocked while the child ran")
+        _ = await slow.value
+    }
+
+    /// Control-socket calls with no daemon listening fail fast and off-main.
+    @MainActor
+    func testControlClientFailsFastWithNoDaemon() async {
+        let start = Date()
+        _ = try? await AgentControlClient.send(cmd: "status", timeout: 2)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
+
+    func testTrustCacheFreshness() {
+        let now = Date()
+        let mtime = Date(timeIntervalSince1970: 1_000)
+        let e = TunnelViewModel.TrustCacheEntry(pemPath: "/a.pem", pemModified: mtime, trusted: true, checkedAt: now)
+
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(nil, pemPath: "/a.pem", pemModified: mtime, now: now))
+        XCTAssertTrue(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: mtime, now: now.addingTimeInterval(5)))
+        // expired
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: mtime,
+                                                         now: now.addingTimeInterval(TunnelViewModel.trustCacheTTL + 1)))
+        // different PEM, or the CA was re-generated (mtime changed)
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/b.pem", pemModified: mtime, now: now))
+        XCTAssertFalse(TunnelViewModel.trustCacheIsFresh(e, pemPath: "/a.pem", pemModified: Date(timeIntervalSince1970: 2_000), now: now))
+    }
+}
+
+// MARK: - 2026-10-13 field fixes (enrollment relay, binary token parse)
+
+@MainActor
+final class EnrollmentFieldFixTests: XCTestCase {
+
+    /// Binary token exactly as `ztlp admin enroll --relay ... --relay-secret-file ...`
+    /// writes it: version, flags, zone, ns, relays, [gateway], [callback],
+    /// [relay secret], max_uses, expires, nonce, mac.
+    private func binaryToken(relays: [String], gateway: String? = nil, callback: String? = nil,
+                             relaySecret: String? = nil, nsKey: Data? = nil,
+                             expiresIn: TimeInterval = 3600) -> String {
+        var d = Data([0x01])
+        var flags: UInt8 = 0
+        if gateway != nil { flags |= 0x01 }
+        if callback != nil { flags |= 0x02 }
+        if relaySecret != nil { flags |= 0x08 }
+        if nsKey != nil { flags |= 0x10 }
+        d.append(flags)
+        func lp(_ s: String) {
+            let b = Data(s.utf8)
+            d.append(UInt8(b.count >> 8)); d.append(UInt8(b.count % 256)); d.append(b)
+        }
+        lp("trs.ztlp"); lp("44.227.148.151:23096")
+        d.append(UInt8(relays.count)); relays.forEach(lp)
+        if let g = gateway { lp(g) }
+        if let c = callback { lp(c) }
+        if let r = relaySecret { lp(r) }
+        if let k = nsKey { d.append(k) }                         // 32 raw bytes
+        d.append(contentsOf: [0x00, 0x01])                       // max_uses = 1
+        let exp = UInt64(Date().addingTimeInterval(expiresIn).timeIntervalSince1970)
+        for i in (0..<8).reversed() { d.append(UInt8((exp >> (UInt64(i) * 8)) % 256)) }
+        d.append(Data(repeating: 0xAB, count: 16))               // nonce
+        d.append(Data(repeating: 0xCD, count: 32))               // mac (NS verifies)
+        let b64 = d.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "ztlp://enroll/" + b64
+    }
+
+    private func parsed(_ uri: String) -> EnrollmentTokenInfo? {
+        let vm = EnrollmentViewModel(configuration: ZTLPConfiguration(suiteName: "ztlp.tests.\(UUID().uuidString)"))
+        vm.handleManualEntry(uri)
+        if case .tokenParsed(let info) = vm.state { return info }
+        return nil
+    }
+
+    func testProdTokenWithRelayAndSecretParses() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["44.230.7.100:23095"], relaySecret: "abcdef0123")))
+        XCTAssertEqual(info.zone, "trs.ztlp")
+        XCTAssertEqual(info.nsAddress, "44.227.148.151:23096")
+        XCTAssertEqual(info.relayAddresses, ["44.230.7.100:23095"])
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertFalse(info.isExpired, "expiry must be read at the right offset after the secret")
+    }
+
+    func testCallbackAndSecretDoNotShiftExpiry() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], gateway: "5.6.7.8:23097",
+                                                    callback: "https://ztlp.net/cb", relaySecret: "s3cret")))
+        XCTAssertEqual(info.gatewayAddress, "5.6.7.8:23097")
+        XCTAssertEqual(info.callbackURL, "https://ztlp.net/cb")
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertFalse(info.isExpired)
+        XCTAssertEqual(info.maxUses, 1)
+    }
+
+    func testNsKeyTokenParsesWithFieldsAfterItAtTheRightOffset() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], gateway: "5.6.7.8:23097",
+                                                    callback: "https://ztlp.net/cb", relaySecret: "s3cret",
+                                                    nsKey: Data(repeating: 0x42, count: 32))))
+        XCTAssertEqual(info.gatewayAddress, "5.6.7.8:23097")
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertEqual(info.maxUses, 1, "max_uses must be read after the 32-byte NS key")
+        XCTAssertFalse(info.isExpired, "expiry must be read after the 32-byte NS key")
+    }
+
+    func testTruncatedNsKeyTokenIsRejected() {
+        // Flag 0x10 set but only 31 key bytes before the token ends.
+        var d = Data([0x01, 0x10])
+        for s in ["trs.ztlp", "44.227.148.151:23096"] {
+            let b = Data(s.utf8); d.append(UInt8(b.count >> 8)); d.append(UInt8(b.count % 256)); d.append(b)
+        }
+        d.append(0x00)                                            // no relays
+        d.append(Data(repeating: 0x42, count: 31))
+        let b64 = d.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        XCTAssertNil(parsed("ztlp://enroll/" + b64))
+    }
+
+    /// The Rust-minted all-flags vector (gateway, callback, relay secret, NS
+    /// key; proto/tests/fixtures/enrollment_token_all_flags.hex). It expires
+    /// at 0, so a correct parse lands on "expired", never "invalid".
+    func testSharedAllFlagsRustVectorParses() {
+        let hex = "011b00087472732e7a746c70000f3132372e302e302e313a323330393601000f3132372e302e302e313a3233303935000f3132372e302e302e313a3233303937001a68747470733a2f2f6578616d706c652e696e76616c69642f63620040636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463644242424242424242424242424242424242424242424242424242424242424242000000000000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aaef9de2c3304a2985d900a64f784ec416b450e54fa113b29d7e4263c4c9e478b"
+        var bytes = Data()
+        var i = hex.startIndex
+        while i < hex.endIndex {
+            let j = hex.index(i, offsetBy: 2)
+            bytes.append(UInt8(hex[i..<j], radix: 16)!)
+            i = j
+        }
+        let b64 = bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let vm = EnrollmentViewModel(configuration: ZTLPConfiguration(suiteName: "ztlp.tests.\(UUID().uuidString)"))
+        vm.handleManualEntry("ztlp://enroll/" + b64)
+        guard case .error(let msg) = vm.state else { return XCTFail("expected the expired-token error") }
+        XCTAssertEqual(msg, "This enrollment token has expired.")
+    }
+
+    func testTypedRelaySecretOnlySentWhenTokenHasNone() throws {
+        let withSecret = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], relaySecret: "fromtoken")))
+        let noSecret = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"])))
+        XCTAssertNil(EnrollmentViewModel.relaySecretToSend(token: withSecret, typed: "stale-typed"))
+        XCTAssertEqual(EnrollmentViewModel.relaySecretToSend(token: noSecret, typed: "  typed  "), "typed")
+        XCTAssertNil(EnrollmentViewModel.relaySecretToSend(token: noSecret, typed: "   "))
+    }
+
+    func testTokenWithoutRelayParsesAndShowsNoRelay() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: [])))
+        XCTAssertTrue(info.relayAddresses.isEmpty)
+        XCTAssertFalse(info.hasRelaySecret)
+    }
+
+    func testRelayOverrideOnlySentWhenTokenHasNone() throws {
+        let withRelay = try XCTUnwrap(parsed(binaryToken(relays: ["44.230.7.100:23095"])))
+        let noRelay = try XCTUnwrap(parsed(binaryToken(relays: [])))
+        XCTAssertNil(EnrollmentViewModel.relayOverrideToSend(token: withRelay, typed: "9.9.9.9:23095"))
+        XCTAssertNil(EnrollmentViewModel.relayOverrideToSend(token: noRelay, typed: "   "))
+        XCTAssertEqual(EnrollmentViewModel.relayOverrideToSend(token: noRelay, typed: " 9.9.9.9:23095 "), "9.9.9.9:23095")
+    }
+
+    func testLoginItemsInstructionsNameTheSwitch() {
+        let s = TunnelViewModel.loginItemsInstructions
+        XCTAssertTrue(s.contains("Allow in the Background"))
+        XCTAssertTrue(s.contains("ZTLP"))
+        XCTAssertTrue(s.lowercased().contains("switch on"))
     }
 }

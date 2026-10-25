@@ -35,9 +35,12 @@ struct ZTLPApp: App {
                 configuration: configuration
             )
         } label: {
-            // macOS renders menu bar images as template (monochrome).
-            // Use distinct SF Symbols so users can tell connected vs disconnected at a glance.
-            Image(systemName: menuBarIconName)
+            // ZTLP shield-lock logo as a template image (macOS tints it for
+            // light/dark menu bars). Full strength = all readiness rows green;
+            // dimmed = not ready yet; pulsing dim while a transition runs.
+            Image("MenuBarIcon")
+                .renderingMode(.template)
+                .opacity(menuBarIconOpacity)
         }
         .menuBarExtraStyle(.window)
 
@@ -60,7 +63,8 @@ struct ZTLPApp: App {
             SettingsView(
                 viewModel: settingsVM,
                 enrollmentViewModel: enrollmentVM,
-                configuration: configuration
+                configuration: configuration,
+                tunnelVM: tunnelVM
             )
         }
     }
@@ -88,18 +92,16 @@ struct ZTLPApp: App {
         return vm
     }
 
-    /// SF Symbol name for the menu bar icon.
-    /// Connected: filled shield (solid). Disconnected: slashed shield.
-    /// Transitioning: half-filled shield.
-    private var menuBarIconName: String {
-        // Task 8: icon reflects readiness (all three rows green), not a
-        // connect session.
-        if tunnelVM.readiness.allReady { return "shield.checkered" }
+    /// Menu bar logo strength. Ready (all three rows green): full.
+    /// Transitioning: 0.7. Not ready: 0.45, the same "dimmed" convention
+    /// macOS uses for inactive status items.
+    private var menuBarIconOpacity: Double {
+        if tunnelVM.readiness.allReady { return 1.0 }
         switch tunnelVM.status {
         case .connecting, .reconnecting, .disconnecting:
-            return "shield.lefthalf.filled"
+            return 0.7
         default:
-            return "shield"
+            return 0.45
         }
     }
 }

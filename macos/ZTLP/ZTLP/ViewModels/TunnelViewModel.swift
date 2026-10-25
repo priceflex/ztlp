@@ -30,6 +30,7 @@ struct DaemonSnapshot: Equatable {
     var version: String = ""
     var dnsListen: String = ""
     var nsServer: String = ""
+    var relay: String = ""
     var vipAllocated: Int = 0
     var uptimeSecs: Int = 0
     var zone: String = ""
@@ -311,67 +312,108 @@ final class TunnelViewModel: ObservableObject {
     /// Row 1 action: install (SMAppService register) the root service.
     /// There is no "connect" — once the service is Running, DNS connects
     /// on demand when the user opens a zone hostname.
+    ///
+    /// Field fixes 2026-10-13 (Steven, fresh Mac):
+    ///  - "Install does nothing": the old guard silently returned while a
+    ///    launch-time auto-start was still waiting (up to 30 s). Now the
+    ///    button shows `installInFlight` progress and a second click is a
+    ///    visible no-op, not a silent one.
+    ///  - "Had to uninstall + reinstall": a stale SMAppService/BTM entry
+    ///    (previous build or an approval granted after register) reports
+    ///    .enabled but launchd never spawns the new binary. If the daemon
+    ///    does not answer within `staleRegistrationTimeout`, we unregister +
+    ///    register ONCE automatically — exactly what fixed it by hand.
     func installService() {
-        guard !transitionInFlight else { return }
+        guard !installInFlight else { return }
         lastError = nil
+        installInFlight = true
         transitionInFlight = true
         status = .connecting
         NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
 
         Task {
-            defer { transitionInFlight = false }
+            defer { transitionInFlight = false; installInFlight = false }
 
             if await Self.daemonReachable() {
                 await pollOnceUnlocked()
                 return
             }
 
-            installer.register()
+            await installer.registerAsync()
             serviceState = installer.state
 
-            switch installer.state {
-            case .requiresApproval:
-                // macOS wants a human click in System Settings — the one
-                // system prompt Steven accepted (UAC equivalent).
-                installer.openLoginItemsSettings()
-                status = .disconnected
-                lastError = "Approve “ZTLP” under System Settings › General › Login Items & Extensions. This page updates by itself."
+            if await handleNonRunningState() { return }
+
+            // Registered and approved. A fresh daemon answers in ~1 s.
+            if await Self.waitForDaemonWithBackoff(timeout: Self.staleRegistrationTimeout) {
+                await pollOnceUnlocked()
+                NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
                 return
-            case .failed(let msg):
-                status = .disconnected
-                lastError = "Could not install the ZTLP service: \(msg)"
-                NSSound.beep()
-                return
-            case .notFound:
-                status = .disconnected
-                lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
-                NSSound.beep()
-                return
-            case .notRegistered:
-                if let err = installer.lastError {
-                    status = .disconnected
-                    lastError = "Could not install the ZTLP service: \(err)"
-                    NSSound.beep()
-                    return
-                }
-            case .running:
-                break
             }
 
-            // B4(c): retry with backoff instead of one 15s window. A fresh
-            // daemon now comes up in unenrolled standby within ~1s, but a
-            // slow first launchd spawn (notarization check, first run) can
-            // take longer.
+            // Stale registration: re-register once (the manual fix).
+            await installer.unregisterAsync()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await installer.registerAsync()
+            serviceState = installer.state
+            if await handleNonRunningState() { return }
+
             if await Self.waitForDaemonWithBackoff(timeout: Self.readyTimeout) {
                 await pollOnceUnlocked()
                 NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
             } else {
                 status = .disconnected
-                lastError = "The ZTLP service was installed but did not answer within \(Int(Self.readyTimeout))s. It may still be starting — this page keeps checking."
+                lastError = "The ZTLP service is installed but is not answering. Open Settings › Service and press Uninstall Service, then Install again. If that fails, restart the Mac."
                 NSSound.beep()
             }
         }
     }
+
+    /// Handles every installer state except a clean `.running`. Returns true
+    /// when installService should stop here.
+    private func handleNonRunningState() async -> Bool {
+        switch installer.state {
+        case .requiresApproval:
+            // macOS wants a human click in System Settings. Open it and tell
+            // the user EXACTLY which switch; the poll flips the row when done.
+            installer.openLoginItemsSettings()
+            status = .disconnected
+            lastError = Self.loginItemsInstructions
+            return true
+        case .failed(let msg):
+            status = .disconnected
+            lastError = "Could not install the ZTLP service: \(msg)"
+            NSSound.beep()
+            return true
+        case .notFound:
+            status = .disconnected
+            lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
+            NSSound.beep()
+            return true
+        case .notRegistered:
+            status = .disconnected
+            lastError = "Could not install the ZTLP service: \(installer.lastError ?? "macOS did not register it")"
+            NSSound.beep()
+            return true
+        case .running:
+            return false
+        }
+    }
+
+    /// Shown on Home and in Settings whenever macOS is waiting for approval.
+    nonisolated static let loginItemsInstructions =
+        "macOS needs your OK to run ZTLP in the background. In the System Settings window that just opened (General › Login Items & Extensions), find ZTLP under “Allow in the Background” and turn its switch ON. Enter your Mac password if asked, then come back here. This page updates by itself."
+
+    /// How long a just-registered daemon may stay silent before we treat the
+    /// registration as stale and re-register once.
+    static let staleRegistrationTimeout: TimeInterval = 10
+
+    /// Drives the Install button's spinner.
+    @Published private(set) var installInFlight = false
+
+    /// Re-entered when the user comes back from System Settings (approval
+    /// granted): finish the install without another click.
+    private var wasAwaitingApproval = false
 
     /// Backwards-compatible name used by older callers.
     func connect() { installService() }
@@ -389,7 +431,7 @@ final class TunnelViewModel: ObservableObject {
         Task {
             defer { transitionInFlight = false }
 
-            installer.unregister()
+            await installer.unregisterAsync()
             serviceState = installer.state
             if case .failed(let msg) = installer.state {
                 lastError = "Could not stop the ZTLP service: \(msg)"
@@ -430,17 +472,16 @@ final class TunnelViewModel: ObservableObject {
         guard !trustInFlight, let pem = daemon?.caRootPemPath, !pem.isEmpty else { return }
         trustInFlight = true
         lastError = nil
-        Task.detached { [weak self] in
-            let result = Self.runTrustCommand(pemPath: pem)
-            await MainActor.run {
-                guard let self else { return }
-                self.trustInFlight = false
-                if let err = result {
-                    self.lastError = err
-                    NSSound.beep()
-                }
-                Task { await self.pollOnce() }
+        Task { [weak self] in
+            let result = await Self.runTrustCommand(pemPath: pem)
+            guard let self else { return }
+            self.trustInFlight = false
+            self.trustCache = nil   // re-evaluate on the next poll
+            if let err = result {
+                self.lastError = err
+                NSSound.beep()
             }
+            await self.pollOnce()
         }
     }
 
@@ -453,34 +494,59 @@ final class TunnelViewModel: ObservableObject {
         (NSHomeDirectory() as NSString).appendingPathComponent("Library/Keychains/login.keychain-db")
     }
 
-    /// Runs /usr/bin/security as the current user. nil on success.
-    nonisolated private static func runTrustCommand(pemPath: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = trustCommandArgs(pemPath: pemPath, loginKeychain: loginKeychainPath())
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        p.standardOutput = Pipe()
-        do { try p.run() } catch { return "Could not run the trust command: \(error.localizedDescription)" }
-        p.waitUntilExit()
-        if p.terminationStatus == 0 { return nil }
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return "Could not trust the ZTLP certificate (exit \(p.terminationStatus)): \(err)"
+    /// Runs /usr/bin/security as the current user, off the main thread.
+    /// nil on success. The trust write may show the login-keychain prompt,
+    /// so it gets a long watchdog (the user may be typing a password).
+    nonisolated private static func runTrustCommand(pemPath: String) async -> String? {
+        let r = await BackgroundProcess.run(
+            "/usr/bin/security",
+            trustCommandArgs(pemPath: pemPath, loginKeychain: loginKeychainPath()),
+            timeout: 120
+        )
+        if r.ok { return nil }
+        if r.timedOut { return "Trusting the ZTLP certificate timed out. Try again." }
+        if r.status == -1 { return "Could not run the trust command: \(r.stderr)" }
+        return "Could not trust the ZTLP certificate (exit \(r.status)): \(r.stderr)"
     }
 
     /// `security verify-cert -c <root.pem>` as the current user: succeeds
     /// only when the root is trusted in a domain this user's session sees
     /// (user, admin or system).
-    nonisolated static func rootIsTrustedForThisUser(pemPath: String) -> Bool {
+    ///
+    /// v0.35.18 freeze fix: this used to run `Process` + `waitUntilExit()`
+    /// synchronously from the @MainActor poll every 2 s, which beachballed
+    /// the menu bar. Now it runs off-main via BackgroundProcess and the
+    /// result is cached per PEM (path + mtime) for `trustCacheTTL`, the same
+    /// idea as the agent's 5 s setup_status probe cache (ZT-11). trustHTTPS()
+    /// clears the cache so the row flips right after the user grants trust.
+    nonisolated static func rootIsTrustedForThisUser(pemPath: String) async -> Bool {
         guard !pemPath.isEmpty, FileManager.default.fileExists(atPath: pemPath) else { return false }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["verify-cert", "-c", pemPath]
-        p.standardOutput = Pipe(); p.standardError = Pipe()
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
+        return await BackgroundProcess.run("/usr/bin/security", ["verify-cert", "-c", pemPath], timeout: 10).ok
+    }
+
+    struct TrustCacheEntry: Equatable {
+        let pemPath: String
+        let pemModified: Date?
+        let trusted: Bool
+        let checkedAt: Date
+    }
+    nonisolated static let trustCacheTTL: TimeInterval = 30
+    private var trustCache: TrustCacheEntry?
+
+    /// Pure, unit-tested: may a cached answer be reused?
+    nonisolated static func trustCacheIsFresh(_ entry: TrustCacheEntry?, pemPath: String, pemModified: Date?, now: Date) -> Bool {
+        guard let e = entry else { return false }
+        return e.pemPath == pemPath && e.pemModified == pemModified && now.timeIntervalSince(e.checkedAt) < trustCacheTTL
+    }
+
+    private func cachedRootTrust(pemPath: String) async -> Bool {
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: pemPath))?[.modificationDate] as? Date
+        if Self.trustCacheIsFresh(trustCache, pemPath: pemPath, pemModified: mtime, now: Date()), let c = trustCache {
+            return c.trusted
+        }
+        let trusted = await Self.rootIsTrustedForThisUser(pemPath: pemPath)
+        trustCache = TrustCacheEntry(pemPath: pemPath, pemModified: mtime, trusted: trusted, checkedAt: Date())
+        return trusted
     }
 
     /// Row 2 action is handled by EnrollmentView (sheet). After the sheet
@@ -521,6 +587,20 @@ final class TunnelViewModel: ObservableObject {
     private func pollOnceUnlocked() async {
         installer.refreshState()
         serviceState = installer.state
+
+        // Approval just granted in System Settings: finish the install for
+        // the user (wait for the daemon, re-register once if stale).
+        if case .requiresApproval = installer.state {
+            wasAwaitingApproval = true
+            if lastError == nil { lastError = Self.loginItemsInstructions }
+        } else if wasAwaitingApproval, case .running = installer.state {
+            wasAwaitingApproval = false
+            if lastError == Self.loginItemsInstructions { lastError = nil }
+            if !installInFlight, await !Self.daemonReachable() {
+                installService()
+                return
+            }
+        }
 
         if await Self.daemonReachable() {
             missedPolls = 0
@@ -565,6 +645,7 @@ final class TunnelViewModel: ObservableObject {
             snap.version = o["version"]?.stringValue ?? snap.version
             snap.dnsListen = o["dns_listen"]?.stringValue ?? snap.dnsListen
             snap.nsServer = o["ns_server"]?.stringValue ?? snap.nsServer
+            snap.relay = o["relay"]?.stringValue ?? snap.relay
             snap.vipAllocated = o["vip_allocated"]?.intValue ?? snap.vipAllocated
             snap.uptimeSecs = o["uptime_secs"]?.intValue ?? snap.uptimeSecs
         }
@@ -579,7 +660,13 @@ final class TunnelViewModel: ObservableObject {
             // cannot see user-domain trust settings (probe 2026-09-20: the
             // user-domain write is the one that works without admin).
             let daemonView = o["ca_installed_system_trust"]?.boolValue ?? false
-            snap.caInstalled = daemonView || (snap.caInitialized && Self.rootIsTrustedForThisUser(pemPath: snap.caRootPemPath))
+            if daemonView {
+                snap.caInstalled = true
+            } else if snap.caInitialized {
+                snap.caInstalled = await cachedRootTrust(pemPath: snap.caRootPemPath)
+            } else {
+                snap.caInstalled = false
+            }
             snap.dnsConfigured = o["dns_configured"]?.boolValue ?? false
         }
 

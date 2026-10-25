@@ -5,9 +5,9 @@
 > Steven's explicit OK first, one step at a time. Phases 1-6 are code on a branch
 > off `main`. Do not push tags or rotate secrets without asking.
 
-Status (2026-10-24): Phase 1 and Phase 2 DONE on `feat/ns-anchored-gateway-trust` (local, not pushed):
-`82d9c76c` (1.x), `ebc39c3c` (2.1-2.3), `cd32ebd5` (2.4), `c47f0923` (2.5), 2.6 next commit. Phase 0 not
-started (needs Steven's OK per step). Next: Phase 3.
+Status (2026-10-24): Phases 1-5 DONE and released as v0.36.0 code on `feat/ns-anchored-gateway-trust`.
+Phase 0 (live CF gateway fixes, key backup) and the Phase 6 rollout/live proof are NOT done: they touch
+live boxes and need Steven's OK per step (see "Operator rollout" below).
 
 Deviations from v2 found while implementing (code facts, see commits):
 - 2.4 `ns_cache::put(dir, raw, anchors, now)` re-verifies the raw bytes itself (no separate
@@ -19,6 +19,21 @@ Deviations from v2 found while implementing (code facts, see commits):
   is already a string list, `agent.toml` is template-generated + hand-tuned (NSSET would rewrite it
   hourly), and `AgentConfig::load_from_path` falls back to defaults on any parse error (would quietly
   drop strict mode). Malformed trust file = error, never "no trust". Phase 3.3/4.3 write this file.
+- 3.2 NSSET = OPERATOR record (type 0x07) at the zone APEX, not `_ns.<zone>`: the NS name validator
+  rejects `_`, and an SVC name could collide with a real host. OPERATOR registrations are now refused
+  (signed and unsigned) so nobody can get the NS to sign a forged server list. Config:
+  `ZTLP_NS_NSSET_ZONES`, `ZTLP_NS_SELF_ADDR`, `ZTLP_NS_PEERS=label=ip:port=hexkey=z1,z2;...`,
+  `ZTLP_NS_NSSET_TTL`. NSSET capped at 1900 encoded bytes (client 2 KB reply budget).
+- 2.5+ Records carrying `registered_unsigned=true` (dev-mode NS signs unauthenticated registrations
+  with its own key) are refused as unverified: that signature vouches for nothing.
+- 4.3 `ztlp setup` with a 0x10 token also does one verified lookup of the device's OWN new KEY record
+  (signed by the token key, carrying its tunnel key) before writing any config: proves the server it
+  enrolled with holds the key even when the NS publishes no NSSET.
+- 5.3 `ztlp connect` (CLI) still dials with legacy trust (own resolution code + opt-in persistent
+  endpoint path). Agent path (desktop apps, Windows service, Linux/macOS daemons) is covered.
+- 4.1 Token minters: `ztlp admin enroll` (updated, `--ns-key`), `bootstrap/` (shells out to the CLI:
+  pass `--ns-key` there), ztlp.net launch app (`launch_app/app.py` mints binary tokens itself, no 0x10
+  yet), Z2LS (separate repo). Tokens without 0x10 keep legacy trust + WARN: follow-ups, not blockers.
 - Pre-existing issues seen (not fixed here): `proto/tests/quic_handshake_vector_test.rs` rewrites
   `gateway/test/fixtures/quic_handshake_vector.json` with random keys on every `cargo test`
   (never stage it); `--no-default-features --features ios-sync` fails on `r3_pool_consult.rs` (tokio).
@@ -430,7 +445,19 @@ only for `strict=false` devices.
    - NSSET: add a replica → device trusts it within an hour; remove → trust gone within an hour.
 5. Update the skill `ztlp-architecture-and-debugging` failure row and the SECURITY GAP note.
 
+## Operator rollout (each step needs Steven's OK)
+1. NS `44.227.148.151`: deploy `ztlp-ns:v0.36.0`; read "NS registration public key" from the log; set
+   `ZTLP_NS_NSSET_ZONES` (+ `ZTLP_NS_SELF_ADDR`, peers if any); back up `registration_signing.key`
+   off-box (it is now the fleet root).
+2. Gateways (CF `.112` first): v0.36.0 image + `ZTLP_QUIC_CERT_DIR`; confirm the SVC record carries
+   `quic_cert_sha256` (`ztlp ns lookup`).
+3. Clients: desktop 1.3.0 / Windows service; re-enroll the 3 devices with
+   `ztlp admin enroll --ns-key <key>` tokens.
+4. Live proof per section 10.4 (real browser), tracker `docs/NS-ANCHORED-TRUST-TRACKER.md`.
+
 ## 11. Follow-ups (file as issues, not in this branch)
+- `ztlp connect` (CLI) and the persistent-endpoint path: use the NS record state.
+- ztlp.net launch app / Z2LS token minters: set flag 0x10.
 - Channel binding: TLS exporter value into the Noise prologue, so Noise cannot be relayed by a MITM
   even if a gateway key leaks. Defense in depth after this plan.
 - Keep the gateway's own registration signature in the stored record so clients verify gateway AND NS

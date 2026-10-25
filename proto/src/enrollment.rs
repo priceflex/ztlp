@@ -942,15 +942,18 @@ mod tests {
         let (t, secret) = ns_key_token();
         let bytes = t.serialize();
         assert_eq!(bytes[1] & FLAG_HAS_NS_KEY, FLAG_HAS_NS_KEY);
-        let parsed = EnrollmentToken::deserialize(&bytes).unwrap();
+        let parsed = EnrollmentToken::deserialize(&bytes).expect("test value");
         assert_eq!(parsed.ns_key, Some([0x42; 32]));
         assert_eq!(parsed.relay_secret, t.relay_secret);
         assert_eq!(parsed.validate(&secret), TokenValidation::Valid);
         // Tamper with one key byte: MAC must fail.
-        let pos = bytes.windows(32).position(|w| w == [0x42; 32]).unwrap();
+        let pos = bytes
+            .windows(32)
+            .position(|w| w == [0x42; 32])
+            .expect("test value");
         let mut bad = bytes.clone();
         bad[pos] ^= 1;
-        let tampered = EnrollmentToken::deserialize(&bad).unwrap();
+        let tampered = EnrollmentToken::deserialize(&bad).expect("test value");
         assert_eq!(tampered.validate(&secret), TokenValidation::InvalidMac);
     }
 
@@ -964,7 +967,12 @@ mod tests {
         // version, flags, zone, ns, relay count, max_uses, expires, nonce, mac
         let expected_len = 1 + 1 + (2 + 8) + (2 + 13) + 1 + 2 + 8 + 16 + 32;
         assert_eq!(bytes.len(), expected_len);
-        assert_eq!(EnrollmentToken::deserialize(&bytes).unwrap().ns_key, None);
+        assert_eq!(
+            EnrollmentToken::deserialize(&bytes)
+                .expect("test value")
+                .ns_key,
+            None
+        );
     }
 
     #[test]
@@ -972,15 +980,18 @@ mod tests {
         let (t, _) = ns_key_token();
         let bytes = t.serialize_without_mac();
         // Cut inside the key: everything after relay secret is shorter than 32.
-        let pos = bytes.windows(32).position(|w| w == [0x42; 32]).unwrap();
-        let err = EnrollmentToken::deserialize(&bytes[..pos + 10]).unwrap_err();
+        let pos = bytes
+            .windows(32)
+            .position(|w| w == [0x42; 32])
+            .expect("test value");
+        let err = EnrollmentToken::deserialize(&bytes[..pos + 10]).expect_err("must fail");
         assert!(err.contains("ns key"), "{err}");
     }
 
     #[test]
     fn uri_round_trip_keeps_the_ns_key() {
         let (t, secret) = ns_key_token();
-        let parsed = EnrollmentToken::from_base64url(&t.to_uri()).unwrap();
+        let parsed = EnrollmentToken::from_base64url(&t.to_uri()).expect("test value");
         assert_eq!(parsed.ns_key, Some([0x42; 32]));
         assert_eq!(parsed.validate(&secret), TokenValidation::Valid);
     }
@@ -1010,9 +1021,9 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/enrollment_token_all_flags.hex");
         if std::env::var("ZTLP_WRITE_GOLDEN").as_deref() == Ok("1") {
-            std::fs::write(&path, format!("{hex_now}\n")).unwrap();
+            std::fs::write(&path, format!("{hex_now}\n")).expect("test value");
         }
-        let committed = std::fs::read_to_string(&path).unwrap();
+        let committed = std::fs::read_to_string(&path).expect("test value");
         assert_eq!(committed.trim(), hex_now);
         assert_eq!(t.serialize()[1], 0x01 | 0x02 | 0x08 | 0x10);
     }

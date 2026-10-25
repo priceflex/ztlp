@@ -189,6 +189,33 @@ impl NsTrustStore {
     }
 }
 
+/// `ns_trust.toml` at the default path, re-read only when its mtime
+/// changes (the dial path consults it per connection). A missing file is
+/// the empty legacy store; an unreadable/malformed file is returned as an
+/// error every time (never silently "no trust").
+pub fn load_cached() -> Result<NsTrustStore, String> {
+    load_cached_from(&default_path())
+}
+
+/// [`load_cached`] for an explicit path (tests).
+pub fn load_cached_from(path: &Path) -> Result<NsTrustStore, String> {
+    type Slot = Option<(PathBuf, Option<std::time::SystemTime>, NsTrustStore)>;
+    static CACHE: std::sync::Mutex<Slot> = std::sync::Mutex::new(None);
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    if let Ok(g) = CACHE.lock() {
+        if let Some((p, m, store)) = g.as_ref() {
+            if p == path && *m == mtime && mtime.is_some() {
+                return Ok(store.clone());
+            }
+        }
+    }
+    let store = NsTrustStore::load(path).map_err(|e| e.to_string())?;
+    if let Ok(mut g) = CACHE.lock() {
+        *g = Some((path.to_path_buf(), mtime, store.clone()));
+    }
+    Ok(store)
+}
+
 /// Summary of a device's name-server trust, for logs and `status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustStatus {

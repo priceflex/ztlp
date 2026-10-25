@@ -119,6 +119,10 @@ pub struct NsResolution {
     /// (docs/DIRECT-FIRST-DIAL-PLAN.md step B) walks this list before
     /// falling back to the relay.
     pub candidates: Vec<SocketAddr>,
+    /// NS-anchored gateway trust: what the NS record says about the
+    /// gateway's QUIC certificate, and whether this device is strict for
+    /// the name. Default = legacy (no record, not strict).
+    pub cert: crate::quic_transport::CertExpectation,
 }
 
 impl NsResolution {
@@ -137,6 +141,7 @@ impl NsResolution {
             node_id,
             ztlp_name: ztlp_name.to_string(),
             candidates,
+            cert: Default::default(),
         })
     }
 }
@@ -165,7 +170,95 @@ pub fn rank_candidates_for_client(
 }
 
 /// Query ZTLP-NS for a name, returning the SVC endpoint(s) and optional NodeID.
+///
+/// NS-anchored gateway trust: when this device trusts a name-server key for
+/// the name's zone (`ns_trust.toml`), the answer MUST verify; addresses,
+/// node id and the gateway's `quic_cert_sha256` then come only from the
+/// verified record. Legacy devices keep the unverified path unchanged.
 pub async fn ns_resolve(
+    ztlp_name: &str,
+    ns_server: &str,
+) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
+    let store = super::ns_trust::load_cached().map_err(|e| {
+        format!("cannot resolve '{ztlp_name}': {e} (fix or re-enroll; refusing unverified answers)")
+    })?;
+    let cache_dir = crate::ns_cache::default_dir();
+    ns_resolve_with_trust(ztlp_name, ns_server, &store, Some(&cache_dir)).await
+}
+
+/// [`ns_resolve`] with explicit trust inputs (tests).
+pub async fn ns_resolve_with_trust(
+    ztlp_name: &str,
+    ns_server: &str,
+    store: &super::ns_trust::NsTrustStore,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::quic_transport::{CertExpectation, RecordState};
+
+    if !store.strict_for(ztlp_name) {
+        let mut r = ns_resolve_legacy(ztlp_name, ns_server).await?;
+        r.cert = CertExpectation {
+            record: RecordState::Unverified,
+            strict: false,
+        };
+        return Ok(r);
+    }
+
+    let trust = NsTrust {
+        anchors: store.anchors_for(ztlp_name),
+        strict: true,
+        cache_dir: cache_dir.map(|p| p.to_path_buf()),
+    };
+    // SVC first (carries addresses + quic_cert_sha256), then a verified KEY
+    // record for legacy single-endpoint gateways.
+    let (set, fp, mut node_id) = match ns_query_verified(ztlp_name, ns_server, 2, &trust).await? {
+        NsAnswer::Verified(rec) => (
+            svc_candidates_from_cbor(&rec.data_cbor),
+            rec.data_str("quic_cert_sha256"),
+            parse_key_node_id(&rec.data_cbor).ok(),
+        ),
+        NsAnswer::NotFound => match ns_query_verified(ztlp_name, ns_server, 1, &trust).await? {
+            NsAnswer::Verified(rec) => {
+                let addr = rec.data_str("address").ok_or_else(|| {
+                    format!("verified KEY record for '{ztlp_name}' has no address")
+                })?;
+                let addr: SocketAddr = addr
+                    .parse()
+                    .map_err(|e| format!("invalid address in KEY record '{addr}': {e}"))?;
+                (vec![addr], None, parse_key_node_id(&rec.data_cbor).ok())
+            }
+            _ => return Err(format!("no SVC address found for '{}'", ztlp_name).into()),
+        },
+        NsAnswer::Unverified(_) => {
+            return Err(Box::new(UnverifiedAnswer {
+                name: ztlp_name.to_string(),
+                reason: "unverified answer".into(),
+            }))
+        }
+    };
+    if set.is_empty() {
+        return Err(format!("no SVC address found for '{}'", ztlp_name).into());
+    }
+    if node_id.is_none() {
+        if let Ok(NsAnswer::Verified(rec)) =
+            ns_query_verified(ztlp_name, ns_server, 1, &trust).await
+        {
+            node_id = parse_key_node_id(&rec.data_cbor).ok();
+        }
+    }
+    let ranked = rank_candidates_for_client(&set, &crate::local_candidates::our_local_subnets());
+    let mut r = NsResolution::from_candidates(ztlp_name, ranked, node_id)?;
+    r.cert = CertExpectation {
+        record: RecordState::Verified {
+            fp: fp.map(|f| f.to_ascii_lowercase()),
+        },
+        strict: true,
+    };
+    Ok(r)
+}
+
+/// The pre-NS-trust resolution path (unverified answers), unchanged.
+async fn ns_resolve_legacy(
     ztlp_name: &str,
     ns_server: &str,
 ) -> Result<NsResolution, Box<dyn std::error::Error + Send + Sync>> {
@@ -226,6 +319,7 @@ fn static_proxy_resolution(
             .clone()
             .unwrap_or_else(|| hostname.to_lowercase()),
         candidates: vec![addr],
+        cert: Default::default(),
     })
 }
 
@@ -398,7 +492,6 @@ fn bare_cbor_from_reply(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Trust inputs for a verified NS lookup (NS-anchored gateway trust).
-#[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, Default)]
 pub struct NsTrust {
     /// Name-server keys trusted for the zone being queried.
@@ -411,7 +504,6 @@ pub struct NsTrust {
 }
 
 /// Outcome of [`ns_query_verified`].
-#[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NsAnswer {
     /// Signature verified against a trusted key, unexpired.
@@ -424,7 +516,6 @@ pub enum NsAnswer {
 
 /// A strict device got an NS answer that does not verify. Callers can
 /// `downcast_ref::<UnverifiedAnswer>()` on the boxed error.
-#[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnverifiedAnswer {
     pub name: String,
@@ -446,7 +537,6 @@ impl std::error::Error for UnverifiedAnswer {}
 /// Like [`ns_query_raw`] but keeps the full signed reply and verifies it.
 /// Verified answers are written to the signed-record cache; when the NS does
 /// not answer at all, a still-valid cached record is returned instead.
-#[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 pub async fn ns_query_verified(
     name: &str,
     ns_server: &str,
@@ -456,7 +546,6 @@ pub async fn ns_query_verified(
     ns_query_verified_with_timeout(name, ns_server, record_type, trust, NS_QUERY_TIMEOUT).await
 }
 
-#[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 async fn ns_query_verified_with_timeout(
     name: &str,
     ns_server: &str,
@@ -2077,6 +2166,115 @@ mod tests {
         assert_eq!(rec.data_str("address").as_deref(), Some("10.0.0.2:1"));
     }
 
+    // ── ns_resolve_with_trust (Phase 5) ────────────────────────────────
+
+    fn trust_store_for(zone: &str) -> super::super::ns_trust::NsTrustStore {
+        super::super::ns_trust::NsTrustStore {
+            servers: vec![super::super::ns_trust::NsServerTrust {
+                addr: "127.0.0.1:1".into(),
+                key: ns_key().verifying_key().to_bytes(),
+                zones: vec![zone.into()],
+                home: true,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_resolution_takes_addresses_and_fp_from_the_verified_record() {
+        use crate::quic_transport::RecordState;
+        let d = tempfile::tempdir().unwrap();
+        let ns = fake_ns(vec![
+            signed_reply(&ns_key(), "www.a.ztlp", "10.0.0.1:23097", 7),
+            // node_id lookup (KEY) -> not found
+            vec![0x03],
+        ])
+        .await;
+        let r = ns_resolve_with_trust(
+            "www.a.ztlp",
+            &ns,
+            &trust_store_for("a.ztlp"),
+            Some(d.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.candidates, vec!["10.0.0.1:23097".parse().unwrap()]);
+        assert!(r.cert.strict);
+        assert_eq!(
+            r.cert.record,
+            RecordState::Verified {
+                fp: Some("ab".repeat(32))
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_resolution_refuses_a_forged_answer() {
+        let d = tempfile::tempdir().unwrap();
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[0x66; 32]);
+        let ns = fake_ns(vec![signed_reply(&attacker, "www.a.ztlp", "6.6.6.6:1", 9)]).await;
+        let err = ns_resolve_with_trust(
+            "www.a.ztlp",
+            &ns,
+            &trust_store_for("a.ztlp"),
+            Some(d.path()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<UnverifiedAnswer>().is_some(), "{err}");
+    }
+
+    #[tokio::test]
+    async fn strict_resolution_falls_back_to_a_verified_key_record() {
+        use crate::quic_transport::RecordState;
+        use ed25519_dalek::Signer;
+        let d = tempfile::tempdir().unwrap();
+        let name = "old.a.ztlp";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cbor = [&[0xA1u8, 0x67][..], b"address", &[0x6E], b"10.0.0.7:23097"].concat();
+        let mut c = vec![1u8];
+        c.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        c.extend_from_slice(name.as_bytes());
+        c.extend_from_slice(&(cbor.len() as u32).to_be_bytes());
+        c.extend_from_slice(&cbor);
+        c.extend_from_slice(&(now - 5).to_be_bytes());
+        c.extend_from_slice(&3600u32.to_be_bytes());
+        c.extend_from_slice(&1u64.to_be_bytes());
+        let sig = ns_key().sign(&c).to_bytes();
+        c.extend_from_slice(&64u16.to_be_bytes());
+        c.extend_from_slice(&sig);
+        c.extend_from_slice(&32u16.to_be_bytes());
+        c.extend_from_slice(&ns_key().verifying_key().to_bytes());
+        let mut key_reply = vec![0x02];
+        key_reply.extend(c);
+        let ns = fake_ns(vec![vec![0x03], key_reply.clone(), key_reply]).await;
+        let r = ns_resolve_with_trust(name, &ns, &trust_store_for("a.ztlp"), Some(d.path()))
+            .await
+            .unwrap();
+        assert_eq!(r.candidates, vec!["10.0.0.7:23097".parse().unwrap()]);
+        assert_eq!(r.cert.record, RecordState::Verified { fp: None });
+    }
+
+    #[tokio::test]
+    async fn non_strict_resolution_keeps_the_legacy_path() {
+        use crate::quic_transport::RecordState;
+        let cbor = [&[0xA1u8, 0x67][..], b"address", &[0x6E], b"10.0.0.8:23097"].concat();
+        let ns = fake_ns(vec![
+            ns_found_response(0x02, "www.b.ztlp", &cbor),
+            vec![0x03],
+        ])
+        .await;
+        let store = trust_store_for("a.ztlp"); // trusts a.ztlp only
+        let r = ns_resolve_with_trust("www.b.ztlp", &ns, &store, None)
+            .await
+            .unwrap();
+        assert_eq!(r.candidates, vec!["10.0.0.8:23097".parse().unwrap()]);
+        assert!(!r.cert.strict);
+        assert_eq!(r.cert.record, RecordState::Unverified);
+    }
+
     #[test]
     fn test_parse_svc_response_errors_when_address_missing() {
         let mut cbor = Vec::new();
@@ -2099,6 +2297,7 @@ mod tests {
             node_id: None,
             ztlp_name: "test.techrockstars.ztlp".to_string(),
             candidates: vec!["10.0.0.99:22000".parse().unwrap()],
+            cert: Default::default(),
         };
 
         assert_eq!(resolved_peer_addr(&resolution), resolution.addr);
@@ -2141,6 +2340,7 @@ mod tests {
                 )),
                 ztlp_name: "windows.techrockstars.ztlp".to_string(),
                 candidates: vec!["10.20.31.111:23095".parse().unwrap()],
+                cert: Default::default(),
             })
         );
     }

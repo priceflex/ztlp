@@ -247,6 +247,217 @@ pub fn client_endpoint_config() -> quinn::EndpointConfig {
 }
 
 #[cfg(feature = "tokio-runtime")]
+/// What the name server said about the gateway being dialed
+/// (NS-anchored gateway trust, plan section 3.3).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RecordState {
+    /// No NS record consulted (static target, legacy caller).
+    #[default]
+    None,
+    /// The NS answered, but the answer did not verify (legacy device only;
+    /// a strict device never gets this far with an unverified answer).
+    Unverified,
+    /// The SVC/KEY record verified against a trusted NS key and is
+    /// unexpired. `fp` is its `quic_cert_sha256` (lowercase hex), absent
+    /// for gateways that predate publishing it.
+    Verified { fp: Option<String> },
+}
+
+/// Everything the QUIC client needs to judge the gateway's certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CertExpectation {
+    pub record: RecordState,
+    /// The device trusts a name-server key for this name's zone. Derived
+    /// from `ns_trust.toml`, never configured: a strict device has no
+    /// fallback to TOFU pins for an unverified answer.
+    pub strict: bool,
+}
+
+/// Outcome of [`decide_cert`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertDecision {
+    /// Accept the certificate. `write_pin`: store it as the TOFU pin
+    /// (legacy paths only; NS-backed accepts never touch pin files).
+    Accept {
+        write_pin: bool,
+        ns_backed: bool,
+    },
+    Reject(CertReject),
+}
+
+/// Why a certificate was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertReject {
+    /// NS-signed fingerprint differs from the presented cert. The caller
+    /// re-resolves once (the gateway may have restarted with a new cert and
+    /// re-registered) before failing.
+    NsMismatch { expected: String },
+    /// Strict device, NS answer missing or not verified.
+    UnverifiedAnswer,
+    /// Legacy TOFU pin mismatch.
+    LegacyPinMismatch { pinned: String },
+}
+
+/// Marker embedded in rejection messages so callers can recognise an
+/// NS fingerprint mismatch through quinn's error chain.
+pub const NS_MISMATCH_MARKER: &str = "[ztlp-ns-cert-mismatch]";
+/// Marker for a strict device refusing an unverified answer.
+pub const UNVERIFIED_MARKER: &str = "[ztlp-ns-unverified]";
+
+/// Plan table 3.3, as a pure function. `presented` and the expected
+/// fingerprints are hex SHA-256 (compared case-insensitively).
+pub fn decide_cert(
+    expect: &CertExpectation,
+    presented: &str,
+    cached_pin: Option<&str>,
+) -> CertDecision {
+    let legacy = |cached_pin: Option<&str>| match cached_pin {
+        None => CertDecision::Accept {
+            write_pin: true,
+            ns_backed: false,
+        },
+        Some(p) if p.trim().eq_ignore_ascii_case(presented) => CertDecision::Accept {
+            write_pin: false,
+            ns_backed: false,
+        },
+        Some(p) => CertDecision::Reject(CertReject::LegacyPinMismatch {
+            pinned: p.trim().to_string(),
+        }),
+    };
+    match &expect.record {
+        RecordState::Verified { fp: Some(fp) } => {
+            if fp.trim().eq_ignore_ascii_case(presented) {
+                CertDecision::Accept {
+                    write_pin: false,
+                    ns_backed: true,
+                }
+            } else {
+                CertDecision::Reject(CertReject::NsMismatch {
+                    expected: fp.trim().to_ascii_lowercase(),
+                })
+            }
+        }
+        // Verified record from a gateway that does not publish a
+        // fingerprint yet (plan 3.5 interim): the TLS signature check still
+        // proves key possession; the legacy pin acts as a cache.
+        RecordState::Verified { fp: None } => legacy(cached_pin),
+        RecordState::Unverified | RecordState::None if expect.strict => {
+            CertDecision::Reject(CertReject::UnverifiedAnswer)
+        }
+        RecordState::Unverified | RecordState::None => legacy(cached_pin),
+    }
+}
+
+#[cfg(test)]
+mod decide_cert_tests {
+    use super::*;
+
+    const FP: &str = "abababababababababababababababababababababababababababababababab";
+    const OTHER: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+    fn e(record: RecordState, strict: bool) -> CertExpectation {
+        CertExpectation { record, strict }
+    }
+
+    fn verified(fp: &str) -> RecordState {
+        RecordState::Verified {
+            fp: Some(fp.to_string()),
+        }
+    }
+
+    #[test]
+    fn verified_matching_fp_accepts_without_pins_strict_or_not() {
+        for strict in [true, false] {
+            assert_eq!(
+                decide_cert(&e(verified(FP), strict), FP, Some(OTHER)),
+                CertDecision::Accept {
+                    write_pin: false,
+                    ns_backed: true
+                },
+                "a stale pin must not matter"
+            );
+        }
+    }
+
+    #[test]
+    fn verified_fp_comparison_is_case_insensitive() {
+        assert!(matches!(
+            decide_cert(&e(verified(&FP.to_uppercase()), true), FP, None),
+            CertDecision::Accept {
+                ns_backed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verified_mismatch_is_ns_mismatch_even_with_a_matching_pin() {
+        assert_eq!(
+            decide_cert(&e(verified(FP), false), OTHER, Some(OTHER)),
+            CertDecision::Reject(CertReject::NsMismatch {
+                expected: FP.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn strict_unverified_or_missing_record_is_rejected_even_with_a_matching_pin() {
+        for rec in [RecordState::Unverified, RecordState::None] {
+            assert_eq!(
+                decide_cert(&e(rec, true), FP, Some(FP)),
+                CertDecision::Reject(CertReject::UnverifiedAnswer)
+            );
+        }
+    }
+
+    #[test]
+    fn non_strict_unverified_keeps_legacy_tofu() {
+        for rec in [RecordState::Unverified, RecordState::None] {
+            assert_eq!(
+                decide_cert(&e(rec.clone(), false), FP, None),
+                CertDecision::Accept {
+                    write_pin: true,
+                    ns_backed: false
+                }
+            );
+            assert_eq!(
+                decide_cert(&e(rec.clone(), false), FP, Some(FP)),
+                CertDecision::Accept {
+                    write_pin: false,
+                    ns_backed: false
+                }
+            );
+            assert_eq!(
+                decide_cert(&e(rec, false), FP, Some(OTHER)),
+                CertDecision::Reject(CertReject::LegacyPinMismatch {
+                    pinned: OTHER.to_string()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn verified_without_fp_uses_the_pin_as_a_cache_for_strict_devices_too() {
+        let rec = RecordState::Verified { fp: None };
+        assert!(matches!(
+            decide_cert(&e(rec.clone(), true), FP, None),
+            CertDecision::Accept {
+                write_pin: true,
+                ns_backed: false
+            }
+        ));
+        assert!(matches!(
+            decide_cert(&e(rec, true), FP, Some(OTHER)),
+            CertDecision::Reject(CertReject::LegacyPinMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn default_expectation_is_legacy() {
+        assert_eq!(CertExpectation::default(), e(RecordState::None, false));
+    }
+}
+
 pub mod tokio_endpoint {
     //! `quinn::Endpoint`-backed server/client. Phase 1 deliverable.
 
@@ -359,6 +570,9 @@ pub mod tokio_endpoint {
         /// which requires `unsafe` in modern Rust and risks races in
         /// a shared test binary).
         pin_dir: std::path::PathBuf,
+        /// NS-anchored trust: what the name server said about this gateway.
+        /// Default = legacy TOFU behavior.
+        expect: super::CertExpectation,
     }
 
     /// TOFU pin identity for a dial: the REMOTE ENDPOINT plus the SNI.
@@ -464,6 +678,14 @@ pub mod tokio_endpoint {
             Self {
                 server_name: server_name.to_string(),
                 pin_dir: Self::default_pin_dir(),
+                expect: super::CertExpectation::default(),
+            }
+        }
+
+        fn with_expectation(server_name: &str, expect: super::CertExpectation) -> Self {
+            Self {
+                expect,
+                ..Self::new(server_name)
             }
         }
 
@@ -471,6 +693,7 @@ pub mod tokio_endpoint {
             Self {
                 server_name: server_name.to_string(),
                 pin_dir,
+                expect: super::CertExpectation::default(),
             }
         }
 
@@ -479,6 +702,20 @@ pub mod tokio_endpoint {
             Self {
                 server_name: server_name.to_string(),
                 pin_dir,
+                expect: super::CertExpectation::default(),
+            }
+        }
+
+        #[cfg(test)]
+        fn with_pin_dir_and_expectation(
+            server_name: &str,
+            pin_dir: std::path::PathBuf,
+            expect: super::CertExpectation,
+        ) -> Self {
+            Self {
+                server_name: server_name.to_string(),
+                pin_dir,
+                expect,
             }
         }
 
@@ -540,15 +777,43 @@ pub mod tokio_endpoint {
         /// Returns Err with a descriptive message if it does NOT match
         /// (the connection must be rejected).
         fn verify_or_pin(&self, cert: &CertificateDer<'_>) -> Result<(), String> {
+            use super::{decide_cert, CertDecision, CertReject};
             let fingerprint = Self::fingerprint(cert);
             let path = self.pin_path();
+            let pinned = std::fs::read_to_string(&path).ok();
 
-            if let Ok(pinned) = std::fs::read_to_string(&path) {
-                let pinned = pinned.trim();
-                if pinned.eq_ignore_ascii_case(&fingerprint) {
-                    return Ok(());
+            match decide_cert(&self.expect, &fingerprint, pinned.as_deref()) {
+                CertDecision::Accept {
+                    write_pin,
+                    ns_backed,
+                } => {
+                    if ns_backed && pinned.is_some() {
+                        // Task 5.5: the NS-signed fingerprint now covers this
+                        // gateway; retire its TOFU pin.
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    if write_pin {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&path, &fingerprint);
+                    }
+                    Ok(())
                 }
-                return Err(format!(
+                CertDecision::Reject(CertReject::NsMismatch { expected }) => Err(format!(
+                    "{} gateway '{}' presented QUIC certificate {} but its name-server-signed \
+                     record says {}",
+                    super::NS_MISMATCH_MARKER,
+                    self.server_name,
+                    fingerprint,
+                    expected
+                )),
+                CertDecision::Reject(CertReject::UnverifiedAnswer) => Err(format!(
+                    "{} no verified name-server record for gateway '{}'; refusing its certificate",
+                    super::UNVERIFIED_MARKER,
+                    self.server_name
+                )),
+                CertDecision::Reject(CertReject::LegacyPinMismatch { pinned }) => Err(format!(
                     "QUIC certificate fingerprint for '{}' does not match the pinned value \
                      (expected {}, got {}). This may indicate a MITM attack, or the server's \
                      certificate was legitimately rotated (delete {} to reset the pin).",
@@ -556,15 +821,8 @@ pub mod tokio_endpoint {
                     pinned,
                     fingerprint,
                     path.display()
-                ));
+                )),
             }
-
-            // First connection to this server_name — pin it now.
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&path, &fingerprint);
-            Ok(())
         }
     }
 
@@ -936,7 +1194,15 @@ pub mod tokio_endpoint {
             server_name: &str,
             std_socket: std::net::UdpSocket,
         ) -> Result<QuicConnection, QuicTransportError> {
-            Self::connect_with_socket_for_service(cfg, remote, server_name, std_socket, None).await
+            Self::connect_with_socket_for_service(
+                cfg,
+                remote,
+                server_name,
+                std_socket,
+                None,
+                super::CertExpectation::default(),
+            )
+            .await
         }
 
         /// Same as [`Self::connect_with_socket`], but a RELAYED dial passes
@@ -949,13 +1215,15 @@ pub mod tokio_endpoint {
             server_name: &str,
             std_socket: std::net::UdpSocket,
             relayed_service: Option<&str>,
+            expect: super::CertExpectation,
         ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
             cleanup_legacy_pins_once(server_name);
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::new(
+                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::with_expectation(
                     &pin_key_for_service(remote, server_name, relayed_service),
+                    expect,
                 )))
                 .with_no_client_auth();
 
@@ -1844,6 +2112,211 @@ pub mod tokio_endpoint {
             assert_eq!(pinned.trim(), cert_sha256_hex(certs[0].as_ref()));
             let _ = std::fs::remove_dir_all(&cert_dir);
             let _ = std::fs::remove_dir_all(&pin_dir);
+        }
+
+        // ── Phase 5: verifier honours the NS record state ─────────────
+
+        #[test]
+        fn verified_fp_match_ignores_and_retires_a_stale_pin() {
+            let tmp = tempfile_dir();
+            let cert = fake_cert(0xAA);
+            let fp = TofuCertVerifier::fingerprint(&cert);
+            let legacy = TofuCertVerifier::with_pin_dir("gw.ns", tmp.clone());
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(legacy.pin_path(), "00".repeat(32)).unwrap();
+            let v = TofuCertVerifier::with_pin_dir_and_expectation(
+                "gw.ns",
+                tmp.clone(),
+                crate::quic_transport::CertExpectation {
+                    record: crate::quic_transport::RecordState::Verified { fp: Some(fp) },
+                    strict: true,
+                },
+            );
+            assert!(v
+                .verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+            assert!(!v.pin_path().exists(), "pin retired once NS-backed");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn verified_fp_match_needs_no_pin_and_writes_none() {
+            let tmp = tempfile_dir();
+            let cert = fake_cert(0xAB);
+            let v = TofuCertVerifier::with_pin_dir_and_expectation(
+                "gw.ns2",
+                tmp.clone(),
+                crate::quic_transport::CertExpectation {
+                    record: crate::quic_transport::RecordState::Verified {
+                        fp: Some(TofuCertVerifier::fingerprint(&cert)),
+                    },
+                    strict: true,
+                },
+            );
+            assert!(v
+                .verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now())
+                .is_ok());
+            assert!(!v.pin_path().exists());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn strict_unverified_rejects_even_with_a_matching_pin_and_never_says_delete_the_pin() {
+            let tmp = tempfile_dir();
+            let cert = fake_cert(0xAC);
+            let legacy = TofuCertVerifier::with_pin_dir("gw.ns3", tmp.clone());
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(legacy.pin_path(), TofuCertVerifier::fingerprint(&cert)).unwrap();
+            let v = TofuCertVerifier::with_pin_dir_and_expectation(
+                "gw.ns3",
+                tmp.clone(),
+                crate::quic_transport::CertExpectation {
+                    record: crate::quic_transport::RecordState::Unverified,
+                    strict: true,
+                },
+            );
+            let err = v
+                .verify_server_cert(&cert, &[], &fake_server_name(), &[], fixed_now())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(crate::quic_transport::UNVERIFIED_MARKER),
+                "{err}"
+            );
+            assert!(err.contains("gw.ns3"), "{err}");
+            assert!(!err.contains("delete"), "{err}");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        #[test]
+        fn ns_mismatch_names_the_gateway_and_carries_the_marker() {
+            let tmp = tempfile_dir();
+            let v = TofuCertVerifier::with_pin_dir_and_expectation(
+                "gw.ns4",
+                tmp.clone(),
+                crate::quic_transport::CertExpectation {
+                    record: crate::quic_transport::RecordState::Verified {
+                        fp: Some("ab".repeat(32)),
+                    },
+                    strict: true,
+                },
+            );
+            let err = v
+                .verify_server_cert(&fake_cert(0xAD), &[], &fake_server_name(), &[], fixed_now())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(crate::quic_transport::NS_MISMATCH_MARKER),
+                "{err}"
+            );
+            assert!(err.contains("gw.ns4") && !err.contains("delete"), "{err}");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        async fn loopback_dial_expecting(
+            server: &quinn::Endpoint,
+            pin_dir: std::path::PathBuf,
+            expect: crate::quic_transport::CertExpectation,
+        ) -> Result<(), String> {
+            let mut cc = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(
+                    TofuCertVerifier::with_pin_dir_and_expectation("loopback.ns", pin_dir, expect),
+                ))
+                .with_no_client_auth();
+            cc.alpn_protocols = vec![b"ztlp-test".to_vec()];
+            let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap())
+                .map_err(|e| e.to_string())?;
+            client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(cc).unwrap(),
+            )));
+            let addr = server.local_addr().unwrap();
+            let srv = server.clone();
+            let accept = tokio::spawn(async move {
+                if let Some(inc) = srv.accept().await {
+                    let _ = inc.await;
+                }
+            });
+            let res = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                client
+                    .connect(addr, "localhost")
+                    .map_err(|e| e.to_string())?,
+            )
+            .await
+            .map_err(|_| "handshake timed out".to_string())?
+            .map(|c| c.close(0u32.into(), b"done"))
+            .map_err(|e| e.to_string());
+            accept.abort();
+            client.wait_idle().await;
+            res
+        }
+
+        /// Phase 5 over a real handshake: a gateway whose cert matches its
+        /// NS-signed fingerprint is accepted with no pin file at all; after
+        /// a cert change (restart without a persisted cert) the stale
+        /// fingerprint is refused with the NS-mismatch marker the dialer's
+        /// retry looks for, and the fresh one is accepted, never pinning.
+        #[tokio::test]
+        async fn real_handshake_follows_the_ns_fingerprint_without_pins() {
+            use crate::quic_transport::{CertExpectation, RecordState, NS_MISMATCH_MARKER};
+            let pin_dir = tempfile_dir();
+            let (dir_a, dir_b) = (tempfile_dir(), tempfile_dir());
+            std::fs::create_dir_all(&dir_a).unwrap();
+            std::fs::create_dir_all(&dir_b).unwrap();
+            let fp_of = |d: &std::path::Path| {
+                let (c, _) = load_or_generate_self_signed_in(d);
+                cert_sha256_hex(c[0].as_ref())
+            };
+            let (fp_a, fp_b) = (fp_of(&dir_a), fp_of(&dir_b));
+            let exp = |fp: &str| CertExpectation {
+                record: RecordState::Verified {
+                    fp: Some(fp.to_string()),
+                },
+                strict: true,
+            };
+
+            let a = loopback_server(&dir_a);
+            loopback_dial_expecting(&a, pin_dir.clone(), exp(&fp_a))
+                .await
+                .expect("matching NS fingerprint accepted");
+            drop(a);
+
+            let b = loopback_server(&dir_b); // "restarted with a new cert"
+            let err = loopback_dial_expecting(&b, pin_dir.clone(), exp(&fp_a))
+                .await
+                .unwrap_err();
+            assert!(err.contains(NS_MISMATCH_MARKER), "{err}");
+            loopback_dial_expecting(&b, pin_dir.clone(), exp(&fp_b))
+                .await
+                .expect("re-resolved fingerprint accepted");
+            assert!(
+                !pin_dir.exists() || std::fs::read_dir(&pin_dir).unwrap().next().is_none(),
+                "NS-backed dials never write pins"
+            );
+            for d in [pin_dir, dir_a, dir_b] {
+                let _ = std::fs::remove_dir_all(d);
+            }
+        }
+
+        #[tokio::test]
+        async fn real_handshake_strict_device_without_a_record_is_refused() {
+            use crate::quic_transport::{CertExpectation, RecordState, UNVERIFIED_MARKER};
+            let dir = tempfile_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let s = loopback_server(&dir);
+            let err = loopback_dial_expecting(
+                &s,
+                tempfile_dir(),
+                CertExpectation {
+                    record: RecordState::None,
+                    strict: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.contains(UNVERIFIED_MARKER), "{err}");
+            let _ = std::fs::remove_dir_all(dir);
         }
 
         fn tempfile_dir() -> std::path::PathBuf {

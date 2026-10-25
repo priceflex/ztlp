@@ -512,10 +512,12 @@ async fn ns_query_verified_with_timeout(
         .and_then(|p| ns_verify::verify(&p, &trust.anchors, now))
         .and_then(|rec| {
             // A genuine record for another name must not answer this one.
-            if rec.name == name && rec.type_byte == record_type {
-                Ok(rec)
-            } else {
+            if rec.name != name || rec.type_byte != record_type {
                 Err(ns_verify::NsVerifyError::WrongRecord)
+            } else if rec.registered_unsigned() {
+                Err(ns_verify::NsVerifyError::UnauthenticatedRegistration)
+            } else {
+                Ok(rec)
             }
         });
 
@@ -1936,6 +1938,57 @@ mod tests {
             .downcast_ref::<UnverifiedAnswer>()
             .expect("UnverifiedAnswer");
         assert!(u.reason.contains("different name"), "{}", u.reason);
+    }
+
+    #[tokio::test]
+    async fn record_from_an_unauthenticated_registration_is_refused() {
+        // Dev-mode NS signs unsigned registrations with its own key and
+        // flags them; such a signature authenticates nothing.
+        use ed25519_dalek::Signer;
+        let d = tempfile::tempdir().unwrap();
+        let name = "www.a.ztlp";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut cbor = Vec::new();
+        ciborium::ser::into_writer(
+            &ciborium::value::Value::Map(vec![
+                (
+                    ciborium::value::Value::Text("address".into()),
+                    ciborium::value::Value::Text("6.6.6.6:1".into()),
+                ),
+                (
+                    ciborium::value::Value::Text("registered_unsigned".into()),
+                    ciborium::value::Value::Bool(true),
+                ),
+            ]),
+            &mut cbor,
+        )
+        .unwrap();
+        let mut c = vec![2u8];
+        c.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        c.extend_from_slice(name.as_bytes());
+        c.extend_from_slice(&(cbor.len() as u32).to_be_bytes());
+        c.extend_from_slice(&cbor);
+        c.extend_from_slice(&(now - 10).to_be_bytes());
+        c.extend_from_slice(&3600u32.to_be_bytes());
+        c.extend_from_slice(&1u64.to_be_bytes());
+        let sig = ns_key().sign(&c).to_bytes();
+        c.extend_from_slice(&64u16.to_be_bytes());
+        c.extend_from_slice(&sig);
+        c.extend_from_slice(&32u16.to_be_bytes());
+        c.extend_from_slice(&ns_key().verifying_key().to_bytes());
+        let mut reply = vec![0x02];
+        reply.extend(c);
+        let ns = fake_ns(vec![reply]).await;
+        let err = ns_query_verified(name, &ns, 2, &strict_trust(d.path()))
+            .await
+            .unwrap_err();
+        let u = err
+            .downcast_ref::<UnverifiedAnswer>()
+            .expect("UnverifiedAnswer");
+        assert!(u.reason.contains("unauthenticated"), "{}", u.reason);
     }
 
     #[tokio::test]

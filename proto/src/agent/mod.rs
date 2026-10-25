@@ -44,6 +44,7 @@ pub mod local_tls;
 pub mod macos_daemon;
 pub mod ns_checkin;
 pub mod ns_trust;
+pub mod nsset;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;

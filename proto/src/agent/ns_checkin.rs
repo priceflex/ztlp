@@ -344,6 +344,14 @@ pub async fn run_checkin_loop(
     loop {
         let outcome = check_in(&identity, &ns_servers, NS_REPLY_TIMEOUT).await;
         log_outcome(&outcome);
+        // NS-anchored trust (task 3.3): refresh the home-signed NSSET so
+        // added / removed name servers take effect within one interval.
+        let trust_path = super::ns_trust::default_path();
+        let cache_dir = crate::ns_cache::default_dir();
+        match super::nsset::refresh_nsset(&trust_path, &cache_dir).await {
+            Ok(_) => {}
+            Err(e) => warn!("NSSET refresh failed (will retry): {e}"),
+        }
         tokio::time::sleep(interval).await;
     }
 }

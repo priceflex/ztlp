@@ -45,6 +45,10 @@ pub enum NsVerifyError {
     Expired,
     /// A valid record, but for a different name or type than was asked.
     WrongRecord,
+    /// The NS signed it on behalf of an UNAUTHENTICATED registrant
+    /// (`registered_unsigned: true`, dev/demo NS mode): the NS signature
+    /// vouches for nothing, so it can never authenticate a gateway.
+    UnauthenticatedRegistration,
 }
 
 impl fmt::Display for NsVerifyError {
@@ -59,6 +63,9 @@ impl fmt::Display for NsVerifyError {
             Self::BadSignature => write!(f, "NS record signature does not verify"),
             Self::Expired => write!(f, "NS record expired"),
             Self::WrongRecord => write!(f, "NS record is for a different name or type"),
+            Self::UnauthenticatedRegistration => {
+                write!(f, "NS record came from an unauthenticated registration")
+            }
         }
     }
 }
@@ -97,6 +104,21 @@ impl VerifiedRecord {
     /// Unix time (seconds) after which the record is no longer valid.
     pub fn expires_at(&self) -> u64 {
         self.created_at.saturating_add(u64::from(self.ttl))
+    }
+
+    /// True when the NS stored this record from an unauthenticated
+    /// (unsigned, dev-mode) registration.
+    pub fn registered_unsigned(&self) -> bool {
+        let Ok(value) =
+            ciborium::de::from_reader::<ciborium::value::Value, _>(self.data_cbor.as_slice())
+        else {
+            return false;
+        };
+        value.as_map().is_some_and(|m| {
+            m.iter().any(|(k, v)| {
+                k.as_text() == Some("registered_unsigned") && v.as_bool() == Some(true)
+            })
+        })
     }
 
     /// Text value of a top-level CBOR map key (e.g. `quic_cert_sha256`).
@@ -272,6 +294,7 @@ mod tests {
         assert_eq!(v.data_str("address").as_deref(), Some("10.42.42.112:23097"));
         assert_eq!(v.data_str("zone").as_deref(), Some("chooseforce.ztlp"));
         assert_eq!(v.data_str("missing"), None);
+        assert!(!v.registered_unsigned());
     }
 
     #[test]

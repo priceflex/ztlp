@@ -572,7 +572,8 @@ defmodule ZtlpNs.Server do
     # 1. Validate name format
     suffix = ZtlpNs.Config.name_suffix()
 
-    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+    with :ok <- reject_reserved_type(type),
+         :ok <- NameValidator.validate_with_suffix(name, suffix),
          # 2. Decode CBOR data
          {:ok, data} <- decode_data(data_bin),
          # 2b. Validate record type-specific fields
@@ -686,7 +687,8 @@ defmodule ZtlpNs.Server do
   defp handle_unsigned_registration(name, type, data_bin) do
     suffix = ZtlpNs.Config.name_suffix()
 
-    with :ok <- NameValidator.validate_with_suffix(name, suffix),
+    with :ok <- reject_reserved_type(type),
+         :ok <- NameValidator.validate_with_suffix(name, suffix),
          {:ok, data} <- decode_data(data_bin) do
       server_priv = get_registration_key()
 
@@ -876,6 +878,12 @@ defmodule ZtlpNs.Server do
   end
 
   # Validate type-specific record data fields
+  # OPERATOR records (0x07) are authored by the NS itself (NSSET: the
+  # signed list of name servers clients may trust). Nobody may register
+  # one, or a zone admin could get the NS to sign a forged server list.
+  defp reject_reserved_type(:operator), do: {:error, :reserved_type}
+  defp reject_reserved_type(_type), do: :ok
+
   defp validate_record_data(:device, data), do: Record.validate_device(data)
   defp validate_record_data(:user, data), do: Record.validate_user(data)
   defp validate_record_data(:group, data), do: Record.validate_group(data)

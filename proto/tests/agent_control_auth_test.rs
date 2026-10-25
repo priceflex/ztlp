@@ -21,6 +21,7 @@ fn control_command_serializes_with_token() {
 
         enrollment_uri: None,
         relay_secret: None,
+        relay: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     assert!(
@@ -38,6 +39,7 @@ fn control_command_omits_token_when_none() {
 
         enrollment_uri: None,
         relay_secret: None,
+        relay: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     assert!(
@@ -55,6 +57,7 @@ fn control_command_round_trips_with_token() {
 
         enrollment_uri: None,
         relay_secret: None,
+        relay: None,
     };
     let json = serde_json::to_string(&cmd).expect("serialize");
     let back: ControlCommand = serde_json::from_str(&json).expect("deserialize");
@@ -88,6 +91,7 @@ fn make_cmd_json(cmd: &str, token: Option<&str>) -> String {
 
         enrollment_uri: None,
         relay_secret: None,
+        relay: None,
     };
     serde_json::to_string(&c).unwrap()
 }

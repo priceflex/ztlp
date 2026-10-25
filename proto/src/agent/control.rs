@@ -115,6 +115,9 @@ pub struct StatusInfo {
     pub vip_capacity: u32,
     pub ns_server: String,
     pub domain_mappings: usize,
+    /// NS-anchored gateway trust: "verified" | "legacy" | "invalid".
+    #[serde(default)]
+    pub ns_trust: String,
 }
 
 /// Setup wizard status — what the UI shows on the Setup page.
@@ -588,6 +591,11 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         vip_capacity: dns.vip_pool.capacity(),
         ns_server: dns.ns_server.clone(),
         domain_mappings: dns.domain_mapper.len(),
+        ns_trust: super::ns_trust::TrustStatus::of(&super::ns_trust::NsTrustStore::load(
+            &super::ns_trust::default_path(),
+        ))
+        .as_str()
+        .to_string(),
     };
     drop(dns);
 

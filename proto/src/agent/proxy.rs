@@ -400,7 +400,7 @@ fn bare_cbor_from_reply(data: &[u8]) -> Option<Vec<u8>> {
 /// Trust inputs for a verified NS lookup (NS-anchored gateway trust).
 #[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, Default)]
-pub(crate) struct NsTrust {
+pub struct NsTrust {
     /// Name-server keys trusted for the zone being queried.
     pub anchors: Vec<[u8; 32]>,
     /// True when the device has ANY trusted key for the zone: an answer
@@ -413,7 +413,7 @@ pub(crate) struct NsTrust {
 /// Outcome of [`ns_query_verified`].
 #[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NsAnswer {
+pub enum NsAnswer {
     /// Signature verified against a trusted key, unexpired.
     Verified(crate::ns_verify::VerifiedRecord),
     /// Found, but not verifiable (legacy, non-strict devices only): bare CBOR.
@@ -426,7 +426,7 @@ pub(crate) enum NsAnswer {
 /// `downcast_ref::<UnverifiedAnswer>()` on the boxed error.
 #[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UnverifiedAnswer {
+pub struct UnverifiedAnswer {
     pub name: String,
     pub reason: String,
 }
@@ -447,7 +447,7 @@ impl std::error::Error for UnverifiedAnswer {}
 /// Verified answers are written to the signed-record cache; when the NS does
 /// not answer at all, a still-valid cached record is returned instead.
 #[allow(dead_code)] // called from the dial path in Phase 5 (task 5.3)
-pub(crate) async fn ns_query_verified(
+pub async fn ns_query_verified(
     name: &str,
     ns_server: &str,
     record_type: u8,

@@ -145,6 +145,35 @@ defmodule ZtlpNs.EnrollmentTest do
              )
   end
 
+  test "the ENROLL reply carries the zone's NS-signed NSSET when one exists",
+       %{secret: s, pfx: p} do
+    priv = Application.get_env(:ztlp_ns, :registration_private_key)
+    cfg = %{zones: [@test_zone], self_addr: "127.0.0.1:23096", peers: [], ttl: 3600}
+    {:ok, [nsset]} = ZtlpNs.NssetSeeder.build(cfg, priv)
+    :ok = Store.insert(nsset)
+
+    on_exit(fn ->
+      :mnesia.dirty_delete(:ztlp_ns_records, {ZtlpNs.NameValidator.canonicalize(@test_zone), :operator})
+    end)
+
+    reply =
+      Enrollment.process_enroll(
+        enroll_req(create_token(s), :crypto.strong_rand_bytes(32),
+          :crypto.strong_rand_bytes(16), dev_name(p, "nsset"))
+      )
+
+    # 1 relay, 0 gateways, then the NSSET trailer.
+    relay = @test_relay
+
+    assert <<0x08, 0x00, 1::8, rl::16, ^relay::binary-size(rl), 0::8, len::16,
+             enc::binary-size(len)>> = reply
+
+    assert {:ok, rec} = ZtlpNs.Record.decode(enc)
+    assert rec.type == :operator
+    assert ZtlpNs.Record.verify(rec)
+    assert rec.signer_public_key == ZtlpNs.Crypto.public_key_from_private(priv)
+  end
+
   test "successful enrollment creates KEY record", %{secret: s, pfx: p} do
     token = create_token(s)
     pk = :crypto.strong_rand_bytes(32)

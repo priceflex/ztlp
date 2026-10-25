@@ -9224,6 +9224,68 @@ async fn setup_join(
                     // Parse config from response
                     let (relay_addrs, gateway_addrs) = parse_enroll_config(config)?;
 
+                    // NS-anchored gateway trust: a token minted with --ns-key
+                    // makes the device trust only answers signed by that key.
+                    // Establish (and prove) that trust BEFORE writing any
+                    // config; a reply that does not verify aborts setup.
+                    let ns_trust_store = match token.ns_key {
+                        Some(ns_key) => {
+                            use ztlp_proto::agent::enroll_trust;
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let nsset = enroll_trust::nsset_from_enroll_config(config)?;
+                            let store = enroll_trust::initial_trust_store(
+                                &token.ns_addr,
+                                &token.zone,
+                                ns_key,
+                                nsset,
+                                now,
+                            )?;
+                            enroll_trust::confirm_home_key(
+                                &ns_addr.to_string(),
+                                &full_name,
+                                ns_key,
+                                &hex::encode(pubkey_bytes),
+                            )
+                            .await
+                            .map_err(|e| {
+                                format!(
+                                    "enrollment could not be verified: {e}. The device is NOT configured; \
+                                     if this persists, ask for a new enrollment token."
+                                )
+                            })?;
+                            eprintln!(
+                                "  {} name server verified against the token's key ({} trusted server{})",
+                                c_green("✓"),
+                                store.servers.len(),
+                                if store.servers.len() == 1 { "" } else { "s" }
+                            );
+                            Some(store)
+                        }
+                        None => {
+                            eprintln!(
+                                "  {} token has no name-server key: this device cannot verify name-server \
+                                 answers (legacy trust). Ask for a token made with `ztlp admin enroll --ns-key`.",
+                                c_yellow("⚠")
+                            );
+                            None
+                        }
+                    };
+                    if let Some(ref store) = ns_trust_store {
+                        let trust_path = agent_config_path
+                            .parent()
+                            .map(|d| d.join(ztlp_proto::agent::ns_trust::FILE_NAME))
+                            .unwrap_or_else(ztlp_proto::agent::ns_trust::default_path);
+                        store.save(&trust_path)?;
+                        eprintln!(
+                            "  {} name-server trust written to {}",
+                            c_green("✓"),
+                            trust_path.display()
+                        );
+                    }
+
                     // Write config file
                     write_config_file(
                         &config_path,

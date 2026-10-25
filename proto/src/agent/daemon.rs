@@ -628,6 +628,18 @@ pub async fn run_daemon(
         identity.node_id
     );
 
+    // NS-anchored gateway trust (task 4.4): say at every start whether this
+    // device verifies name-server answers; legacy devices are told to
+    // re-enroll.
+    {
+        use super::ns_trust::{NsTrustStore, TrustStatus};
+        let st = TrustStatus::of(&NsTrustStore::load(&super::ns_trust::default_path()));
+        match st {
+            TrustStatus::Verified { .. } => info!("{}", st.message()),
+            _ => warn!("{}", st.message()),
+        }
+    }
+
     // v0.35.19: hourly NS check-in. Keeps this enrolled device's KEY record
     // alive for a sliding year (each accepted check-in restarts the window),
     // so the gateway can always resolve its device name. Same code on

@@ -189,6 +189,55 @@ impl NsTrustStore {
     }
 }
 
+/// Summary of a device's name-server trust, for logs and `status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustStatus {
+    /// Enrolled with a name-server key: answers are verified.
+    Verified { home: String, servers: usize },
+    /// No key (token without 0x10): legacy, answers are not verified.
+    Legacy,
+    /// The trust file exists but cannot be used.
+    Invalid(String),
+}
+
+impl TrustStatus {
+    /// Classify a `load` result.
+    pub fn of(loaded: &Result<NsTrustStore, NsTrustError>) -> Self {
+        match loaded {
+            Ok(s) => match s.home() {
+                Some(h) => Self::Verified {
+                    home: h.addr.clone(),
+                    servers: s.servers.len(),
+                },
+                None => Self::Legacy,
+            },
+            Err(e) => Self::Invalid(e.to_string()),
+        }
+    }
+
+    /// Short machine value for `status` JSON.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Verified { .. } => "verified",
+            Self::Legacy => "legacy",
+            Self::Invalid(_) => "invalid",
+        }
+    }
+
+    /// Human message for the agent's startup log.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Verified { home, servers } => format!(
+                "name-server answers are verified (home {home}, {servers} trusted server(s))"
+            ),
+            Self::Legacy => "enrolled without a name-server key: name-server answers are NOT \
+                 verified. Re-enroll with a token made by `ztlp admin enroll --ns-key`."
+                .to_string(),
+            Self::Invalid(e) => format!("name-server trust file unusable: {e}"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct FileRepr {
     #[serde(default)]
@@ -347,6 +396,19 @@ zones = ["customers.ztlp"]
         );
         let s = NsTrustStore::from_toml(&t).unwrap();
         assert_eq!(s.anchors_for("w.a.ztlp"), vec![key(K1), key(K2)]);
+    }
+
+    #[test]
+    fn trust_status_classifies_load_results() {
+        let s = NsTrustStore::from_toml(&sample()).unwrap();
+        let v = TrustStatus::of(&Ok(s));
+        assert_eq!(v.as_str(), "verified");
+        assert!(v.message().contains("44.227.148.151:23096"));
+        let l = TrustStatus::of(&Ok(NsTrustStore::default()));
+        assert_eq!(l, TrustStatus::Legacy);
+        assert!(l.message().contains("re-enroll") || l.message().contains("Re-enroll"));
+        let i = TrustStatus::of(&Err(NsTrustError::Parse("x".into())));
+        assert_eq!(i.as_str(), "invalid");
     }
 
     #[test]

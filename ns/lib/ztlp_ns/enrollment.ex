@@ -50,7 +50,9 @@ defmodule ZtlpNs.Enrollment do
   - 0x06 = invalid request format
 
   Config data (on success):
-      <<relay_count::8, relay_addrs..., gateway_count::8, gateway_addrs...>>
+      <<relay_count::8, relay_addrs..., gateway_count::8, gateway_addrs...,
+        # optional (v0.36+): the zone's NS-signed NSSET
+        nsset_len::16, nsset::binary-size(nsset_len)>>
   Where each addr is: <<addr_len::16, addr::binary-size(addr_len)>>
   """
 
@@ -494,7 +496,23 @@ defmodule ZtlpNs.Enrollment do
       <<acc::binary, byte_size(addr_bin)::16, addr_bin::binary>>
     end)
 
-    <<relay_bin::binary, gw_bin::binary>>
+    <<relay_bin::binary, gw_bin::binary, nsset_trailer(token.zone)::binary>>
+  end
+
+  # NS-anchored gateway trust: when this NS publishes an NSSET for the zone
+  # (ZtlpNs.NssetSeeder), append it as <<len::16, Record.encode(nsset)>> so
+  # the enrolling device can verify it with the key from its token and learn
+  # the peer name servers immediately. Old clients stop parsing after the
+  # gateway list and ignore it.
+  defp nsset_trailer(zone) do
+    case Store.lookup(zone, :operator) do
+      {:ok, %Record{data: %{"kind" => "nsset"}} = rec} ->
+        enc = Record.encode(rec)
+        <<byte_size(enc)::16, enc::binary>>
+
+      _ ->
+        <<>>
+    end
   end
 
   defp log_enrollment(name, node_id_hex, pubkey_hex, token) do

@@ -420,12 +420,14 @@ final class EnrollmentFieldFixTests: XCTestCase {
     /// writes it: version, flags, zone, ns, relays, [gateway], [callback],
     /// [relay secret], max_uses, expires, nonce, mac.
     private func binaryToken(relays: [String], gateway: String? = nil, callback: String? = nil,
-                             relaySecret: String? = nil, expiresIn: TimeInterval = 3600) -> String {
+                             relaySecret: String? = nil, nsKey: Data? = nil,
+                             expiresIn: TimeInterval = 3600) -> String {
         var d = Data([0x01])
         var flags: UInt8 = 0
         if gateway != nil { flags |= 0x01 }
         if callback != nil { flags |= 0x02 }
         if relaySecret != nil { flags |= 0x08 }
+        if nsKey != nil { flags |= 0x10 }
         d.append(flags)
         func lp(_ s: String) {
             let b = Data(s.utf8)
@@ -436,6 +438,7 @@ final class EnrollmentFieldFixTests: XCTestCase {
         if let g = gateway { lp(g) }
         if let c = callback { lp(c) }
         if let r = relaySecret { lp(r) }
+        if let k = nsKey { d.append(k) }                         // 32 raw bytes
         d.append(contentsOf: [0x00, 0x01])                       // max_uses = 1
         let exp = UInt64(Date().addingTimeInterval(expiresIn).timeIntervalSince1970)
         for i in (0..<8).reversed() { d.append(UInt8((exp >> (UInt64(i) * 8)) % 256)) }
@@ -471,6 +474,59 @@ final class EnrollmentFieldFixTests: XCTestCase {
         XCTAssertTrue(info.hasRelaySecret)
         XCTAssertFalse(info.isExpired)
         XCTAssertEqual(info.maxUses, 1)
+    }
+
+    func testNsKeyTokenParsesWithFieldsAfterItAtTheRightOffset() throws {
+        let info = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], gateway: "5.6.7.8:23097",
+                                                    callback: "https://ztlp.net/cb", relaySecret: "s3cret",
+                                                    nsKey: Data(repeating: 0x42, count: 32))))
+        XCTAssertEqual(info.gatewayAddress, "5.6.7.8:23097")
+        XCTAssertTrue(info.hasRelaySecret)
+        XCTAssertEqual(info.maxUses, 1, "max_uses must be read after the 32-byte NS key")
+        XCTAssertFalse(info.isExpired, "expiry must be read after the 32-byte NS key")
+    }
+
+    func testTruncatedNsKeyTokenIsRejected() {
+        // Flag 0x10 set but only 31 key bytes before the token ends.
+        var d = Data([0x01, 0x10])
+        for s in ["trs.ztlp", "44.227.148.151:23096"] {
+            let b = Data(s.utf8); d.append(UInt8(b.count >> 8)); d.append(UInt8(b.count % 256)); d.append(b)
+        }
+        d.append(0x00)                                            // no relays
+        d.append(Data(repeating: 0x42, count: 31))
+        let b64 = d.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        XCTAssertNil(parsed("ztlp://enroll/" + b64))
+    }
+
+    /// The Rust-minted all-flags vector (gateway, callback, relay secret, NS
+    /// key; proto/tests/fixtures/enrollment_token_all_flags.hex). It expires
+    /// at 0, so a correct parse lands on "expired", never "invalid".
+    func testSharedAllFlagsRustVectorParses() {
+        let hex = "011b00087472732e7a746c70000f3132372e302e302e313a323330393601000f3132372e302e302e313a3233303935000f3132372e302e302e313a3233303937001a68747470733a2f2f6578616d706c652e696e76616c69642f63620040636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463646364636463644242424242424242424242424242424242424242424242424242424242424242000000000000000000005a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5aaef9de2c3304a2985d900a64f784ec416b450e54fa113b29d7e4263c4c9e478b"
+        var bytes = Data()
+        var i = hex.startIndex
+        while i < hex.endIndex {
+            let j = hex.index(i, offsetBy: 2)
+            bytes.append(UInt8(hex[i..<j], radix: 16)!)
+            i = j
+        }
+        let b64 = bytes.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let vm = EnrollmentViewModel(configuration: ZTLPConfiguration(suiteName: "ztlp.tests.\(UUID().uuidString)"))
+        vm.handleManualEntry("ztlp://enroll/" + b64)
+        guard case .error(let msg) = vm.state else { return XCTFail("expected the expired-token error") }
+        XCTAssertEqual(msg, "This enrollment token has expired.")
+    }
+
+    func testTypedRelaySecretOnlySentWhenTokenHasNone() throws {
+        let withSecret = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"], relaySecret: "fromtoken")))
+        let noSecret = try XCTUnwrap(parsed(binaryToken(relays: ["1.2.3.4:23095"])))
+        XCTAssertNil(EnrollmentViewModel.relaySecretToSend(token: withSecret, typed: "stale-typed"))
+        XCTAssertEqual(EnrollmentViewModel.relaySecretToSend(token: noSecret, typed: "  typed  "), "typed")
+        XCTAssertNil(EnrollmentViewModel.relaySecretToSend(token: noSecret, typed: "   "))
     }
 
     func testTokenWithoutRelayParsesAndShowsNoRelay() throws {

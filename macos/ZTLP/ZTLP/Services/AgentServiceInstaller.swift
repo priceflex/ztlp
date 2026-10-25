@@ -124,6 +124,27 @@ final class AgentServiceInstaller: ObservableObject {
 
     @Published private(set) var operationInFlight = false
 
+    /// The register/unregister currently running. The task clears this (and
+    /// publishes state) itself before it completes, so anyone awaiting its
+    /// value resumes with it already cleared.
+    private var inFlight: Task<String?, Never>?
+
+    private func startOperation(_ op: @escaping @Sendable () throws -> Void) -> Task<String?, Never> {
+        operationInFlight = true
+        let task = Task { [weak self] () -> String? in
+            let err = await Self.runOffMain(op)
+            if let self {
+                self.inFlight = nil
+                self.operationInFlight = false
+                self.lastError = err
+                self.refreshState()
+            }
+            return err
+        }
+        inFlight = task
+        return task
+    }
+
     nonisolated private static func runOffMain(_ body: @escaping @Sendable () throws -> Void) async -> String? {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -134,20 +155,21 @@ final class AgentServiceInstaller: ObservableObject {
     }
 
     func registerAsync() async {
-        guard !operationInFlight else { return }
-        operationInFlight = true
-        defer { operationInFlight = false }
+        guard inFlight == nil else { return }  // a second click while busy is a no-op
         let plist = Self.plistName
-        lastError = await Self.runOffMain { try SMAppService.daemon(plistName: plist).register() }
-        refreshState()
+        _ = await startOperation { try SMAppService.daemon(plistName: plist).register() }.value
     }
 
-    func unregisterAsync() async {
-        guard !operationInFlight else { return }
-        operationInFlight = true
-        defer { operationInFlight = false }
+    /// Waits for any register/unregister already running, then unregisters.
+    /// Returns true when the daemon is not registered afterwards (including
+    /// "was never registered"), so callers like factory reset can refuse to
+    /// continue while the service is still installed.
+    @discardableResult
+    func unregisterAsync() async -> Bool {
+        while let pending = inFlight { _ = await pending.value }
         let plist = Self.plistName
-        lastError = await Self.runOffMain { try SMAppService.daemon(plistName: plist).unregister() }
-        refreshState()
+        let err = await startOperation { try SMAppService.daemon(plistName: plist).unregister() }.value
+        let status = service.status
+        return err == nil || status == .notRegistered || status == .notFound
     }
 }

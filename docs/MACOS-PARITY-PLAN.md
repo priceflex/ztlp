@@ -60,10 +60,10 @@ Same flow as before: **one script, run by Steven in a GUI Terminal on MACLLM4.**
 notarizing and stapling need the unlocked login keychain, which plain SSH can't reach.
 
 Changes to `~/ztlp-mac-build.sh` (I'll write it there, you run it):
-- take a branch argument (`~/ztlp-mac-build.sh feat/macos-parity-0.35.18`) instead of hard
+- take a branch argument (`~/ztlp-mac-build.sh feat/macos-parity-0.36.0`) instead of hard
   ff-only to `origin/main`, so the build can happen before merge
 - step 1 resets the one dirty file it always leaves behind (`macos/ZTLP/Libraries/ztlp`)
-- print `ztlp --version` (expect 0.35.18) and the bundle version (expect 1.2.4 / 35018)
+- print `ztlp --version` (expect 0.36.0) and the bundle version (expect 1.3.0 / 36000)
 - everything else unchanged: `xcodebuild test`, then the Developer-ID hardened Release build
   (team `5527A7TH5P`), notarize with profile `ztlp-notary`, staple, `spctl`, then `~/ZTLP.zip`
 

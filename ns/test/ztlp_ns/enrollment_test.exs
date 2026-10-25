@@ -28,6 +28,7 @@ defmodule ZtlpNs.EnrollmentTest do
     gateway_addr = Keyword.get(opts, :gateway_addr, nil)
     callback_url = Keyword.get(opts, :callback_url, nil)
     relay_secret = Keyword.get(opts, :relay_secret, nil)
+    ns_key = Keyword.get(opts, :ns_key, nil)
     max_uses = Keyword.get(opts, :max_uses, 0)
     expires_at = Keyword.get(opts, :expires_at, System.system_time(:second) + 3600)
 
@@ -42,7 +43,10 @@ defmodule ZtlpNs.EnrollmentTest do
           if(gateway_addr, do: 0x01, else: 0x00),
           if(callback_url, do: 0x02, else: 0x00)
         ),
-        if(relay_secret, do: 0x08, else: 0x00)
+        Bitwise.bor(
+          if(relay_secret, do: 0x08, else: 0x00),
+          if(ns_key, do: 0x10, else: 0x00)
+        )
       )
 
     data =
@@ -53,6 +57,7 @@ defmodule ZtlpNs.EnrollmentTest do
         if(gateway_addr, do: enc(gateway_addr), else: <<>>) <>
         if(callback_url, do: enc(callback_url), else: <<>>) <>
         if(relay_secret, do: enc(relay_secret), else: <<>>) <>
+        if(ns_key, do: ns_key, else: <<>>) <>
         <<max_uses::16, expires_at::64>> <> nonce
 
     mac = Enrollment.hmac_blake2s(secret, data)
@@ -78,6 +83,96 @@ defmodule ZtlpNs.EnrollmentTest do
   end
 
   # ── Tests ──────────────────────────────────────────────────────────
+
+  # ── FLAG_HAS_NS_KEY (0x10, NS-anchored gateway trust) ──────────────
+
+  test "a token carrying the home NS key (0x10) enrolls", %{secret: s, pfx: p} do
+    token = create_token(s, ns_key: :binary.copy(<<0x42>>, 32))
+    assert <<0x01, 0x10, _::binary>> = token
+
+    assert <<0x08, 0x00, _::binary>> =
+             Enrollment.process_enroll(
+               enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16),
+                 dev_name(p, "nskey"))
+             )
+  end
+
+  test "0x10 together with gateway, callback and relay secret enrolls", %{secret: s, pfx: p} do
+    token =
+      create_token(s,
+        gateway_addr: "127.0.0.1:23097",
+        callback_url: "https://example.invalid/cb",
+        relay_secret: String.duplicate("cd", 32),
+        ns_key: :binary.copy(<<0x42>>, 32)
+      )
+
+    assert <<0x01, 0x1B, _::binary>> = token
+
+    assert <<0x08, 0x00, _::binary>> =
+             Enrollment.process_enroll(
+               enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16),
+                 dev_name(p, "allflags"))
+             )
+  end
+
+  test "an unknown flag (0x20) is still refused", %{secret: s, pfx: p} do
+    <<v, _flags, rest::binary>> = create_token(s)
+    token = <<v, 0x20, rest::binary>>
+
+    refute match?(
+             <<0x08, 0x00, _::binary>>,
+             Enrollment.process_enroll(
+               enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16),
+                 dev_name(p, "unknown"))
+             )
+           )
+  end
+
+  test "the Rust-minted all-flags token vector enrolls (cross-language parser check)",
+       %{pfx: p} do
+    hex =
+      Path.expand("../../../proto/tests/fixtures/enrollment_token_all_flags.hex", __DIR__)
+      |> File.read!()
+      |> String.trim()
+
+    token = Base.decode16!(hex, case: :lower)
+    Enrollment.set_zone_secret(:binary.copy(<<7>>, 32))
+
+    assert <<0x08, 0x00, _::binary>> =
+             Enrollment.process_enroll(
+               enroll_req(token, :crypto.strong_rand_bytes(32), :crypto.strong_rand_bytes(16),
+                 "#{p}-rust.trs.ztlp")
+             )
+  end
+
+  test "the ENROLL reply carries the zone's NS-signed NSSET when one exists",
+       %{secret: s, pfx: p} do
+    priv = Application.get_env(:ztlp_ns, :registration_private_key)
+    cfg = %{zones: [@test_zone], self_addr: "127.0.0.1:23096", peers: [], ttl: 3600}
+    {:ok, [nsset]} = ZtlpNs.NssetSeeder.build(cfg, priv)
+    :ok = Store.insert(nsset)
+
+    on_exit(fn ->
+      :mnesia.dirty_delete(:ztlp_ns_records, {ZtlpNs.NameValidator.canonicalize(@test_zone), :operator})
+    end)
+
+    reply =
+      Enrollment.process_enroll(
+        enroll_req(create_token(s), :crypto.strong_rand_bytes(32),
+          :crypto.strong_rand_bytes(16), dev_name(p, "nsset"))
+      )
+
+    # 1 relay, 0 gateways, then the NSSET trailer.
+    relay = @test_relay
+
+    assert <<0x08, 0x00, 1::8, rl::16, ^relay::binary-size(rl), 0::8, len::16,
+             enc::binary-size(len)>> = reply
+
+    assert {:ok, rec} = ZtlpNs.Record.decode(enc)
+    assert rec.type == :operator
+    assert ZtlpNs.Record.verify(rec)
+    assert rec.signer_public_key == ZtlpNs.Crypto.public_key_from_private(priv)
+  end
 
   test "successful enrollment creates KEY record", %{secret: s, pfx: p} do
     token = create_token(s)

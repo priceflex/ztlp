@@ -124,6 +124,9 @@ pub struct StatusInfo {
     /// enrollment token configured (2026-10-13). Additive: older UIs ignore it.
     #[serde(default)]
     pub relay: String,
+    /// NS-anchored gateway trust: "verified" | "legacy" | "invalid".
+    #[serde(default)]
+    pub ns_trust: String,
 }
 
 /// Setup wizard status — what the UI shows on the Setup page.
@@ -603,6 +606,11 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         ns_server: dns.ns_server.clone(),
         domain_mappings: dns.domain_mapper.len(),
         relay: String::new(),
+        ns_trust: super::ns_trust::TrustStatus::of(&super::ns_trust::NsTrustStore::load(
+            &super::ns_trust::default_path(),
+        ))
+        .as_str()
+        .to_string(),
     };
     drop(dns);
     let mut status = status;
@@ -1912,6 +1920,7 @@ mod tests {
                 ns_server: "".into(),
                 domain_mappings: 0,
                 relay: "44.230.7.100:23095".into(),
+                ns_trust: "legacy".into(),
             };
             let v = serde_json::to_value(s).unwrap();
             assert_eq!(v["relay"], "44.230.7.100:23095");

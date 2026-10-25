@@ -50,7 +50,9 @@ defmodule ZtlpNs.Enrollment do
   - 0x06 = invalid request format
 
   Config data (on success):
-      <<relay_count::8, relay_addrs..., gateway_count::8, gateway_addrs...>>
+      <<relay_count::8, relay_addrs..., gateway_count::8, gateway_addrs...,
+        # optional (v0.36+): the zone's NS-signed NSSET
+        nsset_len::16, nsset::binary-size(nsset_len)>>
   Where each addr is: <<addr_len::16, addr::binary-size(addr_len)>>
   """
 
@@ -250,10 +252,10 @@ defmodule ZtlpNs.Enrollment do
         throw({:error, :bad_version})
       end
 
-      # Known flags: 0x01 gateway, 0x02 callback, 0x08 relay secret. A token
+      # Known flags: 0x01 gateway, 0x02 callback, 0x08 relay secret, 0x10 NS key. A token
       # with any other bit set is from a newer format; reading it anyway would
       # misparse the unknown field as max_uses/expires_at, so refuse it.
-      if Bitwise.band(flags, Bitwise.bnot(0x0B)) != 0 do
+      if Bitwise.band(flags, Bitwise.bnot(0x1B)) != 0 do
         throw({:error, :bad_version})
       end
 
@@ -308,8 +310,20 @@ defmodule ZtlpNs.Enrollment do
           rest7
         end
 
+      # Home NS public key (if flag set — FLAG_HAS_NS_KEY = 0x10, NS-anchored
+      # gateway trust). 32 raw bytes, covered by the MAC. The client uses it
+      # as its trust root for NS answers; the NS only skips the bytes so the
+      # fields after it parse (the same skew the 0x02 / 0x08 flags caused).
+      rest9 =
+        if Bitwise.band(flags, 0x10) != 0 do
+          <<_ns_key::binary-size(32), r::binary>> = rest8
+          r
+        else
+          rest8
+        end
+
       # max_uses, expires_at, nonce, mac
-      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest8
+      <<max_uses::16, expires_at::64, nonce::binary-size(16), _mac::binary-size(32)>> = rest9
 
       {:ok,
        %{
@@ -482,7 +496,23 @@ defmodule ZtlpNs.Enrollment do
       <<acc::binary, byte_size(addr_bin)::16, addr_bin::binary>>
     end)
 
-    <<relay_bin::binary, gw_bin::binary>>
+    <<relay_bin::binary, gw_bin::binary, nsset_trailer(token.zone)::binary>>
+  end
+
+  # NS-anchored gateway trust: when this NS publishes an NSSET for the zone
+  # (ZtlpNs.NssetSeeder), append it as <<len::16, Record.encode(nsset)>> so
+  # the enrolling device can verify it with the key from its token and learn
+  # the peer name servers immediately. Old clients stop parsing after the
+  # gateway list and ignore it.
+  defp nsset_trailer(zone) do
+    case Store.lookup(zone, :operator) do
+      {:ok, %Record{data: %{"kind" => "nsset"}} = rec} ->
+        enc = Record.encode(rec)
+        <<byte_size(enc)::16, enc::binary>>
+
+      _ ->
+        <<>>
+    end
   end
 
   defp log_enrollment(name, node_id_hex, pubkey_hex, token) do

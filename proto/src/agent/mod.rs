@@ -31,6 +31,7 @@ pub mod dns_setup;
 // inside it is gated to `cfg(windows)` in D4.T2.
 pub mod dns_setup_windows;
 pub mod domain_map;
+pub mod enroll_trust;
 pub mod forwarded_proto;
 pub mod hardware_key;
 // Linux system-service token sharing (PR #112 review fix). Pure planners
@@ -43,6 +44,8 @@ pub mod local_tls;
 #[cfg(unix)]
 pub mod macos_daemon;
 pub mod ns_checkin;
+pub mod ns_trust;
+pub mod nsset;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;

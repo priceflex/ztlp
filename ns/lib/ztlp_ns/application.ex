@@ -114,7 +114,9 @@ defmodule ZtlpNs.Application do
       ZtlpNs.CertAuthority,
       ZtlpNs.AntiEntropy,
       ZtlpNs.MetricsServer,
-      ZtlpNs.Server
+      ZtlpNs.Server,
+      # After Server: needs the NS registration key it ensures at init.
+      ZtlpNs.NssetSeeder
     ]
 
     opts = [strategy: :one_for_one, name: ZtlpNs.Supervisor]

@@ -7161,6 +7161,50 @@ fn compute_advertised_svc(
     (best, addresses)
 }
 
+/// SVC record fields published by `ztlp listen` (pure, tested).
+///
+/// Stage 2: the full ICE candidate set rides in `addresses` alongside the
+/// single `address`. Old clients read `address`; new clients split
+/// `addresses`, rank against their own subnets, and dial/failover. Empty/None
+/// list → legacy single-address SVC (no `addresses` key) for exact back-compat.
+///
+/// NS-anchored trust (task 3.4): `quic_cert_sha256` = hex SHA-256 of the QUIC
+/// cert this gateway serves. The NS re-signs the record, so clients can check
+/// the presented cert against an NS-signed value instead of a TOFU pin. Old
+/// clients ignore the unknown key.
+fn svc_record_pairs<'a>(
+    address: &'a str,
+    node_id_hex: &'a str,
+    zone: &'a str,
+    addresses: Option<&'a str>,
+    quic_cert_sha256: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut pairs = vec![
+        ("address", address),
+        ("node_id", node_id_hex),
+        ("zone", zone),
+    ];
+    if let Some(list) = addresses.filter(|l| !l.is_empty()) {
+        pairs.push(("addresses", list));
+    }
+    if let Some(fp) = quic_cert_sha256.filter(|f| !f.is_empty()) {
+        pairs.push(("quic_cert_sha256", fp));
+    }
+    pairs
+}
+
+/// Fingerprint of this process's bound QUIC server cert, if any.
+fn published_quic_cert_sha256() -> Option<String> {
+    #[cfg(feature = "quic-transport")]
+    {
+        ztlp_proto::quic_transport::tokio_endpoint::published_server_cert_sha256()
+    }
+    #[cfg(not(feature = "quic-transport"))]
+    {
+        None
+    }
+}
+
 async fn ns_publish_self(
     name: &str,
     zone: &str,
@@ -7254,20 +7298,14 @@ async fn ns_publish_self(
             .parse()
             .map_err(|e| format!("invalid address '{}': {} (expected ip:port)", addr_str, e))?;
 
-        let mut svc_pairs = vec![
-            ("address", addr_str.as_str()),
-            ("node_id", node_id_hex.as_str()),
-            ("zone", zone),
-        ];
-        // Stage 2: publish the full ICE candidate set alongside the single
-        // `address`. Old clients read `address`; new clients split `addresses`,
-        // rank against their own subnets, and dial/failover. Empty/None list →
-        // legacy single-address SVC (no `addresses` key) for exact back-compat.
-        if let Some(list) = addresses {
-            if !list.is_empty() {
-                svc_pairs.push(("addresses", list));
-            }
-        }
+        let quic_fp = published_quic_cert_sha256();
+        let mut svc_pairs = svc_record_pairs(
+            addr_str.as_str(),
+            node_id_hex.as_str(),
+            zone,
+            addresses,
+            quic_fp.as_deref(),
+        );
         let svc_data_bin = cbor_map(&mut svc_pairs);
 
         // Signed (v2): NS authorizes SVC via the KEY owner (same pubkey) or a
@@ -16328,6 +16366,36 @@ mod tests {
     /// the SVC record is what `ns lookup` ultimately returns, so losing
     /// `node_id` here would break the operator-identity binding even if
     /// the KEY record stayed intact.
+    #[test]
+    fn svc_record_pairs_publish_the_quic_fingerprint_when_known() {
+        let fp = "ab".repeat(32);
+        let p = svc_record_pairs("10.0.0.1:23097", "00ff", "z.ztlp", None, Some(&fp));
+        assert_eq!(
+            p,
+            vec![
+                ("address", "10.0.0.1:23097"),
+                ("node_id", "00ff"),
+                ("zone", "z.ztlp"),
+                ("quic_cert_sha256", fp.as_str()),
+            ]
+        );
+    }
+
+    #[test]
+    fn svc_record_pairs_are_legacy_identical_without_fp_or_addresses() {
+        let p = svc_record_pairs("10.0.0.1:23097", "00ff", "z.ztlp", Some(""), None);
+        assert_eq!(
+            p,
+            vec![
+                ("address", "10.0.0.1:23097"),
+                ("node_id", "00ff"),
+                ("zone", "z.ztlp")
+            ]
+        );
+        let p = svc_record_pairs("a:1", "n", "z", Some("a:1,b:2"), Some(""));
+        assert_eq!(p.last(), Some(&("addresses", "a:1,b:2")));
+    }
+
     #[test]
     fn ns_register_svc_record_includes_node_id() {
         let node_id_hex = "deadbeefdeadbeefdeadbeefdeadbeef";

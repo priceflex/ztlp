@@ -532,9 +532,7 @@ pub mod tokio_endpoint {
         }
 
         fn fingerprint(cert: &CertificateDer<'_>) -> String {
-            use sha2::{Digest, Sha256};
-            let digest = Sha256::digest(cert.as_ref());
-            digest.iter().map(|b| format!("{:02x}", b)).collect()
+            cert_sha256_hex(cert.as_ref())
         }
 
         /// Returns Ok(()) if this is the first-ever pin for this server
@@ -631,9 +629,44 @@ pub mod tokio_endpoint {
         // ZT-06: reuse the cert persisted in `ZTLP_QUIC_CERT_DIR` when the
         // operator mounted one (containers: a volume), else a fresh ephemeral
         // cert exactly as before.
-        match quic_cert_dir_from_env() {
-            Some(dir) => load_or_generate_self_signed_in(&dir),
+        let dir = quic_cert_dir_from_env();
+        let (certs, key) = match &dir {
+            Some(dir) => load_or_generate_self_signed_in(dir),
             None => generate_ephemeral_self_signed(),
+        };
+        publish_server_cert(&certs, dir.as_deref());
+        (certs, key)
+    }
+
+    /// Lowercase hex SHA-256 of a DER certificate: the value clients pin and
+    /// the value a gateway publishes as `quic_cert_sha256` in its SVC record.
+    pub fn cert_sha256_hex(der: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(der))
+    }
+
+    static PUBLISHED_CERT_SHA256: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+    /// Fingerprint of the cert the QUIC server of this process last bound
+    /// (NS-anchored trust, task 3.4). `ztlp listen` publishes it in its SVC
+    /// record so clients can check the gateway cert against an NS-signed
+    /// value. `None` until a server endpoint is bound.
+    pub fn published_server_cert_sha256() -> Option<String> {
+        PUBLISHED_CERT_SHA256.read().ok().and_then(|g| g.clone())
+    }
+
+    fn publish_server_cert(certs: &[CertificateDer<'static>], dir: Option<&std::path::Path>) {
+        let Some(leaf) = certs.first() else { return };
+        let fp = cert_sha256_hex(leaf.as_ref());
+        match dir {
+            Some(d) => tracing::info!("QUIC cert sha256={} persisted={}", fp, d.display()),
+            None => tracing::warn!(
+                "QUIC cert sha256={} persisted=ephemeral (set ZTLP_QUIC_CERT_DIR so the cert survives restarts)",
+                fp
+            ),
+        }
+        if let Ok(mut g) = PUBLISHED_CERT_SHA256.write() {
+            *g = Some(fp);
         }
     }
 
@@ -1775,6 +1808,42 @@ pub mod tokio_endpoint {
             for d in [pin_dir, dir_a, dir_b] {
                 let _ = std::fs::remove_dir_all(d);
             }
+        }
+
+        /// Task 3.4: the published fingerprint is the sha256 of the leaf the
+        /// server really serves, stable across binds on the same cert dir.
+        #[test]
+        fn published_fingerprint_matches_the_served_leaf_and_is_stable() {
+            ensure_crypto();
+            let dir = tempfile_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let (c1, _) = load_or_generate_self_signed_in(&dir);
+            publish_server_cert(&c1, Some(&dir));
+            let fp1 = published_server_cert_sha256().unwrap();
+            assert_eq!(fp1, TofuCertVerifier::fingerprint(&c1[0]));
+            assert_eq!(fp1.len(), 64);
+            let (c2, _) = load_or_generate_self_signed_in(&dir);
+            publish_server_cert(&c2, Some(&dir));
+            assert_eq!(published_server_cert_sha256().unwrap(), fp1);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn published_fingerprint_equals_what_a_client_pins() {
+            let cert_dir = tempfile_dir();
+            std::fs::create_dir_all(&cert_dir).unwrap();
+            let pin_dir = tempfile_dir();
+            let server = loopback_server(&cert_dir);
+            loopback_dial(&server, pin_dir.clone()).await.unwrap();
+            let pinned = std::fs::read_dir(&pin_dir)
+                .unwrap()
+                .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+                .next()
+                .unwrap();
+            let (certs, _) = load_or_generate_self_signed_in(&cert_dir);
+            assert_eq!(pinned.trim(), cert_sha256_hex(certs[0].as_ref()));
+            let _ = std::fs::remove_dir_all(&cert_dir);
+            let _ = std::fs::remove_dir_all(&pin_dir);
         }
 
         fn tempfile_dir() -> std::path::PathBuf {

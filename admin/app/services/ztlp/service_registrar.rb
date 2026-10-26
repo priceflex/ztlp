@@ -81,31 +81,6 @@ module Ztlp
     # The relay secret env var the Rust gateway reads for its zone (ztlp-cli.rs relay_hmac_env_var).
     def self.relay_env_var(zone) = "ZTLP_HMAC_SECRET_#{zone.name.upcase.gsub(/[^A-Z0-9]+/, '_')}"
 
-    # The exact commands to start a gateway for a planned service (no secret values, ever).
-    def self.gateway_command(app)
-      zone = app.gateway.zone
-      label = app.gateway.name
-      relay = Array(zone.relay_addrs).first || Array(Zone.default&.relay_addrs).first || "<relay host:port>"
-      backend = app.backend.presence || "<backend host:port>"
-      <<~CMD
-        # 1. Once, on the gateway box: create this gateway's identity (keep the file private)
-        ztlp keygen --output /etc/ztlp/#{label}-gateway.json
-
-        # 2. Run the gateway. Put the #{zone.name} relay secret in the environment from your secret
-        #    store; it is never shown in this panel.
-        export #{relay_env_var(zone)}=...
-        ztlp listen --gateway --bind 0.0.0.0:23097 \\
-          --key /etc/ztlp/#{label}-gateway.json \\
-          --forward #{label}:#{backend} --service-name #{label} \\
-          --zone #{zone.name} --ns-register-name #{app.ztlp_name} \\
-          --ns-server #{zone.ns_addr} --relay #{relay} \\
-          --policy /etc/ztlp/#{label}-policy.toml
-
-        # 3. Save this gateway's policy from the Policies page as /etc/ztlp/#{label}-policy.toml
-        #    (no file = allow everyone). The app shows as registered once the gateway is on the NS.
-      CMD
-    end
-
     def self.svc_records(zone, secret, ns_client)
       ns_client.list(Reconciler.ns_admin_port(zone), secret, type: "svc", zone: zone.name)
     end
@@ -114,6 +89,6 @@ module Ztlp
       list = data["addresses"].to_s.split(",").map(&:strip).reject(&:empty?)
       list.presence || [ data["address"] ].compact_blank
     end
-    private_class_method :svc_records, :addresses_of
+    private_class_method :svc_records
   end
 end

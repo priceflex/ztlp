@@ -14,7 +14,7 @@
 # editing a service publishes NOTHING to the NS: the rendered policy is a
 # gateway-side artifact deployed by the operator at gateway restart.
 class ServicesController < ApplicationController
-  before_action :require_operator, only: %i[new create edit update enable disable]
+  before_action :require_operator, only: %i[new create edit update enable disable install_script check_gateway]
 
   APP_FIELDS = %i[backend protocol min_assurance description].freeze
 
@@ -107,6 +107,55 @@ class ServicesController < ApplicationController
 
   def disable
     set_enabled(false)
+  end
+
+  INSTALL_WINDOW = 30.minutes
+
+  # The gateway install script (slice 5). It carries the zone relay secret and the header secret, so
+  # it is rendered straight into this POST response (no-store), operators only, audited without
+  # values; viewable for INSTALL_WINDOW after the first show, then only via Regenerate (which
+  # rotates the header secret: the app must get the new one too).
+  def install_script
+    @service = zone_service
+    gw = @service.gateway
+    missing = Ztlp::GatewayInstall.missing(gw)
+    if missing.any?
+      return redirect_to service_path(@service), alert: "No install script yet: #{missing.to_sentence}."
+    end
+
+    @regenerated = params[:regenerate] == "1"
+    if gw.install_shown_at && gw.install_shown_at < INSTALL_WINDOW.ago && !@regenerated
+      return redirect_to service_path(@service),
+                         alert: "The install script was shown at #{gw.install_shown_at.utc.strftime('%Y-%m-%d %H:%M UTC')} " \
+                                "and is no longer viewable. Use Regenerate to show it again (it rotates the header secret)."
+    end
+
+    gw.rotate_header_secret! if gw.inject_headers && (@regenerated || gw.header_secret_ct.blank?)
+    gw.update!(install_shown_at: Time.current) if @regenerated || gw.install_shown_at.nil?
+    @script = Ztlp::GatewayInstall.script(gw, relay_secret: gw.zone.relay_secret_ct, header_secret: gw.header_secret_ct)
+    @app_env = gw.inject_headers ? Ztlp::GatewayInstall.app_env(gw, header_secret: gw.header_secret_ct) : nil
+    @expires_at = gw.install_shown_at + INSTALL_WINDOW
+    audit!(@regenerated ? "gateway.install_regenerated" : "gateway.install_shown", target: gw,
+           details: { fqdn: gw.ns_name, header_secret_rotated: @regenerated && gw.inject_headers })
+    response.headers["Cache-Control"] = "no-store"
+    render :install_script
+  rescue Ztlp::GatewayInstall::Unsafe => e
+    redirect_to service_path(@service), alert: "Cannot build the install script: #{e.message}."
+  end
+
+  def check_gateway
+    @service = zone_service
+    gw = @service.gateway
+    result = Ztlp::GatewayStatus.check!(gw)
+    audit!("gateway.check", target: gw, details: { fqdn: gw.ns_name, result: result.to_s })
+    message = case result
+    when :online then [ :notice, "#{gw.ns_name} is on the name server: online." ]
+    when :not_found then [ :alert, "#{gw.ns_name} is not on the name server yet. Run the install script on the box, then check again." ]
+    else [ :alert, "This zone has no name server admin secret in the panel, so it cannot check." ]
+    end
+    redirect_to service_path(@service), message[0] => message[1]
+  rescue Ztlp::NsClient::NsError, SystemCallError, IOError, Timeout::Error => e
+    redirect_to service_path(@service), alert: "Could not reach the name server (#{e.class.name.demodulize}). Try again."
   end
 
   private

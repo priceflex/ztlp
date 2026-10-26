@@ -95,10 +95,12 @@ class ServiceRegistrationTest < ActionDispatch::IntegrationTest
     app = gw.services.find_by!(name: "shop")
     assert_equal "10.0.0.5:8080", app.backend
     follow_redirect!
-    assert_match "--forward shop:10.0.0.5:8080", response.body
-    assert_match "--zone cf.test", response.body
-    assert_match "--ns-register-name shop.cf.test", response.body
-    assert_match "ZTLP_HMAC_SECRET_CF_TEST", response.body, "names the relay secret env var, never its value"
+    # The printed command became the gateway install panel (slice 5): the script itself, with its
+    # secrets, only appears in the POST response of "Show install script".
+    assert_select "[data-install-panel]"
+    assert_match "/opt/ztlp-gateway-shop-cf-test", response.body
+    assert_match "the cf.test relay secret is not set in the panel", response.body
+    assert_select "form[action='/services/#{app.id}/install_script']", false, "no script without the relay secret"
   end
 
   test "a name in no configured zone says so and offers Add zone (super admin)" do

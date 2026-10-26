@@ -36,6 +36,8 @@ Rails.application.routes.draw do
     member do
       post :enable
       post :disable
+      post :install_script
+      post :check_gateway
     end
     scope module: nil do
       resource :rules, only: %i[create], controller: "service_rules", as: :rules

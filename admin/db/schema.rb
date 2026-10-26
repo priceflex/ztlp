@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_26_000002) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_26_000003) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -121,6 +121,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_26_000002) do
     t.string "ns_server"
     t.string "relay_addr"
     t.string "image_tag"
+    t.datetime "install_shown_at"
     t.index ["zone_id", "name"], name: "idx_gateways_zone_name", unique: true
     t.index ["zone_id"], name: "idx_gateways_zone"
   end

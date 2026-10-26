@@ -6,6 +6,7 @@
 #   republish_ns        every 6 hours    re-write the zone's NS records (KEY, users, groups, devices)
 #   reconcile_ns        every 30 minutes list NS records, store drift in system_settings ns_drift_json
 #   expire_enrollments  every 5 minutes  pending enrollment tokens past expires_at -> expired
+#   gateway_status      every 30 minutes each Rust gateway's SVC record -> online / stale
 default: &default
   republish_ns:
     class: RepublishNsJob
@@ -16,6 +17,9 @@ default: &default
   expire_enrollments:
     class: ExpireEnrollmentsJob
     schedule: every 5 minutes
+  gateway_status:
+    class: GatewayStatusJob
+    schedule: every 30 minutes
 
 production:
   <<: *default

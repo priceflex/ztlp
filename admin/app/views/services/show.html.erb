@@ -22,15 +22,7 @@
 <% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>
 
 <div class="stack">
-  <% if @service.gateway.status == "planned" %>
-    <div class="panel" data-start-gateway>
-      <div class="panel-h"><h2>Start the gateway</h2><span class="badge warn">planned</span></div>
-      <div class="panel-b">
-        <p class="hint">This service is not on the name server yet. Run this on the box next to the service.</p>
-        <pre class="code-box"><%= Ztlp::ServiceRegistrar.gateway_command(@service) %></pre>
-      </div>
-    </div>
-  <% end %>
+  <% if write && !drawer %><%= render "services/install_panel" %><% end %>
   <div class="panel">
     <div class="panel-h"><h2>About</h2><span class="badge <%= @service.enabled ? "ok" : "bad" %>"><%= @service.enabled ? "enabled" : "disabled" %></span></div>
     <dl class="kv">

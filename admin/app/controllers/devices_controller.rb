@@ -17,12 +17,12 @@
 # endpoint exists (route + action) and is tested, and Assign owner is a
 # plain link to the user's page (no form, no fake button).
 class DevicesController < ApplicationController
-  before_action :set_device, only: %i[show revoke assign_owner]
-  before_action :require_write_access, only: %i[assign_owner]
+  before_action :set_device, only: %i[show disable enable revoke assign_owner]
+  before_action :require_write_access, only: %i[disable enable assign_owner]
   before_action :require_operator, only: %i[revoke]
 
   FILTERS = [ %w[all All], %w[enrolled Enrolled], %w[pending Pending],
-              %w[revoked Revoked] ].freeze
+              %w[disabled Disabled], %w[revoked Revoked] ].freeze
 
   def index
     @status = FILTERS.map(&:first).include?(params[:status]) ? params[:status] : "all"
@@ -43,6 +43,29 @@ class DevicesController < ApplicationController
   # re-registered. One REVOKE record names this device. Security action:
   # if the NS write fails, NOTHING changes in the DB (no status stamp, no
   # revoked_at), the alert says so, and the audit row is `failed`.
+  # Reversible (slice 3; helpdesk may do it): the DEVICE record is republished without an owner
+  # (group:/role: rules stop matching) and the owner's USER record without the device; a policy
+  # file drops rules that name it. Only an enrolled device can be disabled.
+  def disable
+    unless @device.enrolled?
+      return redirect_to device_path(@device), alert: "Only an enrolled device can be disabled (this one is #{@device.status})."
+    end
+
+    @device.update!(status: "disabled")
+    warning = republish_device(@device)
+    audit!("device.disable", target: @device, details: { name: @device.name, published: warning.nil? })
+    redirect_to device_path(@device), notice: "#{@device.name} disabled.", alert: warning
+  end
+
+  def enable
+    return redirect_to device_path(@device), notice: "#{@device.name} is not disabled." unless @device.disabled?
+
+    @device.update!(status: "enrolled")
+    warning = republish_device(@device)
+    audit!("device.enable", target: @device, details: { name: @device.name, published: warning.nil? })
+    redirect_to device_path(@device), notice: "#{@device.name} enabled.", alert: warning
+  end
+
   def revoke
     if @device.status == "revoked"
       audit!("device.revoke", target: @device, status: "skipped",
@@ -159,6 +182,19 @@ class DevicesController < ApplicationController
   end
 
   private
+
+  def republish_device(device)
+    failure = nil
+    [ [ :publish_device!, device ], ([ :publish_user!, device.user ] if device.user) ].compact.each do |method, record|
+      Ztlp::Publisher.public_send(method, record, admin: current_admin)
+    rescue Ztlp::NsClient::NsError => e
+      failure ||= e
+    end
+    return nil unless failure
+
+    format("Saved, but not published to the name server (0x%02X %s). The 6-hourly republish will retry.",
+           failure.code, failure.reason)
+  end
 
   def set_device
     # Scoped lookup: a device id from another zone 404s (same rule as users/groups).

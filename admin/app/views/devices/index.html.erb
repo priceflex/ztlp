@@ -1,6 +1,7 @@
 <% content_for :title, "Devices - ZTLP Directory" %>
 <div class="page-head">
-  <div><h1>Devices</h1><p class="lede">Machine identities enrolled in this zone. A device's owner is the person (or service user) it belongs to; groups and access follow the owner.</p></div>
+  <div><h1>Devices</h1><p class="lede">Machine identities enrolled in this zone. A device's owner is the person (or service account) it belongs to; groups and access follow the owner.</p></div>
+  <% if current_admin&.write_access? %><div class="actions"><%= link_to "Add device", new_enrollment_path, class: "btn primary" %></div><% end %>
 </div>
 
 <div class="toolbar">
@@ -9,7 +10,7 @@
       <a href="<%= devices_path(status: key) %>"<% if @status == key %> aria-current="page"<% end %>><%= label %></a>
     <% end %>
   </div>
-  <span class="sub">No create form: devices enroll with a code (the Enrollments page, Slice 10) or are adopted from the name server (Slice 12 reconcile).</span>
+  <span class="sub">Add device creates an enrollment code (string, QR, command) for the machine to redeem; devices already on the name server are adopted by reconcile.</span>
 </div>
 
 <div class="table-wrap">

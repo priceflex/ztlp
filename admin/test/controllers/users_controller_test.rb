@@ -135,14 +135,16 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_includes body, "eng"
     assert_includes body, "alice-mbp"
     assert_includes body, "device-bound"
-    # actions (operator decision 2026-10-22): Edit + a permanent Revoke user; no Disable/Enable.
+    # actions: Edit, reversible Disable (PLAN-services-wizard-and-helpdesk.md slice 3) and the
+    # permanent Revoke user (operator decision 2026-10-22); Enable only once disabled.
     assert_select "a.btn[href=?]", "/users/#{@alice.id}/edit"
     assert_select "form[action=?]", "/users/#{@alice.id}/revoke"
+    assert_select "form[action=?]", "/users/#{@alice.id}/disable"
     refute_includes body, "/users/#{@alice.id}/enable"
-    refute_includes body, "/users/#{@alice.id}/disable"
   end
 
-  test "show of a legacy disabled user still offers Revoke, never Enable" do
+  test "show of a legacy disabled user (NS-revoked by the old Disable) offers Revoke, never Enable" do
+    AuditLog.record!("ns.publish", target: @carol, status: "ok", details: { "name" => @carol.ns_name, "type" => "revoke" })
     get user_path(@carol)
     assert_response :success
     assert_select "form[action=?]", "/users/#{@carol.id}/revoke"
@@ -393,10 +395,13 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
     assert_select "[data-toast]", /already revoked/
   end
 
-  test "there is no enable route" do
-    refute_respond_to self, :enable_user_path
-    post "/users/#{@carol.id}/enable"
-    assert_response :not_found
+  test "enable refuses a legacy disabled user whose name the old Disable revoked on the NS" do
+    AuditLog.record!("ns.publish", target: @carol, status: "ok", details: { "name" => @carol.ns_name, "type" => "revoke" })
+    Ztlp::Publisher.expects(:publish_user!).never
+    post enable_user_path(@carol)
+    assert_equal "disabled", @carol.reload.status
+    follow_redirect!
+    assert_select "[data-toast]", /permanent/
   end
 
   test "read_only admin gets 403 on revoke" do

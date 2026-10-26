@@ -25,6 +25,14 @@ class User < ApplicationRecord
 
   def active? = status == "active"
   def disabled? = status == "disabled"
+  def revoked? = status == "revoked"
+
+  # Before 2026-10-22 "Disable" published a permanent NS REVOKE for the user. Such a legacy
+  # "disabled" user can never be enabled again (the NS refuses the name); Revoke is the only way on.
+  def ns_revoked?
+    AuditLog.where(action: "ns.publish", status: "ok", target_type: "User", target_id: id)
+            .any? { |log| log.details.to_h["type"] == "revoke" }
+  end
 
   validates :username, presence: true, length: { maximum: 63 },
                        format: { with: USERNAME, message: "must be a lowercase DNS label" },

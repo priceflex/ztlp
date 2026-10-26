@@ -52,6 +52,20 @@
         A name-server revocation is permanent: this name can never re-enroll. To onboard the machine again, create a new enrollment under a new device name.</p>
     </div>
   <% else %>
+    <% if current_admin&.write_access? && (@device.enrolled? || @device.disabled?) %>
+      <div class="actions">
+        <% if @device.disabled? %>
+          <%= form_with url: enable_device_path(@device), method: :post, class: "actions" do %>
+            <button type="submit" class="btn">Enable device</button>
+          <% end %>
+        <% else %>
+          <%= form_with url: disable_device_path(@device), method: :post, class: "actions" do %>
+            <button type="submit" class="btn" data-confirm="Disable <%= @device.name %>? You can enable it again later.">Disable device</button>
+          <% end %>
+        <% end %>
+      </div>
+      <p class="hint">Disable is reversible: the name server stops vouching for this device (group and role rules stop matching once it is published) and gateways with a policy file drop rules that name it. Gateways running without a policy file still let enrolled devices in. Revoke is the permanent cut.</p>
+    <% end %>
     <% if operator? %>
       <div class="actions">
         <%= form_with url: revoke_device_path(@device), method: :post, class: "actions" do %>

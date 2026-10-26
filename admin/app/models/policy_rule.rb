@@ -34,13 +34,24 @@ class PolicyRule < ApplicationRecord
     when "role"
       "role:#{subject_value}"
     when "user", "device"
-      subject_entity&.ns_name || subject_value
+      entity = subject_entity
+      return nil if entity && !rule_subject_active?(entity)
+
+      entity&.ns_name || subject_value
     when "any"
       "*"
     end
   end
 
   private
+
+  # Disabled (or revoked) users and devices, and devices of a disabled user, drop out of the
+  # rendered allow list (the renderer compacts nils).
+  def rule_subject_active?(entity)
+    return !entity.suspended? if entity.is_a?(Device)
+
+    !(entity.disabled? || entity.revoked?)
+  end
 
   # Pin the subject's ns_name into subject_value at create time so the rule
   # keeps rendering a literal after the entity row is deleted (the gateway

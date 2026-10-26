@@ -11,8 +11,8 @@
 # mutations require write access and audit their own action.
 class UsersController < ApplicationController
   include EnrollmentMinting
-  before_action :set_user, only: %i[show edit update revoke]
-  before_action :require_write_access, only: %i[new create edit update]
+  before_action :set_user, only: %i[show edit update disable enable revoke]
+  before_action :require_write_access, only: %i[new create edit update disable enable]
   before_action :require_operator, only: %i[revoke]
 
   FILTERS = [ %w[all All], %w[active Active], %w[invited Invited],
@@ -68,14 +68,41 @@ class UsersController < ApplicationController
     end
   end
 
-  # ------------------------------------------------- slice 6c: lifecycle
+  # ------------------------------------------------- lifecycle
   #
-  # Disable = REVOKE record for the user's ns name (spec §6.3) + the user's
-  # devices marked `revoked` in the DB. Enable = republish the user record
-  # (its devices[] no longer includes revoked devices, per Records.user_data)
-  # + re-activate the user and their devices. The DB is the source of truth:
-  # an NS failure never 500s after the save — the DB change stands, the
-  # failure is a warning, the 6-hourly republish retries.
+  # Disable / Enable (reversible, helpdesk may do it) and Revoke (permanent, operators only).
+  # The DB is the source of truth: an NS failure never 500s after the save; it is a warning and the
+  # 6-hourly republish retries.
+
+  # Reversible (PLAN-services-wizard-and-helpdesk.md slice 3; helpdesk may do it). The NS stops
+  # vouching once republished: USER role "" + no devices, GROUP records without the user, their
+  # devices without an owner (Records). Gateways with a policy file also drop the user's rules.
+  # The DB change always stands; an NS failure is a warning (the 6-hourly republish retries).
+  def disable
+    return redirect_to(user_path(@user), alert: "#{@user.display_name} is revoked permanently.") if @user.revoked?
+    return redirect_to(user_path(@user), notice: "#{@user.display_name} is already disabled.") if @user.disabled?
+
+    was_active = @user.active?
+    @user.update!(status: "disabled")
+    warning = republish_user_tree(@user, include_user: was_active || @user.ns_published_at.present?)
+    audit!("user.disable", target: @user, details: { username: @user.username, published: warning.nil? })
+    redirect_to user_path(@user), notice: "#{@user.display_name} disabled.", alert: warning
+  end
+
+  def enable
+    return redirect_to(user_path(@user), alert: "#{@user.display_name} is revoked permanently.") if @user.revoked?
+    return redirect_to(user_path(@user), notice: "#{@user.display_name} is not disabled.") unless @user.disabled?
+    if @user.ns_revoked?
+      return redirect_to(user_path(@user), alert: "#{@user.display_name} was revoked on the name server by the old " \
+                                                  "Disable; that is permanent. Create a new user to restore access.")
+    end
+
+    @user.update!(status: @user.devices.where(status: "enrolled").exists? ? "active" : "invited")
+    warning = republish_user_tree(@user, include_user: @user.active? || @user.ns_published_at.present?)
+    audit!("user.enable", target: @user, details: { username: @user.username, status: @user.status,
+                                                    published: warning.nil? })
+    redirect_to user_path(@user), notice: "#{@user.display_name} enabled (#{@user.status}).", alert: warning
+  end
 
   # Operator decision 2026-10-22: PERMANENT "Revoke user" (no Enable). One REVOKE record lists
   # the user + every enrolled device (the gateway does not cascade owner→device). In the NS a
@@ -113,6 +140,21 @@ class UsersController < ApplicationController
   private
 
   # Warnings for the flash (never a 500 after the save).
+  # USER + every GROUP the user is in + their enrolled devices, save-and-warn.
+  def republish_user_tree(user, include_user:)
+    jobs = []
+    jobs << [ :publish_user!, user ] if include_user
+    user.groups.each { |g| jobs << [ :publish_group!, g ] }
+    user.devices.where(status: "enrolled").each { |d| jobs << [ :publish_device!, d ] }
+    failure = nil
+    jobs.each do |method, record|
+      Ztlp::Publisher.public_send(method, record, admin: current_admin)
+    rescue Ztlp::NsClient::NsError => e
+      failure ||= e
+    end
+    failure && user_warning(failure)
+  end
+
   def user_warning(e)
     format("Saved, but not published to the name server (0x%02X %s). " \
            "The 6-hourly republish will retry.", e.code, e.reason)

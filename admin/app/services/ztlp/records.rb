@@ -22,10 +22,12 @@ module Ztlp
     def self.user_data(user)
       raise Error, "user has no ns_name" if user.ns_name.nil?
 
+      # A disabled user stops vouching: no role (role: rules miss) and no devices.
+      off = user.disabled? || user.revoked?
       {
         "public_key" => user.signing_pubkey_hex.to_s,
-        "role" => user.role.to_s,
-        "devices" => user.devices.where(status: "enrolled").order(:name).map(&:ns_name), # never pending/revoked
+        "role" => off ? "" : user.role.to_s,
+        "devices" => off ? [] : user.devices.where(status: "enrolled").order(:name).map(&:ns_name), # never pending/disabled/revoked
         "email" => ""
       }
     end
@@ -35,7 +37,7 @@ module Ztlp
       raise Error, "group has no ns_name" if group.ns_name.nil?
 
       {
-        "members" => group.users.order(:username).map(&:ns_name),
+        "members" => group.users.where.not(status: %w[disabled revoked]).order(:username).map(&:ns_name),
         "description" => ""
       }
     end
@@ -47,7 +49,8 @@ module Ztlp
       {
         "node_id" => device.node_id_hex.to_s,
         "public_key" => device.noise_pubkey_hex.to_s,
-        "owner" => owner ? owner.ns_name : "",
+        # No owner while the device or its owner is disabled: group:/role: rules resolve via the owner.
+        "owner" => owner && !device.suspended? ? owner.ns_name : "",
         "assurance" => Assurance.wire(device.assurance),
         "key_source" => device.key_source.to_s
       }

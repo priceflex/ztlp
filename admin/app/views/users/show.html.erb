@@ -46,6 +46,19 @@
 
   <div class="actions">
     <a class="btn" href="<%= "/users/#{@user.id}/edit" %>">Edit</a>
+    <% if current_admin&.write_access? && !@user.revoked? %>
+      <% if @user.disabled? && @user.ns_revoked? %>
+        <span class="sub">Revoked on the name server by the old Disable (permanent): create a new user to restore access.</span>
+      <% elsif @user.disabled? %>
+        <%= form_with url: enable_user_path(@user), method: :post, class: "actions" do %>
+          <button type="submit" class="btn">Enable user</button>
+        <% end %>
+      <% else %>
+        <%= form_with url: disable_user_path(@user), method: :post, class: "actions" do %>
+          <button type="submit" class="btn" data-confirm="Disable <%= @user.display_name %>? You can enable them again later.">Disable user</button>
+        <% end %>
+      <% end %>
+    <% end %>
     <% if @user.status == "revoked" %>
       <span class="sub">Revoked permanently. To restore access, create a new user.</span>
     <% elsif operator? %>
@@ -55,4 +68,7 @@
       <% end %>
     <% end %>
   </div>
+  <% unless @user.revoked? %>
+    <p class="hint">Disable is reversible: the name server stops vouching for this user and their devices (group and role rules stop matching once it is published) and gateways with a policy file drop rules that name them. Gateways running without a policy file still let enrolled devices in. Revoke is the permanent cut.</p>
+  <% end %>
 </div>

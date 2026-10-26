@@ -45,6 +45,8 @@ Rails.application.routes.draw do
 
   resources :users, only: %i[index show new create edit update] do
     member do
+      post :disable
+      post :enable
       post :revoke
     end
   end
@@ -52,6 +54,8 @@ Rails.application.routes.draw do
   # Slice 8: Devices directory (read side 8a; revoke 8b; assign_owner 8c).
   resources :devices, only: %i[index show] do
     member do
+      post :disable
+      post :enable
       post :revoke
       post :assign_owner
     end

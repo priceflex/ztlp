@@ -5,7 +5,7 @@
 class Device < ApplicationRecord
   KEY_SOURCES = %w[yubikey tpm secure-enclave strongbox file unknown].freeze
   ASSURANCE_LEVELS = (1..4).freeze
-  STATUSES = %w[pending enrolled revoked].freeze
+  STATUSES = %w[pending enrolled disabled revoked].freeze
 
   belongs_to :zone
   belongs_to :user, optional: true
@@ -28,4 +28,9 @@ class Device < ApplicationRecord
 
   def revoked? = status == "revoked"
   def enrolled? = status == "enrolled"
+  def disabled? = status == "disabled"
+
+  # Disabled/revoked, or owned by a disabled/revoked user: the zone stops vouching for it
+  # (no owner in its DEVICE record, dropped from rendered policy). Pending devices are not suspended.
+  def suspended? = disabled? || revoked? || (user.present? && (user.disabled? || user.revoked?))
 end

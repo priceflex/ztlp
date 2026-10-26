@@ -10,6 +10,29 @@
       "line": 44,
       "code": "params.require(:admin).permit(:username, :display_name, :email, :role, :pubkey_hex)",
       "note": "role is only settable by super_admin (before_action :require_super_admin); roles whitelisted by model validation"
+    },
+    {
+      "warning_type": "Mass Assignment",
+      "warning_code": 105,
+      "fingerprint": "c61fc0d39cd784cc38c9bea67c59f2cbcd468df09649e7ed24bb19bf3ad0463c",
+      "check_name": "PermitAttributes",
+      "message": "Potentially dangerous key allowed for mass assignment",
+      "file": "app/controllers/users_controller.rb",
+      "line": 186,
+      "link": "https://brakemanscanner.org/docs/warning_types/mass_assignment/",
+      "code": "params.require(:user).permit(:username, :display_name, :first_name, :last_name, :email, :phone, :sms_opt_in, :notes, :role, :kind)",
+      "render_path": null,
+      "location": {
+        "type": "method",
+        "class": "UsersController",
+        "method": "user_params"
+      },
+      "user_input": ":role",
+      "confidence": "Medium",
+      "cwe_id": [
+        915
+      ],
+      "note": "role/kind are permitted only when current_admin.operator? (super_admin/admin); helpdesk-created users keep the column defaults. Pinned by test/controllers/helpdesk_role_test.rb."
     }
   ],
   "updated": "2026-10-06",

@@ -39,8 +39,13 @@ SKIP_CLAIM_BOOT=1 timeout 600 bin/rails test  # a hung test must not run away (4
 # ---------------------------------------------------------------------------
 # 2 + 3. Rubocop (auto-fix, then verify clean)
 # ---------------------------------------------------------------------------
-echo "== 2/6 bundle exec rubocop -A"
-bundle exec rubocop -A
+# On CI (GitHub sets CI=true) never auto-fix: a fix on the runner would hide unformatted code.
+if [ "${CI:-}" = "true" ]; then
+  echo "== 2/6 rubocop auto-fix skipped on CI"
+else
+  echo "== 2/6 bundle exec rubocop -A"
+  bundle exec rubocop -A
+fi
 echo "== 3/6 bundle exec rubocop (must be clean)"
 bundle exec rubocop
 
@@ -51,28 +56,26 @@ bundle exec rubocop
 # ---------------------------------------------------------------------------
 echo "== 4/6 bundle exec brakeman -q --no-pager (EOL findings tolerated)"
 set +e
-bundle exec brakeman -q --no-pager > /tmp/brakeman_2b.log 2>&1
+BRK_LOG="${TMPDIR:-/tmp}/brakeman_2b.log"
+bundle exec brakeman -q --no-pager > "$BRK_LOG" 2>&1
 BRK_EXIT=$?
 set -e
 # If the only findings are EOLRuby / EOLRails, exit 0. Otherwise surface the
 # real warnings and fail.
-if grep -qE "EOLRuby|EOLRails" /tmp/brakeman_2b.log; then
-  # Count non-EOL warning blocks. A real finding shows up as a "Check:"
-  # line that is not EOLRuby/EOLRails.
-  NON_EOL=$(grep -cE "^Check: (?!EOL)" /tmp/brakeman_2b.log || true)
-  # Fallback: grep for known-real checks that this app has historically
-  # produced (Sql, Eval, BasicAuth, etc.). If any appear, fail.
-  REAL_FINDING=$(grep -E "^Check: (Sql|Eval|BasicAuth|Header|Cookie|FileAccess|UserInput|XSS|ReDoS)" /tmp/brakeman_2b.log || true)
-  if [ -n "$REAL_FINDING" ]; then
-    echo "brakeman: real finding(s) found:"
-    echo "$REAL_FINDING"
-    exit 1
-  fi
-  echo "brakeman: only EOL findings (EOLRuby/EOLRails) — tolerated"
-else
-  echo "brakeman: exit=$BRK_EXIT, no EOL findings in output (unexpected)"
-  exit $BRK_EXIT
+# Any "Check:" other than EOLRuby/EOLRails is a real finding (reviewed exceptions live in
+# config/brakeman.ignore, which brakeman applies before reporting).
+REAL_FINDING=$(grep -E "^Check: " "$BRK_LOG" | grep -vE "^Check: (EOLRuby|EOLRails)$" || true)
+if [ -n "$REAL_FINDING" ]; then
+  echo "brakeman: real finding(s):"
+  cat "$BRK_LOG"
+  exit 1
 fi
+if [ "$BRK_EXIT" -ne 0 ] && ! grep -qE "^Check: (EOLRuby|EOLRails)$" "$BRK_LOG"; then
+  echo "brakeman failed (exit $BRK_EXIT):"
+  cat "$BRK_LOG"
+  exit "$BRK_EXIT"
+fi
+echo "brakeman: no findings beyond EOLRuby/EOLRails"
 
 # ---------------------------------------------------------------------------
 # 5. node --check the only JS file

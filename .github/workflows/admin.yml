@@ -1,0 +1,65 @@
+name: admin panel
+
+# The ZTLP admin panel (admin/, Rails + MariaDB). Runs the same gate as local development:
+# admin/scripts/ci-admin.sh (tests, rubocop without auto-fix on CI, brakeman, JS checks).
+on:
+  pull_request:
+    paths:
+      - "admin/**"
+      - ".github/workflows/admin.yml"
+  push:
+    branches: [main]
+    paths:
+      - "admin/**"
+      - ".github/workflows/admin.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: devroot
+        ports:
+          - "33061:3306"
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    defaults:
+      run:
+        working-directory: admin
+    env:
+      RAILS_ENV: test
+      TEST_DB_HOST: 127.0.0.1
+      TEST_DB_PORT: "33061"
+      TEST_DB_USER: root
+      TEST_DB_PASSWORD: devroot
+      NODE: node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          working-directory: admin
+          bundler-cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Prepare the test database
+        run: bin/rails db:prepare
+
+      - name: Gate (tests, rubocop, brakeman, JS)
+        run: bash scripts/ci-admin.sh

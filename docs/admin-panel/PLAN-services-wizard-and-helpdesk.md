@@ -1,6 +1,28 @@
 # Plan: Services (rename), Add Service wizard + gateway install, helpdesk role, user/device lifecycle
 
-Status: PLANNED 2026-10-25, not started. Ships before `plan/admin-panel` is pushed and merged to main.
+Status: BUILT 2026-10-25 (slices 1-6 committed locally on `plan/admin-panel`; not pushed, not deployed).
+
+| Slice | Commit | Notes |
+|---|---|---|
+| 1 helpdesk | 58d52a6f, cba7bfd9 | brakeman role/kind permit recorded as reviewed (operator-gated) |
+| 2 rename | 180e9082 | also fixed two dead /apps links; user kind `service` reads "Service account" |
+| 3 lifecycle | e2d590b7 | see "Decisions made while building" |
+| 4 Add Service | 9220a9c6 | no "user" access choice (see below) |
+| 5 gateway install | fc41e332 | + Check now, GatewayStatusJob (30 min) |
+| 6 CI | (this commit) | `.github/workflows/admin.yml`; ci-admin.sh: no rubocop auto-fix on CI, brakeman fails on any non-EOL finding |
+
+## Decisions made while building (2026-10-25)
+
+- Disable reaches the name server too, not only rendered policy: a disabled user's USER record has role "" and
+  no devices, GROUP records leave them out, their devices' DEVICE records carry no owner, so `group:`/`role:`
+  rules (resolved live by the gateway) stop matching once republished. Pending devices are never "suspended".
+- A legacy "disabled" user whose name the pre-2026-10-22 Disable REVOKED on the NS (audit `ns.publish`
+  type=revoke) can never be enabled; the page and the action say so. Production had none.
+- The Add Service access picker has no "one user" choice: Rust gateways check the DEVICE, so a user rule
+  never matches. Choices: nobody yet / every enrolled device / group / device / role.
+- The install script's `keygen` runs `--user 0:0` (the data dir is root-owned at that point), then
+  `chown -R 1000:1000 data` hands it to the gateway user.
+- The old secret-free `ServiceRegistrar.gateway_command` printout is replaced by the install panel.
 
 Operator asks (2026-10-25):
 - "should we call applications services instead?" -> yes.

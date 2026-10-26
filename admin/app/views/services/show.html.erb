@@ -42,6 +42,30 @@
     </dl>
   </div>
 
+  <% gw = @service.gateway %>
+  <div class="panel" data-gateway-settings>
+    <div class="panel-h"><h2>Gateway</h2><span class="badge <%= gw.status == "online" ? "ok" : "warn" %>"><%= gw.status %></span></div>
+    <dl class="kv">
+      <dt>Runs on</dt><dd><%= gw.host_note.presence || "—" %></dd>
+      <dt>UDP port</dt><dd class="mono"><%= gw.bind_port %></dd>
+      <dt>Sign-in headers</dt><dd><%= gw.inject_headers ? "on (audience #{@service.name})" : "off" %></dd>
+      <dt>Policy file</dt><dd><%= { true => "yes", false => "no", nil => "unknown" }[gw.policy_file] %></dd>
+      <dt>Name server</dt><dd class="mono"><%= gw.effective_ns_server %></dd>
+      <dt>Relay</dt><dd class="mono"><%= gw.effective_relay || "—" %></dd>
+      <dt>Max sessions</dt><dd><%= gw.max_sessions %></dd>
+      <dt>Hole punching</dt><dd><%= gw.punch ? "on" : "off" %></dd>
+      <dt>Image</dt><dd class="mono"><%= gw.effective_image %></dd>
+      <% if gw.node_id_hex.present? %><dt>Node id</dt><dd class="mono"><%= gw.node_id_hex %></dd><% end %>
+    </dl>
+    <% if gw.policy_file == false %>
+      <p class="hint warn-text">This gateway runs without a policy file: every enrolled device in the zone can reach it, and
+        the rules below are not enforced until it is restarted with <span class="mono">--policy</span>.</p>
+    <% elsif gw.policy_file.nil? %>
+      <p class="hint">It is not known whether this gateway runs with a policy file (it was found on the name server). Without
+        one every enrolled device can reach it; set this under Edit once you know.</p>
+    <% end %>
+  </div>
+
   <div class="panel">
     <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @service.policy_rules.count %></span></div>
     <% if @service.policy_rules.any? %>

@@ -1,7 +1,7 @@
 <% content_for :title, "Services - ZTLP Directory" %>
 <div class="page-head">
   <div><h1>Services</h1><p class="lede">Services exposed on the zone's gateways. Each one's allow-list is its policy rules; the default is deny.</p></div>
-  <% if operator? %><div class="actions"><a class="btn primary" href="<%= register_services_path %>">Register service</a></div><% end %>
+  <% if operator? %><div class="actions"><a class="btn primary" href="<%= new_service_path %>">Add service</a><a class="btn" href="<%= register_services_path %>">Register a running service</a></div><% end %>
 </div>
 
 <div class="table-wrap">

@@ -39,3 +39,11 @@
 .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .inline-form input[type=text] { flex: 1 1 320px; font: inherit; padding: 8px 10px; border-radius: 8px;
   border: 1px solid var(--line, #d9dde3); }
+
+/* Add Service form + gateway settings (PLAN-services-wizard-and-helpdesk.md slice 4) */
+details.panel > summary { cursor: pointer; list-style: none; }
+details.panel > summary::-webkit-details-marker { display: none; }
+details.panel > summary h2::before { content: "\25B8\00a0"; }
+details.panel[open] > summary h2::before { content: "\25BE\00a0"; }
+fieldset[data-gateway-fields] { border: 1px solid var(--line, #d6dbe1); border-radius: 8px; padding: 12px 14px; margin: 8px 0; }
+fieldset[data-gateway-fields] legend { padding: 0 6px; font-weight: 600; }

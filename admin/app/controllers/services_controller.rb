@@ -34,18 +34,28 @@ class ServicesController < ApplicationController
     render :show, layout: false if request.headers["X-Drawer"] == "1"
   end
 
+  # Add Service (slice 4): one form for a new service + its gateway. `?existing=1` keeps the older
+  # form that adds a service to a gateway that already exists.
   def new
-    @gateways = @zone.gateways.order(:name)
-    @service = Service.new
+    if params[:existing].present?
+      @gateways = @zone.gateways.order(:name)
+      @service = Service.new
+      return render :new_existing
+    end
+
+    @setup = ServiceSetup.new
+    load_setup_pickers
   end
 
   def create
+    return create_from_setup if params.key?(:setup)
+
     gateway = scoped_gateway(params.require(:service)[:gateway_id]) # missing -> 400, not 500
     if gateway.nil?
       @gateways = @zone.gateways.order(:name)
       @service = Service.new(service_params)
       @service.errors.add(:base, "Pick a gateway from this zone.")
-      return render :new, status: :unprocessable_content
+      return render :new_existing, status: :unprocessable_content
     end
 
     @service = gateway.services.build(service_params)
@@ -55,7 +65,7 @@ class ServicesController < ApplicationController
       redirect_to service_path(@service), notice: "Service #{@service.name} created. Deploy the rendered policy and restart the gateway to make it live."
     else
       @gateways = @zone.gateways.order(:name)
-      render :new, status: :unprocessable_content
+      render :new_existing, status: :unprocessable_content
     end
   end
 
@@ -69,8 +79,15 @@ class ServicesController < ApplicationController
     # Name and gateway are immutable after create: the name drives the
     # gateway's service entry and the ztlp name; moving gateways would leave
     # the old gateway's policy still allowing the (now missing) service.
-    if @service.update(service_params.except(:name, :gateway_id))
-      audit!("service.update", target: @service, details: { name: @service.name })
+    attrs = service_params.except(:name, :gateway_id)
+    if attrs[:gateway_attributes].present?
+      attrs[:gateway_attributes] = attrs[:gateway_attributes].merge(id: @service.gateway_id)
+    end
+    if @service.update(attrs)
+      # Turning sign-in headers on for the first time needs a secret for the gateway and the app.
+      @service.gateway.rotate_header_secret! if @service.gateway.inject_headers && @service.gateway.header_secret_ct.blank?
+      audit!("service.update", target: @service, details: { name: @service.name,
+                                                            gateway: @service.gateway.saved_changes.keys - %w[updated_at header_secret_ct] })
       redirect_to service_path(@service), notice: "Service #{@service.name} updated. Deploy the rendered policy and restart the gateway to make it live."
     else
       @gateways = @zone.gateways.order(:name)
@@ -93,6 +110,32 @@ class ServicesController < ApplicationController
   end
 
   private
+
+  def create_from_setup
+    @setup = ServiceSetup.new(setup_params)
+    if @setup.save
+      svc = @setup.service
+      session[:zone_id] = svc.gateway.zone_id
+      audit!("service.setup", target: svc, details: {
+               fqdn: svc.ztlp_name, gateway: svc.gateway.name, backend: svc.backend, protocol: svc.protocol,
+               inject_headers: svc.gateway.inject_headers, bind_port: svc.gateway.bind_port,
+               access: @setup.access, rules: svc.policy_rules.count
+             })
+      redirect_to service_path(svc), notice: "#{svc.ztlp_name} created (planned). Install its gateway with the script below."
+    else
+      load_setup_pickers
+      render :new, status: :unprocessable_content
+    end
+  end
+
+  def load_setup_pickers
+    @zone_groups = @zone.groups.order(:name).limit(500)
+    @zone_devices = @zone.devices.where.not(status: "revoked").order(:name).limit(500)
+  end
+
+  def setup_params
+    params.require(:setup).permit(*ServiceSetup.attribute_names.map(&:to_sym))
+  end
 
   # One shared toggle so enable/disable can't drift apart. A no-op toggle
   # (already in the requested state) writes no audit row and just re-renders.
@@ -138,7 +181,10 @@ class ServicesController < ApplicationController
     @zone.gateways.find_by(id: gateway_id)
   end
 
+  GATEWAY_FIELDS = %i[host_note bind_port max_sessions punch inject_headers policy_file ns_server relay_addr
+                      image_tag subject_map_text].freeze
+
   def service_params
-    params.require(:service).permit(:gateway_id, :name, *APP_FIELDS)
+    params.require(:service).permit(:gateway_id, :name, *APP_FIELDS, gateway_attributes: GATEWAY_FIELDS)
   end
 end

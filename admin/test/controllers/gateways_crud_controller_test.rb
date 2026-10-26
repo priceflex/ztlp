@@ -154,8 +154,8 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
 
   # ---- the service new form shows the inline gateway form link ---------
 
-  test "the service new form includes a link to the inline gateway form" do
-    get new_service_path
+  test "the existing-gateway service form includes a link to the inline gateway form" do
+    get new_service_path(existing: 1)
     assert_response :success
     assert_select "a[href=?]", "/gateways/new", count: 1
   end

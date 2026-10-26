@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_26_000001) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_26_000002) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -111,6 +111,16 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_26_000001) do
     t.datetime "policy_rendered_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.integer "bind_port", default: 23097, null: false
+    t.integer "max_sessions", default: 100, null: false
+    t.boolean "punch", default: true, null: false
+    t.boolean "inject_headers", default: false, null: false
+    t.text "header_secret_ct"
+    t.text "subject_map"
+    t.boolean "policy_file"
+    t.string "ns_server"
+    t.string "relay_addr"
+    t.string "image_tag"
     t.index ["zone_id", "name"], name: "idx_gateways_zone_name", unique: true
     t.index ["zone_id"], name: "idx_gateways_zone"
   end

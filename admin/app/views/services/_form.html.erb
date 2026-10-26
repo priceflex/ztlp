@@ -29,6 +29,29 @@
         <%= f.label :min_assurance %><%= f.number_field :min_assurance, in: 1..4, step: 1, required: true %><p class="hint">Devices below this assurance get a warning from the panel's test-access; Rust gateways do not enforce a floor.</p>
       </div>
       <div class="field"><%= f.label :description %><%= f.text_field :description %></div>
+      <% if @service.persisted? %>
+        <%= f.fields_for :gateway do |g| %>
+          <fieldset class="form-grid" data-gateway-fields>
+            <legend>Gateway <span class="mono"><%= @service.gateway.ns_name %></span></legend>
+            <div class="field"><%= g.label :host_note, "Runs on" %><%= g.text_field :host_note, maxlength: 200 %></div>
+            <div class="field"><label class="check"><%= g.check_box :inject_headers %> Sign people in with ZTLP (signed X-ZTLP-* headers)</label></div>
+            <div class="field">
+              <%= g.label :policy_file, "Runs with a policy file" %>
+              <%= g.select :policy_file, [ [ "Yes (--policy)", true ], [ "No: every enrolled device gets in", false ], [ "Unknown", "" ] ],
+                           selected: @service.gateway.policy_file.nil? ? "" : @service.gateway.policy_file %>
+            </div>
+            <div class="field"><%= g.label :bind_port, "UDP port" %><%= g.number_field :bind_port, in: 1..65_535 %></div>
+            <div class="field"><%= g.label :ns_server, "Name server" %><%= g.text_field :ns_server, class: "mono", placeholder: @service.gateway.zone.ns_addr %></div>
+            <div class="field"><%= g.label :relay_addr, "Relay" %><%= g.text_field :relay_addr, class: "mono", placeholder: Array(@service.gateway.zone.relay_addrs).first %></div>
+            <div class="field"><%= g.label :max_sessions %><%= g.number_field :max_sessions, in: 1..100_000 %></div>
+            <div class="field"><label class="check"><%= g.check_box :punch %> NAT hole punching</label></div>
+            <div class="field"><%= g.label :image_tag, "Gateway image" %><%= g.text_field :image_tag, class: "mono", placeholder: Gateway.default_image %></div>
+            <div class="field"><%= g.label :subject_map_text, "Fallback subject map" %><%= g.text_area :subject_map_text, rows: 3, class: "mono", placeholder: "<64 hex noise key>=steve" %></div>
+            <p class="hint">Changes here take effect when the gateway is reinstalled or restarted with the updated settings
+              (the install script on the service page reflects them).</p>
+          </fieldset>
+        <% end %>
+      <% end %>
       <div class="actions">
         <%= f.submit @service.persisted? ? "Save" : "Create service", class: "btn primary" %>
         <%= link_to "Cancel", @service.persisted? ? service_path(@service) : services_path, class: "btn" %>

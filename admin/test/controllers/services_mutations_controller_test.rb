@@ -41,11 +41,11 @@ class ServicesMutationsControllerTest < ActionDispatch::IntegrationTest
 
   # -------------------------------------------------------------- new / create
 
-  test "new renders the form with the zone's gateways" do
-    get new_service_path
+  test "new (existing gateway) renders the form with the zone's gateways" do
+    get new_service_path(existing: 1)
     assert_response :success
     body = response.body
-    assert_includes body, "New service"
+    assert_includes body, "Add a service to an existing gateway"
     # every zone gateway is a pickable option
     assert_includes body, "gw1"
     assert_includes body, "gw-e"

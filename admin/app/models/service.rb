@@ -7,6 +7,8 @@ class Service < ApplicationRecord
 
   belongs_to :gateway
   has_many :policy_rules, dependent: :destroy
+  # The edit form also edits the gateway's settings (one gateway per service, slice 4).
+  accepts_nested_attributes_for :gateway, update_only: true
 
   validates :name, presence: true, length: { maximum: 63 },
                    format: { with: Admin::USERNAME, message: "must be a lowercase DNS label" },

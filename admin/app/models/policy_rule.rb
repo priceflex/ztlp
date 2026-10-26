@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# One allow-list entry on an application (decision 7). `render` maps the
+# One allow-list entry on a service (decision 7). `render` maps the
 # subject to the gateway's literal: group:<ns> | role:<v> | <ns> | *.
 # NOTE: `subject_type` is deliberately NOT wired as a Rails polymorphic
 # association — values like "group"/"role" would be constantized as STI
@@ -9,7 +9,7 @@ class PolicyRule < ApplicationRecord
   SUBJECT_TYPES = %w[group role user device any].freeze
   SUBJECT_CLASS = { "group" => "Group", "user" => "User", "device" => "Device" }.freeze
 
-  belongs_to :application
+  belongs_to :service
 
   validates :subject_type, inclusion: { in: SUBJECT_TYPES, message: "is unknown" }
   validate :subject_required_for_typed_rule

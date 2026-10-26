@@ -17,7 +17,7 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
   # /enrollments/:id lands in sub-slice 2 and is added to the device/show
   # list below when it exists).
   PAGE_ROUTES = [
-    "/", "/users", "/devices", "/groups", "/applications", "/policies",
+    "/", "/users", "/devices", "/groups", "/services", "/policies",
     "/zone", "/admins", "/audit_logs", "/login", "/claim", "/enrollments",
     "/enrollments/new"
   ].freeze
@@ -55,7 +55,7 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
   test "directory pages have no inline event handlers" do
     @admin, @seed = make_admin
     sign_in_as(@admin, @seed)
-    %w[/applications /policies].each do |route|
+    %w[/services /policies].each do |route|
       get route
       %w[onclick onchange onsubmit oninput].each do |attr|
         assert_select "[#{attr}]", false
@@ -74,12 +74,12 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
     pending_dev = zone.devices.create!(name: "fresh-box", status: "pending")
     group = zone.groups.create!(name: "techs")
     gw = zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    app = gw.applications.create!(name: "wiki", backend: "10.0.0.5:80")
+    app = gw.services.create!(name: "wiki", backend: "10.0.0.5:80")
     app.policy_rules.create!(subject_type: "group", subject_id: group.id, position: 1)
     routes = [ "/users/#{user.id}", "/users/new", "/users/#{user.id}/edit",
                "/devices/#{device.id}", "/devices/#{pending_dev.id}", "/groups/#{group.id}", "/groups/new", "/groups/#{group.id}/edit",
-               "/applications/#{app.id}", "/applications/new", "/applications/#{app.id}/edit",
-               "/apps/new_gateway", "/admins/new" ]
+               "/services/#{app.id}", "/services/new", "/services/#{app.id}/edit",
+               "/gateways/new", "/admins/new" ]
     routes.each do |route|
       get route
       assert_response :success, route

@@ -78,15 +78,15 @@ class PolicyRendererTest < ActiveSupport::TestCase
   setup do
     @zone = Zone.primary
     @gw = @zone.gateways.create!(name: "web", kind: "rust_listen")
-    @app1 = @gw.applications.create!(name: "comms", enabled: true, min_assurance: 3,
+    @app1 = @gw.services.create!(name: "comms", enabled: true, min_assurance: 3,
                                      backend: "10.0.0.5:8080", protocol: "http")
-    @app2 = @gw.applications.create!(name: "vault", enabled: false)
+    @app2 = @gw.services.create!(name: "vault", enabled: false)
     @alice = @zone.users.create!(username: "alice", display_name: "Alice Anderson", role: "tech", status: "active")
     @eng = @zone.groups.create!(name: "eng")
     @dev = @zone.devices.create!(name: "alice-mac")
   end
 
-  test "a gateway with no applications still renders an explicit default deny (missing policy = allow-all)" do
+  test "a gateway with no services still renders an explicit default deny (missing policy = allow-all)" do
     empty = @zone.gateways.create!(name: "quiet", kind: "rust_listen")
     default_allow, rules = RustPolicyPort.parse(Ztlp::PolicyRenderer.render(empty))
     refute default_allow

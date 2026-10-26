@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_24_000002) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_26_000001) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -28,19 +28,6 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_24_000002) do
     t.index ["pubkey_hex"], name: "idx_admins_pubkey", unique: true
     t.index ["user_id"], name: "idx_admins_user"
     t.index ["username"], name: "idx_admins_username", unique: true
-  end
-
-  create_table "applications", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
-    t.bigint "gateway_id", null: false
-    t.string "name", null: false
-    t.string "backend"
-    t.string "protocol"
-    t.integer "min_assurance", default: 1, null: false
-    t.boolean "enabled", default: true, null: false
-    t.text "description"
-    t.datetime "created_at", null: false
-    t.datetime "updated_at", null: false
-    t.index ["gateway_id", "name"], name: "idx_applications_gw_name", unique: true
   end
 
   create_table "audit_logs", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
@@ -163,15 +150,28 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_24_000002) do
   end
 
   create_table "policy_rules", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
-    t.bigint "application_id", null: false
+    t.bigint "service_id", null: false
     t.string "subject_type", null: false
     t.bigint "subject_id"
     t.string "subject_value"
     t.integer "position", default: 0, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
-    t.index ["application_id", "position"], name: "idx_policy_rules_pos", unique: true
-    t.index ["application_id"], name: "idx_policy_rules_app"
+    t.index ["service_id", "position"], name: "idx_policy_rules_pos", unique: true
+    t.index ["service_id"], name: "idx_policy_rules_service"
+  end
+
+  create_table "services", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
+    t.bigint "gateway_id", null: false
+    t.string "name", null: false
+    t.string "backend"
+    t.string "protocol"
+    t.integer "min_assurance", default: 1, null: false
+    t.boolean "enabled", default: true, null: false
+    t.text "description"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["gateway_id", "name"], name: "idx_services_gw_name", unique: true
   end
 
   create_table "session_tokens", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|

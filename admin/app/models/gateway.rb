@@ -7,7 +7,7 @@ class Gateway < ApplicationRecord
   STATUSES = %w[planned registered online stale].freeze
 
   belongs_to :zone
-  has_many :applications, dependent: :destroy
+  has_many :services, dependent: :destroy
   serialize :addresses, coder: JSON
 
   before_validation :normalize_name

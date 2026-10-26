@@ -5,7 +5,7 @@
 # helpdesk = "managing users, like adding and disabling users and devices" (operator, 2026-10-25):
 #   CAN  : read everything; create users (always role user / kind person); edit contact fields;
 #          enrollments (= add devices); assign a device owner.
-#   CANNOT: change role or kind; revoke (permanent) users or devices; groups; applications/services,
+#   CANNOT: change role or kind; revoke (permanent) users or devices; groups; services/services,
 #          their rules, registration and gateways; zone publish/reconcile.
 # admin keeps every operational function; read_only stays read-only.
 require "test_helper"
@@ -17,7 +17,7 @@ class HelpdeskRoleTest < ActionDispatch::IntegrationTest
                                 status: "active", email: "alice@example.com")
     @group = @zone.groups.create!(name: "staff")
     @gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen", status: "planned")
-    @svc = @gw.applications.create!(name: "blitz", backend: "127.0.0.1:5200", protocol: "http")
+    @svc = @gw.services.create!(name: "blitz", backend: "127.0.0.1:5200", protocol: "http")
     @device = @zone.devices.create!(name: "alice-pc", ns_name: "alice-pc.#{@zone.name}", status: "enrolled")
     # Publishing needs the zone authority (absent in tests); role checks must happen before any publish.
     Ztlp::Publisher.stubs(:publish_user!).returns(:ok)
@@ -41,13 +41,13 @@ class HelpdeskRoleTest < ActionDispatch::IntegrationTest
     "delete a group"            => ->(t) { t.delete t.group_path(t.group) },
     "add a group member"        => ->(t) { t.post t.add_member_group_path(t.group), params: { user_id: t.user.id } },
     "remove a group member"     => ->(t) { t.delete t.remove_member_group_path(t.group), params: { user_id: t.user.id } },
-    "open new application"      => ->(t) { t.get t.new_application_path },
-    "create an application"     => ->(t) { t.post t.applications_path, params: { application: { name: "x", gateway_id: t.gw.id } } },
-    "edit an application"       => ->(t) { t.patch t.application_path(t.svc), params: { application: { backend: "1.2.3.4:80" } } },
-    "disable an application"    => ->(t) { t.post t.disable_application_path(t.svc) },
-    "enable an application"     => ->(t) { t.post t.enable_application_path(t.svc) },
-    "add an access rule"        => ->(t) { t.post t.application_rules_path(t.svc), params: { rule: { subject_type: "all" } } },
-    "register an application"   => ->(t) { t.post t.register_applications_path, params: { fqdn: "x.#{t.zone.name}" } },
+    "open new service"      => ->(t) { t.get t.new_service_path },
+    "create a service"     => ->(t) { t.post t.services_path, params: { service: { name: "x", gateway_id: t.gw.id } } },
+    "edit a service"       => ->(t) { t.patch t.service_path(t.svc), params: { service: { backend: "1.2.3.4:80" } } },
+    "disable a service"    => ->(t) { t.post t.disable_service_path(t.svc) },
+    "enable a service"     => ->(t) { t.post t.enable_service_path(t.svc) },
+    "add an access rule"        => ->(t) { t.post t.service_rules_path(t.svc), params: { rule: { subject_type: "all" } } },
+    "register a service"   => ->(t) { t.post t.register_services_path, params: { fqdn: "x.#{t.zone.name}" } },
     "open new gateway"          => ->(t) { t.get t.new_gateway_path },
     "create a gateway"          => ->(t) { t.post t.gateways_path, params: { gateway: { name: "gw2", kind: "rust_listen" } } },
     "change a gateway kind"     => ->(t) { t.post t.update_kind_gateway_path(t.gw), params: { kind: "elixir" } },
@@ -62,13 +62,13 @@ class HelpdeskRoleTest < ActionDispatch::IntegrationTest
   FORBIDDEN.each do |what, call|
     test "helpdesk cannot #{what}" do
       as("helpdesk")
-      before = [ User.pluck(:status, :role), Group.count, GroupMembership.count, Application.count,
-                 Application.pluck(:enabled, :backend), PolicyRule.count, Gateway.pluck(:kind), Gateway.count,
+      before = [ User.pluck(:status, :role), Group.count, GroupMembership.count, Service.count,
+                 Service.pluck(:enabled, :backend), PolicyRule.count, Gateway.pluck(:kind), Gateway.count,
                  Device.pluck(:status) ]
       call.call(self)
       assert_response :forbidden, "#{what}: expected 403, got #{response.status}"
-      after = [ User.pluck(:status, :role), Group.count, GroupMembership.count, Application.count,
-                Application.pluck(:enabled, :backend), PolicyRule.count, Gateway.pluck(:kind), Gateway.count,
+      after = [ User.pluck(:status, :role), Group.count, GroupMembership.count, Service.count,
+                Service.pluck(:enabled, :backend), PolicyRule.count, Gateway.pluck(:kind), Gateway.count,
                 Device.pluck(:status) ]
       assert_equal before, after, "#{what}: state changed"
     end
@@ -124,12 +124,12 @@ class HelpdeskRoleTest < ActionDispatch::IntegrationTest
     assert_select "form[action='#{revoke_user_path(@user)}']", false
   end
 
-  test "helpdesk sees no New group / Register application buttons" do
+  test "helpdesk sees no New group / Register service buttons" do
     as("helpdesk")
     get groups_path
     assert_select "a[href='#{new_group_path}']", false
-    get applications_path
-    assert_select "a[href='#{register_applications_path}']", false
+    get services_path
+    assert_select "a[href='#{register_services_path}']", false
   end
 
   # ------------------------------------------------------------------ admin keeps operator powers
@@ -142,9 +142,9 @@ class HelpdeskRoleTest < ActionDispatch::IntegrationTest
     assert Group.exists?(name: "ops")
   end
 
-  test "admin can open new application and new gateway" do
+  test "admin can open new service and new gateway" do
     as("admin")
-    get new_application_path
+    get new_service_path
     assert_response :success
     get new_gateway_path
     assert_response :success

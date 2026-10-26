@@ -14,7 +14,7 @@ class DashboardController < ApplicationController
       "users" => zone_users.count,
       "devices" => zone_devices.count,
       "groups" => @zone&.groups.count.to_i,
-      "applications" => Application.where(gateway_id: zone_gateway_ids).count
+      "services" => Service.where(gateway_id: zone_gateway_ids).count
     }
     @checklist = setup_checklist
     @checklist_open = @checklist.any? { |i| !i["done"] }

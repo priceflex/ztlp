@@ -9,8 +9,8 @@ class Zone < ApplicationRecord
   has_many :devices
   has_many :enrollments
   has_many :gateways
-  has_many :applications
-  # PolicyRule has no zone_id (rules belong to an application's gateway);
+  has_many :services
+  # PolicyRule has no zone_id (rules belong to a service's gateway);
   # zone-scoped rule lookups must go through the gateway join.
 
   DNS_NAME = /\A[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\z/

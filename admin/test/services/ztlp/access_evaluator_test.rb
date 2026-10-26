@@ -24,8 +24,8 @@ class AccessEvaluatorTest < ActiveSupport::TestCase
     @zone = Zone.primary
     @gw_rust = @zone.gateways.create!(name: "edge", kind: "rust_listen")
     @gw_elixir = @zone.gateways.create!(name: "web", kind: "elixir")
-    @app = @gw_rust.applications.create!(name: "panel", min_assurance: 3, backend: "10.0.0.5:8443")
-    @app_off = @gw_elixir.applications.create!(name: "panel", min_assurance: 3, backend: "10.0.0.5:8443", enabled: false)
+    @app = @gw_rust.services.create!(name: "panel", min_assurance: 3, backend: "10.0.0.5:8443")
+    @app_off = @gw_elixir.services.create!(name: "panel", min_assurance: 3, backend: "10.0.0.5:8443", enabled: false)
 
     @owner = @zone.users.create!(username: "alice", role: "tech", status: "active")
     @bob = @zone.users.create!(username: "bob", role: "user", status: "active")
@@ -99,7 +99,7 @@ class AccessEvaluatorTest < ActiveSupport::TestCase
     assert_equal "allow", ev(anon, @app)[:decision]
   end
 
-  test "application disabled: deny" do
+  test "service disabled: deny" do
     out = ev(@dev, @app_off)
     assert_equal "deny", out[:decision]
     assert_match(/disabled/i, out[:reason])

@@ -2,7 +2,7 @@
 
 # A service exposed on a gateway. The gateway's allow-list entries are its
 # policy rules (decision 7); the default is deny.
-class Application < ApplicationRecord
+class Service < ApplicationRecord
   ASSURANCE_LEVELS = (1..4).freeze
 
   belongs_to :gateway

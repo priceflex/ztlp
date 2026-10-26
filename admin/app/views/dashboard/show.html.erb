@@ -6,7 +6,7 @@
   <a class="tally-item" href="<%= users_path %>"><div class="tally-n"><%= @tally["users"] %></div><div class="tally-l">Users</div><div class="tally-s">directory identities</div></a>
   <a class="tally-item" href="/devices"><div class="tally-n"><%= @tally["devices"] %></div><div class="tally-l">Devices</div><div class="tally-s">enrolled + pending</div></a>
   <a class="tally-item" href="<%= groups_path %>"><div class="tally-n"><%= @tally["groups"] %></div><div class="tally-l">Groups</div><div class="tally-s">shared subjects for policy</div></a>
-  <a class="tally-item" href="/apps"><div class="tally-n"><%= @tally["applications"] %></div><div class="tally-l">Applications</div><div class="tally-s">behind the gateways</div></a>
+  <a class="tally-item" href="<%= services_path %>"><div class="tally-n"><%= @tally["services"] %></div><div class="tally-l">Services</div><div class="tally-s">behind the gateways</div></a>
 </div>
 <div class="stack">
   <% if @checklist_open %>
@@ -55,7 +55,7 @@
           </div>
         </div>
       <% end %>
-      <% if @gateways.empty? %><div class="sub">No gateways registered yet (Slice 9c: add one from the Applications page).</div><% end %>
+      <% if @gateways.empty? %><div class="sub">No gateways registered yet (Slice 9c: add one from the Services page).</div><% end %>
     </div>
   </div>
   <div class="panel">

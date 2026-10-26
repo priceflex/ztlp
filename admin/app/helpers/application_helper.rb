@@ -12,7 +12,7 @@ module ApplicationHelper
     ],
     [
       "Access",
-      [ [ "apps", "Applications", "app" ], [ "policies", "Policies", "shield" ],
+      [ [ "services", "Services", "app" ], [ "policies", "Policies", "shield" ],
         [ "enrollments", "Enrollments", "key" ] ]
     ],
     [
@@ -44,7 +44,8 @@ module ApplicationHelper
 
   def current_route
     case request.path
-    when %r{\A/(users|devices|groups|apps|policies|enrollments|zone|admins|audit_logs)\b}
+    when %r{\A/(?:services|applications|gateways)\b} then "services"
+    when %r{\A/(users|devices|groups|policies|enrollments|zone|admins|audit_logs)\b}
       Regexp.last_match(1)
     else
       "root"
@@ -59,7 +60,7 @@ module ApplicationHelper
     when "users" then users_path
     when "devices" then "/devices"
     when "groups" then groups_path
-    when "apps" then "/apps"
+    when "services" then services_path
     when "policies" then "/policies"
     when "enrollments" then enrollments_path
     when "zone" then "/zone"

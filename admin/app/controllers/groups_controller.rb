@@ -8,7 +8,7 @@
 # is the source of truth: an NS failure never 500s after the save, it is a
 # warning toast and the 6-hourly republish retries. Destroy is blocked while
 # any policy rule references the group and for the default `admins` group.
-# Slice 9a seam: index "Applications" column + show "Policies" panel are
+# Slice 9a seam: index "Services" column + show "Policies" panel are
 # computed from policy_rules (Ztlp::PolicyRenderer.apps_for_group).
 class GroupsController < ApplicationController
   before_action :set_group, only: %i[show edit update destroy add_member remove_member]
@@ -101,7 +101,7 @@ class GroupsController < ApplicationController
       return redirect_to groups_path, alert: "The admins group cannot be deleted."
     end
     referenced = PolicyRule.where(subject_type: "group", subject_id: @group.id)
-                            .where(application_id: Application.where(gateway_id: @zone.gateways.select(:id)))
+                            .where(service_id: Service.where(gateway_id: @zone.gateways.select(:id)))
                             .exists?
     if referenced
       audit!("group.destroy", target: @group, status: "skipped", details: { reason: "referenced_by_policy" })
@@ -130,7 +130,7 @@ class GroupsController < ApplicationController
 
   private
 
-  # { ns_name => [Application, ...] } for every `group:` policy rule in the
+  # { ns_name => [Service, ...] } for every `group:` policy rule in the
   # zone's gateways. A rule whose group row was deleted still shows (stale but
   # honest — the ns_name is pinned in subject_value at rule-create time).
   def group_refs_by_ns_name
@@ -142,11 +142,11 @@ class GroupsController < ApplicationController
   end
 
   def group_refs_for_gateway(gateway)
-    app_ids = gateway.applications.pluck(:id)
+    app_ids = gateway.services.pluck(:id)
     refs = {}
-    PolicyRule.where(subject_type: "group", application_id: app_ids).each do |rule|
+    PolicyRule.where(subject_type: "group", service_id: app_ids).each do |rule|
       refs[rule.subject_value] = Array(refs[rule.subject_value])
-      app = rule.application
+      app = rule.service
       refs[rule.subject_value] << app unless refs[rule.subject_value].include?(app)
     end
     refs

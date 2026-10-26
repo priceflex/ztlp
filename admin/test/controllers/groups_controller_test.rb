@@ -2,14 +2,14 @@
 
 # Slice 7a: Groups read side (spec Slice 7).
 #
-# GET /groups          index  name, description, member count, applications
+# GET /groups          index  name, description, member count, services
 #                       referencing it (none yet -- Slice 9); New group button
 #                       (gated by write access; the form is Slice 7b).
 # GET /groups/:id      show   normal page or drawer fragment under X-Drawer: 1
 #                       (same contract as users#show). Description, members
 #                       table (display name, username, role, status), and a
 #                       read-only "Policies that reference this group" panel
-#                       (empty note until Slice 9 builds applications/rules).
+#                       (empty note until Slice 9 builds services/rules).
 #
 # Read-only slice: Publisher is never touched here (7b adds the publish_group!
 # hook on membership changes).
@@ -307,7 +307,7 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
 
   test "destroy is blocked while a policy rule references the group" do
     gw = @zone.gateways.create!(name: "docs-gw")
-    app = gw.applications.create!(name: "docs", backend: "10.0.0.9:80")
+    app = gw.services.create!(name: "docs", backend: "10.0.0.9:80")
     app.policy_rules.create!(subject_type: "group",
                              subject_id: @eng.id, subject_value: "eng.groups.test.ztlp")
     delete group_path(@eng)
@@ -360,14 +360,14 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
   # ---------------------------------------------------- 9a seam: group references
 
   # A `group:` policy rule must surface in the Groups directory: the index
-  # "Applications" column (7a placeholder "0") and the show page's Policies
+  # "Services" column (7a placeholder "0") and the show page's Policies
   # panel (7a placeholder "No policies"). Rules are matched on the pinned
   # subject_value (ns_name), so a rule whose group row was deleted still
   # counts against the ns_name (stale but honest, per 9a).
-  test "index shows the referencing-application count per group" do
+  test "index shows the referencing-service count per group" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    api = gw.applications.create!(name: "api", backend: "127.0.0.1:8080")
-    PolicyRule.create!(application: api, subject_type: "group", subject_id: @eng.id,
+    api = gw.services.create!(name: "api", backend: "127.0.0.1:8080")
+    PolicyRule.create!(service: api, subject_type: "group", subject_id: @eng.id,
                        subject_value: @eng.ns_name, position: 1)
     get groups_path
     assert_response :success
@@ -386,22 +386,22 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
   test "index counts references across ALL gateways (one gateway must not overwrite another)" do
     gw1 = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
     gw2 = @zone.gateways.create!(name: "gw2", kind: "elixir")
-    [ gw1.applications.create!(name: "api", backend: "127.0.0.1:8080"),
-      gw2.applications.create!(name: "wiki", backend: "127.0.0.1:8081") ].each do |app|
-      PolicyRule.create!(application: app, subject_type: "group", subject_id: @eng.id, position: 1)
+    [ gw1.services.create!(name: "api", backend: "127.0.0.1:8080"),
+      gw2.services.create!(name: "wiki", backend: "127.0.0.1:8081") ].each do |app|
+      PolicyRule.create!(service: app, subject_type: "group", subject_id: @eng.id, position: 1)
     end
     get groups_path
     eng_row = css_select("tbody tr").detect { |el| el.text.include?(@eng.ns_name) }
     assert_equal "2", eng_row.at_css("td.row-apps").text
   end
 
-  test "show lists the applications whose rules reference the group" do
+  test "show lists the services whose rules reference the group" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    api = gw.applications.create!(name: "api")
-    dash = gw.applications.create!(name: "dash")
-    PolicyRule.create!(application: api, subject_type: "group", subject_id: @eng.id,
+    api = gw.services.create!(name: "api")
+    dash = gw.services.create!(name: "dash")
+    PolicyRule.create!(service: api, subject_type: "group", subject_id: @eng.id,
                        subject_value: @eng.ns_name, position: 1)
-    PolicyRule.create!(application: dash, subject_type: "role", subject_value: "tech", position: 1)
+    PolicyRule.create!(service: dash, subject_type: "role", subject_value: "tech", position: 1)
     get group_path(@eng)
     assert_response :success
     assert_includes response.body, "api.test.ztlp"
@@ -412,10 +412,10 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, "No policies reference this group yet."
   end
 
-  test "show drawer fragment includes the referencing applications" do
+  test "show drawer fragment includes the referencing services" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    api = gw.applications.create!(name: "api")
-    PolicyRule.create!(application: api, subject_type: "group", subject_id: @eng.id,
+    api = gw.services.create!(name: "api")
+    PolicyRule.create!(service: api, subject_type: "group", subject_id: @eng.id,
                        subject_value: @eng.ns_name, position: 1)
     get group_path(@eng), headers: { "X-Drawer" => "1" }
     assert_response :success
@@ -428,8 +428,8 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
   # stale ns_name must not appear in any group's cell.
   test "index does not crash when a group rule references a deleted group row" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    api = gw.applications.create!(name: "api")
-    rule = PolicyRule.create!(application: api, subject_type: "group", subject_id: @eng.id,
+    api = gw.services.create!(name: "api")
+    rule = PolicyRule.create!(service: api, subject_type: "group", subject_id: @eng.id,
                               subject_value: @eng.ns_name, position: 1)
     @eng.destroy! # the rule keeps the pinned subject_value (stale but honest)
     get groups_path
@@ -444,8 +444,8 @@ class GroupsControllerTest < ActionDispatch::IntegrationTest
 
   test "destroy is refused while a policy rule references the group" do
     gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen")
-    api = gw.applications.create!(name: "api")
-    PolicyRule.create!(application: api, subject_type: "group", subject_id: @hr.id,
+    api = gw.services.create!(name: "api")
+    PolicyRule.create!(service: api, subject_type: "group", subject_id: @hr.id,
                        subject_value: @hr.ns_name, position: 1)
     delete group_path(@hr)
     assert_response :redirect

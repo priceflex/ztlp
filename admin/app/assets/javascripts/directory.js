@@ -544,7 +544,7 @@
     const form = ev.target
     if (!form || !form.getAttribute) return
     const deviceSel = form.querySelector('[data-testid="test-access-device"]')
-    const appSel = form.querySelector('[data-testid="test-access-application"]')
+    const appSel = form.querySelector('[data-testid="test-access-service"]')
     if (!deviceSel || !appSel || !deviceSel.value || !appSel.value) return
     const token = csrfToken()
     if (!token) return // no meta tag — let the plain form POST go through
@@ -562,7 +562,7 @@
       },
       body: JSON.stringify({
         device_id: deviceSel.value,
-        application_id: appSel.value,
+        service_id: appSel.value,
       }),
     })
       .then(function (r) {

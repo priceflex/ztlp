@@ -1,6 +1,6 @@
-<% content_for :title, "Register application - ZTLP Directory" %>
+<% content_for :title, "Register service - ZTLP Directory" %>
 <div class="page-head">
-  <div><h1>Register application</h1><p class="lede">Type the service's full ZTLP name. The panel finds its zone and checks the name server; nothing is published by registering.</p></div>
+  <div><h1>Register service</h1><p class="lede">Type the service's full ZTLP name. The panel finds its zone and checks the name server; nothing is published by registering.</p></div>
 </div>
 
 <% if flash.now[:alert] %><div class="notice"><span class="err"><%= flash.now[:alert] %></span></div><% end %>
@@ -9,7 +9,7 @@
   <div class="panel">
     <div class="panel-h"><h2>Service name</h2></div>
     <div class="panel-b">
-      <form action="<%= register_applications_path %>" method="get" class="inline-form">
+      <form action="<%= register_services_path %>" method="get" class="inline-form">
         <input type="text" name="fqdn" class="mono" placeholder="www.chooseforce.ztlp" value="<%= @fqdn %>"
                aria-label="Service full name" required>
         <button type="submit" class="btn primary">Look up</button>
@@ -28,8 +28,8 @@
           <p>Use one label inside <span class="mono"><%= @reg_zone.name %></span>, for example <span class="mono">www.<%= @reg_zone.name %></span>.</p>
         <% elsif @existing %>
           <p>Already registered: gateway <span class="mono"><%= @existing.ns_name %></span> (<%= @existing.status %>).</p>
-          <% app = @existing.applications.find_by(name: @label) %>
-          <% if app %><p><a class="btn" href="<%= application_path(app) %>">Open application</a></p><% end %>
+          <% app = @existing.services.find_by(name: @label) %>
+          <% if app %><p><a class="btn" href="<%= service_path(app) %>">Open service</a></p><% end %>
         <% else %>
           <dl class="kv"><dt>Zone</dt><dd class="mono"><%= @reg_zone.name %></dd></dl>
           <% if @record %>
@@ -39,17 +39,17 @@
             <dl class="kv"><dt>Node ID</dt><dd class="mono"><%= d["node_id"] %></dd></dl>
             <% if @record[:created_at] %><dl class="kv"><dt>Last registered</dt><dd><%= Time.at(@record[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M UTC") %></dd></dl><% end %>
             <% if operator? %>
-              <form action="<%= register_applications_path %>" method="post">
+              <form action="<%= register_services_path %>" method="post">
                 <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                 <input type="hidden" name="fqdn" value="<%= @fqdn %>">
                 <button type="submit" class="btn primary">Register <%= @fqdn %></button>
               </form>
-              <p class="hint">Creates the gateway and the application <span class="mono"><%= @label %></span>. Access is denied until you add rules on the application page.</p>
+              <p class="hint">Creates the gateway and the service <span class="mono"><%= @label %></span>. Access is denied until you add rules on the service page.</p>
             <% end %>
           <% else %>
             <p><span class="badge warn">not running</span> <%= @fqdn %> is <strong>not on the name server</strong><% if @ns_error %> (<%= @ns_error %>)<% elsif @not_configured %> (the panel has no NS admin API secret, so it cannot check)<% end %>.</p>
             <% if operator? %>
-              <form action="<%= register_applications_path %>" method="post" class="stack">
+              <form action="<%= register_services_path %>" method="post" class="stack">
                 <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                 <input type="hidden" name="fqdn" value="<%= @fqdn %>">
                 <div class="field">
@@ -79,7 +79,7 @@
                 <td class="nowrap"><%= row[:created_at] ? Time.at(row[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M") : "" %></td>
                 <td class="nowrap">
                   <% if operator? %>
-                    <form action="<%= register_applications_path %>" method="post">
+                    <form action="<%= register_services_path %>" method="post">
                       <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                       <input type="hidden" name="fqdn" value="<%= row[:fqdn] %>">
                       <button type="submit" class="btn sm">Register</button>

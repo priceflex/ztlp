@@ -1,20 +1,20 @@
 <% drawer = request.headers["X-Drawer"] == "1" %>
 <% write = operator? %>
-<% kind = @application.gateway.kind %>
-<% unless drawer %><% content_for :title, "#{ @application.name } - ZTLP Directory" %><% end %>
+<% kind = @service.gateway.kind %>
+<% unless drawer %><% content_for :title, "#{ @service.name } - ZTLP Directory" %><% end %>
 <div class="page-head">
-  <div><h1><%= @application.name %></h1>
-    <p class="lede mono"><%= @application.ztlp_name %></p></div>
+  <div><h1><%= @service.name %></h1>
+    <p class="lede mono"><%= @service.ztlp_name %></p></div>
   <% if write %>
     <div class="actions">
-      <%= form_with url: (@application.enabled ? disable_application_path(@application) : enable_application_path(@application)),
+      <%= form_with url: (@service.enabled ? disable_service_path(@service) : enable_service_path(@service)),
                     method: :post,
-                    data: { confirm: (@application.enabled ?
-                                       "Disable #{ @application.name }? It leaves the rendered policy now; the gateway stops serving it after you deploy the policy and restart the gateway." :
-                                       "Enable #{ @application.name }? It enters the rendered policy now; the gateway serves it after you deploy the policy and restart the gateway.") } do %>
-        <button type="submit" class="btn"><%= @application.enabled ? "Disable" : "Enable" %></button>
+                    data: { confirm: (@service.enabled ?
+                                       "Disable #{ @service.name }? It leaves the rendered policy now; the gateway stops serving it after you deploy the policy and restart the gateway." :
+                                       "Enable #{ @service.name }? It enters the rendered policy now; the gateway serves it after you deploy the policy and restart the gateway.") } do %>
+        <button type="submit" class="btn"><%= @service.enabled ? "Disable" : "Enable" %></button>
       <% end %>
-      <a class="btn" href="<%= edit_application_path(@application) %>">Edit</a>
+      <a class="btn" href="<%= edit_service_path(@service) %>">Edit</a>
     </div>
   <% end %>
 </div>
@@ -22,40 +22,40 @@
 <% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>
 
 <div class="stack">
-  <% if @application.gateway.status == "planned" %>
+  <% if @service.gateway.status == "planned" %>
     <div class="panel" data-start-gateway>
       <div class="panel-h"><h2>Start the gateway</h2><span class="badge warn">planned</span></div>
       <div class="panel-b">
-        <p class="hint">This application is not on the name server yet. Run this on the box next to the service.</p>
-        <pre class="code-box"><%= Ztlp::AppRegistrar.gateway_command(@application) %></pre>
+        <p class="hint">This service is not on the name server yet. Run this on the box next to the service.</p>
+        <pre class="code-box"><%= Ztlp::ServiceRegistrar.gateway_command(@service) %></pre>
       </div>
     </div>
   <% end %>
   <div class="panel">
-    <div class="panel-h"><h2>About</h2><span class="badge <%= @application.enabled ? "ok" : "bad" %>"><%= @application.enabled ? "enabled" : "disabled" %></span></div>
+    <div class="panel-h"><h2>About</h2><span class="badge <%= @service.enabled ? "ok" : "bad" %>"><%= @service.enabled ? "enabled" : "disabled" %></span></div>
     <dl class="kv">
-      <dt>Gateway</dt><dd class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %> (<%= kind %>)</dd>
-      <dt>Backend</dt><dd class="mono"><%= @application.backend.presence || "—" %></dd>
-      <dt>Protocol</dt><dd><%= @application.protocol.presence || "—" %></dd>
-      <dt>Min assurance</dt><dd><%= @application.min_assurance %><% if kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
-      <dt>Description</dt><dd><%= @application.description.presence || "—" %></dd>
+      <dt>Gateway</dt><dd class="mono"><%= @service.gateway.name %>.<%= @service.gateway.zone.name %> (<%= kind %>)</dd>
+      <dt>Backend</dt><dd class="mono"><%= @service.backend.presence || "—" %></dd>
+      <dt>Protocol</dt><dd><%= @service.protocol.presence || "—" %></dd>
+      <dt>Min assurance</dt><dd><%= @service.min_assurance %><% if kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
+      <dt>Description</dt><dd><%= @service.description.presence || "—" %></dd>
     </dl>
   </div>
 
   <div class="panel">
-    <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @application.policy_rules.count %></span></div>
-    <% if @application.policy_rules.any? %>
+    <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @service.policy_rules.count %></span></div>
+    <% if @service.policy_rules.any? %>
       <div class="table-wrap"><table>
         <thead><tr><th>#</th><th>Subject type</th><th>Subject</th><th>Rendered literal</th><% if write %><th></th><% end %></tr></thead>
         <tbody>
-          <% @application.policy_rules.order(:position, :id).each do |rule| %>
+          <% @service.policy_rules.order(:position, :id).each do |rule| %>
             <tr><td class="nowrap"><%= rule.position %></td>
               <td class="nowrap"><%= rule.subject_type %></td>
               <td class="nowrap mono"><%= rule.subject_entity&.ns_name || rule.subject_value || "all" %></td>
               <td class="nowrap mono"><%= rule.render %></td>
               <% if write %><td class="nowrap">
-                <%= form_with url: application_rule_path(@application, rule), method: :delete,
-                              data: { confirm: "Remove #{rule.render} from #{ @application.name }? A gateway restart is needed for it to take effect." } do %>
+                <%= form_with url: service_rule_path(@service, rule), method: :delete,
+                              data: { confirm: "Remove #{rule.render} from #{ @service.name }? A gateway restart is needed for it to take effect." } do %>
                   <button type="submit" class="btn sm">Remove</button>
                 <% end %></td><% end %></tr>
           <% end %>
@@ -74,7 +74,7 @@
       <% user_pairs = pairs.call(@zone_users || []) { |u| "#{u.display_name} (#{u.username})" } %>
       <% device_pairs = pairs.call(@zone_devices || [], &:name) %>
       <% group_pairs = pairs.call(@zone_groups || [], &:name) %>
-      <%= form_with url: application_rules_path(@application), method: :post, class: "actions" do %>
+      <%= form_with url: service_rules_path(@service), method: :post, class: "actions" do %>
         <label for="rule_subject_type">Add rule</label>
         <select name="subject_type" id="rule_subject_type" class="mono" data-rule-type>
           <% PolicyRule::SUBJECT_TYPES.each do |t| %>
@@ -100,7 +100,7 @@
   </div>
   <div class="panel">
     <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= kind %></span></div>
-    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@application.gateway) %></code></pre>
-    <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @application.gateway.name %>.<%= @application.gateway.zone.name %></span> and restart the gateway to apply it.</p>
+    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@service.gateway) %></code></pre>
+    <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @service.gateway.name %>.<%= @service.gateway.zone.name %></span> and restart the gateway to apply it.</p>
   </div>
 </div>

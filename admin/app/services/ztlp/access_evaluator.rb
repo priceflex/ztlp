@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module Ztlp
-  # Evaluate whether a device may use an application on its gateway,
+  # Evaluate whether a device may use a service on its gateway,
   # mirroring the GATEWAY (not the spec prose) — STATUS 2026-10-23 01:55Z:
   #
   # proto/src/policy.rs: the client identity on a Rust gateway is the DEVICE
@@ -26,10 +26,10 @@ module Ztlp
   # config the panel does not render. So the floor is reported as a WARNING with
   # assurance_enforced: false and never changes the gateway's decision.
   class AccessEvaluator
-    def self.evaluate(device, application, ns_client: NsClient)
+    def self.evaluate(device, service, ns_client: NsClient)
       trace = []
       warnings = []
-      kind = application.gateway&.kind || "rust_listen"
+      kind = service.gateway&.kind || "rust_listen"
 
       return result("deny", "device is #{device.status} (not enrolled)", trace, warnings) unless device.enrolled?
 
@@ -37,17 +37,17 @@ module Ztlp
       if owner && %w[revoked disabled].include?(owner.status)
         return result("deny", "owner #{owner.username} is #{owner.status}", trace, warnings)
       end
-      return result("deny", "application #{application.name} is disabled", trace, warnings) unless application.enabled
+      return result("deny", "service #{service.name} is disabled", trace, warnings) unless service.enabled
 
-      if device.assurance.to_i < application.min_assurance.to_i
-        warnings << "Device assurance #{device.assurance} is below the application minimum " \
-                    "#{application.min_assurance}, but the minimum is not enforced by #{kind} gateways."
+      if device.assurance.to_i < service.min_assurance.to_i
+        warnings << "Device assurance #{device.assurance} is below the service minimum " \
+                    "#{service.min_assurance}, but the minimum is not enforced by #{kind} gateways."
       end
 
       zone = device.zone
       ns_port = Reconciler.ns_admin_port(zone)
       ns_secret = zone.ns_admin_secret
-      application.policy_rules.order(:position, :id).each do |rule|
+      service.policy_rules.order(:position, :id).each do |rule|
         res, why = rule_result(rule, device: device, owner: owner, zone: zone, kind: kind,
                                      ns_client: ns_client, ns_port: ns_port, ns_secret: ns_secret)
         trace << { rule: rule_label(rule), result: res, why: why }

@@ -26,7 +26,7 @@
           <td><div class="who"><span class="avatar"><%= initials(u.display_name) %></span>
             <div><div class="strong"><a href="<%= user_path(u) %>"><%= u.display_name %></a></div>
             <div class="sub mono"><%= u.ns_name %></div></div></div></td>
-          <td class="nowrap"><%= u.kind == "service" ? "Service" : "Person" %></td>
+          <td class="nowrap"><%= u.kind == "service" ? "Service account" : "Person" %></td>
           <td class="nowrap"><%= u.role %></td>
           <td><div class="chips"><% u.groups.each do |g| %><span class="chip"><%= g.name %></span><% end %></div></td>
           <td class="row-devices"><%= u.devices.count(&:enrolled?) %></td>

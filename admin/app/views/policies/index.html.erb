@@ -1,12 +1,12 @@
 <% content_for :title, "Policies - ZTLP Directory" %>
 <div class="page-head">
-  <div><h1>Policies</h1><p class="lede">Every application's allow-list, grouped by application. The default is deny; rule changes need a gateway restart, membership changes are live.</p></div>
+  <div><h1>Policies</h1><p class="lede">Every service's allow-list, grouped by service. The default is deny; rule changes need a gateway restart, membership changes are live.</p></div>
 </div>
 
 <div class="stack">
   <% @gateways.each do |gw| %>
     <% doc = @policy_docs[gw] %>
-    <% gw.applications.order(:name).each do |app| %>
+    <% gw.services.order(:name).each do |app| %>
       <div class="panel">
         <div class="panel-h"><h2><%= app.name %></h2>
           <span class="sub mono"><%= app.ztlp_name %></span>
@@ -30,7 +30,7 @@
           <button type="button" class="btn sm" data-act="copy"
                   data-copy="<%= doc %>"
                   data-testid="policy-copy-<%= app.name %>">Copy policy</button>
-          <a class="btn sm" href="<%= application_path(app) %>">Open application</a>
+          <a class="btn sm" href="<%= service_path(app) %>">Open service</a>
         </div>
         <p class="hint">Rule changes need a gateway restart; group membership changes are live. Deploy this document to <span class="mono"><%= gw.name %>.<%= gw.zone.name %></span> and restart the gateway to apply it.</p>
       </div>
@@ -39,7 +39,7 @@
 
   <div class="panel">
     <div class="panel-h"><h2>Test access</h2></div>
-    <p class="sub">Pick a device and an application. The check runs the same rule walk the gateway performs: a revoked or pending device, a disabled owner or a disabled application deny; then the rules in order until one allows — otherwise default deny. This is a panel-side simulation of the gateway decision, not a probe of the running gateway.</p>
+    <p class="sub">Pick a device and a service. The check runs the same rule walk the gateway performs: a revoked or pending device, a disabled owner or a disabled service deny; then the rules in order until one allows — otherwise default deny. This is a panel-side simulation of the gateway decision, not a probe of the running gateway.</p>
     <%= form_with url: "/policies/test", method: :post, html: { data: { testid: "test-access-form" } } do %>
       <div class="actions">
         <label for="test-access-device">Device</label>
@@ -49,8 +49,8 @@
             <option value="<%= d.id %>"><%= d.name %> (<%= d.status %>)</option>
           <% end %>
         </select>
-        <label for="test-access-application">Application</label>
-        <select name="application_id" id="test-access-application" class="mono" data-testid="test-access-application">
+        <label for="test-access-service">Service</label>
+        <select name="service_id" id="test-access-service" class="mono" data-testid="test-access-service">
           <option value="">choose…</option>
           <% @test_apps.each do |gw, app| %>
             <option value="<%= app.id %>"><%= app.name %> (<%= gw.name %>.<%= gw.zone.name %>)</option>

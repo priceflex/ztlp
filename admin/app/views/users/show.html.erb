@@ -10,7 +10,7 @@
   <div class="panel">
     <div class="panel-h"><h2>Profile</h2><% if @user.kind == "service" %><span class="sub">service identity</span><% end %></div>
     <dl class="kv"><dt>Username</dt><dd class="mono"><%= @user.username %></dd></dl>
-    <dl class="kv"><dt>Kind</dt><dd><%= @user.kind == "service" ? "Service" : "Person" %></dd></dl>
+    <dl class="kv"><dt>Kind</dt><dd><%= @user.kind == "service" ? "Service account" : "Person" %></dd></dl>
     <dl class="kv"><dt>Role</dt><dd><%= @user.role %></dd></dl>
     <% if @user.email.present? %><dl class="kv"><dt>Email</dt><dd><%= @user.email %></dd></dl><% end %>
     <% if @user.phone.present? %><dl class="kv"><dt>Phone</dt><dd><%= @user.phone %><%= @user.sms_opt_in ? " (SMS opt-in)" : "" %></dd></dl><% end %>

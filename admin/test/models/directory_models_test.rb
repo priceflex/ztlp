@@ -186,7 +186,7 @@ class EnrollmentValidationTest < ActiveSupport::TestCase
   end
 end
 
-class GatewayApplicationPolicyRuleTest < ActiveSupport::TestCase
+class GatewayServicePolicyRuleTest < ActiveSupport::TestCase
   def setup
     @zone = Zone.create!(name: "trs.ztlp", ns_addr: "127.0.0.1:9103")
     @gw = @zone.gateways.create!(name: "edge", kind: "rust_listen")
@@ -200,16 +200,16 @@ class GatewayApplicationPolicyRuleTest < ActiveSupport::TestCase
     refute @zone.gateways.build(name: "edge2", status: "offline").valid?
   end
 
-  test "application min_assurance 1..4 and ztlp_name" do
-    a = @gw.applications.build(name: "web", min_assurance: 3)
+  test "service min_assurance 1..4 and ztlp_name" do
+    a = @gw.services.build(name: "web", min_assurance: 3)
     assert a.valid?
     assert_equal "web.trs.ztlp", a.ztlp_name
-    refute @gw.applications.build(name: "web2", min_assurance: 5).valid?
-    refute @gw.applications.build(name: "web2", min_assurance: 0).valid?
+    refute @gw.services.build(name: "web2", min_assurance: 5).valid?
+    refute @gw.services.build(name: "web2", min_assurance: 0).valid?
   end
 
   def make(subject_type, subject: nil, subject_value: nil, app: "app1")
-    rule = @gw.applications.create!(name: app).policy_rules.build(subject_type:, subject_value:)
+    rule = @gw.services.create!(name: app).policy_rules.build(subject_type:, subject_value:)
     rule.subject_id = subject.id if subject
     rule
   end

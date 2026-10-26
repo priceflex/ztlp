@@ -2,13 +2,13 @@
 
 # Slice 9c sub-slice 1: the Policies page (read-only overview + Test access).
 #
-# GET /policies       index  every application (across the zone's gateways)
+# GET /policies       index  every service (across the zone's gateways)
 #                         with its rules (subject type, rendered literal)
-#                         grouped under the application; per-application
+#                         grouped under the service; per-service
 #                         rendered policy code block with a copy button
 #                         (data-act="copy", CSP-clean); "Test access" panel
-#                         with device + application pickers (data-testid
-#                         test-access-device / test-access-application) and
+#                         with device + service pickers (data-testid
+#                         test-access-device / test-access-service) and
 #                         a button that POSTs /policies/test (form with
 #                         data-testid="test-access-form", no inline
 #                         JS/script/style per the CSP rule).
@@ -35,16 +35,16 @@ class PoliciesControllerTest < ActionDispatch::IntegrationTest
                                     assurance: 3, status: "enrolled")
     @pending = @zone.devices.create!(name: "bob-pc", user: nil, status: "pending")
 
-    @app = @gw.applications.create!(name: "comms-blitz", backend: "10.42.42.112:5200",
+    @app = @gw.services.create!(name: "comms-blitz", backend: "10.42.42.112:5200",
                                     protocol: "http", min_assurance: 2)
     @app.policy_rules.create!(subject_type: "any", position: 0)
     @app.policy_rules.create!(subject_type: "group", subject_id: @eng.id,
                               subject_value: @eng.ns_name, position: 1)
-    @off = @gw.applications.create!(name: "vault", enabled: false, backend: "10.42.42.200:3000")
-    @elix = @gw_elixir.applications.create!(name: "dash", backend: "dash:3000")
+    @off = @gw.services.create!(name: "vault", enabled: false, backend: "10.42.42.200:3000")
+    @elix = @gw_elixir.services.create!(name: "dash", backend: "dash:3000")
   end
 
-  test "index renders every application with its rules grouped under it" do
+  test "index renders every service with its rules grouped under it" do
     get policies_path
     assert_response :success
     body = response.body
@@ -56,11 +56,11 @@ class PoliciesControllerTest < ActionDispatch::IntegrationTest
     # rules render their subject type + literal
     assert_includes body, "any"
     assert_includes body, "group:eng.groups.test.ztlp"
-    # disabled application is still listed (read-only overview)
+    # disabled service is still listed (read-only overview)
     assert_includes body, "disabled"
   end
 
-  test "index renders a rendered-policy code block per application with a copy button" do
+  test "index renders a rendered-policy code block per service with a copy button" do
     get policies_path
     assert_response :success
     body = response.body
@@ -76,17 +76,17 @@ class PoliciesControllerTest < ActionDispatch::IntegrationTest
     assert_includes body, %(data-testid="policy-copy-comms-blitz")
   end
 
-  test "index renders the test-access panel with device and application pickers" do
+  test "index renders the test-access panel with device and service pickers" do
     get policies_path
     assert_response :success
     body = response.body
 
     assert_includes body, %(data-testid="test-access-device")
-    assert_includes body, %(data-testid="test-access-application")
+    assert_includes body, %(data-testid="test-access-service")
     assert_includes body, %(data-testid="test-access-form")
     assert_includes body, "alice-mbp"
     assert_includes body, "comms-blitz"
-    # every device (incl. pending) and application (incl. disabled) is pickable
+    # every device (incl. pending) and service (incl. disabled) is pickable
     assert_includes body, "bob-pc"
     assert_includes body, "vault"
   end

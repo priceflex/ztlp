@@ -4,7 +4,7 @@
 #
 # GET /search.json?q=  search#index  JSON [{type,id,name,sub,url}]
 # ILIKE over users (username/display_name/email-deterministic exact), devices
-# (name/node_id), groups, applications; max 20; JSON response (never HTML),
+# (name/node_id), groups, services; max 20; JSON response (never HTML),
 # so a `<script>` query returns escaped JSON and no HTML markup.
 require "test_helper"
 
@@ -25,7 +25,7 @@ class SearchControllerTest < ActionDispatch::IntegrationTest
                                     noise_pubkey_hex: "cd" * 32, key_source: "secure-enclave",
                                     assurance: 3, status: "enrolled")
     @gw = @zone.gateways.create!(name: "portal", kind: "rust_listen")
-    @app = @gw.applications.create!(name: "crm", backend: "http://10.0.0.5:8080", protocol: "http",
+    @app = @gw.services.create!(name: "crm", backend: "http://10.0.0.5:8080", protocol: "http",
                                     enabled: true)
   end
 
@@ -82,12 +82,12 @@ class SearchControllerTest < ActionDispatch::IntegrationTest
     assert JSON.parse(response.body).any? { |r| r["type"] == "group" && r["name"] == "eng" }
   end
 
-  test "matches applications by name" do
+  test "matches services by name" do
     get "/search.json?q=crm"
     rows = JSON.parse(response.body)
-    a = rows.find { |r| r["type"] == "application" }
+    a = rows.find { |r| r["type"] == "service" }
     assert a && a["name"] == "crm"
-    assert_equal("/applications/#{@app.id}", a["url"])
+    assert_equal("/services/#{@app.id}", a["url"])
   end
 
   test "a script-tag query returns escaped json and no html" do
@@ -105,7 +105,7 @@ class SearchControllerTest < ActionDispatch::IntegrationTest
     get "/search.json?q=g"
     rows = JSON.parse(response.body)
     assert_operator rows.length, :<=, 20, "the response is capped at 20"
-    assert_equal "group", rows.first["type"] # type order: users, devices, groups, applications
+    assert_equal "group", rows.first["type"] # type order: users, devices, groups, services
   end
 
   test "blank or missing q returns an empty array" do

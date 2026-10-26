@@ -328,7 +328,7 @@ test('renderTestAccessResult: warnings render as a warnings panel', () => {
   const panel = Z.renderTestAccessResult(fakeDoc, box, {
     decision: 'allow', reason: 'rule 2 matched',
     trace: [{ rule: 'any', result: 'allow', why: 'matches every identity' }],
-    warnings: ['Device assurance high is below the application minimum critical'],
+    warnings: ['Device assurance high is below the service minimum critical'],
   })
   const wpanel = panel.children.find(c => c.attrs['data-testid'] === 'test-access-warnings')
   assert.ok(wpanel, 'warnings panel present')

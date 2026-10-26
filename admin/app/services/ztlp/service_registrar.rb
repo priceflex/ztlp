@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
 module Ztlp
-  # Register an application by its full ZTLP name (www.chooseforce.ztlp, blitz.trs.ztlp): find the
+  # Register a service by its full ZTLP name (www.chooseforce.ztlp, blitz.trs.ztlp): find the
   # zone from the name, look the service up on the NS (SVC record via the admin API), and create the
-  # gateway + application rows. READ-ONLY toward the NS: registering never publishes anything.
+  # gateway + service rows. READ-ONLY toward the NS: registering never publishes anything.
   # PLAN-multizone-and-app-registration.md, Phase B.
-  class AppRegistrar
+  class ServiceRegistrar
     class Error < StandardError; end
 
     LABEL = Admin::USERNAME
@@ -52,8 +52,8 @@ module Ztlp
       [ rows.sort_by { |row| row[:fqdn] }, errors ]
     end
 
-    # Create (or return the existing) gateway + application for the name. `record` is the SVC
-    # record from #lookup (nil = not running yet -> planned). Returns the Application.
+    # Create (or return the existing) gateway + service for the name. `record` is the SVC
+    # record from #lookup (nil = not running yet -> planned). Returns the Service.
     def self.register!(fqdn, zone, record:, backend: nil)
       label = label_for(fqdn, zone) or raise Error, "#{fqdn} must be one DNS label inside #{zone.name}"
       data = (record && record[:data]) || {}
@@ -69,7 +69,7 @@ module Ztlp
           )
           gateway.save!
         end
-        app = gateway.applications.find_or_initialize_by(name: label)
+        app = gateway.services.find_or_initialize_by(name: label)
         if app.new_record?
           app.backend = backend.to_s.strip.presence
           app.save!
@@ -81,7 +81,7 @@ module Ztlp
     # The relay secret env var the Rust gateway reads for its zone (ztlp-cli.rs relay_hmac_env_var).
     def self.relay_env_var(zone) = "ZTLP_HMAC_SECRET_#{zone.name.upcase.gsub(/[^A-Z0-9]+/, '_')}"
 
-    # The exact commands to start a gateway for a planned application (no secret values, ever).
+    # The exact commands to start a gateway for a planned service (no secret values, ever).
     def self.gateway_command(app)
       zone = app.gateway.zone
       label = app.gateway.name

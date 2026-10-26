@@ -1,14 +1,14 @@
 # frozen_string_literal: true
 
-# Slice 9b sub-slice 4: policy-rule add/remove on the application show page.
+# Slice 9b sub-slice 4: policy-rule add/remove on the service show page.
 #
-# POST   /apps/:id/rules        add a rule (subject_type + subject_id or
+# POST   /services/:id/rules        add a rule (subject_type + subject_id or
 #                                subject_value); position auto = count + 1;
 #                                audit rule.add; redirect back with the
 #                                deploy hint (rule changes need a gateway
 #                                restart — same contract as the other 9b
 #                                sub-slices: NOTHING is published to the NS).
-# DELETE /apps/:id/rules/:rid   remove one rule (scoped to the application,
+# DELETE /services/:id/rules/:rid   remove one rule (scoped to the service,
 #                                which is itself zone-scoped); audit
 #                                rule.remove; unknown rule -> 404.
 #
@@ -17,53 +17,53 @@
 # text; any needs no subject. The subject's ns_name is pinned into subject_value
 # at create time (PolicyRule#pin_subject_value), so the rendered literal
 # survives entity deletion.
-class ApplicationRulesController < ApplicationController
+class ServiceRulesController < ApplicationController
   before_action :require_operator, only: %i[create destroy]
 
   PICKED_TYPES = %w[group user device].freeze
 
   def create
-    @application = zone_application
-    @rule = @application.policy_rules.new(rule_attrs)
+    @service = zone_service
+    @rule = @service.policy_rules.new(rule_attrs)
     if @rule.save
-      audit!("rule.add", target: @application, rule: @rule.render)
-      redirect_to application_path(@application),
+      audit!("rule.add", target: @service, rule: @rule.render)
+      redirect_to service_path(@service),
                   notice: "Rule #{@rule.render} added. Deploy the rendered policy and restart the gateway to make it live."
     else
       @rule_errors = @rule.errors.full_messages
       load_show_context
-      render "applications/show", status: :unprocessable_content
+      render "services/show", status: :unprocessable_content
     end
   end
 
   def destroy
-    @application = zone_application
-    rule = @application.policy_rules.find(params[:id]) # unknown -> 404
+    @service = zone_service
+    rule = @service.policy_rules.find(params[:id]) # unknown -> 404
     literal = rule.render
     destroyed = rule.destroy
     unless destroyed
-      audit!("rule.remove", target: @application, status: "failed", rule: literal,
+      audit!("rule.remove", target: @service, status: "failed", rule: literal,
                                       error: "row survived: #{rule.errors.full_messages.to_sentence}")
-      return redirect_to application_path(@application),
+      return redirect_to service_path(@service),
                          alert: "Could not remove rule #{literal}: #{rule.errors.full_messages.to_sentence}"
     end
 
-    audit!("rule.remove", target: @application, rule: literal)
-    redirect_to application_path(@application),
+    audit!("rule.remove", target: @service, rule: literal)
+    redirect_to service_path(@service),
                 notice: "Rule #{literal} removed. Deploy the rendered policy and restart the gateway to make it live."
   end
 
   private
 
-  def zone_application
-    @application ||= Application
-                      .where(id: params[:application_id])
+  def zone_service
+    @service ||= Service
+                      .where(id: params[:service_id])
                       .where(gateway_id: @zone.gateways.select(:id))
                       .includes(gateway: :zone, policy_rules: [])
                       .first
-    raise ActiveRecord::RecordNotFound, "application" if @application.nil?
+    raise ActiveRecord::RecordNotFound, "service" if @service.nil?
 
-    @application
+    @service
   end
 
   def load_show_context
@@ -99,9 +99,9 @@ class ApplicationRulesController < ApplicationController
 
   # A picked subject must be a row in THIS zone; a subject id from another
   # zone (or a missing row) is not a rule target.
-  # max + 1, not count + 1: after a removal count + 1 collides with the unique (application, position).
+  # max + 1, not count + 1: after a removal count + 1 collides with the unique (service, position).
   def next_position
-    @application.policy_rules.maximum(:position).to_i + 1
+    @service.policy_rules.maximum(:position).to_i + 1
   end
 
   def subject_entity(type, id)

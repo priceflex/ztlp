@@ -19,24 +19,24 @@ class OverviewSetupTest < ActionDispatch::IntegrationTest
 
   # --- Overview: tally strip --------------------------------------------
 
-  test "overview shows a tally of users, devices, groups and applications" do
+  test "overview shows a tally of users, devices, groups and services" do
     @zone.users.create!(username: "alice", display_name: "Alice", kind: "person", role: "user", status: "active")
     @zone.devices.create!(name: "alice-mbp", ns_name: "alice-mbp.test.ztlp", node_id_hex: "aa" * 32,
                          noise_pubkey_hex: "bb" * 32, status: "enrolled")
     @zone.groups.create!(name: "ops", ns_name: "ops.groups.test.ztlp")
     gw = @zone.gateways.create!(name: "gw1", ns_name: "gw1.test.ztlp", kind: "rust_listen", status: "online")
-    gw.applications.create!(name: "blitz", backend: "http://10.0.0.1:8091")
+    gw.services.create!(name: "blitz", backend: "http://10.0.0.1:8091")
 
     sign_in(@steve, @steve_seed)
     get root_path
     assert_response :success
     assert_includes response.body, "Overview"
     tally = response.body.scan(/tally-item/).size
-    assert_operator tally, :>=, 4, "tally strip must cover users/devices/groups/applications"
+    assert_operator tally, :>=, 4, "tally strip must cover users/devices/groups/services"
     assert_match %r{1</div>\s*<div class="tally-l">Users}, response.body
     assert_match %r{1</div>\s*<div class="tally-l">Devices}, response.body
     assert_match %r{1</div>\s*<div class="tally-l">Groups}, response.body
-    assert_match %r{1</div>\s*<div class="tally-l">Applications}, response.body
+    assert_match %r{1</div>\s*<div class="tally-l">Services}, response.body
   end
 
   # --- Setup checklist: visibility matrix --------------------------------

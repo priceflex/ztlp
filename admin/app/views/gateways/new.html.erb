@@ -1,7 +1,7 @@
 <%# Slice 9b sub-slice 6: inline "New gateway" form (spec Slice 9). Reachable
-    from the application new/create flow — a gateway is what an application
+    from the service new/create flow — a gateway is what a service
     lives on, so the operator adds the zone's gateway row here, then creates
-    the application on it. Name is fixed after create (it drives ns_name
+    the service on it. Name is fixed after create (it drives ns_name
     <name>.<zone> and the rendered service entry). No NS publish: the rendered
     policy is deployed by the operator at gateway restart. %>
 <% content_for :title, "New gateway - ZTLP Directory" %>
@@ -29,7 +29,7 @@
         <div class="field"><%= f.label :host_note %><%= f.text_field :host_note, class: "mono" %><p class="hint">Host:port note for the operator (optional).</p></div>
         <div class="actions">
           <%= f.submit "Create gateway", class: "btn primary" %>
-          <%= link_to "Cancel", new_application_path, class: "btn" %>
+          <%= link_to "Cancel", new_service_path, class: "btn" %>
         </div>
       <% end %>
     </div>

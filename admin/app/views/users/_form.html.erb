@@ -38,7 +38,7 @@
       <% if operator? %>
       <div class="field">
         <%= f.label :kind %>
-        <%= f.select :kind, User::KINDS.map { |k| [k.humanize, k] } %>
+        <%= f.select :kind, [ [ "Person", "person" ], [ "Service account", "service" ] ] %>
       </div>
       <% else %>
       <p class="sub">Role and kind are set by an administrator (new users start as a person with the user role).</p>

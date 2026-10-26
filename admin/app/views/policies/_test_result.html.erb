@@ -6,7 +6,7 @@
 # Server-rendered and ERB-escaped: no innerHTML with server data in the JS.
 <div class="panel" data-testid="test-access-result">
   <div class="panel-h">
-    <h2>Access check — <%= @test_result_device_name %> → <%= @test_result_application_name %></h2>
+    <h2>Access check — <%= @test_result_device_name %> → <%= @test_result_service_name %></h2>
     <span class="badge <%= @test_result[:decision] == "allow" ? "ok" : "bad" %>"><%= @test_result[:decision] %></span>
   </div>
   <p class="sub" data-testid="test-access-reason"><%= @test_result[:reason] %></p>

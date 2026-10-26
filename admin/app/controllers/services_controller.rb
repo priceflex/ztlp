@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Slice 9b sub-slice 2: Applications directory — read side (spec Slice 9).
+# Slice 9b sub-slice 2: Services directory — read side (spec Slice 9).
 # Index across the zone's gateways; show = page or drawer fragment (X-Drawer: 1,
 # same contract as users/groups show). No Publisher calls: the rendered policy
 # is computed locally with Ztlp::PolicyRenderer; publishing it is the operator's
@@ -11,24 +11,24 @@
 # <name>.<zone> — a rename would leave the old service live on the gateway).
 # Every action is scoped to the zone's gateways (cross-zone ids 404 on
 # edit/update; a gateway pick from another zone fails create). Creating or
-# editing an application publishes NOTHING to the NS: the rendered policy is a
+# editing a service publishes NOTHING to the NS: the rendered policy is a
 # gateway-side artifact deployed by the operator at gateway restart.
-class ApplicationsController < ApplicationController
+class ServicesController < ApplicationController
   before_action :require_operator, only: %i[new create edit update enable disable]
 
   APP_FIELDS = %i[backend protocol min_assurance description].freeze
 
   def index
-    @apps = @zone.gateways.includes(applications: %i[policy_rules]).flat_map(&:applications)
+    @apps = @zone.gateways.includes(services: %i[policy_rules]).flat_map(&:services)
   end
 
   def show
-    @application = Application
+    @service = Service
                      .where(id: params[:id])
                      .where(gateway_id: @zone.gateways.select(:id))
                      .includes(gateway: :zone, policy_rules: [])
                      .first
-    raise ActiveRecord::RecordNotFound, "application" if @application.nil?
+    raise ActiveRecord::RecordNotFound, "service" if @service.nil?
 
     load_rule_subjects
     render :show, layout: false if request.headers["X-Drawer"] == "1"
@@ -36,23 +36,23 @@ class ApplicationsController < ApplicationController
 
   def new
     @gateways = @zone.gateways.order(:name)
-    @application = Application.new
+    @service = Service.new
   end
 
   def create
-    gateway = scoped_gateway(params.require(:application)[:gateway_id]) # missing -> 400, not 500
+    gateway = scoped_gateway(params.require(:service)[:gateway_id]) # missing -> 400, not 500
     if gateway.nil?
       @gateways = @zone.gateways.order(:name)
-      @application = Application.new(application_params)
-      @application.errors.add(:base, "Pick a gateway from this zone.")
+      @service = Service.new(service_params)
+      @service.errors.add(:base, "Pick a gateway from this zone.")
       return render :new, status: :unprocessable_content
     end
 
-    @application = gateway.applications.build(application_params)
-    if @application.save
-      audit!("application.create", target: @application,
-                                details: { gateway: @application.gateway.name, name: @application.name })
-      redirect_to application_path(@application), notice: "Application #{@application.name} created. Deploy the rendered policy and restart the gateway to make it live."
+    @service = gateway.services.build(service_params)
+    if @service.save
+      audit!("service.create", target: @service,
+                                details: { gateway: @service.gateway.name, name: @service.name })
+      redirect_to service_path(@service), notice: "Service #{@service.name} created. Deploy the rendered policy and restart the gateway to make it live."
     else
       @gateways = @zone.gateways.order(:name)
       render :new, status: :unprocessable_content
@@ -60,18 +60,18 @@ class ApplicationsController < ApplicationController
   end
 
   def edit
-    @application = zone_application
+    @service = zone_service
     @gateways = @zone.gateways.order(:name)
   end
 
   def update
-    @application = zone_application
+    @service = zone_service
     # Name and gateway are immutable after create: the name drives the
     # gateway's service entry and the ztlp name; moving gateways would leave
     # the old gateway's policy still allowing the (now missing) service.
-    if @application.update(application_params.except(:name, :gateway_id))
-      audit!("application.update", target: @application, details: { name: @application.name })
-      redirect_to application_path(@application), notice: "Application #{@application.name} updated. Deploy the rendered policy and restart the gateway to make it live."
+    if @service.update(service_params.except(:name, :gateway_id))
+      audit!("service.update", target: @service, details: { name: @service.name })
+      redirect_to service_path(@service), notice: "Service #{@service.name} updated. Deploy the rendered policy and restart the gateway to make it live."
     else
       @gateways = @zone.gateways.order(:name)
       render :edit, status: :unprocessable_content
@@ -79,7 +79,7 @@ class ApplicationsController < ApplicationController
   end
 
   # Slice 9b sub-slice 5: enable/disable. The rendered policy only lists
-  # enabled applications as [[services]] (PolicyRenderer), so disabling is how
+  # enabled services as [[services]] (PolicyRenderer), so disabling is how
   # an operator takes a service off the gateway's allow-list without deleting
   # its rules. No NS publish: the operator deploys the rendered policy and
   # restarts the gateway for the change to take effect (the redirect says so).
@@ -97,31 +97,31 @@ class ApplicationsController < ApplicationController
   # One shared toggle so enable/disable can't drift apart. A no-op toggle
   # (already in the requested state) writes no audit row and just re-renders.
   def set_enabled(want)
-    @application = zone_application
-    if @application.enabled != want
-      @application.update!(enabled: want)
-      audit!(want ? "application.enable" : "application.disable", target: @application,
-            details: { name: @application.name, enabled: want })
-      redirect_to application_path(@application),
-                  notice: "Application #{@application.name} #{want ? 'enabled' : 'disabled'}. " \
+    @service = zone_service
+    if @service.enabled != want
+      @service.update!(enabled: want)
+      audit!(want ? "service.enable" : "service.disable", target: @service,
+            details: { name: @service.name, enabled: want })
+      redirect_to service_path(@service),
+                  notice: "Service #{@service.name} #{want ? 'enabled' : 'disabled'}. " \
                           "Deploy the rendered policy and restart the gateway to make it live."
     else
-      redirect_to application_path(@application),
-                  notice: "Application #{@application.name} is already #{want ? 'enabled' : 'disabled'}."
+      redirect_to service_path(@service),
+                  notice: "Service #{@service.name} is already #{want ? 'enabled' : 'disabled'}."
     end
   end
 
   # The show/edit/update target, scoped to the zone's gateways (cross-zone id
   # -> 404, same as show).
-  def zone_application
-    @application ||= Application
+  def zone_service
+    @service ||= Service
                       .where(id: params[:id])
                       .where(gateway_id: @zone.gateways.select(:id))
                       .includes(gateway: :zone)
                       .first
-    raise ActiveRecord::RecordNotFound, "application" if @application.nil?
+    raise ActiveRecord::RecordNotFound, "service" if @service.nil?
 
-    @application
+    @service
   end
 
   # The rule form's subject picker (sub-slice 4) lists rows in THIS zone.
@@ -138,7 +138,7 @@ class ApplicationsController < ApplicationController
     @zone.gateways.find_by(id: gateway_id)
   end
 
-  def application_params
-    params.require(:application).permit(:gateway_id, :name, *APP_FIELDS)
+  def service_params
+    params.require(:service).permit(:gateway_id, :name, *APP_FIELDS)
   end
 end

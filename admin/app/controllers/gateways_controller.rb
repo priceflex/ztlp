@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-# Slice 9b sub-slice 6: gateway minimal CRUD inline from the application form
+# Slice 9b sub-slice 6: gateway minimal CRUD inline from the service form
 # (spec Slice 9). Gateways front zone services and stamp ZTLP identity headers;
-# an application always lives ON a gateway, so the panel needs a way to add the
-# zone's gateway rows from inside the application flow rather than a separate
+# a service always lives ON a gateway, so the panel needs a way to add the
+# zone's gateway rows from inside the service flow rather than a separate
 # top-level page.
 #
 # Minimal CRUD:
@@ -26,8 +26,8 @@ class GatewaysController < ApplicationController
     if @gateway.save
       audit!("gateway.create", target: @gateway,
                             details: { name: @gateway.name, kind: @gateway.kind })
-      redirect_to applications_path,
-                  notice: "Gateway #{@gateway.name} created. Add an application on it, then deploy the rendered policy and restart the gateway."
+      redirect_to services_path,
+                  notice: "Gateway #{@gateway.name} created. Add a service on it, then deploy the rendered policy and restart the gateway."
     else
       render :new, status: :unprocessable_content
     end
@@ -43,7 +43,7 @@ class GatewaysController < ApplicationController
     if @gateway.update(gateway_update_params)
       audit!("gateway.update", target: @gateway,
                             details: { name: @gateway.name, kind: @gateway.kind })
-      redirect_to applications_path,
+      redirect_to services_path,
                   notice: "Gateway #{@gateway.name} updated. Deploy the rendered policy and restart the gateway to make it live."
     else
       render :new, status: :unprocessable_content

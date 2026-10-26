@@ -24,18 +24,22 @@ Rails.application.routes.draw do
   resources :audit_logs, only: [ :index ]
 
   # Slice 9b sub-slice 2 (read) + sub-slice 3 (new/create, edit/update) +
-  # sub-slice 4 (policy-rule add/remove, handled by ApplicationRulesController).
-  # Register an application by its full name (must precede resources: "register" is not an :id).
-  get  "applications/register", to: "application_registrations#new", as: :register_applications
-  post "applications/register", to: "application_registrations#create"
-  resources :applications, only: %i[index show new create edit update] do
+  # sub-slice 4 (policy-rule add/remove, handled by ServiceRulesController).
+  # "Applications" are "Services" since PLAN-services-wizard-and-helpdesk.md slice 2: keep old bookmarks working.
+  get "applications", to: redirect("/services", status: 301)
+  get "applications/*rest", to: redirect(status: 301) { |p, _req| "/services/#{p[:rest]}" }, format: false
+
+  # Register a service by its full name (must precede resources: "register" is not an :id).
+  get  "services/register", to: "service_registrations#new", as: :register_services
+  post "services/register", to: "service_registrations#create"
+  resources :services, only: %i[index show new create edit update] do
     member do
       post :enable
       post :disable
     end
     scope module: nil do
-      resource :rules, only: %i[create], controller: "application_rules", as: :rules
-      resources :rules, only: %i[destroy], controller: "application_rules"
+      resource :rules, only: %i[create], controller: "service_rules", as: :rules
+      resources :rules, only: %i[destroy], controller: "service_rules"
     end
   end
 
@@ -62,10 +66,10 @@ Rails.application.routes.draw do
     end
   end
 
-  # Slice 9b sub-slice 6: gateway minimal CRUD inline from the application
-  # form. Gateways are the objects applications live on, so the inline
-  # "New gateway" form is reachable from the application flow.
-  get  "apps/new_gateway", to: "gateways#new", as: :new_gateway
+  # Slice 9b sub-slice 6: gateway minimal CRUD inline from the service
+  # form. Gateways are the objects services live on, so the inline
+  # "New gateway" form is reachable from the service flow.
+  get  "gateways/new", to: "gateways#new", as: :new_gateway
   post "gateways", to: "gateways#create", as: :gateways
   post "gateways/:id/update_kind", to: "gateways#update_kind", as: :update_kind_gateway
 

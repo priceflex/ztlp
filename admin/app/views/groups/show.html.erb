@@ -50,7 +50,7 @@
     <div class="panel-h"><h2>Policies</h2><span class="sub"><%= @referencing.size %></span></div>
     <% if @referencing.any? %>
       <div class="table-wrap"><table>
-        <thead><tr><th>Application</th><th>Gateway</th></tr></thead>
+        <thead><tr><th>Service</th><th>Gateway</th></tr></thead>
         <tbody>
           <% @referencing.each do |app| %>
             <tr><td class="nowrap mono"><%= app.ztlp_name %></td>
@@ -58,7 +58,7 @@
           <% end %>
         </tbody>
       </table></div>
-      <p class="hint">Remove the rule on the application first, then this group can be deleted.</p>
+      <p class="hint">Remove the rule on the service first, then this group can be deleted.</p>
     <% else %><div class="empty-note">No policies reference this group yet.</div><% end %>
   </div>
 

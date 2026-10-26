@@ -95,7 +95,7 @@ class UsersControllerTest < ActionDispatch::IntegrationTest
                         role: "user", status: "active")
     get users_path
     assert_includes response.body, "Backup service"
-    assert_includes response.body, ">Service<"
+    assert_includes response.body, ">Service account<"
   end
 
   test "index search is escaped and unknown status falls back to all" do

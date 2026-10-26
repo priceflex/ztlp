@@ -1,23 +1,23 @@
-<%# Slice 9b sub-slice 3: shared application form (new + edit). The gateway pick
+<%# Slice 9b sub-slice 3: shared service form (new + edit). The gateway pick
     is only active on create; the name is fixed after create (it drives the
     gateway's service entry and the ztlp name <name>.<zone>). No NS publish
     happens on save — the rendered policy is deployed at gateway restart. %>
-<%= form_with model: @application, class: "stack" do |f| %>
-  <% if @application.errors.any? %>
-    <div class="notice"><span class="err"><%= @application.errors.full_messages.to_sentence %></span></div>
+<%= form_with model: @service, class: "stack" do |f| %>
+  <% if @service.errors.any? %>
+    <div class="notice"><span class="err"><%= @service.errors.full_messages.to_sentence %></span></div>
   <% end %>
   <div class="panel">
     <div class="panel-b form-grid">
       <div class="field">
         <%= f.label :gateway_id, "Gateway" %>
         <%= f.select :gateway_id,
-                     options_for_select(@gateways.map { |g| ["#{g.name}.#{g.zone.name} (#{g.kind})", g.id] }, @application.gateway_id),
+                     options_for_select(@gateways.map { |g| ["#{g.name}.#{g.zone.name} (#{g.kind})", g.id] }, @service.gateway_id),
                      { include_blank: false },
-                     disabled: @application.persisted? %><p class="hint">Services on this gateway. On a <span class="mono">rust_listen</span> gateway the min-assurance floor is not enforced by the gateway; on an <span class="mono">elixir</span> gateway group, role and user rules never match a device. <a href="<%= new_gateway_path %>">New gateway</a></p>
+                     disabled: @service.persisted? %><p class="hint">Services on this gateway. On a <span class="mono">rust_listen</span> gateway the min-assurance floor is not enforced by the gateway; on an <span class="mono">elixir</span> gateway group, role and user rules never match a device. <a href="<%= new_gateway_path %>">New gateway</a></p>
       </div>
       <div class="field">
         <%= f.label :name %>
-        <%= f.text_field :name, required: true, readonly: @application.persisted?,
+        <%= f.text_field :name, required: true, readonly: @service.persisted?,
                           pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
                           class: "mono" %><p class="hint">Lowercase DNS label, fixed after create; the full name is <span class="mono">&lt;name&gt;.&lt;zone&gt;</span> and is the service entry the gateway allow-lists.</p>
       </div>
@@ -30,8 +30,8 @@
       </div>
       <div class="field"><%= f.label :description %><%= f.text_field :description %></div>
       <div class="actions">
-        <%= f.submit @application.persisted? ? "Save" : "Create application", class: "btn primary" %>
-        <%= link_to "Cancel", @application.persisted? ? application_path(@application) : applications_path, class: "btn" %>
+        <%= f.submit @service.persisted? ? "Save" : "Create service", class: "btn primary" %>
+        <%= link_to "Cancel", @service.persisted? ? service_path(@service) : services_path, class: "btn" %>
       </div>
     </div>
   </div>

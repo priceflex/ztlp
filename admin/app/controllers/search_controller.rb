@@ -4,7 +4,7 @@
 #
 # GET /search.json?q= — ILIKE over users (username / display_name / email via
 # deterministic exact), devices (name / node_id), groups (name / description),
-# applications (name); max 20; JSON {type,id,name,sub,url} only — never HTML.
+# services (name); max 20; JSON {type,id,name,sub,url} only — never HTML.
 # No audit row (a search is not a mutation, and the query string must not
 # reach the audit log).
 class SearchController < ApplicationController
@@ -15,7 +15,7 @@ class SearchController < ApplicationController
     render json: [], status: :ok, layout: false and return if q.empty?
 
     like = "%#{ActiveRecord::Base.sanitize_sql_like(q.downcase)}%"
-    rows = user_rows(q, like) + device_rows(like) + group_rows(like) + application_rows(like)
+    rows = user_rows(q, like) + device_rows(like) + group_rows(like) + service_rows(like)
     render json: rows.first(20), status: :ok, layout: false
   end
 
@@ -51,13 +51,13 @@ class SearchController < ApplicationController
           end
   end
 
-  def application_rows(like)
-    Application.where(gateway: @zone.gateways)
+  def service_rows(like)
+    Service.where(gateway: @zone.gateways)
                .where("LOWER(name) LIKE :like OR LOWER(backend) LIKE :like", like: like)
                .order(:name).limit(2 * PER_PAGE).map do |a|
-                 { type: "application", id: a.id, name: a.name,
+                 { type: "service", id: a.id, name: a.name,
                    sub: [ a.protocol, a.backend ].compact_blank.join(" "),
-                   url: "/applications/#{a.id}" }
+                   url: "/services/#{a.id}" }
                end
   end
 end

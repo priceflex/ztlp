@@ -1,15 +1,15 @@
 # frozen_string_literal: true
 
-# Slice 9b sub-slice 6: gateway minimal CRUD inline from the application form
+# Slice 9b sub-slice 6: gateway minimal CRUD inline from the service form
 # (spec Slice 9: "New gateway" inline: name, kind, host_note).
 #
 # Gateways are the objects that front zone services and stamp ZTLP identity
-# headers; an application always lives ON a gateway, so the panel needs a way
-# to add the zone's gateway rows from inside the application flow (the gateway
-# select on the application form) rather than a separate top-level page.
+# headers; a service always lives ON a gateway, so the panel needs a way
+# to add the zone's gateway rows from inside the service flow (the gateway
+# select on the service form) rather than a separate top-level page.
 #
 # Endpoints:
-#   GET  /apps/new_gateway   — the inline "New gateway" form (name, kind, host_note)
+#   GET  /gateways/new   — the inline "New gateway" form (name, kind, host_note)
 #   POST /gateways           — create a gateway on the current zone
 #   POST /gateways/:id/update_kind — minimal edit (kind + host_note only; name is
 #                                   immutable — it drives ns_name <name>.<zone> and
@@ -27,10 +27,10 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
     @existing_gw = @zone.gateways.create!(name: "gw1", kind: "rust_listen", status: "planned")
   end
 
-  # ---- GET /apps/new_gateway ----------------------------------------------
+  # ---- GET /gateways/new ----------------------------------------------
 
   test "new_gateway renders the inline form with name, kind and host_note fields" do
-    get "/apps/new_gateway"
+    get "/gateways/new"
     assert_response :success
     assert_select "form[action=?]", gateways_path, count: 1
     # name + kind + host_note inputs present
@@ -44,7 +44,7 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
   test "create a gateway with name, kind rust_listen and host_note" do
     post gateways_path, params: { gateway: { name: "prod-gw", kind: "rust_listen",
                                              host_note: "10.42.42.91:23095" } }
-    assert_redirected_to applications_path
+    assert_redirected_to services_path
     gw = @zone.gateways.find_by(name: "prod-gw")
     assert gw, "gateway should be created on the zone"
     assert_equal "prod-gw.#{Zone.primary.name}", gw.ns_name
@@ -55,7 +55,7 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
 
   test "create a gateway with kind elixir" do
     post gateways_path, params: { gateway: { name: "elix-gw", kind: "elixir" } }
-    assert_redirected_to applications_path
+    assert_redirected_to services_path
     gw = @zone.gateways.find_by(name: "elix-gw")
     assert gw
     assert_equal "elixir", gw.kind
@@ -83,7 +83,7 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
     # Gateway#normalize_name downcases before validation, so "BadGw" becomes
     # "badgw" — a valid label. This pins the normalization contract.
     post gateways_path, params: { gateway: { name: "BadGw", kind: "elixir" } }
-    assert_redirected_to applications_path
+    assert_redirected_to services_path
     gw = @zone.gateways.find_by(name: "badgw")
     assert gw, "name should be normalized to lowercase"
     assert_equal "badgw", gw.name
@@ -120,7 +120,7 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
   test "update_kind changes kind and host_note but not name" do
     post update_kind_gateway_path(@existing_gw),
          params: { kind: "elixir", host_note: "new-note" }
-    assert_redirected_to applications_path
+    assert_redirected_to services_path
     @existing_gw.reload
     assert_equal "elixir", @existing_gw.kind
     assert_equal "new-note", @existing_gw.host_note
@@ -152,11 +152,11 @@ class GatewaysCrudControllerTest < ActionDispatch::IntegrationTest
     assert_equal "rust_listen", @existing_gw.reload.kind
   end
 
-  # ---- the application new form shows the inline gateway form link ---------
+  # ---- the service new form shows the inline gateway form link ---------
 
-  test "the application new form includes a link to the inline gateway form" do
-    get new_application_path
+  test "the service new form includes a link to the inline gateway form" do
+    get new_service_path
     assert_response :success
-    assert_select "a[href=?]", "/apps/new_gateway", count: 1
+    assert_select "a[href=?]", "/gateways/new", count: 1
   end
 end

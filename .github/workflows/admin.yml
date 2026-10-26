@@ -51,6 +51,9 @@ jobs:
 
       - uses: ruby/setup-ruby@v1
         with:
+          # admin/.ruby-version (3.2.3) is the production image's Ruby; hosted runners only
+          # carry the latest 3.2.x patch, so CI uses the 3.2 series.
+          ruby-version: "3.2"
           working-directory: admin
           bundler-cache: true
 

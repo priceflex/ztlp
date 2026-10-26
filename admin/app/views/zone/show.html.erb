@@ -29,6 +29,24 @@
     <% end %>
   </div>
 
+  <div class="panel" data-ns-key>
+    <div class="panel-h"><h2>Name server key</h2></div>
+    <div class="panel-b">
+      <% if @zone.ns_pubkey_hex.present? %>
+        <dl class="kv"><dt>Public key</dt><dd class="mono"><%= @zone.ns_pubkey_hex %></dd></dl>
+      <% else %>
+        <div class="warn">No key saved yet. Enrollment tokens carry no name server key, so new devices pin each site's certificate on first use and break when it changes.</div>
+      <% end %>
+      <p class="hint">The home name server's public key: it logs it at startup as <span class="mono">NS registration public key</span>. Every new enrollment token carries it, so the device trusts only answers this name server signs and takes each site's certificate pin from them.</p>
+      <% if current_admin&.operator? %>
+        <%= form_with url: zone_ns_key_path, method: :patch, class: "actions" do %>
+          <input type="text" name="ns_pubkey_hex" class="mono" size="66" maxlength="64" pattern="[0-9a-fA-F]{64}" value="<%= @zone.ns_pubkey_hex %>" placeholder="64 hex characters" aria-label="Name server public key">
+          <button type="submit" class="btn">Save key</button>
+        <% end %>
+      <% end %>
+    </div>
+  </div>
+
   <div class="panel">
     <div class="panel-h"><h2>Secrets</h2></div>
     <% secrets.each do |label, set| %>

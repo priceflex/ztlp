@@ -24,6 +24,11 @@
         <%= f.text_field :relay_addrs_text, class: "mono", placeholder: "44.227.148.151:23095" %>
         <p class="hint">host:port, comma separated.</p>
       </div>
+      <div class="field">
+        <%= f.label :ns_pubkey_hex, "Name server public key" %>
+        <%= f.text_field :ns_pubkey_hex, class: "mono", maxlength: 64, placeholder: "64 hex characters" %>
+        <p class="hint">The name server logs it at startup (<span class="mono">NS registration public key</span>). Enrollment tokens carry it so devices trust only that server's answers.</p>
+      </div>
       <div class="actions">
         <%= f.submit "Add zone", class: "btn primary" %>
         <a class="btn" href="<%= zone_path %>">Cancel</a>

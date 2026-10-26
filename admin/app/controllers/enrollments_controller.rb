@@ -22,7 +22,7 @@
 # the new/revoke paths, mirroring the Users controller).
 class EnrollmentsController < ApplicationController
   include EnrollmentMinting
-  before_action :require_write_access, only: %i[new create revoke]
+  before_action :require_write_access, only: %i[new create revoke check]
 
   FILTERS = [ %w[all All], %w[pending Pending], %w[redeemed Redeemed],
               %w[expired Expired], %w[revoked Revoked] ].freeze
@@ -73,8 +73,30 @@ class EnrollmentsController < ApplicationController
                                     embed_relay_secret: attrs[:embed_relay_secret])
     rescue Ztlp::TokenMinter::EnrollmentSecretMissing
       return redirect_to enrollments_path, alert: ENROLLMENT_SECRET_MISSING
+    rescue EnrollmentMinting::InvalidDeviceName, Ztlp::TokenMinter::InvalidField => e
+      return render_unprocessable(e.message)
     end
     redirect_to result_enrollment_path(enrollment)
+  end
+
+  # ------------------------------------------------------------------- check
+
+  # "Check now": look for the token's device on the name server instead of waiting for the 5-minute
+  # EnrollmentPickupJob.
+  CHECK_MESSAGES = {
+    redeemed: [ :notice, "Enrolled: the device is on the name server and is now listed." ],
+    pending: [ :notice, "Not enrolled yet: the name server has no key for this device name." ],
+    stale_key: [ :alert, "The name server has an older key under this device name (an earlier enrollment), " \
+                         "not one from this token. Use Add an existing device on the user's page to list it." ],
+    not_pending: [ :notice, "This token is no longer pending." ],
+    no_device_name: [ :alert, "This token has no device name, so the panel cannot look the device up." ],
+    ns_error: [ :alert, "The name server did not answer. Try again in a minute." ]
+  }.freeze
+
+  def check
+    enrollment = @zone.enrollments.find(params[:id])
+    kind, message = CHECK_MESSAGES.fetch(Ztlp::DevicePickup.check(enrollment), [ :alert, "Unexpected result." ])
+    redirect_to enrollment_path(enrollment), kind => message
   end
 
   # ------------------------------------------------------------------ result
@@ -97,10 +119,12 @@ class EnrollmentsController < ApplicationController
     session[:enrollment_reveal] = nil # consume: exactly one render carries the token
     @token_uri = @enrollment.token_uri_ct
     @qr_svg = Ztlp::TokenQr.svg(@token_uri)
-    # `ztlp setup --relay-secret` is required when the zone's relays run HMAC prod mode; the v1 token
-    # has no field for it, so "embed" means the one-time command carries the flag.
-    @relay_secret = @zone.relay_secret_ct.presence if @enrollment.embed_relay_secret
-    @relay_missing = @enrollment.embed_relay_secret && @relay_secret.nil?
+    # The relay secret and the NS key ride INSIDE the token (flags 0x08 / 0x10); read back what this
+    # token actually carries rather than what the zone holds now.
+    minted = Ztlp::TokenMinter.parse(Ztlp::TokenMinter.from_uri(@token_uri))
+    @relay_in_token = minted[:relay_secret].present?
+    @relay_missing = @enrollment.embed_relay_secret && !@relay_in_token
+    @ns_key_in_token = minted[:ns_key_hex].present?
     # Shown once, stored never: redeem is keyed by token_id, nothing needs the URI after this render.
     @enrollment.update_column(:token_uri_ct, nil)
   end

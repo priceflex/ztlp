@@ -42,6 +42,13 @@
         </tbody>
       </table></div>
     <% else %><div class="empty-note">No devices.</div><% end %>
+    <% if current_admin&.write_access? %>
+      <%= form_with url: adopt_device_user_path(@user), method: :post, class: "actions", data: { adopt_device: true } do %>
+        <input type="text" name="device_name" class="mono" maxlength="63" placeholder="device name, e.g. heidys-macbook-air" aria-label="Existing device name" required>
+        <button type="submit" class="btn">Add an existing device</button>
+      <% end %>
+      <p class="hint">For a computer that is already enrolled in <span class="mono"><%= @zone.name %></span>: the panel reads its key from the name server and lists it here. Nothing on the computer changes.</p>
+    <% end %>
   </div>
 
   <div class="actions">

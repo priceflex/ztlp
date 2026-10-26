@@ -102,7 +102,8 @@ class NoInlineAssetsTest < ActionDispatch::IntegrationTest
     zone = Zone.primary
     zone.update!(enrollment_secret_ct: "cd" * 32, relay_addrs: %w[10.0.0.9:23095])
     user = zone.users.create!(username: "qruser", display_name: "QR User", role: "user", status: "active")
-    post "/enrollments", params: { enrollment: { kind: "user_device", user_id: user.id, expiry_hours: "1", embed_relay_secret: "1" } }
+    post "/enrollments", params: { enrollment: { kind: "user_device", user_id: user.id, expiry_hours: "1", embed_relay_secret: "1",
+                                                 device_name: "qr-laptop" } }
     assert_response :redirect
     follow_redirect!
     assert_response :success, "the result page renders after the mint"

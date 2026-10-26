@@ -11,8 +11,8 @@
 # mutations require write access and audit their own action.
 class UsersController < ApplicationController
   include EnrollmentMinting
-  before_action :set_user, only: %i[show edit update disable enable revoke]
-  before_action :require_write_access, only: %i[new create edit update disable enable]
+  before_action :set_user, only: %i[show edit update disable enable revoke adopt_device]
+  before_action :require_write_access, only: %i[new create edit update disable enable adopt_device]
   before_action :require_operator, only: %i[revoke]
 
   FILTERS = [ %w[all All], %w[active Active], %w[invited Invited],
@@ -137,6 +137,19 @@ class UsersController < ApplicationController
     redirect_to user_path(@user), notice: "#{@user.display_name} revoked permanently, with #{devices.size} device(s)."
   end
 
+  # "Add an existing device": list a device that is already enrolled (e.g. with a CLI token) under
+  # this user, from its KEY record on the name server. Nothing is re-keyed or published.
+  def adopt_device
+    device = Ztlp::DevicePickup.adopt!(@zone, @user, params[:device_name], admin: current_admin)
+    redirect_to user_path(@user), notice: "#{device.name} is now listed under #{@user.display_name}."
+  rescue Ztlp::DevicePickup::NotFound => e
+    redirect_to user_path(@user), alert: "Not added: #{e.message}."
+  rescue ActiveRecord::RecordInvalid => e
+    redirect_to user_path(@user), alert: "Not added: #{e.record.errors.full_messages.to_sentence}."
+  rescue *Ztlp::DevicePickup::NS_ERRORS
+    redirect_to user_path(@user), alert: "Not added: the name server did not answer. Try again in a minute."
+  end
+
   private
 
   # Warnings for the flash (never a 500 after the save).
@@ -218,6 +231,9 @@ class UsersController < ApplicationController
   rescue ActiveRecord::RecordInvalid => err
     redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).",
                                   alert: "No enrollment token: #{err.record.errors.full_messages.to_sentence}"
+  rescue EnrollmentMinting::InvalidDeviceName, Ztlp::TokenMinter::InvalidField => err
+    redirect_to user_path(@user), notice: "#{@user.display_name} created (invited).",
+                                  alert: "No enrollment token: #{err.message}"
   end
 
   # role and kind decide what a user can reach (role:admin rules, service users): operators only.

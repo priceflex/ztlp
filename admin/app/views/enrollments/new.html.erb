@@ -20,12 +20,12 @@
         <p class="hint">The redeeming device is assigned to this user. Leave empty for a headless / service device.</p>
       </div>
       <div class="field">
-        <label for="enrollment_device_name">Device name <span class="sub">(optional)</span></label>
+        <label for="enrollment_device_name">Device name <span class="sub">(needed for a user + device token)</span></label>
         <input type="text" id="enrollment_device_name" name="enrollment[device_name]"
                pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" class="mono"
                placeholder="e.g. alice-mbp" aria-describedby="device-name-hint"
                value="<%= @enrollment.device_name %>">
-        <p class="hint" id="device-name-hint">Lowercase DNS label. If empty, the enrolling machine picks its own name.</p>
+        <p class="hint" id="device-name-hint">The computer's short name, lowercase, e.g. <span class="mono">heidys-macbook-air</span>. It goes into the setup command, and the panel finds and lists the enrolled device by it.</p>
       </div>
       <div class="grid2">
         <div class="field">

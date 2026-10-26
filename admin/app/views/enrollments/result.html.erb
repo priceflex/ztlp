@@ -28,11 +28,19 @@
   <div class="panel">
     <div class="panel-h"><h2>Command</h2></div>
     <div class="panel-b">
-      <pre class="code-box">ztlp setup --token "<%= @token_uri %>"<% if @relay_secret %> --relay-secret "<%= @relay_secret %>"<% end %></pre>
-      <% if @relay_secret %>
-        <p class="hint" data-relay-warning>This command includes the zone-wide relay secret. Treat it like a password: give it only to this device's owner, over a private channel.</p>
+      <pre class="code-box">ztlp setup --token "<%= @token_uri %>"<% if @enrollment.device_name.present? %> --name "<%= @enrollment.device_name %>"<% end %></pre>
+      <% if @relay_in_token %>
+        <p class="hint" data-relay-warning>The zone's relay secret is inside the token, so the device needs nothing else pasted. That makes the token (and its QR code) a password: give it only to this device's owner, over a private channel.</p>
       <% elsif @relay_missing %>
         <p class="hint" data-relay-warning>You asked to embed the relay secret, but no relay secret is set for this zone. If its relays run in HMAC prod mode, set it first (<span class="mono">rails zone:set_secret relay</span>) and mint a new token.</p>
+      <% end %>
+      <% if @ns_key_in_token %>
+        <p class="hint" data-ns-trust>The token carries this zone's name server key. The device trusts only answers that name server signs, and takes each site's certificate pin from them, so a gateway restart or certificate change needs nothing on the device.</p>
+      <% else %>
+        <p class="hint warn-text" data-ns-trust-missing>This zone has no name server key set, so the token carries none: the device will pin each site's certificate on first use and break if that certificate changes. Set the key on the Zone page and mint a new token.</p>
+      <% end %>
+      <% if @enrollment.device_name.present? %>
+        <p class="hint">Keep the device name exactly as shown: the panel finds the enrolled device by it and lists it under <%= @enrollment.user&.display_name || "this token" %> within a few minutes (or use <strong>Check now</strong> on the token page).</p>
       <% end %>
       <p class="hint">The device enrolls straight against the name server and opens its first tunnel. This panel does not need to approve anything.</p>
     </div>

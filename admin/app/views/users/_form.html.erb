@@ -51,7 +51,7 @@
           <p class="hint">After saving you get the one-time enrollment string, a QR code for the ZTLP app on a phone, and the <span class="mono">ztlp setup</span> command.</p>
           <div class="grid2">
             <div class="field">
-              <label for="enroll_device_name">Device name <span class="sub">(optional)</span></label>
+              <label for="enroll_device_name">Device name <span class="sub">(needed to enroll now)</span></label>
               <input type="text" id="enroll_device_name" name="enroll[device_name]" class="mono"
                      pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="e.g. dana-iphone"
                      value="<%= params.dig(:enroll, :device_name) %>">

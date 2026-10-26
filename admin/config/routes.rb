@@ -50,6 +50,7 @@ Rails.application.routes.draw do
       post :disable
       post :enable
       post :revoke
+      post :adopt_device
     end
   end
 
@@ -88,6 +89,7 @@ Rails.application.routes.draw do
   resources :enrollments, only: %i[index show new create], path: "enrollments" do
     member do
       post :revoke
+      post :check
       get :result
     end
   end
@@ -99,6 +101,7 @@ Rails.application.routes.draw do
   post "zones", to: "zones#create", as: :zones
   post "zone/publish", to: "zone#publish", as: :zone_publish
   post "zone/reconcile", to: "zone#reconcile", as: :zone_reconcile
+  patch "zone/ns_key", to: "zone#update_ns_key", as: :zone_ns_key
 
   # Slice 11a: Setup checklist break-glass acknowledgement (super_admin only).
   post "setup/acknowledge_breakglass", to: "setup#acknowledge_breakglass",

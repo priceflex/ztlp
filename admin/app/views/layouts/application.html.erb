@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title><%= content_for(:title) || "ZTLP Directory" %></title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <%= csrf_meta_tags %>
+    <link rel="icon" href="<%= asset_path("ztlp-logo.png") %>">
+    <%= stylesheet_link_tag "directory", "admin" %>
+    <%= javascript_include_tag "directory", defer: true %>
+  </head>
+  <body>
+    <div class="app" id="app">
+      <aside class="rail" id="rail" aria-label="Main navigation">
+        <div class="brand">
+          <%= image_tag "ztlp-logo.png", alt: "ZTLP", width: 34, height: 34 %>
+          <div><div class="brand-name">ZTLP Directory</div><div class="brand-zone"><%= @zone&.name || ENV.fetch("ZTLP_ZONE", "") %></div></div>
+        </div>
+        <% if signed_in? && @zones.present? %>
+          <form class="zone-pick" action="<%= zone_switch_path %>" method="post" aria-label="Zone">
+            <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+            <label for="zone-pick" class="nav-label">Zone</label>
+            <select id="zone-pick" name="zone_id" data-autosubmit>
+              <% @zones.each do |z| %>
+                <option value="<%= z.id %>"<%= " selected" if z.id == @zone&.id %>><%= z.name %></option>
+              <% end %>
+            </select>
+            <noscript><button type="submit" class="btn sm">Switch</button></noscript>
+          </form>
+        <% end %>
+        <% if signed_in? %>
+          <nav class="nav" id="nav">
+            <% route = current_route %>
+            <% ApplicationHelper::NAV.each do |section, items| %>
+              <div class="nav-sec"><div class="nav-label"><%= section %></div>
+                <% items.each do |item_route, label, icon| %>
+                  <a href="<%= nav_href(item_route) %>"<% if item_route == route %> aria-current="page"<% end %>><%= nav_icon(icon) %><span><%= label %></span></a>
+                <% end %>
+              </div>
+            <% end %>
+          </nav>
+        <% end %>
+        <div class="rail-foot">
+          <div class="ns-line"><span class="dot <%= @zone&.authority_configured? ? "ok" : "" %>"></span><%= @zone&.ns_addr || ENV.fetch("ZTLP_NS_ADDR", "name server") %></div>
+          <% if session[:via] == "ztlp" && session[:device].present? %><div class="ns-meta">via ZTLP <%= session[:device] %> &middot; <%= Ztlp::Assurance.label(Ztlp::Assurance.level(session[:assurance])) %></div><% end %>
+          <div class="ns-meta">v<%= ZtlpAdmin::VERSION %></div>
+          <% if signed_in? %>
+            <div class="ns-meta" id="rail-me"><span class="avatar avatar-sm"><%= initials(current_admin.display_name) %></span><%= current_admin.username %> &middot; <%= current_admin.role.humanize %><% if session[:via] == "ztlp" %><% if session[:device].present? %> &middot; via ZTLP <%= session[:device] %><% end %> &middot; <%= Ztlp::Assurance.label(Device.find_by(ns_name: session[:device])&.assurance || session[:assurance]) %><% end %></div>
+          <% end %>
+        </div>
+      </aside>
+      <div class="main">
+        <header class="topbar">
+          <button class="icon-btn menu-btn" data-act="nav-toggle" aria-label="Open navigation"><%= nav_icon("menu") %></button>
+          <div class="gsearch">
+            <span id="gs-ic"><%= nav_icon("search", 18) %></span>
+            <input type="search" id="gs-input" placeholder="Find a user, device, group or service" aria-label="Search the directory" autocomplete="off">
+            <div class="gresults" id="gresults" role="listbox"></div>
+          </div>
+          <div class="top-right">
+            <button class="icon-btn" data-act="theme" id="theme-btn" aria-label="Switch light or dark theme"><%= nav_icon("moon") %></button>
+            <% if signed_in? %>
+              <div class="me"><span class="avatar"><%= initials(current_admin.display_name) %></span><span class="me-name"><%= current_admin.display_name %></span></div>
+              <%= form_with url: logout_path, method: :delete, class: "actions" do %>
+                <button type="submit" class="btn sm">Sign out</button>
+              <% end %>
+            <% end %>
+          </div>
+        </header>
+        <main class="content" id="content" tabindex="-1">
+          <div class="wrap">
+            <% if notice %><div data-toast class="toast"><%= notice %></div><% end %>
+            <% if alert %><div data-toast class="toast"><%= alert %></div><% end %>
+            <%= yield %>
+          </div>
+        </main>
+      </div>
+    </div>
+    <div class="scrim" id="nscrim" data-act="close-nav"></div>
+    <div class="scrim" id="dscrim" data-act="close-drawer"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="Details"></aside>
+    <div class="modal-root" id="modal-root" role="dialog" aria-modal="true"></div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </body>
+</html>

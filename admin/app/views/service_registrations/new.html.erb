@@ -1,0 +1,98 @@
+<% content_for :title, "Register service - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Register service</h1><p class="lede">Type the service's full ZTLP name. The panel finds its zone and checks the name server; nothing is published by registering.</p></div>
+</div>
+
+<% if flash.now[:alert] %><div class="notice"><span class="err"><%= flash.now[:alert] %></span></div><% end %>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Service name</h2></div>
+    <div class="panel-b">
+      <form action="<%= register_services_path %>" method="get" class="inline-form">
+        <input type="text" name="fqdn" class="mono" placeholder="www.chooseforce.ztlp" value="<%= @fqdn %>"
+               aria-label="Service full name" required>
+        <button type="submit" class="btn primary">Look up</button>
+      </form>
+    </div>
+  </div>
+
+  <% if @fqdn %>
+    <div class="panel" data-lookup>
+      <div class="panel-h"><h2 class="mono"><%= @fqdn %></h2></div>
+      <div class="panel-b">
+        <% if @reg_zone.nil? %>
+          <p>This name is in <strong>no zone</strong> the panel knows.</p>
+          <% if current_admin.super_admin? %><p><a class="btn" href="<%= new_zone_path %>">Add zone</a></p><% end %>
+        <% elsif @label.nil? %>
+          <p>Use one label inside <span class="mono"><%= @reg_zone.name %></span>, for example <span class="mono">www.<%= @reg_zone.name %></span>.</p>
+        <% elsif @existing %>
+          <p>Already registered: gateway <span class="mono"><%= @existing.ns_name %></span> (<%= @existing.status %>).</p>
+          <% app = @existing.services.find_by(name: @label) %>
+          <% if app %><p><a class="btn" href="<%= service_path(app) %>">Open service</a></p><% end %>
+        <% else %>
+          <dl class="kv"><dt>Zone</dt><dd class="mono"><%= @reg_zone.name %></dd></dl>
+          <% if @record %>
+            <% d = @record[:data] || {} %>
+            <p><span class="badge ok">running</span> The gateway is registered on the name server.</p>
+            <dl class="kv"><dt>Addresses</dt><dd class="mono"><%= d["addresses"].presence || d["address"] %></dd></dl>
+            <dl class="kv"><dt>Node ID</dt><dd class="mono"><%= d["node_id"] %></dd></dl>
+            <% if @record[:created_at] %><dl class="kv"><dt>Last registered</dt><dd><%= Time.at(@record[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M UTC") %></dd></dl><% end %>
+            <% if operator? %>
+              <form action="<%= register_services_path %>" method="post">
+                <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+                <input type="hidden" name="fqdn" value="<%= @fqdn %>">
+                <button type="submit" class="btn primary">Register <%= @fqdn %></button>
+              </form>
+              <p class="hint">Creates the gateway and the service <span class="mono"><%= @label %></span>. Access is denied until you add rules on the service page.</p>
+            <% end %>
+          <% else %>
+            <p><span class="badge warn">not running</span> <%= @fqdn %> is <strong>not on the name server</strong><% if @ns_error %> (<%= @ns_error %>)<% elsif @not_configured %> (the panel has no NS admin API secret, so it cannot check)<% end %>.</p>
+            <% if operator? %>
+              <form action="<%= register_services_path %>" method="post" class="stack">
+                <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+                <input type="hidden" name="fqdn" value="<%= @fqdn %>">
+                <div class="field">
+                  <label for="reg-backend">Backend (where the gateway forwards to)</label>
+                  <input type="text" id="reg-backend" name="backend" class="mono" placeholder="10.0.0.5:8080" required>
+                </div>
+                <div class="actions"><button type="submit" class="btn primary">Register as planned</button></div>
+              </form>
+              <p class="hint">The next page shows the exact command to start its gateway. It turns to registered when the gateway appears on the name server.</p>
+            <% end %>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
+  <% else %>
+    <div class="panel">
+      <div class="panel-h"><h2>Discovered on the name server</h2><span class="sub">running services not registered here yet</span></div>
+      <% if @discovered.any? %>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Service</th><th>Zone</th><th>Gateway address</th><th>Last registered</th><th></th></tr></thead>
+          <tbody>
+            <% @discovered.each do |row| %>
+              <tr data-discovered>
+                <td class="mono"><%= row[:fqdn] %></td>
+                <td class="mono"><%= row[:zone].name %></td>
+                <td class="mono"><%= row[:data]["address"] %></td>
+                <td class="nowrap"><%= row[:created_at] ? Time.at(row[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M") : "" %></td>
+                <td class="nowrap">
+                  <% if operator? %>
+                    <form action="<%= register_services_path %>" method="post">
+                      <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+                      <input type="hidden" name="fqdn" value="<%= row[:fqdn] %>">
+                      <button type="submit" class="btn sm">Register</button>
+                    </form>
+                  <% end %>
+                </td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table></div>
+      <% else %>
+        <div class="empty-note">Nothing new on the name server<% if @discover_errors.any? %> (<%= @discover_errors.join("; ") %>)<% end %>.</div>
+      <% end %>
+    </div>
+  <% end %>
+</div>

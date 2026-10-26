@@ -1,0 +1,37 @@
+<%# Slice 9b sub-slice 6: inline "New gateway" form (spec Slice 9). Reachable
+    from the service new/create flow — a gateway is what a service
+    lives on, so the operator adds the zone's gateway row here, then creates
+    the service on it. Name is fixed after create (it drives ns_name
+    <name>.<zone> and the rendered service entry). No NS publish: the rendered
+    policy is deployed by the operator at gateway restart. %>
+<% content_for :title, "New gateway - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>New gateway</h1><p class="lede">Zone <span class="mono"><%= @zone.name %></span>. A gateway fronts services and stamps ZTLP identity headers.</p></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-b">
+      <%= form_with model: @gateway, url: gateways_path, class: "stack" do |f| %>
+        <% if @gateway.errors.any? %>
+          <div class="notice"><span class="err"><%= @gateway.errors.full_messages.to_sentence %></span></div>
+        <% end %>
+        <div class="field">
+          <%= f.label :name %><%= f.text_field :name, required: true,
+                                                pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
+                                                class: "mono" %><p class="hint">Lowercase DNS label, fixed after create; the full name is <span class="mono">&lt;name&gt;.&lt;zone&gt;</span>.</p>
+        </div>
+        <div class="field">
+          <%= f.label :kind %>
+          <%= f.select :kind, options_for_select([["rust_listen", "rust_listen"], ["elixir", "elixir"]], @gateway.kind),
+                       { include_blank: false } %><p class="hint"><span class="mono">rust_listen</span>: min-assurance floor not enforced by the gateway. <span class="mono">elixir</span>: group/role/user rules never match a device.</p>
+        </div>
+        <div class="field"><%= f.label :host_note %><%= f.text_field :host_note, class: "mono" %><p class="hint">Host:port note for the operator (optional).</p></div>
+        <div class="actions">
+          <%= f.submit "Create gateway", class: "btn primary" %>
+          <%= link_to "Cancel", new_service_path, class: "btn" %>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</div>

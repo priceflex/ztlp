@@ -1,0 +1,12 @@
+<% content_for :title, "Assurance level insufficient" %>
+<div class="panel">
+  <div class="panel-h"><h2>Device assurance insufficient</h2></div>
+  <div class="panel-b">
+    <p class="lede">Your device reports assurance
+      <strong><%= Ztlp::Assurance.label(Ztlp::Assurance.level(@gate_actual)) %></strong> — this panel requires
+      <strong><%= Ztlp::Assurance.label(Ztlp::Assurance.level(@gate_required)) %></strong> or higher.</p>
+    <p class="sub">Bind the agent's key to a hardware source (YubiKey, TPM or
+      Secure Enclave), or ask an administrator to lower
+      <code class="mono">ZTLP_MIN_ASSURANCE</code> for this zone. Then reload.</p>
+  </div>
+</div>

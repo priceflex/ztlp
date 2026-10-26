@@ -1,0 +1,36 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% unless drawer %><% content_for :title, "Token #{@enrollment.code} - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div class="who"><span class="avatar lg">K</span>
+    <div><h1>Token <span class="mono"><%= @enrollment.code %></span></h1>
+    <p class="lede"><%= status_badge(@enrollment.status) %> &middot; <%= @enrollment.kind == "user_device" ? "User + device" : "Device only" %></p></div></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Details</h2></div>
+    <dl class="kv"><dt>Code</dt><dd class="mono"><%= @enrollment.code %></dd></dl>
+    <dl class="kv"><dt>Kind</dt><dd><%= @enrollment.kind == "user_device" ? "User + device" : "Device only" %></dd></dl>
+    <dl class="kv"><dt>User</dt><dd><%= @enrollment.user ? @enrollment.user.display_name : "None (device only)" %></dd></dl>
+    <dl class="kv"><dt>Device</dt><dd class="mono"><%= @enrollment.device_name || "Not yet (device has not enrolled)" %></dd></dl>
+    <dl class="kv"><dt>Embed relay secret</dt><dd><%= @enrollment.embed_relay_secret ? "Yes" : "No" %></dd></dl>
+    <dl class="kv"><dt>Max uses</dt><dd><%= @enrollment.max_uses || 1 %></dd></dl>
+    <dl class="kv"><dt>Uses</dt><dd><%= @enrollment.uses %></dd></dl>
+    <dl class="kv"><dt>Expires</dt><dd><%= @enrollment.expires_at ? @enrollment.expires_at.utc.strftime("%Y-%m-%d %H:%M UTC") : "Never" %></dd></dl>
+    <dl class="kv"><dt>Created</dt><dd><%= @enrollment.created_at&.utc&.strftime("%Y-%m-%d %H:%M UTC") %><%= " by #{@enrollment.created_by_admin&.display_name}" if @enrollment.created_by_admin %></dd></dl>
+    <% if @enrollment.redeemed_at.present? %><dl class="kv"><dt>Redeemed</dt><dd><%= @enrollment.redeemed_at.utc.strftime("%Y-%m-%d %H:%M UTC") %></dd></dl><% end %>
+    <% if @enrollment.revoked_at.present? %><dl class="kv"><dt>Revoked</dt><dd><%= @enrollment.revoked_at.utc.strftime("%Y-%m-%d %H:%M UTC") %></dd></dl><% end %>
+  </div>
+
+  <div class="actions">
+    <a class="btn" href="<%= enrollments_path %>">Back to enrollments</a>
+    <% if @enrollment.pending? && current_admin&.write_access? %>
+      <%= form_with url: revoke_enrollment_path(@enrollment), method: :post, class: "actions",
+                    data: { confirm: "Revoke token #{@enrollment.code}? The panel will refuse it, but the name server still accepts it until it expires or is used (ZTLP tokens cannot be revoked individually; rotating the zone enrollment secret kills every outstanding token)." } do %>
+        <button type="submit" class="btn danger">Revoke token</button>
+      <% end %>
+    <% elsif @enrollment.status == "revoked" %>
+      <span class="sub">Revoked in the panel. The name server still accepts it until it expires or is used.</span>
+    <% end %>
+  </div>
+</div>

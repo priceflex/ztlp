@@ -1,0 +1,16 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# solid_queue worker (spec §10.2 "jobs" service): dispatcher + worker + scheduler for
+# config/recurring.yml. The jobs container can start before the web container has finished
+# db:prepare, so WAIT for the solid_queue tables, then start (never idle forever).
+require_relative '../config/environment'
+
+waited = 0
+until ActiveRecord::Base.connection.table_exists?('solid_queue_jobs')
+  warn 'ztlp-admin jobs: waiting for the solid_queue tables (web runs db:prepare)...' if (waited % 60).zero?
+  sleep 5
+  waited += 5
+  ActiveRecord::Base.connection_pool.disconnect!
+end
+exec 'bundle', 'exec', 'rake', 'solid_queue:start'

@@ -1,0 +1,10 @@
+<% content_for :title, "Audit log - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Audit log</h1><p class="lede">Every change and sign-in, newest first.</p></div>
+  <%= form_with url: audit_logs_path, method: :get, class: "actions" do |f| %>
+    <%= f.select :action_filter, options_for_select([["All actions", ""]] + @actions.map { |a| [a, a] }, params[:action_filter]), { class: "field", data: { auto_submit: "" } } %>
+  <% end %>
+</div>
+<div class="table-wrap">
+  <%= render "audit_logs/table", logs: @logs %>
+</div>

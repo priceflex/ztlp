@@ -1,0 +1,61 @@
+<%# Install the gateway (PLAN-services-wizard-and-helpdesk.md slice 5). Operators only. No secret is
+    ever rendered here: the script itself is only in the POST response of install_script. %>
+<% gw = @service.gateway %>
+<% missing = Ztlp::GatewayInstall.missing(gw) %>
+<% window_open = gw.install_shown_at && gw.install_shown_at > ServicesController::INSTALL_WINDOW.ago %>
+<div class="panel" data-install-panel>
+  <div class="panel-h"><h2>Gateway install</h2>
+    <span class="badge <%= gw.status == "online" ? "ok" : (gw.status == "stale" ? "bad" : "warn") %>"><%= gw.status %></span></div>
+  <div class="panel-b">
+    <ol class="checklist" data-install-checklist>
+      <li><strong>Get the install script.</strong>
+        <% if gw.install_shown_at %>Shown <%= gw.install_shown_at.utc.strftime("%Y-%m-%d %H:%M UTC") %><%= window_open ? " (still viewable for #{((gw.install_shown_at + ServicesController::INSTALL_WINDOW - Time.current) / 60).ceil} min)" : "" %>.
+        <% else %>Not shown yet.<% end %>
+        It contains the zone relay secret<%= gw.inject_headers ? " and the sign-in header secret" : "" %>.</li>
+      <li><strong>Run it as root on <%= gw.host_note.presence || "the gateway box" %>.</strong> It installs into
+        <span class="mono"><%= Ztlp::GatewayInstall.dir(gw) %></span>, creates the gateway identity there and starts it
+        (docker compose, host networking).</li>
+      <% if gw.inject_headers %>
+        <li><strong>Give the app the header secret.</strong> The script page shows the two lines
+          (<span class="mono">ZTLP_GATEWAY_HEADER_SECRET</span>, <span class="mono">ZTLP_GATEWAY_AUDIENCE=<%= gw.name %></span>) for the app's environment.</li>
+      <% end %>
+      <li><strong>Gateway on the name server.</strong>
+        <% if gw.status == "online" %>Yes<% if gw.last_svc_seen_at %>, seen <%= gw.last_svc_seen_at.utc.strftime("%Y-%m-%d %H:%M UTC") %><% end %>.
+        <% elsif gw.status == "stale" %>It was, but is not any more: check the gateway on its box.
+        <% else %>Not yet.<% end %>
+        The panel checks every 30 minutes, or now:</li>
+      <li><strong>Try it</strong> from an enrolled device that the rules allow: open <span class="mono"><%= @service.ztlp_name %></span>.</li>
+    </ol>
+
+    <% if missing.any? %>
+      <p class="hint warn-text">No install script yet: <%= missing.to_sentence %>.</p>
+    <% end %>
+
+    <div class="actions">
+      <% if missing.empty? %>
+        <% if gw.install_shown_at.nil? || window_open %>
+          <%= form_with url: install_script_service_path(@service), method: :post do %>
+            <button type="submit" class="btn primary">Show install script</button>
+          <% end %>
+        <% else %>
+          <%= form_with url: install_script_service_path(@service), method: :post do %>
+            <input type="hidden" name="regenerate" value="1">
+            <button type="submit" class="btn" data-confirm="<%= gw.inject_headers ? "Regenerate rotates the sign-in header secret: the running gateway and the app both need the new one (rerun the script and update the app). Continue?" : "Show the install script again?" %>">Regenerate install script</button>
+          <% end %>
+        <% end %>
+      <% end %>
+      <%= form_with url: check_gateway_service_path(@service), method: :post do %>
+        <button type="submit" class="btn">Check now</button>
+      <% end %>
+    </div>
+
+    <% if gw.kind == "rust_listen" && gw.status != "planned" %>
+      <details>
+        <summary>After a rule change: update the gateway's policy</summary>
+        <p class="hint">Run on the gateway box. It rewrites the policy file and restarts the gateway; its identity and
+          QUIC certificate stay, so clients keep working. No secrets in this block.</p>
+        <pre class="code-box"><%= Ztlp::GatewayInstall.policy_update_script(gw) %></pre>
+      </details>
+    <% end %>
+  </div>
+</div>

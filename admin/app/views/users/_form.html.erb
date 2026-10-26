@@ -1,0 +1,73 @@
+<% # Slice 6b: shared user form (new + edit). Username is a plain field on
+   # create and a locked (readonly) field on edit — the controller drops the
+   # submitted username on update regardless. %>
+<%= form_with model: user, class: "stack" do |f| %>
+  <% if user.errors.any? %>
+    <div class="notice"><span class="err"><%= user.errors.full_messages.to_sentence %></span></div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-b form-grid">
+      <div class="grid2">
+        <div class="field">
+          <%= f.label :username %>
+          <%= f.text_field :username, required: true,
+                            readonly: user.persisted?,
+                            pattern: "[a-z0-9]([a-z0-9-]*[a-z0-9])?",
+                            class: "mono" %>
+          <p class="hint"><%= user.persisted? ? "Username cannot be changed after creation." : "Lowercase DNS label; immutable after creation." %></p>
+        </div>
+        <div class="field"><%= f.label :display_name %><%= f.text_field :display_name %></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><%= f.label :first_name %><%= f.text_field :first_name %></div>
+        <div class="field"><%= f.label :last_name %><%= f.text_field :last_name %></div>
+      </div>
+      <div class="field"><%= f.label :email %><%= f.email_field :email %></div>
+      <div class="grid2">
+        <div class="field">
+          <%= f.label :phone %><%= f.telephone_field :phone %>
+          <label class="check"><%= check_box_tag "user[sms_opt_in]", "1", user.sms_opt_in %> SMS opt-in</label>
+        </div>
+        <% if operator? %>
+        <div class="field">
+          <%= f.label :role %>
+          <%= f.select :role, User::ROLES.map { |r| [r.humanize, r] } %>
+        </div>
+        <% end %>
+      </div>
+      <% if operator? %>
+      <div class="field">
+        <%= f.label :kind %>
+        <%= f.select :kind, [ [ "Person", "person" ], [ "Service account", "service" ] ] %>
+      </div>
+      <% else %>
+      <p class="sub">Role and kind are set by an administrator (new users start as a person with the user role).</p>
+      <% end %>
+      <div class="field"><%= f.label :notes %><%= f.text_area :notes, rows: 3 %></div>
+      <% unless user.persisted? %>
+        <fieldset class="field">
+          <legend>Enroll a device now</legend>
+          <label class="check"><input type="hidden" name="enroll[now]" value="0"><input type="checkbox" id="enroll_now" name="enroll[now]" value="1" <%= "checked" unless params.dig(:enroll, :now) == "0" %>> Create an enrollment token for this user's first device</label>
+          <p class="hint">After saving you get the one-time enrollment string, a QR code for the ZTLP app on a phone, and the <span class="mono">ztlp setup</span> command.</p>
+          <div class="grid2">
+            <div class="field">
+              <label for="enroll_device_name">Device name <span class="sub">(optional)</span></label>
+              <input type="text" id="enroll_device_name" name="enroll[device_name]" class="mono"
+                     pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="e.g. dana-iphone"
+                     value="<%= params.dig(:enroll, :device_name) %>">
+            </div>
+            <div class="field">
+              <label for="enroll_expiry_hours">Expires in (hours)</label>
+              <input type="number" id="enroll_expiry_hours" name="enroll[expiry_hours]" class="mono"
+                     min="1" max="24" step="1" value="<%= params.dig(:enroll, :expiry_hours).presence || 24 %>">
+            </div>
+          </div>
+        </fieldset>
+      <% end %>
+      <div class="actions">
+        <%= f.submit user.persisted? ? "Save" : "Create user", class: "btn primary" %>
+        <%= link_to "Cancel", user.persisted? ? user_path(user) : users_path, class: "btn" %>
+      </div>
+    </div>
+  </div>
+<% end %>

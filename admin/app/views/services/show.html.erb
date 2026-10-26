@@ -1,0 +1,122 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% write = operator? %>
+<% kind = @service.gateway.kind %>
+<% unless drawer %><% content_for :title, "#{ @service.name } - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div><h1><%= @service.name %></h1>
+    <p class="lede mono"><%= @service.ztlp_name %></p></div>
+  <% if write %>
+    <div class="actions">
+      <%= form_with url: (@service.enabled ? disable_service_path(@service) : enable_service_path(@service)),
+                    method: :post,
+                    data: { confirm: (@service.enabled ?
+                                       "Disable #{ @service.name }? It leaves the rendered policy now; the gateway stops serving it after you deploy the policy and restart the gateway." :
+                                       "Enable #{ @service.name }? It enters the rendered policy now; the gateway serves it after you deploy the policy and restart the gateway.") } do %>
+        <button type="submit" class="btn"><%= @service.enabled ? "Disable" : "Enable" %></button>
+      <% end %>
+      <a class="btn" href="<%= edit_service_path(@service) %>">Edit</a>
+    </div>
+  <% end %>
+</div>
+
+<% if @rule_errors.present? %><div class="notice"><span class="err"><%= @rule_errors.to_sentence %></span></div><% end %>
+
+<div class="stack">
+  <% if write && !drawer %><%= render "services/install_panel" %><% end %>
+  <div class="panel">
+    <div class="panel-h"><h2>About</h2><span class="badge <%= @service.enabled ? "ok" : "bad" %>"><%= @service.enabled ? "enabled" : "disabled" %></span></div>
+    <dl class="kv">
+      <dt>Gateway</dt><dd class="mono"><%= @service.gateway.name %>.<%= @service.gateway.zone.name %> (<%= kind %>)</dd>
+      <dt>Backend</dt><dd class="mono"><%= @service.backend.presence || "—" %></dd>
+      <dt>Protocol</dt><dd><%= @service.protocol.presence || "—" %></dd>
+      <dt>Min assurance</dt><dd><%= @service.min_assurance %><% if kind == "rust_listen" %> <span class="sub">(not enforced by Rust gateways)</span><% end %></dd>
+      <dt>Description</dt><dd><%= @service.description.presence || "—" %></dd>
+    </dl>
+  </div>
+
+  <% gw = @service.gateway %>
+  <div class="panel" data-gateway-settings>
+    <div class="panel-h"><h2>Gateway</h2><span class="badge <%= gw.status == "online" ? "ok" : "warn" %>"><%= gw.status %></span></div>
+    <dl class="kv">
+      <dt>Runs on</dt><dd><%= gw.host_note.presence || "—" %></dd>
+      <dt>UDP port</dt><dd class="mono"><%= gw.bind_port %></dd>
+      <dt>Sign-in headers</dt><dd><%= gw.inject_headers ? "on (audience #{@service.name})" : "off" %></dd>
+      <dt>Policy file</dt><dd><%= { true => "yes", false => "no", nil => "unknown" }[gw.policy_file] %></dd>
+      <dt>Name server</dt><dd class="mono"><%= gw.effective_ns_server %></dd>
+      <dt>Relay</dt><dd class="mono"><%= gw.effective_relay || "—" %></dd>
+      <dt>Max sessions</dt><dd><%= gw.max_sessions %></dd>
+      <dt>Hole punching</dt><dd><%= gw.punch ? "on" : "off" %></dd>
+      <dt>Image</dt><dd class="mono"><%= gw.effective_image %></dd>
+      <% if gw.node_id_hex.present? %><dt>Node id</dt><dd class="mono"><%= gw.node_id_hex %></dd><% end %>
+    </dl>
+    <% if gw.policy_file == false %>
+      <p class="hint warn-text">This gateway runs without a policy file: every enrolled device in the zone can reach it, and
+        the rules below are not enforced until it is restarted with <span class="mono">--policy</span>.</p>
+    <% elsif gw.policy_file.nil? %>
+      <p class="hint">It is not known whether this gateway runs with a policy file (it was found on the name server). Without
+        one every enrolled device can reach it; set this under Edit once you know.</p>
+    <% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Rules</h2><span class="sub"><%= @service.policy_rules.count %></span></div>
+    <% if @service.policy_rules.any? %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>#</th><th>Subject type</th><th>Subject</th><th>Rendered literal</th><% if write %><th></th><% end %></tr></thead>
+        <tbody>
+          <% @service.policy_rules.order(:position, :id).each do |rule| %>
+            <tr><td class="nowrap"><%= rule.position %></td>
+              <td class="nowrap"><%= rule.subject_type %></td>
+              <td class="nowrap mono"><%= rule.subject_entity&.ns_name || rule.subject_value || "all" %></td>
+              <td class="nowrap mono"><%= rule.render %></td>
+              <% if write %><td class="nowrap">
+                <%= form_with url: service_rule_path(@service, rule), method: :delete,
+                              data: { confirm: "Remove #{rule.render} from #{ @service.name }? A gateway restart is needed for it to take effect." } do %>
+                  <button type="submit" class="btn sm">Remove</button>
+                <% end %></td><% end %></tr>
+          <% end %>
+        </tbody>
+      </table></div>
+    <% else %><div class="empty-note">No rules yet — access is default deny.</div><% end %>
+
+    <% hint = if kind == "elixir"
+                "This gateway is elixir: group, role and user rules never match a device (the gateway does not look up owners). Only * or an exact device name do."
+              else
+                "This gateway is rust_listen: user rules never match (the gateway checks the device, so use a group). Group and role rules match through the device's owner; device rules match that device exactly. The min-assurance floor is not enforced by the gateway."
+              end %>
+    <p class="hint" data-rule-hint><%= hint %></p>
+    <% if write %>
+      <% pairs = ->(rows, &label) { rows.map { |r| [ label.call(r), r.id ] } } %>
+      <% user_pairs = pairs.call(@zone_users || []) { |u| "#{u.display_name} (#{u.username})" } %>
+      <% device_pairs = pairs.call(@zone_devices || [], &:name) %>
+      <% group_pairs = pairs.call(@zone_groups || [], &:name) %>
+      <%= form_with url: service_rules_path(@service), method: :post, class: "actions" do %>
+        <label for="rule_subject_type">Add rule</label>
+        <select name="subject_type" id="rule_subject_type" class="mono" data-rule-type>
+          <% PolicyRule::SUBJECT_TYPES.each do |t| %>
+            <option value="<%= t %>" <%= "selected" if t == "group" %>><%= t %></option>
+          <% end %>
+        </select>
+        <span data-rule-pick-slot>
+          <select name="subject_id" class="mono" aria-label="Subject" data-rule-pick
+                  data-user-options="<%= user_pairs.to_json %>" data-device-options="<%= device_pairs.to_json %>"
+                  data-group-options="<%= group_pairs.to_json %>">
+            <option value="">group…</option>
+            <% group_pairs.each do |label, id| %><option value="<%= id %>"><%= label %></option><% end %>
+          </select>
+        </span>
+        <span data-rule-role-slot hidden>
+          <select name="subject_value" class="mono" aria-label="Role">
+            <% User::ROLES.each do |r| %><option value="<%= r %>"><%= r %></option><% end %>
+          </select>
+        </span>
+        <button type="submit" class="btn sm primary">Add rule</button>
+      <% end %>
+    <% end %>
+  </div>
+  <div class="panel">
+    <div class="panel-h"><h2>Rendered policy</h2><span class="sub"><%= kind %></span></div>
+    <pre class="code"><code><%= Ztlp::PolicyRenderer.render(@service.gateway) %></code></pre>
+    <p class="hint">Rule changes need a gateway restart; membership changes are live. Deploy this document to <span class="mono"><%= @service.gateway.name %>.<%= @service.gateway.zone.name %></span> and restart the gateway to apply it.</p>
+  </div>
+</div>

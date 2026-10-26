@@ -1,0 +1,113 @@
+<%# Add Service (PLAN-services-wizard-and-helpdesk.md slice 4). Plain HTML only: the panel CSP
+    forbids inline script/style, so Advanced is a native <details> and access is radio + selects. %>
+<% content_for :title, "Add service - ZTLP Directory" %>
+<% zone = @zone %>
+<div class="page-head">
+  <div><h1>Add service</h1>
+    <p class="lede">A service is what people reach through ZTLP, e.g. <span class="mono">www.<%= zone.name %></span>. Saving creates
+      the service and its gateway as <em>planned</em>; the next page gives you the install script to run on the box.
+      Nothing is published and nothing runs anywhere until then.</p></div>
+</div>
+
+<%= form_with model: @setup, scope: :setup, url: services_path, method: :post, class: "stack" do |f| %>
+  <% if @setup.errors.any? %>
+    <div class="notice"><% @setup.errors.full_messages.each do |m| %><p class="err"><%= m %></p><% end %></div>
+  <% end %>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Service</h2></div>
+    <div class="panel-b form-grid">
+      <div class="field">
+        <%= f.label :fqdn, "Full name" %>
+        <%= f.text_field :fqdn, required: true, class: "mono", placeholder: "www.#{zone.name}", autocomplete: "off" %>
+        <p class="hint">One label inside a zone this panel knows (<%= @zones.map(&:name).join(", ") %>). The first label is the
+          service name the gateway forwards (<span class="mono">--service-name</span>) and the sign-in audience.</p>
+      </div>
+      <div class="field">
+        <%= f.label :host_note, "Runs on" %>
+        <%= f.text_field :host_note, placeholder: "e.g. ChooseForce box 10.42.42.112", maxlength: 200 %>
+        <p class="hint">Which machine the gateway will run on (a note for people; the gateway uses host networking there).</p>
+      </div>
+      <div class="field">
+        <%= f.label :backend, "Backend" %>
+        <%= f.text_field :backend, required: true, class: "mono", placeholder: "127.0.0.1:8080" %>
+        <p class="hint">host:port the gateway forwards to, as seen from that machine (<span class="mono">--forward</span>).</p>
+      </div>
+      <div class="field">
+        <%= f.label :protocol %>
+        <%= f.select :protocol, [ [ "HTTP (web app)", "http" ], [ "TCP (anything else)", "tcp" ] ] %>
+      </div>
+      <div class="field">
+        <label class="check"><%= f.check_box :inject_headers %> Sign people in with ZTLP (HTTP only)</label>
+        <p class="hint">The gateway adds signed <span class="mono">X-ZTLP-*</span> identity headers so the app can sign the
+          person in without a password. The panel generates the shared secret; the install page shows it for the gateway and
+          for the app.</p>
+      </div>
+      <div class="field"><%= f.label :description %><%= f.text_field :description, maxlength: 200 %></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Who can reach it</h2><span class="sub">default is deny; add more rules on the service page</span></div>
+    <div class="panel-b form-grid">
+      <label class="check"><%= f.radio_button :access, "none" %> Nobody yet</label>
+      <label class="check"><%= f.radio_button :access, "any" %> Every enrolled device in the zone</label>
+      <div class="field">
+        <label class="check"><%= f.radio_button :access, "group" %> A group</label>
+        <%= f.select :access_group_id, @zone_groups.map { |g| [ g.name, g.id ] }, { include_blank: "Choose a group" }, "aria-label": "Group" %>
+      </div>
+      <div class="field">
+        <label class="check"><%= f.radio_button :access, "device" %> One device</label>
+        <%= f.select :access_device_id, @zone_devices.map { |d| [ d.name, d.id ] }, { include_blank: "Choose a device" }, "aria-label": "Device" %>
+      </div>
+      <div class="field">
+        <label class="check"><%= f.radio_button :access, "role" %> Everyone with a role</label>
+        <%= f.select :access_role, User::ROLES.map { |r| [ r, r ] }, { include_blank: "Choose a role" }, "aria-label": "Role" %>
+      </div>
+    </div>
+  </div>
+
+  <details class="panel">
+    <summary class="panel-h"><h2>Advanced</h2><span class="sub">defaults fit most installs</span></summary>
+    <div class="panel-b form-grid">
+      <div class="field">
+        <%= f.label :bind_port, "UDP port" %><%= f.number_field :bind_port, in: 1..65_535 %>
+        <p class="hint"><span class="mono">--bind 0.0.0.0:&lt;port&gt;</span>. Use another port for a second gateway on the same box.</p>
+      </div>
+      <div class="field">
+        <%= f.label :ns_server, "Name server" %><%= f.text_field :ns_server, class: "mono", placeholder: zone.ns_addr %>
+        <p class="hint"><span class="mono">--ns-server</span>; blank = the zone's.</p>
+      </div>
+      <div class="field">
+        <%= f.label :relay_addr, "Relay" %><%= f.text_field :relay_addr, class: "mono", placeholder: Array(zone.relay_addrs).first %>
+        <p class="hint"><span class="mono">--relay</span>; blank = the zone's.</p>
+      </div>
+      <div class="field">
+        <%= f.label :max_sessions, "Max sessions" %><%= f.number_field :max_sessions, in: 1..100_000 %>
+        <p class="hint"><span class="mono">--max-sessions</span></p>
+      </div>
+      <div class="field">
+        <label class="check"><%= f.check_box :punch %> NAT hole punching</label>
+        <p class="hint">Off adds <span class="mono">--no-punch</span> (clients always go through the relay or the LAN).</p>
+      </div>
+      <div class="field">
+        <%= f.label :image_tag, "Gateway image" %><%= f.text_field :image_tag, class: "mono", placeholder: Gateway.default_image %>
+      </div>
+      <div class="field">
+        <%= f.label :subject_map_text, "Fallback subject map" %>
+        <%= f.text_area :subject_map_text, rows: 3, class: "mono", placeholder: "<64 hex noise key>=steve" %>
+        <p class="hint">One <span class="mono">--admin-pubkey-email</span> per line, for devices that have no DEVICE record on
+          the name server yet.</p>
+      </div>
+      <div class="field">
+        <%= f.label :min_assurance %><%= f.number_field :min_assurance, in: 1..4 %>
+      </div>
+    </div>
+  </details>
+
+  <div class="actions">
+    <%= f.submit "Create service", class: "btn primary" %>
+    <%= link_to "Cancel", services_path, class: "btn" %>
+    <a class="btn" href="<%= new_service_path(existing: 1) %>">Add to an existing gateway instead</a>
+  </div>
+<% end %>

@@ -1,0 +1,31 @@
+<%= form_with model: admin, class: "stack" do |f| %>
+  <% if admin.errors.any? %>
+    <div class="notice"><span class="err"><%= admin.errors.full_messages.to_sentence %></span></div>
+  <% end %>
+  <div class="panel">
+    <div class="panel-b form-grid">
+      <div class="grid2">
+        <div class="field"><%= f.label :username %><%= f.text_field :username, required: true %></div>
+        <div class="field"><%= f.label :display_name, "Full name" %><%= f.text_field :display_name, required: true %></div>
+      </div>
+      <div class="field"><%= f.label :email %><%= f.email_field :email %></div>
+      <div class="field">
+        <%= f.label :role %>
+        <%= f.select :role, Admin::ROLES.map { |r| [r.humanize, r] } %>
+        <p class="hint">super_admin: manage administrators and secrets. admin: everything else. helpdesk: enrollments and device reset. read_only: view.</p>
+      </div>
+      <div class="field">
+        <%= f.label :pubkey_hex, "Ed25519 public key (hex)" %>
+        <%= f.text_field :pubkey_hex, required: admin.new_record?, readonly: admin.persisted?, pattern: "[0-9a-fA-F]{64}", class: "mono #{"opacity-60" if admin.persisted?}" %>
+        <p class="hint">From the person's <code>ztlp keygen</code> identity. <%= "Keys cannot be changed; disable this account and add a new one instead." if admin.persisted? %></p>
+      </div>
+      <% if admin.persisted? %>
+        <label class="check"><%= check_box_tag "admin[disabled]", "1", admin.disabled? %> Disabled (cannot sign in)</label>
+      <% end %>
+      <div class="actions">
+        <%= f.submit admin.new_record? ? "Add administrator" : "Save", class: "btn primary" %>
+        <%= link_to "Cancel", admins_path, class: "btn" %>
+      </div>
+    </div>
+  </div>
+<% end %>

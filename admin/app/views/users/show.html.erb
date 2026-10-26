@@ -1,0 +1,74 @@
+<% drawer = request.headers["X-Drawer"] == "1" %>
+<% unless drawer %><% content_for :title, "#{@user.display_name} - ZTLP Directory" %><% end %>
+<div class="page-head">
+  <div class="who"><span class="avatar lg"><%= initials(@user.display_name) %></span>
+    <div><h1><%= @user.display_name %></h1>
+    <p class="lede mono"><%= @user.ns_name %> &middot; <%= status_badge(@user.status) %></p></div></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Profile</h2><% if @user.kind == "service" %><span class="sub">service identity</span><% end %></div>
+    <dl class="kv"><dt>Username</dt><dd class="mono"><%= @user.username %></dd></dl>
+    <dl class="kv"><dt>Kind</dt><dd><%= @user.kind == "service" ? "Service account" : "Person" %></dd></dl>
+    <dl class="kv"><dt>Role</dt><dd><%= @user.role %></dd></dl>
+    <% if @user.email.present? %><dl class="kv"><dt>Email</dt><dd><%= @user.email %></dd></dl><% end %>
+    <% if @user.phone.present? %><dl class="kv"><dt>Phone</dt><dd><%= @user.phone %><%= @user.sms_opt_in ? " (SMS opt-in)" : "" %></dd></dl><% end %>
+    <% if @user.notes.present? %><dl class="kv"><dt>Notes</dt><dd><%= @user.notes %></dd></dl><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Groups</h2></div>
+    <% if @user.groups.any? %>
+      <div class="chips">
+        <% @user.groups.each do |g| %>
+          <span class="chip"><%= g.name %></span>
+        <% end %>
+      </div>
+    <% else %><div class="empty-note">No groups.</div><% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Devices</h2><% if current_admin&.write_access? %><a class="btn sm" href="<%= new_enrollment_path(user_id: @user.id) %>">Enroll a device</a><% end %></div>
+    <% if @user.devices.any? %>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Assurance</th><th>Status</th></tr></thead>
+        <tbody>
+          <% @user.devices.order(:name).each do |d| %>
+            <tr><td class="mono"><%= d.name %></td>
+              <td class="nowrap"><span class="badge <%= d.assurance >= 3 ? "ok" : (d.assurance == 2 ? "warn" : "") %>"><%= Ztlp::Assurance.label(d.assurance) %></span></td>
+              <td class="nowrap"><%= status_badge(d.status) %></td></tr>
+          <% end %>
+        </tbody>
+      </table></div>
+    <% else %><div class="empty-note">No devices.</div><% end %>
+  </div>
+
+  <div class="actions">
+    <a class="btn" href="<%= "/users/#{@user.id}/edit" %>">Edit</a>
+    <% if current_admin&.write_access? && !@user.revoked? %>
+      <% if @user.disabled? && @user.ns_revoked? %>
+        <span class="sub">Revoked on the name server by the old Disable (permanent): create a new user to restore access.</span>
+      <% elsif @user.disabled? %>
+        <%= form_with url: enable_user_path(@user), method: :post, class: "actions" do %>
+          <button type="submit" class="btn">Enable user</button>
+        <% end %>
+      <% else %>
+        <%= form_with url: disable_user_path(@user), method: :post, class: "actions" do %>
+          <button type="submit" class="btn" data-confirm="Disable <%= @user.display_name %>? You can enable them again later.">Disable user</button>
+        <% end %>
+      <% end %>
+    <% end %>
+    <% if @user.status == "revoked" %>
+      <span class="sub">Revoked permanently. To restore access, create a new user.</span>
+    <% elsif operator? %>
+      <% n = @user.devices.count { |d| d.status == "enrolled" } %>
+      <%= form_with url: revoke_user_path(@user), method: :post, class: "actions" do %>
+        <button type="submit" class="btn danger" data-confirm="Permanently revoke <%= @user.display_name %> and <%= n %> device(s)? This cannot be undone: the name server never lets this user name be used again. To restore access you must create a new user.">Revoke user</button>
+      <% end %>
+    <% end %>
+  </div>
+  <% unless @user.revoked? %>
+    <p class="hint">Disable is reversible: the name server stops vouching for this user and their devices (group and role rules stop matching once it is published) and gateways with a policy file drop rules that name them. Gateways running without a policy file still let enrolled devices in. Revoke is the permanent cut.</p>
+  <% end %>
+</div>

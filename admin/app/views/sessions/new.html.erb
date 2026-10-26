@@ -1,0 +1,43 @@
+<% content_for :title, "Sign in - ZTLP Directory" %>
+<div class="panel panel-narrow">
+  <div class="panel-h"><h2>Sign in</h2></div>
+  <div class="panel-b">
+    <p class="lede">Passwordless. Request a challenge for your key, sign it on your machine, paste the signature.</p>
+    <% if @gateway&.ok %>
+      <div class="notice mt-notice">
+        This request arrived through the ZTLP tunnel as <code class="mono"><%= @gateway.device_name %></code>
+        (subject <code class="mono"><%= @gateway.subject.presence || "unmapped" %></code>), but no active administrator matches that subject.
+        A super_admin must add an administrator whose username is <code class="mono"><%= @gateway.subject.presence || "&lt;mapped name&gt;" %></code>, or map this device on the gateway.
+      </div>
+    <% end %>
+
+    <% unless @challenge %>
+      <%= form_with url: auth_challenge_path, method: :post do |f| %>
+        <div class="form-grid">
+          <div class="field">
+            <%= f.label :pubkey_hex, "Ed25519 public key (hex)" %>
+            <%= f.text_field :pubkey_hex, required: true, pattern: "[0-9a-fA-F]{64}", class: "mono" %>
+          </div>
+          <div class="actions"><%= f.submit "Request challenge", class: "btn primary" %></div>
+        </div>
+      <% end %>
+    <% else %>
+      <div class="notice mt-m">
+        <p>Challenge issued; valid for <%= @challenge[:expires_in] %> seconds. Sign this exact message:</p>
+<pre class="code-box mt-xs">python3 /ztlp-admin-sign.py login --host "<%= @challenge[:host] %>" --nonce "<%= @challenge[:nonce] %>"</pre>
+        <p class="sub mt-xs">Message = <code>"ztlp-admin-login\n<%= @challenge[:host] %>\n&lt;nonce&gt;"</code>, signed with the seed in <code>identity.json</code>.</p>
+      </div>
+      <%= form_with url: auth_verify_path, method: :post do |f| %>
+        <%= f.hidden_field :pubkey_hex, value: @pubkey_hex %>
+        <%= f.hidden_field :nonce, value: @challenge[:nonce] %>
+        <div class="form-grid">
+          <div class="field">
+            <%= f.label :signature, "Signature (hex)" %>
+            <%= f.text_field :signature, required: true, pattern: "[0-9a-fA-F]{128}", autocomplete: "off", class: "mono" %>
+          </div>
+          <div class="actions"><%= f.submit "Sign in", class: "btn primary" %></div>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+</div>

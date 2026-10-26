@@ -1,0 +1,16 @@
+<table>
+  <thead><tr><th>When</th><th>Action</th><th>By</th><th>Target</th><th>Status</th><th>Details</th></tr></thead>
+  <tbody>
+  <% logs.each do |l| %>
+    <tr>
+      <td class="sub nowrap"><%= l.created_at.utc.strftime("%Y-%m-%d %H:%M:%S") %></td>
+      <td class="mono"><%= l.action %></td>
+      <td><%= l.admin&.username || "-" %></td>
+      <td class="sub"><%= [l.target_type, l.target_id].compact.join(" #") %></td>
+      <td><span class="badge <%= l.status == "ok" ? "ok" : "bad" %>"><%= l.status %></span></td>
+      <td class="mono sub"><%= l.details&.to_json %> <span class="faint"><%= l.ip %></span></td>
+    </tr>
+  <% end %>
+  <% if logs.empty? %><tr class="empty"><td colspan="6">Nothing yet.</td></tr><% end %>
+  </tbody>
+</table>

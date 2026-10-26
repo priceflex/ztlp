@@ -1,0 +1,42 @@
+# frozen_string_literal: true
+
+# Slice 9c sub-slice 2: the Test access decision, rendered under the widget.
+# `@test_result` = { decision:, reason:, trace: [{rule:, result:, why:}],
+# warnings: [], assurance_enforced: false } (Ztlp::AccessEvaluator.result shape).
+# Server-rendered and ERB-escaped: no innerHTML with server data in the JS.
+<div class="panel" data-testid="test-access-result">
+  <div class="panel-h">
+    <h2>Access check — <%= @test_result_device_name %> → <%= @test_result_service_name %></h2>
+    <span class="badge <%= @test_result[:decision] == "allow" ? "ok" : "bad" %>"><%= @test_result[:decision] %></span>
+  </div>
+  <p class="sub" data-testid="test-access-reason"><%= @test_result[:reason] %></p>
+
+  <% if @test_result[:trace].any? %>
+    <div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>Rule</th><th>Result</th><th>Why</th></tr></thead>
+      <tbody>
+        <% @test_result[:trace].each_with_index do |row, i| %>
+          <tr data-testid="trace-rule-<%= i %>">
+            <td class="nowrap"><%= i %></td>
+            <td class="nowrap mono"><%= row[:rule] %></td>
+            <td class="nowrap"><span class="badge <%= row[:result] == "allow" ? "ok" : "bad" %>"><%= row[:result] %></span></td>
+            <td><%= row[:why] %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table></div>
+  <% else %>
+    <div class="empty-note">No rules were evaluated.</div>
+  <% end %>
+
+  <% if @test_result[:warnings].any? %>
+    <div class="panel" data-testid="test-access-warnings">
+      <div class="panel-h"><h3>Warnings</h3></div>
+      <% @test_result[:warnings].each do |w| %>
+        <p class="sub"><%= w %></p>
+      <% end %>
+    </div>
+  <% end %>
+
+  <p class="hint">min_assurance is not enforced by the gateway (<%= @test_result[:assurance_enforced] ? "it is" : "it is not" %>); this check is a panel-side simulation of the gateway decision.</p>
+</div>

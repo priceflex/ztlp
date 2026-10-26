@@ -1,0 +1,40 @@
+<% content_for :title, "Token #{@enrollment.code} - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Token <span class="mono"><%= @enrollment.code %></span></h1>
+    <p class="lede"><%= status_badge(@enrollment.status) %><% if @enrollment.user %> &middot; for <strong><%= @enrollment.user.display_name %></strong><% end %><% if @enrollment.device_name.present? %> &middot; device <span class="mono"><%= @enrollment.device_name %></span><% end %> &middot; <strong>shown once</strong> &mdash; copy it now.</p></div>
+</div>
+
+<div class="stack">
+  <div class="panel">
+    <div class="panel-h"><h2>Install this token on the new device</h2></div>
+    <div class="panel-b">
+      <p class="hint">Copy the token and run it on the new machine. It is a single-use capability and is <strong>never shown again</strong> &mdash; after this page you only ever see the human code <span class="mono"><%= @enrollment.code %></span>.</p>
+      <pre class="code-box"><%= @token_uri %></pre>
+      <div class="actions">
+        <button type="button" class="btn primary" data-act="copy" data-copy="<%= @token_uri %>">Copy token</button>
+        <a class="btn" href="<%= enrollments_path %>">Back to enrollments</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Or scan this QR code</h2></div>
+    <div class="panel-b">
+      <div id="token-qr"><%= raw @qr_svg %></div>
+      <p class="hint">On a phone or tablet: open the <strong>ZTLP app</strong>, choose to enroll, and scan this code. On a computer, use the token or the command instead.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Command</h2></div>
+    <div class="panel-b">
+      <pre class="code-box">ztlp setup --token "<%= @token_uri %>"<% if @relay_secret %> --relay-secret "<%= @relay_secret %>"<% end %></pre>
+      <% if @relay_secret %>
+        <p class="hint" data-relay-warning>This command includes the zone-wide relay secret. Treat it like a password: give it only to this device's owner, over a private channel.</p>
+      <% elsif @relay_missing %>
+        <p class="hint" data-relay-warning>You asked to embed the relay secret, but no relay secret is set for this zone. If its relays run in HMAC prod mode, set it first (<span class="mono">rails zone:set_secret relay</span>) and mint a new token.</p>
+      <% end %>
+      <p class="hint">The device enrolls straight against the name server and opens its first tunnel. This panel does not need to approve anything.</p>
+    </div>
+  </div>
+</div>

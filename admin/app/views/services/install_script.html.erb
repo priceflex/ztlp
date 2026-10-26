@@ -1,0 +1,38 @@
+<%# The gateway install script (slice 5). Rendered only into the POST response, Cache-Control: no-store. %>
+<% gw = @service.gateway %>
+<% content_for :title, "Install #{gw.ns_name} - ZTLP Directory" %>
+<div class="page-head">
+  <div><h1>Install <%= gw.ns_name %></h1>
+    <p class="lede">Copy this and run it as root on <strong><%= gw.host_note.presence || "the gateway box" %></strong>
+      (for example save it as <span class="mono">install.sh</span>, then <span class="mono">sudo bash install.sh</span> and delete the file).</p></div>
+</div>
+
+<div class="stack">
+  <div class="notice">
+    <p class="warn-text">This page contains secrets (the <%= gw.zone.name %> relay secret<%= gw.inject_headers ? " and the sign-in header secret" : "" %>).
+      Do not paste it into chat or tickets. It can be shown again until <%= @expires_at.utc.strftime("%H:%M UTC") %>; after that only
+      Regenerate shows it<%= gw.inject_headers ? ", which rotates the header secret" : "" %>.</p>
+    <% if @regenerated && gw.inject_headers %>
+      <p class="warn-text">The header secret was rotated: rerun this script on the gateway box and update the app with the new value below,
+        or ZTLP sign-in stops working until both match.</p>
+    <% end %>
+  </div>
+
+  <div class="panel">
+    <div class="panel-h"><h2>Install script</h2><span class="sub mono"><%= Ztlp::GatewayInstall.dir(gw) %></span></div>
+    <pre class="code-box" data-install-script><%= @script %></pre>
+  </div>
+
+  <% if @app_env %>
+    <div class="panel">
+      <div class="panel-h"><h2>For the app behind the gateway</h2></div>
+      <p class="hint">Put these in the app's environment so it can verify the signed <span class="mono">X-ZTLP-*</span> headers
+        (the same value as the gateway's header secret).</p>
+      <pre class="code-box" data-app-env><%= @app_env %></pre>
+    </div>
+  <% end %>
+
+  <div class="actions">
+    <a class="btn primary" href="<%= service_path(@service) %>">Back to <%= @service.ztlp_name %></a>
+  </div>
+</div>

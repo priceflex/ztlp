@@ -1,0 +1,48 @@
+<% content_for :title, "Claim this ZTLP panel" %>
+<div class="panel panel-narrow">
+  <div class="panel-h"><h2>Claim this panel</h2></div>
+  <div class="panel-b">
+    <p class="lede">No administrator exists yet. The one-time claim code was printed to the container log
+      (<code class="mono">docker compose logs web | grep "Claim code"</code>). Whoever presents it with their
+      ZTLP public key becomes the first administrator (<em>super_admin</em>). No password is involved.</p>
+
+    <%= form_with url: claim_path, scope: :claim, method: :post do |f| %>
+      <div class="form-grid">
+        <div class="field">
+          <%= f.label :claim_code, "Claim code" %>
+          <%= f.text_field :claim_code, required: true, autocomplete: "off", class: "mono", placeholder: "XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" %>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <%= f.label :username %>
+            <%= f.text_field :username, required: true, placeholder: "steve" %>
+            <p class="hint">Lowercase label; becomes <code>&lt;username&gt;.users.&lt;zone&gt;</code>.</p>
+          </div>
+          <div class="field"><%= f.label :display_name, "Full name" %><%= f.text_field :display_name, required: true %></div>
+        </div>
+        <div class="field"><%= f.label :email %><%= f.email_field :email %></div>
+        <div class="field">
+          <%= f.label :pubkey_hex, "Ed25519 public key (hex)" %>
+          <%= f.text_field :pubkey_hex, required: true, pattern: "[0-9a-fA-F]{64}", class: "mono" %>
+          <p class="hint">The <code>ed25519_public_key</code> field of your <code>~/.ztlp/identity.json</code> (created by <code>ztlp keygen</code>).</p>
+        </div>
+        <details class="notice">
+          <summary class="strong">Optional: sign the claim with your key</summary>
+          <p class="sub mt-sm">Proves possession of the private key at claim time. Fill the fields above, then run on the machine holding <code>identity.json</code>:</p>
+<pre class="code-box">python3 <%= link_to "ztlp-admin-sign.py", "/ztlp-admin-sign.py" %> claim \
+  --code "CODE" --username "steve" --display-name "Steven Price" --email "steve@example.com"</pre>
+          <p class="sub">Paste its <code>timestamp</code> and <code>signature</code> here.</p>
+          <div class="field mt-sm">
+            <%= f.label :timestamp %>
+            <%= f.text_field :timestamp, class: "mono" %>
+          </div>
+          <div class="field">
+            <%= f.label :signature %>
+            <%= f.text_field :signature, class: "mono" %>
+          </div>
+        </details>
+        <div class="actions"><%= f.submit "Claim and become administrator", class: "btn primary" %></div>
+      </div>
+    <% end %>
+  </div>
+</div>

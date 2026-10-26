@@ -62,7 +62,7 @@
     <% end %>
   </div>
 
-  <% if current_admin&.write_access? %>
+  <% if operator? %>
     <div class="panel">
       <div class="panel-h"><h2>Run now</h2></div>
       <div class="actions">

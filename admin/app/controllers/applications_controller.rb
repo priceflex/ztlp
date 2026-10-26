@@ -14,7 +14,7 @@
 # editing an application publishes NOTHING to the NS: the rendered policy is a
 # gateway-side artifact deployed by the operator at gateway restart.
 class ApplicationsController < ApplicationController
-  before_action :require_write_access, only: %i[new create edit update enable disable]
+  before_action :require_operator, only: %i[new create edit update enable disable]
 
   APP_FIELDS = %i[backend protocol min_assurance description].freeze
 

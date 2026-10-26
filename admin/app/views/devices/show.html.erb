@@ -52,7 +52,7 @@
         A name-server revocation is permanent: this name can never re-enroll. To onboard the machine again, create a new enrollment under a new device name.</p>
     </div>
   <% else %>
-    <% if current_admin&.write_access? %>
+    <% if operator? %>
       <div class="actions">
         <%= form_with url: revoke_device_path(@device), method: :post, class: "actions" do %>
           <input type="text" name="reason" placeholder="Reason (required, e.g. lost, stolen, offboarded)" aria-label="Revocation reason" class="revoke-input">

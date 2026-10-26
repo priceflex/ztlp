@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class ApplicationController < ActionController::Base
-  helper_method :current_admin, :signed_in?
+  helper_method :current_admin, :signed_in?, :operator?
 
   before_action :require_gateway_identity
   before_action :redirect_to_claim_if_unclaimed
@@ -57,6 +57,7 @@ class ApplicationController < ActionController::Base
   end
 
   def signed_in? = current_admin.present?
+  def operator? = current_admin&.operator? || false
 
   # Tunnel SSO: the ZTLP gateway stamps HMAC-signed X-ZTLP-* headers on every
   # request from an authenticated tunnel. If the bundle's subject is a known,
@@ -112,6 +113,10 @@ class ApplicationController < ActionController::Base
 
   def require_write_access
     head :forbidden unless current_admin&.write_access?
+  end
+
+  def require_operator
+    head :forbidden unless current_admin&.operator?
   end
 
   def require_super_admin

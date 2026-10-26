@@ -18,7 +18,8 @@
 # plain link to the user's page (no form, no fake button).
 class DevicesController < ApplicationController
   before_action :set_device, only: %i[show revoke assign_owner]
-  before_action :require_write_access, only: %i[revoke assign_owner]
+  before_action :require_write_access, only: %i[assign_owner]
+  before_action :require_operator, only: %i[revoke]
 
   FILTERS = [ %w[all All], %w[enrolled Enrolled], %w[pending Pending],
               %w[revoked Revoked] ].freeze

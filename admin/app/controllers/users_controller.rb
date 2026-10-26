@@ -12,7 +12,8 @@
 class UsersController < ApplicationController
   include EnrollmentMinting
   before_action :set_user, only: %i[show edit update revoke]
-  before_action :require_write_access, only: %i[new create edit update revoke]
+  before_action :require_write_access, only: %i[new create edit update]
+  before_action :require_operator, only: %i[revoke]
 
   FILTERS = [ %w[all All], %w[active Active], %w[invited Invited],
               %w[disabled Disabled], %w[revoked Revoked] ].freeze
@@ -177,10 +178,11 @@ class UsersController < ApplicationController
                                   alert: "No enrollment token: #{err.record.errors.full_messages.to_sentence}"
   end
 
+  # role and kind decide what a user can reach (role:admin rules, service users): operators only.
+  # helpdesk-created users are always role user / kind person (the column defaults).
   def user_params
-    params.require(:user).permit(
-      :username, :display_name, :first_name, :last_name,
-      :email, :phone, :sms_opt_in, :role, :kind, :notes
-    )
+    fields = %i[username display_name first_name last_name email phone sms_opt_in notes]
+    fields += %i[role kind] if current_admin.operator?
+    params.require(:user).permit(*fields)
   end
 end

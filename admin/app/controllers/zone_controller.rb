@@ -5,7 +5,7 @@
 # system_settings ns_drift_json — plus Publish now / Reconcile now
 # (enqueue the solid_queue jobs; write access only).
 class ZoneController < ApplicationController
-  before_action :require_write_access, only: [ :publish, :reconcile ]
+  before_action :require_operator, only: [ :publish, :reconcile ]
 
   def show
     @drift = drift_record

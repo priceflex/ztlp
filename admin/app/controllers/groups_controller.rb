@@ -12,7 +12,7 @@
 # computed from policy_rules (Ztlp::PolicyRenderer.apps_for_group).
 class GroupsController < ApplicationController
   before_action :set_group, only: %i[show edit update destroy add_member remove_member]
-  before_action :require_write_access, only: %i[new create edit update destroy add_member remove_member]
+  before_action :require_operator, only: %i[new create edit update destroy add_member remove_member]
 
   # Form fields; the name is normalized (lowercased DNS label) by the model
   # and drives ns_name. Description is free text.

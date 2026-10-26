@@ -1,5 +1,5 @@
 <% drawer = request.headers["X-Drawer"] == "1" %>
-<% write = current_admin&.write_access? %>
+<% write = operator? %>
 <% kind = @application.gateway.kind %>
 <% unless drawer %><% content_for :title, "#{ @application.name } - ZTLP Directory" %><% end %>
 <div class="page-head">

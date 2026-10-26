@@ -15,7 +15,7 @@
 # Access: write-gated (read_only 403s). No NS publish: creating a gateway row is
 # panel-local; the operator deploys the rendered policy and restarts the gateway.
 class GatewaysController < ApplicationController
-  before_action :require_write_access, only: %i[new create update_kind]
+  before_action :require_operator, only: %i[new create update_kind]
 
   def new
     @gateway = Gateway.new

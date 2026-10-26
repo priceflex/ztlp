@@ -38,7 +38,7 @@
             <dl class="kv"><dt>Addresses</dt><dd class="mono"><%= d["addresses"].presence || d["address"] %></dd></dl>
             <dl class="kv"><dt>Node ID</dt><dd class="mono"><%= d["node_id"] %></dd></dl>
             <% if @record[:created_at] %><dl class="kv"><dt>Last registered</dt><dd><%= Time.at(@record[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M UTC") %></dd></dl><% end %>
-            <% if current_admin.write_access? %>
+            <% if operator? %>
               <form action="<%= register_applications_path %>" method="post">
                 <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                 <input type="hidden" name="fqdn" value="<%= @fqdn %>">
@@ -48,7 +48,7 @@
             <% end %>
           <% else %>
             <p><span class="badge warn">not running</span> <%= @fqdn %> is <strong>not on the name server</strong><% if @ns_error %> (<%= @ns_error %>)<% elsif @not_configured %> (the panel has no NS admin API secret, so it cannot check)<% end %>.</p>
-            <% if current_admin.write_access? %>
+            <% if operator? %>
               <form action="<%= register_applications_path %>" method="post" class="stack">
                 <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                 <input type="hidden" name="fqdn" value="<%= @fqdn %>">
@@ -78,7 +78,7 @@
                 <td class="mono"><%= row[:data]["address"] %></td>
                 <td class="nowrap"><%= row[:created_at] ? Time.at(row[:created_at].to_i).utc.strftime("%Y-%m-%d %H:%M") : "" %></td>
                 <td class="nowrap">
-                  <% if current_admin.write_access? %>
+                  <% if operator? %>
                     <form action="<%= register_applications_path %>" method="post">
                       <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
                       <input type="hidden" name="fqdn" value="<%= row[:fqdn] %>">

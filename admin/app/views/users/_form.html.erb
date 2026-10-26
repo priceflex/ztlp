@@ -28,15 +28,21 @@
           <%= f.label :phone %><%= f.telephone_field :phone %>
           <label class="check"><%= check_box_tag "user[sms_opt_in]", "1", user.sms_opt_in %> SMS opt-in</label>
         </div>
+        <% if operator? %>
         <div class="field">
           <%= f.label :role %>
           <%= f.select :role, User::ROLES.map { |r| [r.humanize, r] } %>
         </div>
+        <% end %>
       </div>
+      <% if operator? %>
       <div class="field">
         <%= f.label :kind %>
         <%= f.select :kind, User::KINDS.map { |k| [k.humanize, k] } %>
       </div>
+      <% else %>
+      <p class="sub">Role and kind are set by an administrator (new users start as a person with the user role).</p>
+      <% end %>
       <div class="field"><%= f.label :notes %><%= f.text_area :notes, rows: 3 %></div>
       <% unless user.persisted? %>
         <fieldset class="field">

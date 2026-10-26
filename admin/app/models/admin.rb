@@ -26,6 +26,10 @@ class Admin < ApplicationRecord
 
   def super_admin? = role == "super_admin"
   def write_access? = role != "read_only"
+  # Operational functions (policy, services, gateways, groups, roles, permanent revokes, zone).
+  # helpdesk manages people only: add/edit users, add devices, disable/enable (spec 4.3).
+  def operator? = %w[super_admin admin].include?(role)
+  def helpdesk? = role == "helpdesk"
   def disabled? = disabled_at.present?
 
   def self.exists_any? = unscoped.exists?

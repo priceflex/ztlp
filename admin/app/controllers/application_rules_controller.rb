@@ -18,7 +18,7 @@
 # at create time (PolicyRule#pin_subject_value), so the rendered literal
 # survives entity deletion.
 class ApplicationRulesController < ApplicationController
-  before_action :require_write_access, only: %i[create destroy]
+  before_action :require_operator, only: %i[create destroy]
 
   PICKED_TYPES = %w[group user device].freeze
 

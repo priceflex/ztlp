@@ -6,7 +6,7 @@
 #   POST /applications/register            create the gateway + application (write access)
 # Registering never publishes to the NS.
 class ApplicationRegistrationsController < ApplicationController
-  before_action :require_write_access, only: :create
+  before_action :require_operator, only: :create
 
   def new
     @fqdn = params[:fqdn].to_s.strip.downcase.presence

@@ -1,6 +1,6 @@
 # Admin panel: complete enrollment tokens (relay secret, NS key, domain pin) + device pickup
 
-Status: v0.5.0 deployed 2026-10-27 00:00Z; v0.5.1 adds the device relay secret (below). Operator OK: "Make sure that the relay secrets, the name server, and
+Status: v0.5.0 deployed 2026-10-27 00:00Z, v0.5.1 00:10Z (device relay secret); v0.5.2 = CodeRabbit fixes. Operator OK: "Make sure that the relay secrets, the name server, and
 anything else we need go into the enrollment token ... and the pin for the domain."
 
 ## Why
@@ -52,3 +52,11 @@ falls back to its legacy registration secret. So:
   `relay_secret_ct` when unset. Set with `rails zone:set_secret[device_relay]` (64 hex or 48 alnum).
 - Longer term: zone-specific gateway service names (or CLIENT_ROUTE_V2 `gw:<zone>`) would let a per-zone
   device secret work and stop sharing one relay secret across customers. Not in this change.
+
+## Review fixes (v0.5.2, CodeRabbit on PR #125)
+- Pickup only trusts NS answers SIGNED by the zone's NS key (`NsClient.query_verified`, same contract as
+  proto/src/ns_verify.rs: trusted signer, Ed25519 over the canonical bytes, unexpired, right name/type,
+  not `registered_unsigned`). A zone without `ns_pubkey_hex` cannot pick up or adopt devices.
+- Revoked users get no device from pickup or adopt.
+- `redeemed_at` is set on pickup; one token's database error no longer stops the job; Check now shows a
+  message instead of a 500 on a conflict.

@@ -45,6 +45,24 @@ class DevicePickupFlowTest < ActionDispatch::IntegrationTest
     assert_match(/enrolled/i, response.body)
   end
 
+  test "Check now turns a database conflict into a message, not a 500" do
+    with_stub(Ztlp::DevicePickup, :check, ->(*, **) { raise ActiveRecord::RecordNotUnique, "dup" }) do
+      post "/enrollments/#{@enr.id}/check"
+    end
+    assert_redirected_to "/enrollments/#{@enr.id}"
+    follow_redirect!
+    assert_match(/could not be listed/i, response.body)
+  end
+
+  test "Check now explains a missing NS key and an unverifiable answer" do
+    stub_check(:no_ns_key) { post "/enrollments/#{@enr.id}/check" }
+    follow_redirect!
+    assert_match(/name server key/i, response.body)
+    stub_check(:untrusted) { post "/enrollments/#{@enr.id}/check" }
+    follow_redirect!
+    assert_match(/did not verify/i, response.body)
+  end
+
   test "the user page offers Add an existing device to a write-capable admin" do
     get "/users/#{@heidy.id}"
     assert_select "form[action=?]", "/users/#{@heidy.id}/adopt_device"

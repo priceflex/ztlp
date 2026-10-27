@@ -90,13 +90,21 @@ class EnrollmentsController < ApplicationController
                          "not one from this token. Use Add an existing device on the user's page to list it." ],
     not_pending: [ :notice, "This token is no longer pending." ],
     no_device_name: [ :alert, "This token has no device name, so the panel cannot look the device up." ],
-    ns_error: [ :alert, "The name server did not answer. Try again in a minute." ]
+    ns_error: [ :alert, "The name server did not answer. Try again in a minute." ],
+    no_ns_key: [ :alert, "Set this zone's name server key first (Name server page): the panel only trusts answers it can verify." ],
+    untrusted: [ :alert, "The name server's answer did not verify against this zone's name server key, so nothing was listed." ],
+    revoked_user: [ :alert, "This token's user is revoked, so the device is not listed." ]
   }.freeze
 
   def check
     enrollment = @zone.enrollments.find(params[:id])
     kind, message = CHECK_MESSAGES.fetch(Ztlp::DevicePickup.check(enrollment), [ :alert, "Unexpected result." ])
     redirect_to enrollment_path(enrollment), kind => message
+  rescue ActiveRecord::ActiveRecordError => e
+    Rails.logger.error("enrollment check #{params[:id]}: #{e.class}: #{e.message}")
+    redirect_to enrollment_path(params[:id]),
+                alert: "The device is on the name server but could not be listed (#{e.class.name.demodulize}). " \
+                       "Another device may already have this key; check the Devices page."
   end
 
   # ------------------------------------------------------------------ result

@@ -12,7 +12,9 @@ module Ztlp
   #   adopt!(zone, user, name)   list a device that is ALREADY enrolled (e.g. with a CLI token) under a
   #                              user, from its existing KEY record: no re-key, nothing published
   #
-  # Read-only toward the NS: a plain KEY query, no secrets needed.
+  # Read-only toward the NS: a KEY query, accepted only when the zone's name server signed the answer
+  # (NsClient.query_verified with zones.ns_pubkey_hex). A zone without that key cannot pick devices up:
+  # an unsigned UDP answer would let anyone on the path list their own key as a user's device.
   module DevicePickup
     class NotFound < StandardError; end
 
@@ -21,24 +23,32 @@ module Ztlp
     # panel and the NS); anything older is an earlier enrollment of the same name.
     CLOCK_SKEW = 120
     NS_ERRORS = [ Ztlp::NsClient::NsError, SystemCallError, IOError, Timeout::Error, SocketError ].freeze
+    NO_NS_KEY = "set the zone's name server key first (Name server page): without it the panel cannot verify the answer"
 
     def self.check(enrollment, ns_client: NsClient)
       return :not_pending unless enrollment.pending? && !enrollment.expired?
       return :no_device_name if enrollment.device_name.blank?
+      return :revoked_user if enrollment.user&.revoked?
 
       zone = enrollment.zone
+      return :no_ns_key if zone.ns_pubkey_hex.blank?
+
       rec = lookup_key(zone, enrollment.device_name, ns_client)
       return :pending unless rec
       return :stale_key if rec[:created_at].to_i < enrollment.created_at.to_i - CLOCK_SKEW
 
       Enrollment.transaction do
         device = upsert_device!(zone, enrollment.user, enrollment.device_name, rec, enrollment: enrollment)
-        enrollment.update!(status: "redeemed", uses: enrollment.uses.to_i + 1, redeemed_device: device)
+        enrollment.update!(status: "redeemed", uses: enrollment.uses.to_i + 1, redeemed_device: device,
+                           redeemed_at: Time.current)
         AuditLog.record!("enrollment.redeem", admin: nil, target: enrollment, status: "ok",
                                               details: { code: enrollment.code, device: device.ns_name,
                                                          node_id: device.node_id_hex, via: "ns_key_lookup" })
       end
       :redeemed
+    rescue Ztlp::NsClient::UntrustedAnswer => e
+      Rails.logger.warn("device_pickup #{enrollment.code}: #{e.message}")
+      :untrusted
     rescue *NS_ERRORS
       :ns_error
     end
@@ -48,8 +58,14 @@ module Ztlp
       probe = zone.devices.new(name: name)
       probe.validate
       raise ActiveRecord::RecordInvalid, probe if probe.errors[:name].any?
+      raise NotFound, "#{user.display_name} is revoked; a revoked user cannot get devices" if user&.revoked?
+      raise NotFound, NO_NS_KEY if zone.ns_pubkey_hex.blank?
 
-      rec = lookup_key(zone, name, ns_client)
+      rec = begin
+        lookup_key(zone, name, ns_client)
+      rescue Ztlp::NsClient::UntrustedAnswer => e
+        raise NotFound, "the name server's answer for #{name}.#{zone.name} did not verify (#{e.message})"
+      end
       raise NotFound, "no KEY record for #{name}.#{zone.name} on the name server" unless rec
 
       Device.transaction do
@@ -62,7 +78,8 @@ module Ztlp
     end
 
     def self.lookup_key(zone, name, ns_client)
-      rec = ns_client.query(zone.ns_addr, NS_TIMEOUT, name: "#{name}.#{zone.name}", type: "key")
+      rec = ns_client.query_verified(zone.ns_addr, NS_TIMEOUT, name: "#{name}.#{zone.name}", type: "key",
+                                                              trusted_keys: [ zone.ns_pubkey_hex ])
       rec.is_a?(Hash) ? rec : nil
     end
 

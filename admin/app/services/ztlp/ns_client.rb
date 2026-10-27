@@ -105,6 +105,95 @@ module Ztlp
       end
     end
 
+    # An NS answer that is not signed by a name server we trust (see query_verified).
+    class UntrustedAnswer < StandardError; end
+
+    SIG_LEN = 64
+    PUB_LEN = 32
+
+    # Like query, but the answer counts only if the NAME SERVER signed it (proto/src/ns_verify.rs):
+    #   reply     = 0x02 || canonical || sig_len:u16 || sig || pub_len:u16 || pub
+    #   canonical = type:u8 | name_len:u16 | name | data_len:u32 | cbor | created_at:u64 | ttl:u32 | serial:u64
+    # Accepted only when the signer is one of `trusted_keys` (64 hex), the Ed25519 signature verifies
+    # over `canonical`, the record is unexpired, it is for the name and type asked, and the NS did not
+    # store it from an unauthenticated registration. Raises UntrustedAnswer otherwise. :not_found /
+    # :revoked pass through (a forged "not found" can only delay a pickup, never list a key).
+    def self.query_verified(ns_addr, timeout, name:, type:, trusted_keys:, socket: nil, now: Time.now.to_i)
+      trusted = Array(trusted_keys).map { |k| k.to_s.strip.downcase }.select { |k| k.match?(/\A\h{64}\z/) }
+      raise UntrustedAnswer, "no trusted name server key configured" if trusted.empty?
+
+      type_byte = require_type(type)
+      request = [ 0x01, name.bytesize, name.b, type_byte ].pack("C n a* C")
+      request = request + "\x00".b * (QUERY_PAD_SIZE - request.bytesize)
+      reply = send_one(ns_addr, timeout, request, socket: socket)
+      case reply.getbyte(0)
+      when 0x02 then verify_signed_record(reply, name: name, type_byte: type_byte, trusted: trusted, now: now)
+      when 0x03 then :not_found
+      when 0x04 then :revoked
+      when 0xFF
+        code = reply.getbyte(1) || 0x00
+        raise NsError.new(code, REASON_CODES[code] || "unspecified")
+      else
+        raise NsError.new(0x00, "bad_reply")
+      end
+    end
+
+    def self.verify_signed_record(reply, name:, type_byte:, trusted:, now:)
+      bin = reply.b
+      off = 1
+      rec_type, name_len = bin.byteslice(off, 3).to_s.unpack("C n")
+      raise UntrustedAnswer, "truncated record" if name_len.nil?
+
+      off += 3
+      rec_name = bin.byteslice(off, name_len).to_s
+      off += name_len
+      data_len = bin.byteslice(off, 4).to_s.unpack1("N")
+      raise UntrustedAnswer, "truncated record" if data_len.nil? || rec_name.bytesize != name_len
+
+      off += 4
+      data_bin = bin.byteslice(off, data_len).to_s
+      off += data_len
+      tail = bin.byteslice(off, 20).to_s
+      raise UntrustedAnswer, "truncated record" if data_bin.bytesize != data_len || tail.bytesize != 20
+
+      off += 20
+      canonical = bin.byteslice(1, off - 1)
+      created_at, ttl, serial = tail.unpack("Q> N Q>")
+      sig_len = bin.byteslice(off, 2).to_s.unpack1("n")
+      raise UntrustedAnswer, "signature length #{sig_len.inspect} (want #{SIG_LEN})" unless sig_len == SIG_LEN
+
+      sig = bin.byteslice(off + 2, SIG_LEN).to_s
+      off += 2 + SIG_LEN
+      pub_len = bin.byteslice(off, 2).to_s.unpack1("n")
+      raise UntrustedAnswer, "signer key length #{pub_len.inspect} (want #{PUB_LEN})" unless pub_len == PUB_LEN
+
+      signer = bin.byteslice(off + 2, PUB_LEN).to_s
+      off += 2 + PUB_LEN
+      raise UntrustedAnswer, "truncated signature" if sig.bytesize != SIG_LEN || signer.bytesize != PUB_LEN
+      raise UntrustedAnswer, "trailing bytes after the record" if off != bin.bytesize
+
+      signer_hex = signer.unpack1("H*")
+      raise UntrustedAnswer, "record signed by an untrusted key" unless trusted.include?(signer_hex)
+      unless Ed25519.verify(pubkey_hex: signer_hex, message: canonical, signature_hex: sig.unpack1("H*"))
+        raise UntrustedAnswer, "record signature does not verify"
+      end
+      raise UntrustedAnswer, "record expired" if created_at + ttl <= now
+
+      rec_name = rec_name.force_encoding(Encoding::UTF_8)
+      raise UntrustedAnswer, "answer is for #{rec_name}, not #{name}" if rec_name != name || rec_type != type_byte
+
+      data = Cbor.decode(data_bin)
+      if data.is_a?(Hash) && (data["registered_unsigned"] == true || data[:registered_unsigned] == true)
+        raise UntrustedAnswer, "the name server stored this record from an unauthenticated registration"
+      end
+
+      { name: rec_name, type: TYPE_BYTES.key(rec_type).to_s, data: data, created_at: created_at, ttl: ttl,
+        serial: serial, signer: signer_hex }
+    rescue ArgumentError, TypeError, NoMethodError => e
+      raise UntrustedAnswer, "malformed record (#{e.class})"
+    end
+    private_class_method :verify_signed_record
+
     # List records via the NS admin HTTP API (spec F6). `ns_admin_api_port`
     # is the metrics port (9103 by default, ZTLP_NS_METRICS_PORT);
     # `ns_admin_api_secret` is the 64-hex (or 32-raw) secret behind

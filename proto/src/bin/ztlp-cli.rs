@@ -5256,20 +5256,9 @@ async fn cmd_listen(
     // below (identity bundle resolution needs NS server + policy engine
     // available inside `tokio::spawn`).
     let ns_server_owned: Option<String> = ns_server.clone();
-    let policy_engine: PolicyEngine = match policy_path {
-        Some(path) => match PolicyEngine::from_file(path) {
-            Ok(engine) => engine,
-            Err(e) => {
-                eprintln!(
-                    "⚠ Failed to load --policy file '{}': {} — falling back to allow-all",
-                    path.display(),
-                    e
-                );
-                PolicyEngine::allow_all()
-            }
-        },
-        None => PolicyEngine::allow_all(),
-    };
+    // No --policy = allow all; a --policy file that does not load = deny all
+    // (it used to fall back to allow-all, silently opening every service).
+    let policy_engine: PolicyEngine = PolicyEngine::load_or_deny(policy_path.as_deref());
 
     let server_cfg = QuicEndpointConfig {
         bind: Some(bind.parse().unwrap()),
@@ -5803,6 +5792,51 @@ async fn cmd_listen(
             }
         };
         let (audience, backend_addr) = target_clone;
+
+        // Admission: the same decision the legacy UDP path makes in
+        // handle_new_session. Before this, the QUIC path loaded --policy but
+        // only used it to label X-ZTLP-Group, so every enrolled device could
+        // reach every service. Identity = the peer's NS name from the
+        // cryptographically verified tunnel pubkey (or the pubkey hex when the
+        // NS has no name for it, which only a wildcard rule matches).
+        let peer_pubkey_hex = tunnel_peer_pubkey
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase();
+        let peer_identity = match ns_server_owned.as_deref() {
+            Some(ns) if !peer_pubkey_hex.is_empty() => {
+                match ns_pubkey_lookup(&peer_pubkey_hex, ns).await {
+                    Ok(Some(name)) => name,
+                    _ => peer_pubkey_hex.clone(),
+                }
+            }
+            _ => peer_pubkey_hex.clone(),
+        };
+        let admission_resolver = ns_server_owned.as_deref().map(UdpNsResolver::new);
+        let admitted = policy_engine
+            .authorize_peer(
+                &peer_identity,
+                &audience,
+                admission_resolver
+                    .as_ref()
+                    .map(|r| r as &dyn ztlp_proto::policy::NsResolver),
+            )
+            .await;
+        if !admitted {
+            eprintln!(
+                "{} {} denied for service '{}'",
+                c_red("✗ POLICY DENIED:"),
+                peer_identity,
+                audience
+            );
+            conn.inner
+                .close(quinn::VarInt::from_u32(0x5a01), b"ztlp policy denied");
+            continue;
+        }
+        println!(
+            "Policy allowed {} for service '{}'",
+            peer_identity, audience
+        );
 
         // Resolve the full NS-authoritative identity bundle ONCE per
         // tunnel (right after the handshake, using the cryptographically

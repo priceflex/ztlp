@@ -39,7 +39,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// The policy engine — holds rules for all services.
 #[derive(Debug, Clone)]
@@ -228,6 +228,53 @@ impl PolicyEngine {
                 }
                 self.default_allow
             }
+        }
+    }
+
+    /// The gateway's tunnel-admission decision (QUIC and UDP paths alike).
+    ///
+    /// `identity` is the peer's NS name (from the pubkey reverse lookup) or,
+    /// when the NS has no name for that key, its pubkey hex. With a resolver,
+    /// `group:`/`role:` patterns are evaluated through the NS; without one
+    /// they can never match (exact and wildcard patterns still do).
+    pub async fn authorize_peer(
+        &self,
+        identity: &str,
+        service: &str,
+        resolver: Option<&dyn NsResolver>,
+    ) -> bool {
+        match resolver {
+            Some(r) if self.has_identity_patterns() => {
+                self.authorize_async(identity, service, r).await
+            }
+            _ => self.authorize(identity, service),
+        }
+    }
+
+    /// The engine a gateway runs with: no `--policy` = allow all (unchanged);
+    /// a `--policy` file that loads = its rules; a `--policy` file that does
+    /// NOT load (missing, unreadable, malformed) = deny everything. The last
+    /// case used to fall back to allow-all, so a broken policy file silently
+    /// opened every service.
+    pub fn load_or_deny(path: Option<&Path>) -> Self {
+        match path {
+            None => Self::allow_all(),
+            Some(p) => match Self::from_file(p) {
+                Ok(engine) => engine,
+                Err(e) => {
+                    error!(
+                        "--policy file '{}' did not load ({}): DENYING ALL connections until it is fixed",
+                        p.display(),
+                        e
+                    );
+                    eprintln!(
+                        "✗ --policy file '{}' did not load: {} — denying all connections until it is fixed",
+                        p.display(),
+                        e
+                    );
+                    Self::new()
+                }
+            },
         }
     }
 
@@ -683,6 +730,131 @@ allow = ["role:admin"]
             let result = self.devices.get(device_name).cloned();
             Box::pin(async move { result })
         }
+    }
+
+    // ── QUIC gateway enforcement (authorize_peer / load_or_deny) ──────
+    //
+    // The QUIC accept path in `ztlp listen --gateway` must make the same
+    // decision as the legacy UDP path: the tunnel peer's NS name (or its
+    // pubkey hex when the NS has no name for it) against the service's
+    // allow list, with group:/role: resolved through the NS.
+
+    const WHOAMI_POLICY: &str = r#"
+default = "deny"
+
+[[services]]
+name = "whoami"
+allow = ["stevens-mac-studio.trs.ztlp", "group:blitz@trs.ztlp"]
+"#;
+
+    #[tokio::test]
+    async fn authorize_peer_allows_a_listed_device_and_refuses_an_unlisted_one() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let resolver = MockResolver::new();
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_resolves_group_rules_through_the_ns() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let mut resolver = MockResolver::new();
+        resolver.groups.insert(
+            "blitz@trs.ztlp".to_string(),
+            vec!["steve@trs.ztlp".to_string()],
+        );
+        resolver.devices.insert(
+            "stevens-macbook-pro-2.trs.ztlp".to_string(),
+            "steve@trs.ztlp".to_string(),
+        );
+        assert!(
+            engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_without_a_resolver_never_lets_a_group_rule_match() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", None)
+                .await
+        );
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_refuses_an_unknown_service_under_default_deny() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        assert!(
+            !engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "admin", None)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_refuses_a_bare_pubkey_when_the_ns_has_no_name() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let resolver = MockResolver::new();
+        assert!(
+            !engine
+                .authorize_peer(&"ab".repeat(32), "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn no_policy_file_still_means_allow_all() {
+        let engine = PolicyEngine::load_or_deny(None);
+        assert!(engine.authorize_peer("anyone.trs.ztlp", "www", None).await);
+    }
+
+    #[tokio::test]
+    async fn a_policy_file_that_fails_to_load_denies_everything() {
+        let dir = std::env::temp_dir().join(format!("ztlp-policy-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist.toml");
+        let engine = PolicyEngine::load_or_deny(Some(&missing));
+        assert!(
+            !engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await,
+            "a policy file the operator configured but that cannot load must fail closed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_loadable_policy_file_is_used() {
+        let path = std::env::temp_dir().join(format!("ztlp-policy-ok-{}.toml", std::process::id()));
+        std::fs::write(&path, WHOAMI_POLICY).unwrap();
+        let engine = PolicyEngine::load_or_deny(Some(&path));
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", None)
+                .await
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

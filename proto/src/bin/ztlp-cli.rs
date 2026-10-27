@@ -2602,10 +2602,13 @@ async fn ns_query_raw(
     }
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    sock.send_to(&query, ns_addr).await?;
+    // Connected socket: the kernel drops datagrams from any other sender, so a
+    // reply is only ever read from the name server we asked.
+    sock.connect(ns_addr).await?;
+    sock.send(&query).await?;
     let mut buf = vec![0u8; 65535];
-    match timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
-        Ok(Ok((len, _))) => {
+    match timeout(Duration::from_secs(3), sock.recv(&mut buf)).await {
+        Ok(Ok(len)) => {
             let data = &buf[..len];
 
             if data.is_empty() {
@@ -2715,10 +2718,13 @@ async fn ns_pubkey_lookup(
     query.extend_from_slice(pk_bytes);
 
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    sock.send_to(&query, ns_addr).await?;
+    // Connected socket: the kernel drops datagrams from any other sender, so a
+    // reply is only ever read from the name server we asked.
+    sock.connect(ns_addr).await?;
+    sock.send(&query).await?;
     let mut buf = vec![0u8; 65535];
-    match timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await {
-        Ok(Ok((len, _))) => {
+    match timeout(Duration::from_secs(2), sock.recv(&mut buf)).await {
+        Ok(Ok(len)) => {
             let data = &buf[..len];
             if data.is_empty() || data[0] != 0x02 {
                 return Ok(None);
@@ -5150,6 +5156,10 @@ fn spawn_relay_registration(
 // Falls back to the static `--admin-map` (pubkey=email pairs) when no
 // `--ns-server` is configured, or when NS is unreachable — this keeps the
 // no-NS PoC/demo path working without a live NS server.
+/// Upper bound on the QUIC gateway's per-connection admission check (NS name
+/// lookup + policy evaluation). Exceeding it denies the connection.
+const QUIC_ADMISSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn resolve_identity_bundle(
     pubkey_hex: &str,
     ns_server: &Option<String>,
@@ -5256,20 +5266,10 @@ async fn cmd_listen(
     // below (identity bundle resolution needs NS server + policy engine
     // available inside `tokio::spawn`).
     let ns_server_owned: Option<String> = ns_server.clone();
-    let policy_engine: PolicyEngine = match policy_path {
-        Some(path) => match PolicyEngine::from_file(path) {
-            Ok(engine) => engine,
-            Err(e) => {
-                eprintln!(
-                    "⚠ Failed to load --policy file '{}': {} — falling back to allow-all",
-                    path.display(),
-                    e
-                );
-                PolicyEngine::allow_all()
-            }
-        },
-        None => PolicyEngine::allow_all(),
-    };
+    // No --policy = allow all; a --policy file that does not load = deny all
+    // (it used to fall back to allow-all, silently opening every service).
+    let policy_engine: std::sync::Arc<PolicyEngine> =
+        std::sync::Arc::new(PolicyEngine::load_or_deny(policy_path.as_deref()));
 
     let server_cfg = QuicEndpointConfig {
         bind: Some(bind.parse().unwrap()),
@@ -5757,185 +5757,257 @@ async fn cmd_listen(
         };
         // Provide dummy hmac since secret is required
         let hmac_secret = header_hmac_secret.unwrap_or("").to_string();
-        let (_session, service_hash_bytes, tunnel_peer_pubkey) =
-            match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
-                &conn,
-                &identity_clone,
-                ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
-            )
-            .await
-            {
-                Ok(res) => {
-                    println!(
-                        "Responder handshake success (peer pubkey: {})",
-                        res.2.as_deref().unwrap_or("unknown")
-                    );
-                    (res.0.session, res.1, res.2)
+        // Handshake, admission and identity resolution run in a task per
+        // connection: they wait on the peer and on NS round-trips, and in the
+        // accept loop one slow or hostile peer would delay every other tunnel.
+        let ns_server_owned = ns_server_owned.clone();
+        let policy_engine = policy_engine.clone();
+        tokio::spawn(async move {
+            let (_session, service_hash_bytes, tunnel_peer_pubkey) =
+                match ztlp_proto::quic_transport::noise_stream::run_responder_handshake(
+                    &conn,
+                    &identity_clone,
+                    ztlp_proto::identity::NodeId([0; 16]), // Accept any for now
+                )
+                .await
+                {
+                    Ok(res) => {
+                        println!(
+                            "Responder handshake success (peer pubkey: {})",
+                            res.2.as_deref().unwrap_or("unknown")
+                        );
+                        (res.0.session, res.1, res.2)
+                    }
+                    Err(e) => {
+                        // A single failed handshake (timeout, malformed Noise,
+                        // client disconnect mid-msg3, etc.) must NEVER take down
+                        // the whole gateway process — Docker would restart us in
+                        // a crash loop and every other tenant tunnel would drop.
+                        // Log the reason and accept the next connection. This is
+                        // the v0.29.x bugfix for the test-org-2 crash loop where
+                        // an idle QUIC connection's "timed out" Err propagated up
+                        // through cmd_listen, killing the binary.
+                        eprintln!(
+                            "✗ Responder handshake failed (continuing to accept next): {:?}",
+                            e
+                        );
+                        return;
+                    }
+                };
+
+            let target_clone = match service_registry_clone.resolve(&service_hash_bytes) {
+                Some((name, addr)) => {
+                    println!("Resolved service hash to backend {} at {}", name, addr);
+                    (name.to_string(), addr.to_string())
                 }
-                Err(e) => {
-                    // A single failed handshake (timeout, malformed Noise,
-                    // client disconnect mid-msg3, etc.) must NEVER take down
-                    // the whole gateway process — Docker would restart us in
-                    // a crash loop and every other tenant tunnel would drop.
-                    // Log the reason and accept the next connection. This is
-                    // the v0.29.x bugfix for the test-org-2 crash loop where
-                    // an idle QUIC connection's "timed out" Err propagated up
-                    // through cmd_listen, killing the binary.
+                None => {
                     eprintln!(
-                        "✗ Responder handshake failed (continuing to accept next): {:?}",
-                        e
+                        "Rejecting QUIC stream: service hash {:?} not mapped to any known backend.",
+                        service_hash_bytes
                     );
-                    continue;
+                    return;
                 }
             };
+            let (audience, backend_addr) = target_clone;
 
-        let target_clone = match service_registry_clone.resolve(&service_hash_bytes) {
-            Some((name, addr)) => {
-                println!("Resolved service hash to backend {} at {}", name, addr);
-                (name.to_string(), addr.to_string())
-            }
-            None => {
+            // Admission: the same decision the legacy UDP path makes in
+            // handle_new_session. Before this, the QUIC path loaded --policy but
+            // only used it to label X-ZTLP-Group, so every enrolled device could
+            // reach every service. Identity = the peer's NS name from the
+            // cryptographically verified tunnel pubkey (or the pubkey hex when the
+            // NS has no name for it, which only a wildcard rule matches).
+            let peer_pubkey_hex = tunnel_peer_pubkey
+                .clone()
+                .unwrap_or_default()
+                .to_lowercase();
+            // Bounded: NS round-trips (pubkey lookup, then GROUP/USER/DEVICE
+            // records for group:/role: rules) must not hold a connection open
+            // indefinitely. Running out of time is a deny.
+            let admission = tokio::time::timeout(QUIC_ADMISSION_TIMEOUT, async {
+                let peer_identity = match ns_server_owned.as_deref() {
+                    Some(ns) if !peer_pubkey_hex.is_empty() => {
+                        match ns_pubkey_lookup(&peer_pubkey_hex, ns).await {
+                            Ok(Some(name)) => name,
+                            _ => peer_pubkey_hex.clone(),
+                        }
+                    }
+                    _ => peer_pubkey_hex.clone(),
+                };
+                let admission_resolver = ns_server_owned.as_deref().map(UdpNsResolver::new);
+                let admitted = policy_engine
+                    .authorize_peer(
+                        &peer_identity,
+                        &audience,
+                        admission_resolver
+                            .as_ref()
+                            .map(|r| r as &dyn ztlp_proto::policy::NsResolver),
+                    )
+                    .await;
+                (peer_identity, admitted)
+            })
+            .await;
+            let (peer_identity, admitted) = match admission {
+                Ok(decision) => decision,
+                Err(_) => {
+                    eprintln!(
+                        "{} admission check for service '{}' timed out after {:?}; denying",
+                        c_red("✗ POLICY DENIED:"),
+                        audience,
+                        QUIC_ADMISSION_TIMEOUT
+                    );
+                    (peer_pubkey_hex.clone(), false)
+                }
+            };
+            if !admitted {
                 eprintln!(
-                    "Rejecting QUIC stream: service hash {:?} not mapped to any known backend.",
-                    service_hash_bytes
+                    "{} {} denied for service '{}'",
+                    c_red("✗ POLICY DENIED:"),
+                    peer_identity,
+                    audience
                 );
-                continue;
+                conn.inner
+                    .close(quinn::VarInt::from_u32(0x5a01), b"ztlp policy denied");
+                return;
             }
-        };
-        let (audience, backend_addr) = target_clone;
+            println!(
+                "Policy allowed {} for service '{}'",
+                peer_identity, audience
+            );
 
-        // Resolve the full NS-authoritative identity bundle ONCE per
-        // tunnel (right after the handshake, using the cryptographically
-        // verified peer pubkey) and cache it for the tunnel's lifetime.
-        // Every HTTP request on this tunnel gets the SAME resolved bundle
-        // + a fresh per-request timestamp/signature — no NS round-trip
-        // per request. See resolve_identity_bundle() for the pubkey ->
-        // device -> owner -> group resolution chain and its static
-        // --admin-map fallback.
-        let identity_bundle = if http_inject_headers_copy {
-            let pubkey = tunnel_peer_pubkey.clone().unwrap_or_default();
-            resolve_identity_bundle(
-                &pubkey,
-                &ns_server_owned,
-                &admin_map,
-                &policy_engine,
-                &audience,
-            )
-            .await
-        } else {
-            ztlp_proto::http_injector::IdentityBundle::default()
-        };
+            // Resolve the full NS-authoritative identity bundle ONCE per
+            // tunnel (right after the handshake, using the cryptographically
+            // verified peer pubkey) and cache it for the tunnel's lifetime.
+            // Every HTTP request on this tunnel gets the SAME resolved bundle
+            // + a fresh per-request timestamp/signature — no NS round-trip
+            // per request. See resolve_identity_bundle() for the pubkey ->
+            // device -> owner -> group resolution chain and its static
+            // --admin-map fallback.
+            let identity_bundle = if http_inject_headers_copy {
+                let pubkey = tunnel_peer_pubkey.clone().unwrap_or_default();
+                resolve_identity_bundle(
+                    &pubkey,
+                    &ns_server_owned,
+                    &admin_map,
+                    &policy_engine,
+                    &audience,
+                )
+                .await
+            } else {
+                ztlp_proto::http_injector::IdentityBundle::default()
+            };
 
-        tokio::spawn(async move {
-            loop {
-                if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
-                    let tcp = tokio::net::TcpStream::connect(&backend_addr).await.unwrap();
-                    let (mut t_read, mut t_write) = tcp.into_split();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok((mut q_send, mut q_recv)) = conn.accept_bi().await {
+                        let tcp = tokio::net::TcpStream::connect(&backend_addr).await.unwrap();
+                        let (mut t_read, mut t_write) = tcp.into_split();
 
-                    let hmac = hmac_secret.clone();
-                    let bundle = identity_bundle.clone();
-                    let aud = audience.clone();
-                    let inject_enabled = http_inject_headers_copy;
+                        let hmac = hmac_secret.clone();
+                        let bundle = identity_bundle.clone();
+                        let aud = audience.clone();
+                        let inject_enabled = http_inject_headers_copy;
 
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncWriteExt;
+                        tokio::spawn(async move {
+                            use tokio::io::AsyncWriteExt;
 
-                        let mut read_buf = vec![0u8; 65000];
+                            let mut read_buf = vec![0u8; 65000];
 
-                        // TWO INDEPENDENT pump tasks (mirrors the client-side
-                        // fix). A single `tokio::select!` here coupled the two
-                        // directions: if the backend TCP write stalled (channel
-                        // full), the QUIC read starved and large transfers
-                        // (>=1MB) deadlocked until the SSH keepalive dropped
-                        // the connection. Splitting into two tasks lets each
-                        // direction drain independently. Also removed the
-                        // per-chunk `println!` (line-buffered stdout on the hot
-                        // path throttled throughput — the same bug fixed on
-                        // the client side).
-                        //
-                        // Each direction owns its half of the stream:
-                        //   backend -> client:  t_read (ReadHalf)  -> q_send
-                        //   client -> backend:  q_recv             -> t_write
-                        let pump_backend_to_quic = tokio::spawn(async move {
-                            use tokio::io::AsyncReadExt;
-                            use ztlp_proto::quic_transport::noise_stream;
-                            loop {
-                                match t_read.read(&mut read_buf).await {
-                                    Ok(0) => break, // backend EOF
-                                    Ok(n) => {
-                                        if noise_stream::write_ztlp_frame(
-                                            &mut q_send,
-                                            &read_buf[..n],
-                                        )
-                                        .await
-                                        .is_err()
-                                        {
-                                            eprintln!(
-                                                "gateway TCP->QUIC write error; closing pump"
-                                            );
+                            // TWO INDEPENDENT pump tasks (mirrors the client-side
+                            // fix). A single `tokio::select!` here coupled the two
+                            // directions: if the backend TCP write stalled (channel
+                            // full), the QUIC read starved and large transfers
+                            // (>=1MB) deadlocked until the SSH keepalive dropped
+                            // the connection. Splitting into two tasks lets each
+                            // direction drain independently. Also removed the
+                            // per-chunk `println!` (line-buffered stdout on the hot
+                            // path throttled throughput — the same bug fixed on
+                            // the client side).
+                            //
+                            // Each direction owns its half of the stream:
+                            //   backend -> client:  t_read (ReadHalf)  -> q_send
+                            //   client -> backend:  q_recv             -> t_write
+                            let pump_backend_to_quic = tokio::spawn(async move {
+                                use tokio::io::AsyncReadExt;
+                                use ztlp_proto::quic_transport::noise_stream;
+                                loop {
+                                    match t_read.read(&mut read_buf).await {
+                                        Ok(0) => break, // backend EOF
+                                        Ok(n) => {
+                                            if noise_stream::write_ztlp_frame(
+                                                &mut q_send,
+                                                &read_buf[..n],
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                eprintln!(
+                                                    "gateway TCP->QUIC write error; closing pump"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            eprintln!("gateway TCP read error; closing pump");
                                             break;
                                         }
                                     }
-                                    Err(_) => {
-                                        eprintln!("gateway TCP read error; closing pump");
-                                        break;
-                                    }
                                 }
-                            }
-                            let _ = q_send.finish();
-                        });
-
-                        let pump_quic_to_backend = tokio::spawn(async move {
-                            use tokio::io::AsyncWriteExt;
-                            use ztlp_proto::quic_transport::noise_stream;
-
-                            // Streaming per-request injector: stamps the
-                            // cached identity bundle onto EVERY HTTP
-                            // request on this tunnel (not just the first
-                            // frame), so HTTP keep-alive works normally
-                            // instead of forcing a new tunnel per request.
-                            let mut injector = inject_enabled.then(|| {
-                                ztlp_proto::http_injector::RequestInjector::new(
-                                    bundle,
-                                    &aud,
-                                    hmac.as_bytes(),
-                                )
+                                let _ = q_send.finish();
                             });
 
-                            loop {
-                                match noise_stream::read_ztlp_frame(&mut q_recv).await {
-                                    Ok(frame) => {
-                                        let out = if let Some(inj) = injector.as_mut() {
-                                            let ts = chrono::DateTime::<chrono::Utc>::from(
-                                                SystemTime::now(),
-                                            )
-                                            .format("%Y-%m-%dT%H:%M:%SZ")
-                                            .to_string();
-                                            inj.feed(&frame, &ts)
-                                        } else {
-                                            frame
-                                        };
-                                        if !out.is_empty() && t_write.write_all(&out).await.is_err()
-                                        {
-                                            eprintln!(
-                                                "gateway QUIC->TCP write error; closing pump"
-                                            );
-                                            break;
-                                        }
-                                    }
-                                    Err(_) => break, // client closed the stream
-                                }
-                            }
-                            let _ = t_write.shutdown().await;
-                        });
+                            let pump_quic_to_backend = tokio::spawn(async move {
+                                use tokio::io::AsyncWriteExt;
+                                use ztlp_proto::quic_transport::noise_stream;
 
-                        let _ = pump_backend_to_quic.await;
-                        let _ = pump_quic_to_backend.await;
-                    });
-                } else {
-                    break;
+                                // Streaming per-request injector: stamps the
+                                // cached identity bundle onto EVERY HTTP
+                                // request on this tunnel (not just the first
+                                // frame), so HTTP keep-alive works normally
+                                // instead of forcing a new tunnel per request.
+                                let mut injector = inject_enabled.then(|| {
+                                    ztlp_proto::http_injector::RequestInjector::new(
+                                        bundle,
+                                        &aud,
+                                        hmac.as_bytes(),
+                                    )
+                                });
+
+                                loop {
+                                    match noise_stream::read_ztlp_frame(&mut q_recv).await {
+                                        Ok(frame) => {
+                                            let out = if let Some(inj) = injector.as_mut() {
+                                                let ts = chrono::DateTime::<chrono::Utc>::from(
+                                                    SystemTime::now(),
+                                                )
+                                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                                .to_string();
+                                                inj.feed(&frame, &ts)
+                                            } else {
+                                                frame
+                                            };
+                                            if !out.is_empty()
+                                                && t_write.write_all(&out).await.is_err()
+                                            {
+                                                eprintln!(
+                                                    "gateway QUIC->TCP write error; closing pump"
+                                                );
+                                                break;
+                                            }
+                                        }
+                                        Err(_) => break, // client closed the stream
+                                    }
+                                }
+                                let _ = t_write.shutdown().await;
+                            });
+
+                            let _ = pump_backend_to_quic.await;
+                            let _ = pump_quic_to_backend.await;
+                        });
+                    } else {
+                        break;
+                    }
                 }
-            }
+            });
         });
     }
 }

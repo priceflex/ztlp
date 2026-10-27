@@ -39,7 +39,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// The policy engine — holds rules for all services.
 #[derive(Debug, Clone)]
@@ -81,58 +81,115 @@ impl PolicyEngine {
 
     /// Parse policy from a TOML string.
     pub fn from_toml(content: &str) -> Result<Self, String> {
-        // Simple TOML parser — we only need `default` and `[[services]]`
+        // Minimal, STRICT TOML subset: `default = "allow"|"deny"`, `[[services]]`
+        // blocks with `name = "<svc>"` and a one-line `allow = [..]`, comments
+        // and blank lines. Anything else is an error rather than being skipped:
+        // a skipped line can silently drop a service's rule (and fall through to
+        // `default`), and load_or_deny turns any error into deny-all.
         let mut rules: HashMap<String, Vec<String>> = HashMap::new();
         let mut default_allow = false;
 
+        let mut in_service = false;
         let mut current_service: Option<String> = None;
         let mut current_allow: Vec<String> = Vec::new();
 
-        for line in content.lines() {
-            let line = line.trim();
+        fn finish(
+            rules: &mut HashMap<String, Vec<String>>,
+            name: Option<String>,
+            allow: Vec<String>,
+            line_no: usize,
+        ) -> Result<(), String> {
+            let name = name.ok_or_else(|| {
+                format!("policy: [[services]] block ending at line {line_no} has no name")
+            })?;
+            if rules.insert(name.clone(), allow).is_some() {
+                return Err(format!(
+                    "policy: service '{name}' is defined more than once"
+                ));
+            }
+            Ok(())
+        }
 
-            // Skip comments and empty lines
+        let mut last_line = 0;
+        for (idx, raw) in content.lines().enumerate() {
+            let line_no = idx + 1;
+            last_line = line_no;
+            let line = raw.trim();
+
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            // Default policy
-            if line.starts_with("default") {
-                if let Some(val) = extract_string_value(line) {
-                    default_allow = val == "allow";
-                }
-                continue;
-            }
-
-            // New service section
             if line == "[[services]]" {
-                // Save previous service if any
-                if let Some(name) = current_service.take() {
-                    rules.insert(name, std::mem::take(&mut current_allow));
+                if in_service {
+                    finish(
+                        &mut rules,
+                        current_service.take(),
+                        std::mem::take(&mut current_allow),
+                        line_no,
+                    )?;
                 }
+                in_service = true;
                 continue;
             }
 
-            // Service name
-            if line.starts_with("name") {
-                if let Some(val) = extract_string_value(line) {
-                    current_service = Some(val);
+            let (key, _) = line
+                .split_once('=')
+                .ok_or_else(|| format!("policy line {line_no}: cannot read `{line}`"))?;
+            match key.trim() {
+                "default" => {
+                    if in_service {
+                        return Err(format!(
+                            "policy line {line_no}: `default` must come before any [[services]]"
+                        ));
+                    }
+                    default_allow = match extract_quoted_value(line).as_deref() {
+                        Some("allow") => true,
+                        Some("deny") => false,
+                        _ => {
+                            return Err(format!(
+                                "policy line {line_no}: default must be \"allow\" or \"deny\""
+                            ))
+                        }
+                    };
                 }
-                continue;
-            }
-
-            // Allow list
-            if line.starts_with("allow") {
-                if let Some(list) = extract_string_array(line) {
-                    current_allow = list;
+                "name" => {
+                    if !in_service {
+                        return Err(format!(
+                            "policy line {line_no}: `name` outside a [[services]] block"
+                        ));
+                    }
+                    let val = extract_quoted_value(line)
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| {
+                            format!("policy line {line_no}: name must be a quoted string")
+                        })?;
+                    if current_service.replace(val).is_some() {
+                        return Err(format!(
+                            "policy line {line_no}: a [[services]] block has two names"
+                        ));
+                    }
                 }
-                continue;
+                "allow" => {
+                    if !in_service {
+                        return Err(format!(
+                            "policy line {line_no}: `allow` outside a [[services]] block"
+                        ));
+                    }
+                    current_allow = extract_string_array(line).ok_or_else(|| {
+                        format!(
+                            "policy line {line_no}: allow must be a one-line list like [\"a\", \"b\"]"
+                        )
+                    })?;
+                }
+                other => {
+                    return Err(format!("policy line {line_no}: unknown key `{other}`"));
+                }
             }
         }
 
-        // Don't forget the last service
-        if let Some(name) = current_service {
-            rules.insert(name, current_allow);
+        if in_service {
+            finish(&mut rules, current_service, current_allow, last_line)?;
         }
 
         let engine = Self {
@@ -228,6 +285,53 @@ impl PolicyEngine {
                 }
                 self.default_allow
             }
+        }
+    }
+
+    /// The gateway's tunnel-admission decision (QUIC and UDP paths alike).
+    ///
+    /// `identity` is the peer's NS name (from the pubkey reverse lookup) or,
+    /// when the NS has no name for that key, its pubkey hex. With a resolver,
+    /// `group:`/`role:` patterns are evaluated through the NS; without one
+    /// they can never match (exact and wildcard patterns still do).
+    pub async fn authorize_peer(
+        &self,
+        identity: &str,
+        service: &str,
+        resolver: Option<&dyn NsResolver>,
+    ) -> bool {
+        match resolver {
+            Some(r) if self.has_identity_patterns() => {
+                self.authorize_async(identity, service, r).await
+            }
+            _ => self.authorize(identity, service),
+        }
+    }
+
+    /// The engine a gateway runs with: no `--policy` = allow all (unchanged);
+    /// a `--policy` file that loads = its rules; a `--policy` file that does
+    /// NOT load (missing, unreadable, malformed) = deny everything. The last
+    /// case used to fall back to allow-all, so a broken policy file silently
+    /// opened every service.
+    pub fn load_or_deny(path: Option<&Path>) -> Self {
+        match path {
+            None => Self::allow_all(),
+            Some(p) => match Self::from_file(p) {
+                Ok(engine) => engine,
+                Err(e) => {
+                    error!(
+                        "--policy file '{}' did not load ({}): DENYING ALL connections until it is fixed",
+                        p.display(),
+                        e
+                    );
+                    eprintln!(
+                        "✗ --policy file '{}' did not load: {} — denying all connections until it is fixed",
+                        p.display(),
+                        e
+                    );
+                    Self::new()
+                }
+            },
         }
     }
 
@@ -428,15 +532,16 @@ async fn matches_pattern_async(identity: &str, pattern: &str, resolver: &dyn NsR
     }
 }
 
-/// Extract a string value from a line like `key = "value"`.
-fn extract_string_value(line: &str) -> Option<String> {
+/// The value of `key = "value"`, only when it is a single double-quoted string
+/// with nothing after it.
+fn extract_quoted_value(line: &str) -> Option<String> {
     let eq = line.find('=')?;
     let val = line[eq + 1..].trim();
-    if val.starts_with('"') && val.ends_with('"') && val.len() >= 2 {
-        Some(val[1..val.len() - 1].to_string())
-    } else {
-        Some(val.to_string())
+    let inner = val.strip_prefix('"')?.strip_suffix('"')?;
+    if inner.contains('"') {
+        return None;
     }
+    Some(inner.to_string())
 }
 
 /// Extract a string array from a line like `allow = ["a", "b", "c"]`.
@@ -587,15 +692,17 @@ allow = ["a1b2c3d4e5f6"]
     }
 
     #[test]
-    fn test_extract_string_value() {
+    fn test_extract_quoted_value() {
         assert_eq!(
-            extract_string_value(r#"name = "ssh""#),
+            extract_quoted_value(r#"name = "ssh""#),
             Some("ssh".to_string())
         );
         assert_eq!(
-            extract_string_value(r#"default = "deny""#),
+            extract_quoted_value(r#"default = "deny""#),
             Some("deny".to_string())
         );
+        assert_eq!(extract_quoted_value("default = deny"), None);
+        assert_eq!(extract_quoted_value(r#"name = "a" "b""#), None);
     }
 
     #[test]
@@ -683,6 +790,220 @@ allow = ["role:admin"]
             let result = self.devices.get(device_name).cloned();
             Box::pin(async move { result })
         }
+    }
+
+    // ── QUIC gateway enforcement (authorize_peer / load_or_deny) ──────
+    //
+    // The QUIC accept path in `ztlp listen --gateway` must make the same
+    // decision as the legacy UDP path: the tunnel peer's NS name (or its
+    // pubkey hex when the NS has no name for it) against the service's
+    // allow list, with group:/role: resolved through the NS.
+
+    const WHOAMI_POLICY: &str = r#"
+default = "deny"
+
+[[services]]
+name = "whoami"
+allow = ["stevens-mac-studio.trs.ztlp", "group:blitz@trs.ztlp"]
+"#;
+
+    #[tokio::test]
+    async fn authorize_peer_allows_a_listed_device_and_refuses_an_unlisted_one() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let resolver = MockResolver::new();
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_resolves_group_rules_through_the_ns() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let mut resolver = MockResolver::new();
+        resolver.groups.insert(
+            "blitz@trs.ztlp".to_string(),
+            vec!["steve@trs.ztlp".to_string()],
+        );
+        resolver.devices.insert(
+            "stevens-macbook-pro-2.trs.ztlp".to_string(),
+            "steve@trs.ztlp".to_string(),
+        );
+        assert!(
+            engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_without_a_resolver_never_lets_a_group_rule_match() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", None)
+                .await
+        );
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_refuses_an_unknown_service_under_default_deny() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        assert!(
+            !engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "admin", None)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn authorize_peer_refuses_a_bare_pubkey_when_the_ns_has_no_name() {
+        let engine = PolicyEngine::from_toml(WHOAMI_POLICY).unwrap();
+        let resolver = MockResolver::new();
+        assert!(
+            !engine
+                .authorize_peer(&"ab".repeat(32), "whoami", Some(&resolver))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn no_policy_file_still_means_allow_all() {
+        let engine = PolicyEngine::load_or_deny(None);
+        assert!(engine.authorize_peer("anyone.trs.ztlp", "www", None).await);
+    }
+
+    #[tokio::test]
+    async fn a_policy_file_that_fails_to_load_denies_everything() {
+        let dir = std::env::temp_dir().join(format!("ztlp-policy-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("does-not-exist.toml");
+        let engine = PolicyEngine::load_or_deny(Some(&missing));
+        assert!(
+            !engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await,
+            "a policy file the operator configured but that cannot load must fail closed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_loadable_policy_file_is_used() {
+        let path = std::env::temp_dir().join(format!("ztlp-policy-ok-{}.toml", std::process::id()));
+        std::fs::write(&path, WHOAMI_POLICY).unwrap();
+        let engine = PolicyEngine::load_or_deny(Some(&path));
+        assert!(
+            engine
+                .authorize_peer("stevens-mac-studio.trs.ztlp", "whoami", None)
+                .await
+        );
+        assert!(
+            !engine
+                .authorize_peer("stevens-macbook-pro-2.trs.ztlp", "whoami", None)
+                .await
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Strict parsing: a policy the parser cannot fully read must not load ──
+
+    fn rejects(toml: &str) {
+        assert!(
+            PolicyEngine::from_toml(toml).is_err(),
+            "should be rejected:\n{}",
+            toml
+        );
+    }
+
+    #[test]
+    fn strict_parser_accepts_the_panel_format_with_comments() {
+        let toml = r#"
+# policy.toml for gateway whoami (ztlp listen --policy)
+# Rule changes need a gateway restart; group membership changes are live.
+default = "deny"
+
+# whoami.trs.ztlp
+[[services]]
+name = "whoami"
+allow = ["stevens-mac-studio.trs.ztlp", "group:blitz@trs.ztlp"]
+# --forward whoami:127.0.0.1:8095
+
+[[services]]
+name = "ssh"
+allow = []
+"#;
+        let engine = PolicyEngine::from_toml(toml).unwrap();
+        assert!(engine.authorize("stevens-mac-studio.trs.ztlp", "whoami"));
+        assert!(!engine.authorize("stevens-mac-studio.trs.ztlp", "ssh"));
+    }
+
+    #[test]
+    fn strict_parser_rejects_a_misspelled_key() {
+        rejects("default = \"allow\"\n[[services]]\nnmae = \"whoami\"\nallow = [\"x\"]\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_an_unknown_key() {
+        rejects("default = \"deny\"\nowner = \"steve\"\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_a_default_that_is_not_allow_or_deny() {
+        rejects("default = \"alow\"\n");
+        rejects("default = allow\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_name_or_allow_outside_a_service_block() {
+        rejects("default = \"deny\"\nname = \"whoami\"\n");
+        rejects("default = \"deny\"\nallow = [\"x\"]\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_a_service_block_without_a_name() {
+        rejects("default = \"deny\"\n[[services]]\nallow = [\"x\"]\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_arrays_it_cannot_read() {
+        rejects("[[services]]\nname = \"whoami\"\nallow = [\n  \"x\",\n]\n");
+        rejects("[[services]]\nname = \"whoami\"\nallow = [\"x\"] # trailing comment\n");
+    }
+
+    #[test]
+    fn strict_parser_rejects_duplicate_services() {
+        rejects("[[services]]\nname = \"a\"\nallow = [\"x\"]\n[[services]]\nname = \"a\"\nallow = [\"*\"]\n");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_policy_file_denies_all_even_with_default_allow() {
+        let path =
+            std::env::temp_dir().join(format!("ztlp-policy-bad-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "default = \"allow\"\n[[services]]\nnmae = \"whoami\"\nallow = [\"x\"]\n",
+        )
+        .unwrap();
+        let engine = PolicyEngine::load_or_deny(Some(&path));
+        assert!(
+            !engine
+                .authorize_peer("anyone.trs.ztlp", "whoami", None)
+                .await
+        );
+        assert!(!engine.authorize_peer("anyone.trs.ztlp", "www", None).await);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

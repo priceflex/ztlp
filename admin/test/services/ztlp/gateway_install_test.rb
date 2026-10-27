@@ -84,8 +84,46 @@ class GatewayInstallTest < ActiveSupport::TestCase
   end
 
   test "a missing image is explained instead of a docker error" do
+    @gw.update!(image_tag: "registry.example.com/ztlp-gateway:1.2")
     assert_match(/docker image inspect "\$IMAGE" .*\|\| docker pull "\$IMAGE" \|\| \{/, script)
     assert_includes script, "load it on this box first"
+  end
+
+  # Gap 2 of the whoami UI walkthrough: ztlp-gateway-rust:<tag> is not on any registry, so a fresh box
+  # could not get the default image. The script now builds it from the public GitHub release.
+  test "the default image is built from the GitHub release when the box does not have it" do
+    @gw.update!(image_tag: nil)
+    s = script
+    v = Gateway.default_image[/:(v[\d.]+)\z/, 1]
+    assert_includes s, "https://github.com/priceflex/ztlp/releases/download/#{v}"
+    assert_includes s, %(PKG="ztlp-#{v}-$ARCH-unknown-linux-gnu")
+    assert_includes s, %("#{"https://github.com/priceflex/ztlp/releases/download/#{v}"}/$PKG.tar.gz")
+    assert_includes s, "SHA256SUMS.txt"
+    assert_match(/sha256sum -c/, s)
+    assert_match(/x86_64\|amd64\) ARCH=x86_64/, s)
+    assert_match(/aarch64\|arm64\) ARCH=aarch64/, s)
+    assert_includes s, "FROM ubuntu:24.04"
+    assert_match(/docker build .*"\$IMAGE"/, s)
+    refute_match(/docker pull/, s, "there is nothing to pull for the panel's own image")
+  end
+
+  test "the release build only runs when the image is missing" do
+    @gw.update!(image_tag: nil)
+    s = script
+    assert_match(/if ! docker image inspect "\$IMAGE" >\/dev\/null 2>&1; then\n.*Building/m, s)
+  end
+
+  test "a custom image is still pulled, never built from GitHub" do
+    @gw.update!(image_tag: "registry.example.com/ztlp-gateway:1.2")
+    s = script
+    assert_match(/docker pull "\$IMAGE"/, s)
+    refute_includes s, "github.com/priceflex/ztlp/releases"
+  end
+
+  test "the script with the release build is valid bash" do
+    @gw.update!(image_tag: nil)
+    out, status = Open3.capture2e("bash", "-n", stdin_data: script)
+    assert status.success?, out
   end
 
   test "the policy update block has no secrets and restarts only the gateway" do

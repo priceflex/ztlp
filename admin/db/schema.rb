@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_27_000002) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_27_000003) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -122,6 +122,12 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_27_000002) do
     t.string "relay_addr"
     t.string "image_tag"
     t.datetime "install_shown_at"
+    t.string "quic_cert_sha256", limit: 64
+    t.boolean "quic_cert_verified", default: false, null: false
+    t.string "quic_cert_status", limit: 16
+    t.datetime "quic_cert_seen_at"
+    t.string "quic_cert_previous_sha256", limit: 64
+    t.datetime "quic_cert_changed_at"
     t.index ["zone_id", "name"], name: "idx_gateways_zone_name", unique: true
     t.index ["zone_id"], name: "idx_gateways_zone"
   end

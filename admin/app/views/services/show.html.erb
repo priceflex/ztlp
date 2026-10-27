@@ -47,6 +47,30 @@
       <dt>Max sessions</dt><dd><%= gw.max_sessions %></dd>
       <dt>Hole punching</dt><dd><%= gw.punch ? "on" : "off" %></dd>
       <dt>Image</dt><dd class="mono"><%= gw.effective_image %></dd>
+      <dt>Certificate pin</dt>
+      <dd data-gateway-pin>
+        <% case gw.quic_cert_status %>
+        <% when "verified", "unverified" %>
+          <span class="mono" style="word-break: break-all"><%= gw.quic_cert_sha256 %></span>
+          <div class="hint">
+            <% if gw.quic_cert_status == "verified" %>From the gateway's SVC record, signed by the name server: what clients enrolled with a current token trust.
+            <% else %>From the name server's admin API, not signature-checked (set this zone's name server key on the Name server page).<% end %>
+            Seen <%= gw.quic_cert_seen_at&.utc&.strftime("%Y-%m-%d %H:%M UTC") %>.
+          </div>
+          <% if gw.quic_cert_previous_sha256.present? %>
+            <div class="hint">Changed <%= gw.quic_cert_changed_at&.utc&.strftime("%Y-%m-%d %H:%M UTC") %>; previous pin
+              <span class="mono" style="word-break: break-all"><%= gw.quic_cert_previous_sha256 %></span>. Devices still
+              holding the old pin in a pin file report "certificate does not match the pinned value".</div>
+          <% end %>
+        <% when "untrusted" %>
+          <span class="badge">No verified pin</span>
+          <div class="hint">The gateway's SVC record did not verify against this zone's name server key (checked <%= gw.quic_cert_seen_at&.utc&.strftime("%Y-%m-%d %H:%M UTC") %>).</div>
+        <% when "none" %>
+          <span class="badge">None published</span><div class="hint">The gateway's SVC record carries no certificate pin (older gateway version?).</div>
+        <% else %>
+          <span class="badge">Not checked yet</span><div class="hint">Press Check now once the gateway is running.</div>
+        <% end %>
+      </dd>
       <% if gw.node_id_hex.present? %><dt>Node id</dt><dd class="mono"><%= gw.node_id_hex %></dd><% end %>
     </dl>
     <% if gw.policy_file == false %>

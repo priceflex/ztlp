@@ -51,7 +51,7 @@ module Ztlp
 
         command -v docker >/dev/null || { echo "docker is not installed on this box" >&2; exit 1; }
         docker compose version >/dev/null 2>&1 || { echo "docker compose v2 is not installed on this box" >&2; exit 1; }
-        docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" || { echo "image $IMAGE is not available: load it on this box first (docker load < image.tar)" >&2; exit 1; }
+        #{image_step(image).chomp}
 
         mkdir -p "$DIR/data"
         cd "$DIR"
@@ -78,6 +78,50 @@ module Ztlp
         docker compose logs --tail 40 | grep -E "QUIC cert|registered|listening|rror" || true
         echo
         echo "Installed in $DIR. In the panel, press 'Check now' on #{fqdn}: it turns online once the gateway is on the name server."
+      SH
+    end
+
+    RELEASE_REPO = "priceflex/ztlp"
+    RELEASE_IMAGE = /\Aztlp-gateway-rust:(v\d+\.\d+\.\d+)\z/
+
+    # The panel's own image (ztlp-gateway-rust:vX.Y.Z) is on no registry: when the box lacks it, build it
+    # from the public GitHub release (checksum-verified, same Dockerfile as the production gateways).
+    # Any other image is pulled as before.
+    def self.image_step(image)
+      version = image[RELEASE_IMAGE, 1]
+      unless version
+        return %(docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE" || ) +
+               %({ echo "image $IMAGE is not available: load it on this box first (docker load < image.tar)" >&2; exit 1; }\n)
+      end
+
+      base = "https://github.com/#{RELEASE_REPO}/releases/download/#{version}"
+      <<~SH
+        if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+          echo "Building $IMAGE from the ZTLP #{version} release on GitHub (checksum-verified)..."
+          command -v curl >/dev/null || { echo "curl is not installed on this box" >&2; exit 1; }
+          case "$(uname -m)" in
+            x86_64|amd64) ARCH=x86_64 ;;
+            aarch64|arm64) ARCH=aarch64 ;;
+            *) echo "no ZTLP Linux build for CPU $(uname -m)" >&2; exit 1 ;;
+          esac
+          BUILD=$(mktemp -d)
+          trap 'rm -rf "$BUILD"' EXIT
+          PKG="ztlp-#{version}-$ARCH-unknown-linux-gnu"
+          curl -fsSL --retry 3 -o "$BUILD/$PKG.tar.gz" "#{base}/$PKG.tar.gz"
+          curl -fsSL --retry 3 -o "$BUILD/SHA256SUMS.txt" "#{base}/SHA256SUMS.txt"
+          (cd "$BUILD" && grep " $PKG.tar.gz\$" SHA256SUMS.txt | sha256sum -c -) || { echo "checksum check failed for $PKG.tar.gz" >&2; exit 1; }
+          tar xzf "$BUILD/$PKG.tar.gz" -C "$BUILD" "$PKG/ztlp"
+          mv "$BUILD/$PKG/ztlp" "$BUILD/ztlp"
+          cat > "$BUILD/Dockerfile" <<'ZTLP_DOCKERFILE'
+        FROM ubuntu:24.04
+        RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+        COPY ztlp /usr/local/bin/ztlp
+        RUN chmod 0755 /usr/local/bin/ztlp && ztlp --version
+        ENTRYPOINT ["ztlp"]
+        ZTLP_DOCKERFILE
+          docker build -q -t "$IMAGE" "$BUILD" >/dev/null
+          echo "Built $IMAGE."
+        fi
       SH
     end
 

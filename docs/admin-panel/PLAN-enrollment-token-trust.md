@@ -1,6 +1,6 @@
 # Admin panel: complete enrollment tokens (relay secret, NS key, domain pin) + device pickup
 
-Status: BUILT 2026-10-26 (v0.5.0, PR below); prod rollout per the steps at the end. Operator OK: "Make sure that the relay secrets, the name server, and
+Status: v0.5.0 deployed 2026-10-27 00:00Z; v0.5.1 adds the device relay secret (below). Operator OK: "Make sure that the relay secrets, the name server, and
 anything else we need go into the enrollment token ... and the pin for the domain."
 
 ## Why
@@ -40,3 +40,15 @@ laptop) without re-keying it.
 3. Test enrollment with a throwaway device name from a real client; verify ns_trust.toml, KEY, the
    panel device row, and a connection to www.chooseforce.ztlp through the NS-anchored path.
 4. Add Heidy + Carina; adopt Heidy's current laptop; mint their re-enrollment tokens.
+
+## Finding from the live test (v0.5.1): two relay secrets
+A device enrolled with a v0.5.0 token (relay secret = the zone's per-zone `ZTLP_HMAC_SECRET_CHOOSEFORCE_ZTLP`)
+reached www.chooseforce.ztlp directly but NOT through the relay: `CLIENT_ROUTE ... rejected: invalid HMAC
+(zone=www)`. The relay derives the zone from the gateway's SERVICE name (`www`), not the DNS zone, and then
+falls back to its legacy registration secret. So:
+- `relay_secret_ct` stays the gateway's per-zone secret (install script `ZTLP_HMAC_SECRET_<ZONE>`).
+- New `device_relay_secret_ct` is what tokens carry: one the relay accepts for every service a device dials
+  (today the relay's `RELAY_REGISTRATION_SECRET`, the same one the CLI tokens carried). Falls back to
+  `relay_secret_ct` when unset. Set with `rails zone:set_secret[device_relay]` (64 hex or 48 alnum).
+- Longer term: zone-specific gateway service names (or CLIENT_ROUTE_V2 `gw:<zone>`) would let a per-zone
+  device secret work and stop sharing one relay secret across customers. Not in this change.

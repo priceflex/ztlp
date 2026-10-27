@@ -67,7 +67,7 @@ module EnrollmentMinting
     begin
       uri = Ztlp::TokenMinter.to_uri(
         Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i, callback_url: callback_url,
-                                      relay_secret: (embed_relay ? @zone.relay_secret_ct : nil),
+                                      relay_secret: (embed_relay ? @zone.token_relay_secret : nil),
                                       ns_key_hex: @zone.ns_pubkey_hex)
       )
     rescue Ztlp::TokenMinter::EnrollmentSecretMissing
@@ -82,7 +82,7 @@ module EnrollmentMinting
                               details: { code: enrollment.code, kind: enrollment.kind,
                                          user: user&.username, device: enrollment.device_name,
                                          embed_relay_secret: enrollment.embed_relay_secret,
-                                         relay_secret_in_token: embed_relay && @zone.relay_secret_ct.present?,
+                                         relay_secret_in_token: embed_relay && @zone.token_relay_secret.present?,
                                          ns_key_in_token: @zone.ns_pubkey_hex.present? })
     # One-time reveal: the result page renders the URI once, then clears this.
     session[:enrollment_reveal] = { enrollment_id: enrollment.id, nonce: SecureRandom.hex(16) }

@@ -2,7 +2,11 @@
 
 class Zone < ApplicationRecord
   serialize :relay_addrs, coder: JSON
-  encrypts :authority_seed_ct, :enrollment_secret_ct, :relay_secret_ct, :ns_admin_api_secret_ct
+  encrypts :authority_seed_ct, :enrollment_secret_ct, :relay_secret_ct, :ns_admin_api_secret_ct, :device_relay_secret_ct
+
+  # The relay secret an enrollment token carries (flag 0x08): the device secret when set, else the
+  # zone relay secret (older zones only have the one).
+  def token_relay_secret = device_relay_secret_ct.presence || relay_secret_ct.presence
 
   has_many :users
   has_many :groups

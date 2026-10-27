@@ -10,13 +10,16 @@
 #                                enrollment / ns_admin_api: 64 hex.
 #                                relay: 48 alphanumerics, NOT hex (spec F20: the relay hex-decodes a
 #                                hex secret, the Rust gateway uses ASCII bytes; a hex secret never verifies).
+#                                device_relay: what enrollment tokens carry for devices (64 hex or 48 alnum).
 #   zone:export_authority        prints the seed for the backup runbook (spec section 452). Requires
 #                                CONFIRM=1; audited with the pubkey, never the seed.
 namespace :zone do
   secret_rules = {
     "enrollment" => [ /\A\h{64}\z/, "64 hex characters" ],
     "ns_admin_api" => [ /\A\h{64}\z/, "64 hex characters" ],
-    "relay" => [ /\A(?!\h+\z)[A-Za-z0-9]{48}\z/, "48 alphanumeric characters, not hex (spec F20)" ]
+    "relay" => [ /\A(?!\h+\z)[A-Za-z0-9]{48}\z/, "48 alphanumeric characters, not hex (spec F20)" ],
+    # What enrollment tokens carry for DEVICES. The relay and the client both hex-decode 64 hex.
+    "device_relay" => [ /\A(\h{64}|[A-Za-z0-9]{48})\z/, "64 hex or 48 alphanumeric characters" ]
   }.freeze
 
   desc "Import the zone authority seed from identity.json (FORCE=1 to replace a different seed)"
@@ -41,7 +44,7 @@ namespace :zone do
     puts "zone #{zone.name}: authority imported, pubkey #{pubkey[0, 16]}..."
   end
 
-  desc "Set a zone secret from STDIN: rails zone:set_secret[enrollment|relay|ns_admin_api]"
+  desc "Set a zone secret from STDIN: rails zone:set_secret[enrollment|relay|ns_admin_api|device_relay]"
   task :set_secret, [ :which ] => :environment do |_t, args|
     which = args[:which].to_s
     rule, rule_text = secret_rules[which]

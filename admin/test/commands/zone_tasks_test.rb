@@ -91,7 +91,8 @@ class ZoneTasksTest < ActiveSupport::TestCase
   VALID_SECRET = {
     "enrollment" => "a" * 64,
     "ns_admin_api" => "b" * 64,
-    "relay" => "Zq7" * 16 # 48 alphanumerics, NOT hex (spec F20)
+    "relay" => "Zq7" * 16, # 48 alphanumerics, NOT hex (spec F20)
+    "device_relay" => "c4" * 32 # the relay's legacy registration secret is 64 hex
   }.freeze
 
   def secret_task(verb, zone_name: "test.ztlp")
@@ -101,7 +102,7 @@ class ZoneTasksTest < ActiveSupport::TestCase
   end
 
   test "set_secret reads the value from stdin and stores it encrypted" do
-    %w[enrollment relay ns_admin_api].each do |verb|
+    %w[enrollment relay ns_admin_api device_relay].each do |verb|
       zone = secret_task(verb)
       col = "#{verb}_secret_ct"
       assert zone.public_send(col).present?, "#{verb}_secret_ct should be set"
@@ -137,6 +138,17 @@ class ZoneTasksTest < ActiveSupport::TestCase
     refute run_rake("set_secret", "relay", stdin: "#{"c" * 48}\n"), "48 hex chars is still hex"
     refute run_rake("set_secret", "relay", stdin: "short1\n")
     assert_nil zone.reload.relay_secret_ct
+  end
+
+  # The device relay secret is what enrollment tokens carry (flag 0x08). Devices sign CLIENT_ROUTE with
+  # it and the relay checks it against ZTLP_HMAC_SECRET_<service zone>, then its legacy registration
+  # secret; both the relay and the client hex-decode a 64-hex value, so 64 hex or 48 alphanumerics.
+  test "set_secret[device_relay] takes 64 hex or 48 alphanumerics and nothing else" do
+    with_zone
+    assert run_rake("set_secret", "device_relay", stdin: "#{"Zq7" * 16}\n"), "48 alphanumerics are accepted"
+    refute run_rake("set_secret", "device_relay", stdin: "short1\n")
+    refute run_rake("set_secret", "device_relay", stdin: "#{"g" * 64}\n"), "64 non-hex characters are refused"
+    refute run_rake("set_secret", "device_relay", stdin: "#{"Zq7" * 16}!!\n")
   end
 
   test "import_authority refuses to replace a different seed unless FORCE=1; same seed is a no-op" do

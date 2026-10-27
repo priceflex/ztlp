@@ -1,5 +1,5 @@
 <% content_for :title, "Name server - ZTLP Directory" %>
-<% secrets = { "Enrollment secret" => @zone.enrollment_secret_ct.present?, "Relay secret" => @zone.relay_secret_ct.present?, "NS admin API secret" => @zone.ns_admin_secret.present? } %>
+<% secrets = { "Enrollment secret" => @zone.enrollment_secret_ct.present?, "Relay secret (gateways)" => @zone.relay_secret_ct.present?, "NS admin API secret" => @zone.ns_admin_secret.present? } %>
 <% last = ->(l) { l&.created_at&.utc&.strftime("%Y-%m-%d %H:%M:%S") } %>
 <div class="page-head">
   <div><h1>Name server</h1><p class="lede">Zone <span class="mono"><%= @zone.name %></span> and its NS publication state.<% if current_admin.default_zone_id == @zone.id %> &middot; <span class="badge ok">your default zone</span><% end %></p></div>
@@ -52,6 +52,8 @@
     <% secrets.each do |label, set| %>
       <dl class="kv"><dt><%= label %></dt><dd><span class="badge <%= set ? "ok" : "" %>"><%= set ? "Set" : "Not set" %></span></dd></dl>
     <% end %>
+    <dl class="kv"><dt>Device relay secret (enrollment tokens)</dt><dd><% if @zone.device_relay_secret_ct.present? %><span class="badge ok">Set</span><% else %><span class="badge">Falls back to the gateway relay secret</span><% end %></dd></dl>
+    <p class="hint">Devices sign relay routes with the secret their token carries. The relay checks it against the secret for the gateway's service name, then its registration secret, so a device secret must be one it accepts for every service the device dials. Set with <span class="mono">rails zone:set_secret[device_relay]</span> (value on stdin).</p>
   </div>
 
   <div class="panel">

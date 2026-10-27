@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_27_000001) do
+ActiveRecord::Schema[7.1].define(version: 2026_10_27_000002) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -390,6 +390,7 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_27_000001) do
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.string "ns_pubkey_hex", limit: 64
+    t.text "device_relay_secret_ct"
     t.index ["name"], name: "idx_zones_name", unique: true
   end
 

@@ -34,6 +34,15 @@ class EnrollmentTrustTest < ActionDispatch::IntegrationTest
     assert Ztlp::TokenMinter.valid_mac?(bin, [ @zone.enrollment_secret_ct ].pack("H*"))
   end
 
+  test "the token carries the device relay secret when the zone has one, not the gateway relay secret" do
+    device_secret = "d7" * 32
+    @zone.update!(device_relay_secret_ct: device_secret)
+    tok = Ztlp::TokenMinter.parse(Ztlp::TokenMinter.from_uri(mint.token_uri_ct))
+    assert_equal device_secret, tok[:relay_secret]
+    follow_redirect!
+    refute_includes response.body, device_secret
+  end
+
   test "unchecking embed leaves the relay secret out but keeps the NS key" do
     tok = Ztlp::TokenMinter.parse(Ztlp::TokenMinter.from_uri(mint(embed_relay_secret: "0").token_uri_ct))
     assert_nil tok[:relay_secret]
@@ -87,6 +96,13 @@ class ZoneNsKeyTest < ActionDispatch::IntegrationTest
     @admin, @seed = make_admin
     sign_in_as(@admin, @seed)
     @zone = Zone.primary
+  end
+
+  test "the zone page lists the device relay secret as set or not, never its value" do
+    @zone.update!(device_relay_secret_ct: "e9" * 32)
+    get "/zone"
+    assert_match(/Device relay secret/, response.body)
+    refute_includes response.body, "e9" * 32
   end
 
   test "the NS key must be 64 hex characters and is stored lowercase" do

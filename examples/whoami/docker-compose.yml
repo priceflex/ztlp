@@ -1,0 +1,11 @@
+# ztlp-whoami: the app behind a ZTLP gateway. Only reachable on the host's loopback; the gateway
+# (installed from the admin panel) forwards <service>.<zone> to 127.0.0.1:${WHOAMI_PORT:-8095}.
+services:
+  whoami:
+    build: .
+    image: ztlp-whoami:0.1.0
+    container_name: ztlp-whoami
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WHOAMI_PORT:-8095}:8080"
+    env_file: .env   # ZTLP_GATEWAY_HEADER_SECRET + ZTLP_GATEWAY_AUDIENCE, from the panel's App settings

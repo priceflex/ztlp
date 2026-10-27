@@ -23,19 +23,35 @@ Signed SVC record for whoami.trs.ztlp carries the new gateway's cert pin (582ae7
 signed by the NS key 584a83c8: clients enrolled with a v0.5 token pin it from the NS, no TOFU.
 
 ## Gaps
-- **G1 (security, gateway not panel): access rules are not enforced.** The Rust gateway's QUIC accept path
+- **G1 (security, gateway not panel): access rules are not enforced.** FIXED on branch
+  `fix/quic-gateway-policy-enforcement` (commit c35067b3): `PolicyEngine::authorize_peer` on the QUIC accept
+  path, a bad policy file now denies all. Verified on the whoami gateway: MacBook Pro refused
+  ("POLICY DENIED"), Mac Studio allowed; after adding the MBP rule in the panel and running the panel's
+  policy-update block, the MBP got in. Needs a gateway release before other gateways get it.
+  Original finding: The Rust gateway's QUIC accept path
   (`cmd_listen`, `proto/src/bin/ztlp-cli.rs` ~5790 on main) resolves the service and signs the identity
   headers but never calls `policy.authorize[_async]`; only the legacy UDP `handle_new_session` path
   refuses. The panel's "Who can reach it", device/group/role rules, and Disable (user/device) therefore
   change nothing at the gateway. Until fixed, the app must enforce access itself from the signed headers.
   Fix: authorize (async, with NS resolver) after the service hash resolves and before dialling the
   backend; close the stream with a deny. Needs a gateway release + gateway restarts.
-- **G2: the gateway image is not obtainable from the UI.** The script `docker pull`s
+- **G2: the gateway image is not obtainable from the UI.** FIXED in admin v0.6.0: the install script
+  builds `ztlp-gateway-rust:vX.Y.Z` from the GitHub release (checksum-verified) when the box lacks it.
+  Original finding: The script `docker pull`s
   `ztlp-gateway-rust:v0.36.0`, which exists only as a locally built image (not on any registry). Worked
   here only because the Hermes VM already had it. A fresh box fails with "load it on this box first".
   Fix: publish the image (GHCR) and default to that tag, or link a download from the install page.
-- **G3 (minor): the panel does not show the gateway's cert pin** (`quic_cert_sha256` from the signed SVC
+- **G3 (minor): the panel does not show the gateway's cert pin** FIXED in admin v0.6.0 (signed SVC
+  record, previous pin kept on change). Original finding: (`quic_cert_sha256` from the signed SVC
   record) on the service page. Useful when diagnosing "certificate does not match" reports.
 - **G4 (noise): `KEY registration failed: rate-limited ... retry in 28800s`** on the first start: the
   gateway publishes the KEY twice within milliseconds; the first succeeded (records are present, signed,
   TTL 24 h). The 8 h retry is inside the 24 h TTL, so it self-heals, but it reads like a failure.
+
+## Rule change through the UI (after the G1 fix)
+| # | Step (UI) | Result | Gap? |
+|---|-----------|--------|------|
+| 8 | Service page: Add rule, device stevens-macbook-pro-2 | Rule listed; the page's policy-update block (no secrets) renders both devices | no |
+| 9 | Run the update block on the gateway box | `docker compose restart`, MacBook Pro now 200, gateway log "Policy allowed" | no |
+
+Note for scrapers: the rule form fills its device/user dropdown from `data-device-options` with JavaScript.

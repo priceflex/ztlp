@@ -5,7 +5,7 @@
 # system_settings ns_drift_json — plus Publish now / Reconcile now
 # (enqueue the solid_queue jobs; write access only).
 class ZoneController < ApplicationController
-  before_action :require_operator, only: [ :publish, :reconcile ]
+  before_action :require_operator, only: [ :publish, :reconcile, :update_ns_key ]
 
   def show
     @drift = drift_record
@@ -23,6 +23,19 @@ class ZoneController < ApplicationController
     ReconcileNsJob.perform_later
     audit!("zone.reconcile_now", target: @zone)
     redirect_to zone_path, notice: "Reconcile queued."
+  end
+
+  # The home NS public key minted into enrollment tokens (flag 0x10). Public value; operators only
+  # because it decides which server every newly enrolled device trusts.
+  def update_ns_key
+    before = @zone.ns_pubkey_hex
+    @zone.ns_pubkey_hex = params[:ns_pubkey_hex]
+    if @zone.save
+      audit!("zone.ns_key", target: @zone, details: { from: before, to: @zone.ns_pubkey_hex })
+      redirect_to zone_path, notice: "Name server key saved. New enrollment tokens carry it."
+    else
+      redirect_to zone_path, alert: "Name server key not saved: #{@zone.errors.full_messages.to_sentence}."
+    end
   end
 
   private

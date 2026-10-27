@@ -42,7 +42,7 @@ class ZonesController < ApplicationController
   private
 
   def zone_params
-    p = params.require(:zone).permit(:name, :ns_addr, :relay_addrs_text)
+    p = params.require(:zone).permit(:name, :ns_addr, :relay_addrs_text, :ns_pubkey_hex)
     p[:name] = p[:name].to_s.strip.downcase if p.key?(:name)
     p
   end

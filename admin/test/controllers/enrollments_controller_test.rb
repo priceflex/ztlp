@@ -382,22 +382,26 @@ class EnrollmentsControllerTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
-  # `ztlp setup --relay-secret` (ztlp-cli.rs Setup): "Required when the zone's relays run
-  # ZTLP_RELAY_HMAC_MODE=prod". The v1 token has no relay-secret field, so embedding means the
-  # one-time command carries the flag.
-  test "embed relay secret puts --relay-secret in the one-time setup command, never in the audit" do
+  # The relay secret rides INSIDE the token (flag 0x08, ZT-01): `ztlp setup` writes it to agent.toml,
+  # so the command no longer carries --relay-secret (docs/admin-panel/PLAN-enrollment-token-trust.md).
+  test "embed relay secret puts the secret inside the token, not on the command line or in the audit" do
     relay = "Rk3" + "a" * 45
     @zone.update!(relay_secret_ct: relay)
     post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1", embed_relay_secret: "1" } }
+    tok = Ztlp::TokenMinter.parse(Ztlp::TokenMinter.from_uri(@zone.enrollments.order(:id).last.token_uri_ct))
+    assert_equal relay, tok[:relay_secret]
     follow_redirect!
-    assert_select "pre.code-box", text: /ztlp setup --token "ztlp:\/\/enroll\/[^"]+" --relay-secret "#{relay}"/
-    assert_select "[data-relay-warning]", /zone-wide/i
+    assert_select "pre.code-box", text: /ztlp setup --token "ztlp:\/\/enroll\/[^"]+"/
+    assert_no_match(/--relay-secret/, response.body)
+    assert_select "[data-relay-warning]", /inside the token/i
     refute_includes AuditLog.where(action: "enrollment.mint").last.details.to_json, relay
   end
 
-  test "without embed the command has no relay secret" do
+  test "without embed the token has no relay secret" do
     @zone.update!(relay_secret_ct: "Rk3" + "a" * 45)
     post "/enrollments", params: { enrollment: { kind: "device_only", expiry_hours: "1" } }
+    tok = Ztlp::TokenMinter.parse(Ztlp::TokenMinter.from_uri(@zone.enrollments.order(:id).last.token_uri_ct))
+    assert_nil tok[:relay_secret]
     follow_redirect!
     assert_no_match(/--relay-secret/, response.body)
   end

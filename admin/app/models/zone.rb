@@ -2,7 +2,11 @@
 
 class Zone < ApplicationRecord
   serialize :relay_addrs, coder: JSON
-  encrypts :authority_seed_ct, :enrollment_secret_ct, :relay_secret_ct, :ns_admin_api_secret_ct
+  encrypts :authority_seed_ct, :enrollment_secret_ct, :relay_secret_ct, :ns_admin_api_secret_ct, :device_relay_secret_ct
+
+  # The relay secret an enrollment token carries (flag 0x08): the device secret when set, else the
+  # zone relay secret (older zones only have the one).
+  def token_relay_secret = device_relay_secret_ct.presence || relay_secret_ct.presence
 
   has_many :users
   has_many :groups
@@ -20,6 +24,13 @@ class Zone < ApplicationRecord
   validates :ns_addr, presence: true
   # 64-hex Ed25519 seed, exactly identity.json's signing_key_seed.
   validates :authority_seed_ct, format: { with: /\A\h{64}\z/ }, allow_nil: true
+  # Home NS Ed25519 PUBLIC key (the NS logs it as "NS registration public key"). Enrollment tokens
+  # carry it (flag 0x10) so devices trust only answers this NS signs.
+  validates :ns_pubkey_hex, format: { with: /\A\h{64}\z/, message: "must be 64 hex characters" }, allow_nil: true
+
+  def ns_pubkey_hex=(value)
+    super(value.to_s.strip.downcase.presence)
+  end
 
   # First use creates the zone from the deployment env (docker-compose.yml sets both).
   # No ZTLP_ZONE = misconfigured deployment: raise rather than invent a zone name.

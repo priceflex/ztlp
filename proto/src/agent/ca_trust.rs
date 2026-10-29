@@ -136,6 +136,14 @@ pub fn remove_ca_cert(cert_path: &Path) -> Result<()> {
     return Err(CaTrustError::UnsupportedPlatform);
 }
 
+/// Is the certificate at `cert_path` trusted as a root (Windows: by SHA1
+/// thumbprint in the machine or user Root store)? Used by
+/// `machine-status` for the installer-made machine CA.
+#[cfg(target_os = "windows")]
+pub fn is_cert_trusted(cert_path: &Path) -> bool {
+    cert_path.exists() && check_windows_installed_for(cert_path)
+}
+
 /// Check if the ZTLP CA is installed in the system trust store.
 pub fn is_ca_installed() -> bool {
     let cert_path = default_ca_cert_path();

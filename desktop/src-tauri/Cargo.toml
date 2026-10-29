@@ -1,6 +1,6 @@
 [package]
 name = "ztlp-desktop"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
 description = "ZTLP Desktop — Zero Trust Layer Protocol client"
 authors = ["Steven Price <steve@techrockstars.com>"]
@@ -18,6 +18,16 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ztlp-proto = { path = "../../proto" }
 dirs = "6.0.0"
+# Windows per-user agent: HTTPS health check validated against the OS
+# trust store (the same Root store the browsers use).
+rustls = "0.23"
+rustls-native-certs = "0.8"
+# One app (and one agent supervisor) per user session.
+tauri-plugin-single-instance = "2"
+
+[dev-dependencies]
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

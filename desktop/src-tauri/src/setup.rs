@@ -675,7 +675,7 @@ pub fn ztlp_sibling_exe_path(desktop_exe: &Path) -> PathBuf {
 /// anyway — the user wants to see "✓ Installed" in the wizard, not a
 /// console-style stdout dump.
 #[cfg(target_os = "windows")]
-fn runas_ztlp(args: &[&str]) -> Result<String, String> {
+pub(crate) fn runas_ztlp(args: &[&str]) -> Result<String, String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 

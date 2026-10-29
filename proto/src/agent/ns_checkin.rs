@@ -344,6 +344,8 @@ pub async fn run_checkin_loop(
     loop {
         let outcome = check_in(&identity, &ns_servers, NS_REPLY_TIMEOUT).await;
         log_outcome(&outcome);
+        let failed = matches!(outcome, CheckinOutcome::Failed(_));
+        record_outcome(&outcome);
         // NS-anchored trust (task 3.3): refresh the home-signed NSSET so
         // added / removed name servers take effect within one interval.
         let trust_path = super::ns_trust::default_path();
@@ -352,7 +354,27 @@ pub async fn run_checkin_loop(
             Ok(_) => {}
             Err(e) => warn!("NSSET refresh failed (will retry): {e}"),
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(super::peruser::next_checkin_delay(interval, failed)).await;
+    }
+}
+
+/// Publish the outcome for `status` (the desktop app's Identity check).
+fn record_outcome(outcome: &CheckinOutcome) {
+    let (state, detail) = checkin_state_detail(outcome);
+    super::peruser::record_checkin(state, &detail);
+}
+
+/// Pure mapping of an outcome to the `status` state/detail pair.
+pub fn checkin_state_detail(outcome: &CheckinOutcome) -> (&'static str, String) {
+    match outcome {
+        CheckinOutcome::Renewed(name) => ("ok", name.clone()),
+        CheckinOutcome::NotRenewable(name) => ("not_renewable", name.clone()),
+        CheckinOutcome::NotRegistered => (
+            "not_registered",
+            "this device is not registered in the name server; re-enroll it".to_string(),
+        ),
+        CheckinOutcome::Revoked => ("revoked", "this device has been revoked".to_string()),
+        CheckinOutcome::Failed(e) => ("failed", e.clone()),
     }
 }
 
@@ -381,6 +403,27 @@ mod tests {
         r.extend_from_slice(&(data.len() as u32).to_be_bytes());
         r.extend_from_slice(data);
         r
+    }
+
+    #[test]
+    fn checkin_outcomes_map_to_status_states() {
+        assert_eq!(
+            checkin_state_detail(&CheckinOutcome::Renewed("a.z.ztlp".into())),
+            ("ok", "a.z.ztlp".to_string())
+        );
+        assert_eq!(
+            checkin_state_detail(&CheckinOutcome::NotRenewable("a".into())).0,
+            "not_renewable"
+        );
+        assert_eq!(
+            checkin_state_detail(&CheckinOutcome::NotRegistered).0,
+            "not_registered"
+        );
+        assert_eq!(checkin_state_detail(&CheckinOutcome::Revoked).0, "revoked");
+        assert_eq!(
+            checkin_state_detail(&CheckinOutcome::Failed("timeout".into())),
+            ("failed", "timeout".to_string())
+        );
     }
 
     // ── interval ───────────────────────────────────────────────────────

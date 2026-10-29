@@ -24,13 +24,11 @@ const SetupComponent = (() => {
   let busy = false;
 
   function render() {
-    container.innerHTML = `
-      <h2 class="page-title">Setup</h2>
-      <p class="page-sub">
-        Enroll this device, then run the one-time environment setup. Each step is
-        safe to re-run. Steps that need admin rights will ask for permission.
-      </p>
-
+    // Windows per-user agent: the installer already set up DNS and the
+    // certificate authority, and the app runs the agent itself. Setup is
+    // just "enroll" (plus the optional smoke test).
+    const perUser = !!(window.ZTLP_ENV && window.ZTLP_ENV.per_user_agent);
+    const legacyStatus = `
       <div class="card" id="setup-status-card">
         <div class="card-title">Status</div>
         <div id="setup-status-body">
@@ -38,14 +36,8 @@ const SetupComponent = (() => {
         </div>
       </div>
 
-      <!-- 1 — Enrollment (the "setup string") -->
-      <div class="card">
-        <div class="card-title">1 · Enroll this device</div>
-        <div id="enroll-panel">
-          <p class="setup-pending">Checking enrollment status…</p>
-        </div>
-      </div>
-
+    `;
+    const legacyCards = `
       <!-- 1b — Create identity in the NS (first-run, no enrollment string needed) -->
       <div class="card">
         <div class="card-title">1b · Create an identity in the name server (optional)</div>
@@ -106,6 +98,53 @@ const SetupComponent = (() => {
         <div class="setup-step-state" id="step-install-dns-state"></div>
       </div>
 
+    `;
+    container.innerHTML = perUser ? `
+      <h2 class="page-title">Setup</h2>
+      <p class="page-sub">
+        Enroll this device with the link from your administrator. That is the
+        only step: DNS and certificates were set up when ZTLP was installed.
+      </p>
+      <!-- 1 — Enrollment (the "setup string") -->
+      <div class="card">
+        <div class="card-title">1 · Enroll this device</div>
+        <div id="enroll-panel">
+          <p class="setup-pending">Checking enrollment status…</p>
+        </div>
+      </div>
+
+      <!-- 5 — Browser smoke test -->
+      <div class="card">
+        <div class="card-title">Browser test (optional)</div>
+        <p class="setup-help">
+          Verifies the whole stack end-to-end. Type a hostname in your zone and we
+          fetch it over HTTPS with your installed CA. A 2xx means your browser will
+          show a green lock on the same URL.
+        </p>
+        <div class="form-row">
+          <input type="text" id="setup-test-hostname" class="form-input"
+                 placeholder="e.g. vault.trs.ztlp" spellcheck="false" autocomplete="off">
+          <button class="btn btn-primary" id="btn-test-browse">🚀 Test</button>
+        </div>
+        <div class="setup-step-state" id="step-test-browse-state"></div>
+      </div>
+    ` : `
+      <h2 class="page-title">Setup</h2>
+      <p class="page-sub">
+        Enroll this device, then run the one-time environment setup. Each step is
+        safe to re-run. Steps that need admin rights will ask for permission.
+      </p>
+
+${legacyStatus}
+      <!-- 1 — Enrollment (the "setup string") -->
+      <div class="card">
+        <div class="card-title">1 · Enroll this device</div>
+        <div id="enroll-panel">
+          <p class="setup-pending">Checking enrollment status…</p>
+        </div>
+      </div>
+
+${legacyCards}
       <!-- 5 — Browser smoke test -->
       <div class="card">
         <div class="card-title">5 · Browser smoke test</div>
@@ -563,6 +602,8 @@ const SetupComponent = (() => {
   // boundary the signed-in user must confirm once, not an in-app button we
   // could or should bypass. Everything else here requires zero user input.
   async function autoProvision() {
+    // Windows per-user agent: nothing to provision from the app.
+    if (window.ZTLP_ENV && window.ZTLP_ENV.per_user_agent) return;
     try {
       const status = await invoke('setup_status');
       lastStatus = status;

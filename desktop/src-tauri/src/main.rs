@@ -3,6 +3,7 @@
 
 mod commands;
 mod ipc;
+mod peruser;
 mod setup;
 mod state;
 mod tray;
@@ -12,10 +13,23 @@ use state::AppState;
 use tauri::{Manager, WebviewWindowBuilder};
 
 fn main() {
+    // Started at logon by the installer's Run entry: stay in the tray.
+    let autostart = std::env::args().any(|a| a == "--autostart");
     tauri::Builder::default()
+        // A second launch (Start menu while the logon instance runs) just
+        // shows the existing window: one app, one agent per user.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::default())
-        .setup(|app| {
+        .setup(move |app| {
+            // Windows: this app runs the per-user agent (no service).
+            peruser::start_background();
             // Ensure the main window is VISIBLE on launch.
             //
             // The window is declared in tauri.conf.json (label "main") but the
@@ -25,6 +39,9 @@ fn main() {
             //       -> just show + focus it.
             //   (b) It was never created -> build it, then show + focus.
             match app.get_webview_window("main") {
+                Some(existing) if autostart => {
+                    let _ = existing.hide();
+                }
                 Some(existing) => {
                     let _ = existing.show();
                     let _ = existing.set_focus();
@@ -41,10 +58,12 @@ fn main() {
                     .min_inner_size(720.0, 500.0)
                     .center()
                     .resizable(true)
-                    .visible(true)
+                    .visible(!autostart)
                     .build()?;
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    if !autostart {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
                 }
             }
             tray::setup_tray(app.handle())?;
@@ -69,7 +88,20 @@ fn main() {
             setup::setup_install_dns,
             setup::setup_test_browse,
             setup::setup_create_identity,
+            peruser::platform_info,
+            peruser::health_report,
+            peruser::repair_machine,
         ])
+        .on_window_event(|window, event| {
+            // Closing the window keeps ZTLP running in the tray (the agent
+            // lives as long as the app); Quit is in the tray menu.
+            if peruser::PER_USER_AGENT {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running ZTLP desktop application");
 }

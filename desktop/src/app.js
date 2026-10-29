@@ -94,6 +94,13 @@ function stopPolling() {
 // enrolled and auto_connect is enabled (default true). We never nag the user;
 // if it's not enrolled we just log a hint pointing at Setup.
 async function maybeAutoConnect() {
+  // Windows: the app itself starts and watches the per-user agent (no
+  // service, no Connect step). DNS + certificates were set up by the
+  // installer; Home shows the four checks.
+  if (window.ZTLP_ENV && window.ZTLP_ENV.per_user_agent) {
+    LiveLog.setup('ZTLP runs in the background while you are signed in.');
+    return;
+  }
   // Refresh Home's view of the (possibly new) status so the ring/label repaint
   // after any state change. Safe to call repeatedly.
   const refresh = async () => {
@@ -142,6 +149,14 @@ async function init() {
   window.SetupComponent = SetupComponent;
   window.SettingsComponent = SettingsComponent;
   window.LiveLog = LiveLog;
+
+  // Platform model first: on Windows the per-user agent changes what Home
+  // and Setup show.
+  try {
+    window.ZTLP_ENV = await invoke('platform_info');
+  } catch {
+    window.ZTLP_ENV = { per_user_agent: false };
+  }
 
   // Render the (now three) components.
   HomeComponent.render();

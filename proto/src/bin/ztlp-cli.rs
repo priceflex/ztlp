@@ -846,7 +846,26 @@ enum AgentCommands {
         /// Path to agent config file
         #[arg(short, long)]
         config: Option<PathBuf>,
+
+        /// Exit when this process exits (set by the desktop app that
+        /// supervises the per-user agent on Windows)
+        #[arg(long)]
+        parent_pid: Option<u32>,
     },
+
+    /// Windows, admin: one-time machine setup for the per-user agent
+    /// (DNS rule for .ztlp, machine CA + trust, removes the old service).
+    /// Run by the installer; idempotent, safe to re-run as a repair.
+    #[command(name = "machine-setup")]
+    MachineSetup,
+
+    /// Windows, admin: undo `machine-setup` (run by the uninstaller)
+    #[command(name = "machine-teardown")]
+    MachineTeardown,
+
+    /// Show what `machine-setup` has put in place (JSON; no admin needed)
+    #[command(name = "machine-status")]
+    MachineStatus,
 
     /// Stop the running agent daemon
     #[command(after_help = "EXAMPLES:\n  ztlp agent stop")]
@@ -13786,6 +13805,67 @@ async fn cmd_agent_install_windows(
 /// service. On Unix, systemd/macOS use `rm`/`launchctl bootout` directly
 /// per `agent install`'s own printed instructions, so this is a no-op with
 /// a pointer back to those instructions rather than a silent success.
+/// `ztlp agent machine-setup` / `machine-teardown` (Windows, elevated).
+/// Prints one line per step; exits non-zero if any step failed so the
+/// installer can tell.
+fn cmd_agent_machine(setup: bool) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        use ztlp_proto::agent::machine_setup::{execute, probe_state, setup_plan, teardown_plan};
+        let state = probe_state();
+        let plan = if setup {
+            setup_plan(&state)
+        } else {
+            teardown_plan(&state)
+        };
+        let mut failed = Vec::new();
+        for action in &plan {
+            match execute(action) {
+                Ok(msg) => eprintln!("{} {}", c_green("✓"), msg),
+                Err(e) => {
+                    eprintln!("{} {}", c_red("✗"), e);
+                    failed.push(e);
+                }
+            }
+        }
+        if setup {
+            let after = probe_state();
+            println!("{}", serde_json::to_string(&after)?);
+            if !after.ready() && failed.is_empty() {
+                failed.push("machine setup finished but not every check passed".into());
+            }
+        }
+        if !failed.is_empty() {
+            return Err(format!(
+                "{} step(s) failed (run from an administrator prompt): {}",
+                failed.len(),
+                failed.join("; ")
+            )
+            .into());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = setup;
+        Err("machine-setup / machine-teardown are Windows-only".into())
+    }
+}
+
+/// `ztlp agent machine-status`: JSON of what machine-setup put in place.
+fn cmd_agent_machine_status() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        let s = ztlp_proto::agent::machine_setup::probe_state();
+        println!("{}", serde_json::to_string(&s)?);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("machine-status is Windows-only".into())
+    }
+}
+
 async fn cmd_agent_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
@@ -14809,9 +14889,20 @@ async fn main() {
         } => cmd_proxy(hostname, *port, key, ns_server, relay).await,
 
         Commands::Agent(subcmd) => match subcmd {
-            AgentCommands::Start { foreground, config } => {
+            AgentCommands::Start {
+                foreground,
+                config,
+                parent_pid,
+            } => {
+                if let Some(pid) = parent_pid {
+                    // Read by agent::run_agent_lifecycle (peruser parent watch).
+                    std::env::set_var("ZTLP_PARENT_PID", pid.to_string());
+                }
                 cmd_agent_start(*foreground, config).await
             }
+            AgentCommands::MachineSetup => cmd_agent_machine(true),
+            AgentCommands::MachineTeardown => cmd_agent_machine(false),
+            AgentCommands::MachineStatus => cmd_agent_machine_status(),
             AgentCommands::Stop => cmd_agent_stop().await,
             AgentCommands::Status => cmd_agent_status().await,
             AgentCommands::Dns => cmd_agent_dns().await,

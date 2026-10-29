@@ -352,8 +352,26 @@ from the Dnscache service, not from the user's process.
 | desktop: supervisor, lock watch, health report, Fix, device name, Windows-only UI | `desktop/src-tauri/src/peruser.rs`, `desktop/src/**` | 13 Rust tests (incl. rustls accepts the `.ztlp`-constrained chain), `scripts/test_home_peruser.js` |
 | installer: one UAC (`machine.ps1`), HKCU Run `--autostart`, teardown skipped on update, no winsvc | `desktop/src-tauri/windows/` | CI NSIS compile; live box |
 
-Live acceptance on the AI computer (real user, real browser): see the release
-notes / session log for results of each step below.
+Live acceptance on a Windows test PC (real user session, real Chrome),
+2026-10-29, CI-built installer from PR #129:
+
+| # | Step | Result |
+|---|---|---|
+| 1 | Back up service-era identity, uninstall 1.3.0 | PASS: identity backed up (admin-only), service + install dir gone. Stale ZTLP roots from older builds remain in the store (pre-existing). |
+| 2 | Install 1.4.0 | PASS: `machine-status` all true, root key admins-only, intermediate Users:RX, NRPT `.ztlp`, HKCU Run. (Installed over an elevated shell, so no UAC prompt was shown.) |
+| 3 | App + agent run as the user | PASS: both in session 1, owner = the user, agent child of the app with `--parent-pid`. Killing the app: agent gone in < 2 s (stdin pipe). Killing the agent: restarted in ~1 s. |
+| 4 | Enroll in the app | PASS: one-time token, identity in `%USERPROFILE%\.ztlp`, name `<computer>-<user>`, Home all four green. |
+| 5 | Chrome https://whoami.trs.ztlp | PASS: 200, "secure", issuer "ZTLP Intermediate CA (this machine)", gateway-verified device = the new per-user name. |
+| 6 | Break/repair | PASS: NRPT removed -> DNS red + Fix; Fix raised a real UAC prompt (`consent.exe` in session 1); declining it -> Fix offered again; approving (same `machine-setup`, run elevated) -> green. Root removed from LocalMachine\Root -> HTTPS red + Fix -> green. |
+| 7 | Freeze/thaw | PASS via the control socket: frozen -> `whoami.trs.ztlp` NXDOMAIN, Chrome ERR_NAME_NOT_RESOLVED, health name still answers, Home shows "paused"; thaw -> loads immediately (DNS cache flushed). The live lock event itself was not exercised (the test PC cannot be unlocked remotely); lock detection was verified to read "unlocked" correctly. |
+| 8 | Update in place | PASS: second installer over the first killed app + agent, kept DNS + CA, enrollment survived. |
+
+Found and fixed during the live run: the desktop read `WTSINFOEXW` with the
+union unaligned, so an unlocked desktop looked locked and the agent was
+frozen (commit "read WTSINFOEXW with the 8-byte-aligned union", unit test).
+Note: `curl.exe` (schannel) fails `.ztlp` HTTPS with 0x80092012 because it
+checks revocation by default and the local CA has no CRL; use
+`--ssl-no-revoke`. Chrome/Edge do not revocation-check local roots.
 
 1. Back up the service-era identity, uninstall 1.3.0 (service, NRPT, CA gone).
 2. Install 1.4.0: one UAC, `machine-status` all true, no `ZtlpAgent`.

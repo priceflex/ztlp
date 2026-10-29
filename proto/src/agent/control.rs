@@ -127,6 +127,16 @@ pub struct StatusInfo {
     /// NS-anchored gateway trust: "verified" | "legacy" | "invalid".
     #[serde(default)]
     pub ns_trust: String,
+    /// Session locked: no new connections (desktop sent `freeze`).
+    #[serde(default)]
+    pub frozen: bool,
+    /// Last NS check-in outcome (None until the first one completes).
+    #[serde(default)]
+    pub ns_checkin: Option<crate::agent::peruser::CheckinRecord>,
+    /// Enrolled zone (from config.toml / agent.toml), empty if unknown.
+    /// Lets the desktop skip the heavier `setup_status` on every poll.
+    #[serde(default)]
+    pub zone: String,
 }
 
 /// Setup wizard status — what the UI shows on the Setup page.
@@ -554,6 +564,7 @@ pub async fn handle_standby_request_line_tracked(
             (r, false)
         }
         "shutdown" => (ControlResponse::ok_empty(), true),
+        "freeze" | "thaw" => (cmd_freeze(cmd.cmd == "freeze"), false),
         other => (
             ControlResponse::err(format!(
                 "not enrolled yet: \"{}\" is unavailable until the daemon has an identity (send \"enroll\")",
@@ -579,6 +590,8 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
         "flush_dns" => cmd_flush_dns(state).await,
         "shutdown" => cmd_shutdown(state).await,
         "setup_status" => cmd_setup_status(state).await,
+        "freeze" => cmd_freeze(true),
+        "thaw" => cmd_freeze(false),
         "enroll" => {
             let resp = cmd_enroll(&cmd).await;
             // enrollment rewrites zone, CA and DNS: next poll must re-probe
@@ -592,6 +605,29 @@ async fn handle_command(cmd: ControlCommand, state: &AgentState) -> ControlRespo
 /// First configured relay address, or "" when the agent has none.
 pub(crate) fn first_relay(cfg: &crate::agent::config::AgentConfig) -> String {
     cfg.tunnel.relays.0.first().cloned().unwrap_or_default()
+}
+
+/// `freeze` / `thaw`: the desktop app reports a Windows session lock /
+/// unlock. While frozen no new VIP connection is accepted and ZTLP names
+/// answer NXDOMAIN; established streams run until they idle out.
+fn cmd_freeze(frozen: bool) -> ControlResponse {
+    let was = crate::agent::peruser::set_frozen(frozen);
+    if was && !frozen {
+        // NXDOMAIN answers given while frozen sit in the Windows DNS client
+        // cache; clear it so names work right after unlock.
+        crate::agent::peruser::flush_os_dns_cache();
+    }
+    if was != frozen {
+        info!(
+            "{}",
+            if frozen {
+                "session locked: agent frozen (no new connections)"
+            } else {
+                "session unlocked: agent thawed"
+            }
+        );
+    }
+    ControlResponse::ok(serde_json::json!({ "frozen": frozen }))
 }
 
 async fn cmd_status(state: &AgentState) -> ControlResponse {
@@ -611,6 +647,9 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         ))
         .as_str()
         .to_string(),
+        frozen: crate::agent::peruser::is_frozen(),
+        ns_checkin: crate::agent::peruser::last_checkin(),
+        zone: read_zone_from_config(&crate::agent::config::ztlp_state_dir()).unwrap_or_default(),
     };
     drop(dns);
     let mut status = status;
@@ -1025,7 +1064,27 @@ pub fn build_post_enroll_tls_plan(home: &std::path::Path) -> Result<Vec<Vec<Stri
     // live, 2026-09-20). The GUI app performs the one trust step with the
     // standard admin prompt (Home row 3 "Trust HTTPS"), so the daemon must
     // not attempt (and fail) it here.
-    build_post_enroll_tls_plan_with(home, cfg!(target_os = "macos"))
+    build_post_enroll_tls_plan_for(
+        home,
+        cfg!(target_os = "macos"),
+        crate::agent::peruser::machine_ca_available(),
+    )
+}
+
+/// [`build_post_enroll_tls_plan_with`] plus whether the installer-made
+/// machine CA is usable (Windows per-user agent).
+pub fn build_post_enroll_tls_plan_for(
+    home: &std::path::Path,
+    gui_owns_trust: bool,
+    machine_ca_usable: bool,
+) -> Result<Vec<Vec<String>>, String> {
+    if machine_ca_usable {
+        // The installer created the machine CA and trusted it machine-wide;
+        // the agent mints from it (peruser::effective_ca_dir) and turns TLS
+        // on by itself (peruser::effective_tls_enabled). Nothing to run.
+        return Ok(Vec::new());
+    }
+    build_post_enroll_tls_plan_with(home, gui_owns_trust)
 }
 
 /// `gui_owns_trust` = skip the `install-ca-cert` step (macOS).
@@ -1839,6 +1898,71 @@ mod tests {
     }
 
     #[test]
+    fn post_enroll_tls_plan_is_empty_when_the_machine_ca_is_usable() {
+        // Windows per-user agent: the installer made + trusted the machine
+        // CA; the user's enroll must not create (or try to trust) its own.
+        let home = tmp_home("machineca");
+        std::fs::write(home.join(".ztlp/config.toml"), "zone = \"defcon.ztlp\"\n").unwrap();
+        assert!(build_post_enroll_tls_plan_for(&home, false, true)
+            .unwrap()
+            .is_empty());
+        // without a machine CA the old two-step plan is unchanged
+        assert_eq!(
+            build_post_enroll_tls_plan_for(&home, false, false)
+                .unwrap()
+                .len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn freeze_and_thaw_commands_flip_the_flag_and_status_reports_it() {
+        let _g = crate::agent::peruser::FREEZE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = crate::agent::peruser::set_frozen(false);
+        let state = AgentState::test_without_token();
+        let r = handle_request_line(&state, r#"{"cmd":"freeze"}"#).await;
+        assert!(r.contains("\"ok\":true"), "{r}");
+        assert!(crate::agent::peruser::is_frozen());
+        let s = handle_request_line(&state, r#"{"cmd":"status"}"#).await;
+        assert!(s.contains("\"frozen\":true"), "{s}");
+        let r = handle_request_line(&state, r#"{"cmd":"thaw"}"#).await;
+        assert!(r.contains("\"ok\":true"), "{r}");
+        assert!(!crate::agent::peruser::is_frozen());
+        crate::agent::peruser::set_frozen(before);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn status_reports_last_ns_checkin() {
+        let _g = crate::agent::peruser::CHECKIN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::agent::peruser::record_checkin("ok", "box.trs.ztlp");
+        let state = AgentState::test_without_token();
+        let s = handle_request_line(&state, r#"{"cmd":"status"}"#).await;
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["data"]["ns_checkin"]["state"], "ok", "{s}");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn standby_accepts_freeze_and_thaw() {
+        let _g = crate::agent::peruser::FREEZE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let before = crate::agent::peruser::set_frozen(false);
+        let (r, stop) = handle_standby_request_line("t", r#"{"cmd":"freeze","token":"t"}"#).await;
+        assert!(r.contains("\"ok\":true") && !stop, "{r}");
+        let (r, _) = handle_standby_request_line("t", r#"{"cmd":"thaw","token":"t"}"#).await;
+        assert!(r.contains("\"ok\":true"), "{r}");
+        crate::agent::peruser::set_frozen(before);
+    }
+
+    #[test]
     fn post_enroll_tls_plan_macos_leaves_trust_to_the_gui() {
         // Option B: the daemon inits the CA but never calls install-ca-cert
         // on macOS (it cannot write trust settings unattended).
@@ -1921,6 +2045,9 @@ mod tests {
                 domain_mappings: 0,
                 relay: "44.230.7.100:23095".into(),
                 ns_trust: "legacy".into(),
+                frozen: false,
+                ns_checkin: None,
+                zone: String::new(),
             };
             let v = serde_json::to_value(s).unwrap();
             assert_eq!(v["relay"], "44.230.7.100:23095");

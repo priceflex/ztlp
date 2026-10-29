@@ -29,7 +29,7 @@ defmodule ZtlpRelay.MixProject do
       # the CLIENT_ROUTE service-name string misses, so remote-site /
       # symmetric-NAT gateways (Casita billing) route via relay forwarding
       # under a generic `--service ssh`. Floor ratcheted to 0.34.11.
-      version: "0.36.0",
+      version: "0.37.0",
       elixir: "~> 1.12",
       start_permanent: Mix.env() == :prod,
       deps: deps(),

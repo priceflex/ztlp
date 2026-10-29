@@ -38,6 +38,8 @@ pub mod hardware_key;
 // compile everywhere; the executor is cfg(target_os = "linux").
 pub mod linux_daemon;
 pub mod local_tls;
+// Installer-time machine setup (NRPT + machine CA), Windows per-user agent.
+pub mod machine_setup;
 // macOS root-LaunchDaemon planning (pure) + executor. Compiles on every
 // platform so the plan/plist tests run in Linux CI; only invoked from
 // daemon.rs behind cfg!(target_os = "macos").
@@ -46,6 +48,8 @@ pub mod macos_daemon;
 pub mod ns_checkin;
 pub mod ns_trust;
 pub mod nsset;
+// Per-user (unelevated) agent support: freeze/thaw, health probe, machine CA.
+pub mod peruser;
 pub mod proxy;
 pub mod renewal;
 pub mod session_lock;
@@ -113,6 +117,32 @@ pub async fn run_agent_lifecycle(
     if let Some(pid) = daemon::get_agent_pid() {
         tracing::warn!("Agent already running (PID {})", pid);
         return Ok(());
+    }
+
+    // Per-user agent (Windows): exit with the desktop app that started us.
+    if let Some(ppid) = peruser::parent_pid_from_env() {
+        // Backstop poll (also covers a manual `--parent-pid` from a shell).
+        peruser::spawn_parent_watch(ppid, std::time::Duration::from_secs(10));
+        if peruser::parent_stdin_watch_requested() {
+            peruser::spawn_stdin_parent_watch();
+        }
+    }
+
+    // Another user's agent already owns the control socket (fast user
+    // switching): say so plainly instead of half-starting. The desktop app
+    // shows "in use by another user" and retries.
+    {
+        let listen = match config_path {
+            Some(p) => AgentConfig::load_from_path(p).ipc.listen,
+            None => AgentConfig::load().ipc.listen,
+        };
+        if peruser::control_addr_owned_by_other(&listen) {
+            return Err(format!(
+                "{}: {listen} is held by another process (another user's ZTLP agent?)",
+                peruser::PORTS_OWNED_BY_OTHER
+            )
+            .into());
+        }
     }
 
     // B4 (macOS, HANDOFF-2026-09-20; cross-platform since Task A2): a fresh

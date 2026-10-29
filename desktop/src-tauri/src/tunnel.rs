@@ -124,7 +124,14 @@ pub fn process_enrollment_with_secret(
     token_uri: &str,
     relay_secret: Option<String>,
 ) -> Result<EnrollResult, String> {
-    process_enrollment_at("127.100.255.1:4433", token_uri, None, relay_secret)
+    // Windows per-user agent: name the device <computer>-<user> (each user
+    // has their own identity on a shared PC).
+    let name = if crate::peruser::PER_USER_AGENT {
+        Some(crate::peruser::this_device_name())
+    } else {
+        None
+    };
+    process_enrollment_at("127.100.255.1:4433", token_uri, name, relay_secret)
 }
 
 /// Same as [`process_enrollment`] but parameterized on the IPC address (and

@@ -1009,83 +1009,115 @@ pub async fn run_daemon(
     });
 
     // ── Initialize local TLS ──────────────────────────────────────────
-    let tls_acceptor = if config.tls.enabled {
-        let cert_dir = config.tls.cert_dir_path();
-        if let Err(e) = std::fs::create_dir_all(&cert_dir) {
-            warn!("failed to create cert dir {}: {}", cert_dir.display(), e);
-        }
-
-        // D6.T1: try to load the intermediate CA BEFORE constructing the
-        // resolver, so we can use `with_mint_ca` (the only constructor
-        // that wraps the mint CA in the `Arc` the resolver expects). If
-        // the CA chain hasn't been initialized yet (no
-        // `~/.ztlp/ca/intermediate.{pem,key}`) we silently fall back
-        // to disk-only mode via the plain `new` constructor — the wizard
-        // surface step "CA initialized?" tells the user how to fix that.
-        let ca_dir = crate::agent::config::ztlp_state_dir()
-            .join(".ztlp")
-            .join("ca");
-        let intermediate_pem = ca_dir.join("intermediate.pem");
-        let intermediate_key = ca_dir.join("intermediate.key");
-        let resolver = if intermediate_pem.exists() && intermediate_key.exists() {
-            match crate::agent::cert_mint::IntermediateCa::load_from_dir(&ca_dir) {
-                Ok(ca) => {
-                    info!(
-                        "local TLS: on-demand cert minting enabled (intermediate at {})",
-                        intermediate_pem.display()
-                    );
-                    Arc::new(SniCertResolver::with_mint_ca(
-                        cert_dir.clone(),
-                        Arc::new(ca),
-                    ))
-                }
-                Err(e) => {
-                    warn!(
-                        "local TLS: intermediate CA present at {} but failed to load: {} \
-                         — on-demand minting disabled",
-                        intermediate_pem.display(),
-                        e
-                    );
-                    Arc::new(SniCertResolver::new(cert_dir.clone()))
-                }
+    let machine_ca = super::peruser::machine_ca_dir();
+    let tls_acceptor =
+        if super::peruser::effective_tls_enabled(config.tls.enabled, machine_ca.as_deref()) {
+            let cert_dir = config.tls.cert_dir_path();
+            if let Err(e) = std::fs::create_dir_all(&cert_dir) {
+                warn!("failed to create cert dir {}: {}", cert_dir.display(), e);
             }
-        } else {
-            info!(
-                "local TLS: no intermediate CA found at {} — \
-                 on-demand minting disabled (run `ztlp admin ca-init` first)",
-                intermediate_pem.display()
-            );
-            Arc::new(SniCertResolver::new(cert_dir.clone()))
-        };
 
-        let loaded = resolver.preload_all();
-        if loaded > 0 {
-            info!(
-                "local TLS: loaded {} cert(s) from {}",
-                loaded,
-                cert_dir.display()
+            // D6.T1: try to load the intermediate CA BEFORE constructing the
+            // resolver, so we can use `with_mint_ca` (the only constructor
+            // that wraps the mint CA in the `Arc` the resolver expects). If
+            // the CA chain hasn't been initialized yet (no
+            // `~/.ztlp/ca/intermediate.{pem,key}`) we silently fall back
+            // to disk-only mode via the plain `new` constructor — the wizard
+            // surface step "CA initialized?" tells the user how to fix that.
+            // Windows per-user agent: mint from the installer-made machine CA
+            // (trusted machine-wide) when it is usable, else the user's own CA.
+            let ca_dir = super::peruser::effective_ca_dir(
+                &crate::agent::config::ztlp_state_dir()
+                    .join(".ztlp")
+                    .join("ca"),
+                machine_ca.as_deref(),
             );
-        } else {
-            info!(
-                "local TLS: enabled but no certs found in {} — \
+            let intermediate_pem = ca_dir.join("intermediate.pem");
+            let intermediate_key = ca_dir.join("intermediate.key");
+            let resolver = if intermediate_pem.exists() && intermediate_key.exists() {
+                match crate::agent::cert_mint::IntermediateCa::load_from_dir(&ca_dir) {
+                    Ok(ca) => {
+                        info!(
+                            "local TLS: on-demand cert minting enabled (intermediate at {})",
+                            intermediate_pem.display()
+                        );
+                        Arc::new(SniCertResolver::with_mint_ca(
+                            cert_dir.clone(),
+                            Arc::new(ca),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(
+                            "local TLS: intermediate CA present at {} but failed to load: {} \
+                         — on-demand minting disabled",
+                            intermediate_pem.display(),
+                            e
+                        );
+                        Arc::new(SniCertResolver::new(cert_dir.clone()))
+                    }
+                }
+            } else {
+                info!(
+                    "local TLS: no intermediate CA found at {} — \
+                 on-demand minting disabled (run `ztlp admin ca-init` first)",
+                    intermediate_pem.display()
+                );
+                Arc::new(SniCertResolver::new(cert_dir.clone()))
+            };
+
+            let loaded = resolver.preload_all();
+            if loaded > 0 {
+                info!(
+                    "local TLS: loaded {} cert(s) from {}",
+                    loaded,
+                    cert_dir.display()
+                );
+            } else {
+                info!(
+                    "local TLS: enabled but no certs found in {} — \
                  HTTPS connections will be served by on-demand minting \
                  (if enabled above) or fail otherwise",
-                cert_dir.display()
-            );
-        }
+                    cert_dir.display()
+                );
+            }
 
-        match local_tls::create_tls_acceptor(resolver) {
-            Ok(acceptor) => {
-                info!("local TLS: acceptor ready");
-                Some(Arc::new(acceptor))
+            match local_tls::create_tls_acceptor(resolver) {
+                Ok(acceptor) => {
+                    info!("local TLS: acceptor ready");
+                    Some(Arc::new(acceptor))
+                }
+                Err(e) => {
+                    error!("local TLS: failed to create acceptor: {}", e);
+                    None
+                }
             }
-            Err(e) => {
-                error!("local TLS: failed to create acceptor: {}", e);
-                None
-            }
-        }
+        } else {
+            info!("local TLS: disabled");
+            None
+        };
+
+    // ── Per-user agent health probe (Windows) ─────────────────────────
+    // TLS responder on peruser::HEALTH_VIP:443 so the desktop app can prove
+    // `.ztlp` DNS + machine-CA trust end to end. Windows only: macOS/Linux
+    // behaviour is unchanged.
+    let health_handle = if cfg!(target_os = "windows") {
+        tls_acceptor.as_ref().map(|acc| {
+            let acc = (**acc).clone();
+            tokio::spawn(async move {
+                let addr = SocketAddr::new(
+                    super::peruser::HEALTH_VIP.into(),
+                    super::peruser::HEALTH_PORT,
+                );
+                match TcpListener::bind(addr).await {
+                    Ok(l) => {
+                        info!("health probe listening on {addr}");
+                        local_tls::run_health_responder(l, acc).await;
+                    }
+                    Err(e) => warn!("health probe: cannot bind {addr}: {e}"),
+                }
+            })
+        })
     } else {
-        info!("local TLS: disabled");
         None
     };
 
@@ -1328,6 +1360,9 @@ pub async fn run_daemon(
     proxy_handle.abort();
     gc_handle.abort();
     lockdown_handle.abort();
+    if let Some(h) = health_handle {
+        h.abort();
+    }
 
     info!("agent stopped");
     Ok(())
@@ -1458,6 +1493,18 @@ async fn run_tcp_proxy(
                                         // local user/process ride the daemon owner's
                                         // ZTLP identity.
                                         if !verify_local_peer(&tcp_stream) {
+                                            continue;
+                                        }
+                                        // Session locked (`freeze`): no new
+                                        // connections; established ones keep
+                                        // running until they idle out.
+                                        if !super::peruser::accept_new_connection(
+                                            super::peruser::is_frozen(),
+                                        ) {
+                                            debug!(
+                                                "frozen: refusing new connection {} -> {}",
+                                                client_addr, name
+                                            );
                                             continue;
                                         }
 

@@ -232,11 +232,9 @@ jobs:
           if [ "${{ matrix.target }}" == "linux" ]; then
             cp ../proto/target/release/ztlp src-tauri/binaries/ztlp-x86_64-unknown-linux-gnu
           else
+            # Windows runs the agent per user (no ZtlpAgent service), so
+            # ztlp.exe is the only sidecar the installer ships.
             cp ../proto/target/release/ztlp.exe src-tauri/binaries/ztlp-x86_64-pc-windows-msvc.exe
-            # ZtlpAgent SCM service host; declared as a Windows-only sidecar in
-            # tauri.windows.conf.json, so the Windows bundle build REQUIRES it.
-            (cd ../proto && cargo build --release --bin ztlp-winsvc)
-            cp ../proto/target/release/ztlp-winsvc.exe src-tauri/binaries/ztlp-winsvc-x86_64-pc-windows-msvc.exe
           fi
 
       - name: Build Desktop (Tauri)

@@ -13,6 +13,15 @@ use ztlp_proto::agent::control::{ControlCommand, ControlResponse};
 /// leave room for a future GUI-only override without touching the
 /// shared library function.
 pub fn load_gui_agent_token() -> Option<String> {
+    if crate::peruser::PER_USER_AGENT {
+        // Windows per-user agent: the agent is this same user and writes
+        // the token into this user's profile. Never prefer a leftover
+        // ProgramData token from the old LocalSystem service.
+        return std::fs::read_to_string(ztlp_proto::agent::config::default_token_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
     ztlp_proto::agent::config::load_agent_token()
 }
 
@@ -83,6 +92,7 @@ pub fn ipc_enroll_at(
         token: load_gui_agent_token(),
         enrollment_uri: Some(enrollment_uri.to_string()),
         relay_secret,
+        ..Default::default()
     };
     ipc_send(addr, req)
 }

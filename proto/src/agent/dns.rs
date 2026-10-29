@@ -360,6 +360,15 @@ async fn process_dns_query(
     query: &[u8],
     state: &Mutex<DnsResolverState>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    process_dns_query_with_freeze(query, state, super::peruser::is_frozen()).await
+}
+
+/// [`process_dns_query`] with the freeze flag passed in (testable).
+async fn process_dns_query_with_freeze(
+    query: &[u8],
+    state: &Mutex<DnsResolverState>,
+    frozen: bool,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     if query.len() < DNS_HEADER_SIZE {
         return Err("query too short".into());
     }
@@ -395,6 +404,14 @@ async fn process_dns_query(
         return forward_to_upstream(query, &upstream).await;
     }
 
+    // Per-user agent health probe: a fixed local answer, no NS, no VIP.
+    if super::peruser::is_health_name(&qname_lower) {
+        if qtype == QTYPE_AAAA {
+            return build_empty_response(query);
+        }
+        return build_a_response(query, super::peruser::HEALTH_VIP, 5);
+    }
+
     // Check if this is a ZTLP name or custom domain
     let st = state.lock().await;
     let ztlp_name = st.domain_mapper.to_ztlp_name(&qname_lower);
@@ -409,6 +426,12 @@ async fn process_dns_query(
             return forward_to_upstream(query, &upstream).await;
         }
     };
+
+    // Session locked (desktop app sent `freeze`): no new names resolve.
+    if super::peruser::dns_decision(&ztlp_name, frozen) == super::peruser::DnsDecision::Refuse {
+        debug!("DNS: frozen, refusing {}", ztlp_name);
+        return build_error_response(query, FLAGS_RESPONSE_NXDOMAIN);
+    }
 
     // AAAA for ZTLP names → empty response (no IPv6 VIPs)
     if qtype == QTYPE_AAAA {
@@ -806,6 +829,56 @@ mod tests {
             .unwrap();
         assert!(!path.exists());
         assert_eq!(st.restore_vips(), 0);
+    }
+
+    // ── per-user agent: health name + freeze (2026-10-29) ─────────────
+    fn a_query(name: &str, qtype: u16) -> Vec<u8> {
+        let mut q = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        q.extend_from_slice(&encode_dns_name(name));
+        q.extend_from_slice(&qtype.to_be_bytes());
+        q.extend_from_slice(&1u16.to_be_bytes());
+        q
+    }
+
+    fn rcode(resp: &[u8]) -> u16 {
+        u16::from_be_bytes([resp[2], resp[3]]) & 0x000F
+    }
+
+    #[tokio::test]
+    async fn health_name_answers_fixed_vip_without_ns() {
+        let (st, _) = state_with_persist("health");
+        let st = Mutex::new(st);
+        let resp = process_dns_query(&a_query("ztlp-health.ztlp", QTYPE_A), &st)
+            .await
+            .unwrap();
+        assert_eq!(rcode(&resp), 0, "NOERROR");
+        assert_eq!(&resp[resp.len() - 4..], &[127, 100, 255, 2]);
+        // nothing allocated from the VIP pool
+        assert_eq!(st.lock().await.vip_pool.allocated_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn health_name_still_answers_while_frozen() {
+        let (st, _) = state_with_persist("health-frozen");
+        let st = Mutex::new(st);
+        let resp = process_dns_query_with_freeze(&a_query("ztlp-health.ztlp", QTYPE_A), &st, true)
+            .await
+            .unwrap();
+        assert_eq!(&resp[resp.len() - 4..], &[127, 100, 255, 2]);
+    }
+
+    #[tokio::test]
+    async fn frozen_agent_answers_nxdomain_without_asking_ns() {
+        let (st, _) = state_with_persist("frozen");
+        let st = Mutex::new(st);
+        // NS 127.0.0.1:1 would time out / error: a fast NXDOMAIN proves we
+        // never asked it.
+        let t0 = std::time::Instant::now();
+        let resp = process_dns_query_with_freeze(&a_query("whoami.trs.ztlp", QTYPE_A), &st, true)
+            .await
+            .unwrap();
+        assert_eq!(rcode(&resp), 3, "NXDOMAIN");
+        assert!(t0.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

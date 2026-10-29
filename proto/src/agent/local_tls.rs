@@ -700,11 +700,94 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+// ─── Per-user agent health responder ───────────────────────────────────────
+
+/// Serve the TLS health probe on `listener` (bound to
+/// `peruser::HEALTH_VIP:443` by the daemon): complete the TLS handshake with
+/// a leaf minted for whatever SNI the client sent (`ztlp-health.ztlp`),
+/// answer one fixed `200 OK`, close. The desktop app validates that chain
+/// against the Windows trust store, so a green result proves a browser
+/// would trust the agent's certificates too. Runs until the task is aborted.
+pub async fn run_health_responder(listener: tokio::net::TcpListener, acceptor: TlsAcceptor) {
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("health responder accept error: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                serve_health_once(stream, acceptor),
+            )
+            .await;
+        });
+    }
+}
+
+async fn serve_health_once(stream: TcpStream, acceptor: TlsAcceptor) -> io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut tls = acceptor.accept(stream).await?;
+    // Read (and ignore) whatever request the client sends; a probe that
+    // only handshakes and closes is fine too.
+    let mut buf = [0u8; 1024];
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), tls.read(&mut buf)).await;
+    tls.write_all(crate::agent::peruser::health_http_response().as_bytes())
+        .await?;
+    tls.shutdown().await
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn health_responder_completes_tls_and_answers_ok() {
+        crate::agent::ensure_rustls_crypto_provider();
+        let (ca, ca_pem, _key) =
+            crate::agent::cert_mint::IntermediateCa::generate_for_test().unwrap();
+        let dir = std::env::temp_dir().join(format!("ztlp-health-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let resolver = Arc::new(SniCertResolver::with_mint_ca(dir.clone(), Arc::new(ca)));
+        let acceptor = create_tls_acceptor(resolver).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(run_health_responder(listener, acceptor));
+
+        // Client: trust only the test CA, SNI = the health name.
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        for c in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let cfg = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let sni = tokio_rustls::rustls::pki_types::ServerName::try_from(
+            crate::agent::peruser::HEALTH_NAME,
+        )
+        .unwrap();
+        let mut tls = connector.connect(sni, tcp).await.expect("handshake");
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: ztlp-health.ztlp\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), tls.read_to_end(&mut buf))
+            .await;
+        let text = String::from_utf8_lossy(&buf);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+        assert!(text.ends_with(crate::agent::peruser::HEALTH_BODY), "{text}");
+        task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_tls_mode_for_port() {

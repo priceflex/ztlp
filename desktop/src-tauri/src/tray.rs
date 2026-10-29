@@ -22,18 +22,24 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let open_item = MenuItem::with_id(app, "open", "Open ZTLP", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &status_item,
-            &sep1,
-            &connect_item,
-            &disconnect_item,
-            &sep2,
-            &open_item,
-            &quit_item,
-        ],
-    )?;
+    // Windows per-user agent: the app itself keeps the agent running, so
+    // there is nothing to connect/disconnect. Open + Quit only.
+    let menu = if crate::peruser::PER_USER_AGENT {
+        Menu::with_items(app, &[&open_item, &quit_item])?
+    } else {
+        Menu::with_items(
+            app,
+            &[
+                &status_item,
+                &sep1,
+                &connect_item,
+                &disconnect_item,
+                &sep2,
+                &open_item,
+                &quit_item,
+            ],
+        )?
+    };
 
     let mut builder = TrayIconBuilder::new().menu(&menu);
     // Use the app icon (the ZTLP shield) in the tray; without this the
@@ -42,7 +48,11 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.icon(icon.clone());
     }
     let _tray = builder
-        .tooltip("ZTLP — Disconnected")
+        .tooltip(if crate::peruser::PER_USER_AGENT {
+            "ZTLP"
+        } else {
+            "ZTLP — Disconnected"
+        })
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "connect" => {
                 let state = app.state::<AppState>();
@@ -76,6 +86,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "quit" => {
+                crate::peruser::stop_background();
                 app.exit(0);
             }
             _ => {}

@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.37.0 — 2026-10-29
+
+Windows: the agent runs as the signed-in user, no SYSTEM service. Plan:
+`docs/plans/2026-10-29-windows-agent-per-user-unelevated.md`. Desktop 1.4.0.
+
+- **Install = one UAC prompt, then none.** The installer runs
+  `ztlp agent machine-setup` elevated once: `.ztlp` NRPT rule -> 127.0.0.55,
+  a machine CA (ECDSA P-256 root + intermediate, nameConstraints `.ztlp`) in
+  `C:\ProgramData\ZTLP\ca` trusted in `LocalMachine\Root` (root key
+  admins-only), and removal of the old `ZtlpAgent` service. Uninstall runs
+  `machine-teardown`; an in-place update keeps both. `machine-status` prints
+  the state as JSON without admin.
+- **Per-user agent.** The desktop app starts `ztlp agent start --foreground
+  --parent-pid <app>` as the user, restarts it with backoff, and stops it on
+  Quit; the agent exits by itself when the app is gone. Each user enrolls into
+  their own profile (default device name `<computer>-<user>`). The agent mints
+  from the machine CA and turns local TLS on by itself when it is present, so
+  enrollment no longer runs `ca-init` / `install-ca-cert` on Windows. If
+  another user's agent holds the control socket, the agent refuses to
+  half-start (`ports_owned_by_other`) and the app shows "in use by another
+  user".
+- **Screen lock freezes the agent.** New control commands `freeze` / `thaw`
+  (also in standby); while frozen ZTLP names answer NXDOMAIN and no new VIP
+  connection is accepted; established streams run until they idle out. The
+  desktop app sends them on Windows session lock / unlock / disconnect.
+- **Four real checks on Home (Windows):** Agent (control socket answers),
+  Identity (enrolled + last NS check-in accepted, `status.ns_checkin`), DNS
+  (the reserved name `ztlp-health.ztlp` resolves through Windows DNS to
+  127.100.255.2) and HTTPS (TLS to the agent's health responder validated
+  against the Windows trust store). A red DNS or HTTPS row has a Fix button
+  that re-runs `machine-setup` behind one UAC prompt. All service, CA and DNS
+  setup UI is gone on Windows; Linux and the macOS app are unchanged.
+- NS check-in retries within a minute after a network failure (was one hour).
+- `desktop-build.yml` now also runs on `proto/**` changes: a proto change had
+  broken the desktop crate unnoticed since v0.36.0 (`ControlCommand.relay`).
+- Also in this release (merged since v0.36.0): gateway enforces `--policy` on
+  the QUIC accept path and fails closed on a bad policy file (#126); admin
+  panel v0.4.0-v0.6.0 (#124, #125, #127).
+
 ## v0.36.0 — 2026-10-24
 
 Gateway trust anchored in ZTLP-NS. A gateway rebuild, restart or certificate

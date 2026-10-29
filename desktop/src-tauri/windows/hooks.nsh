@@ -1,29 +1,59 @@
 ; ZTLP NSIS installer hooks (Tauri `bundle.windows.nsis.installerHooks`).
 ;
-; Uninstalling the desktop app used to leave the ZtlpAgent LocalSystem service
-; registered and C:\ProgramData\ZTLP (identity, CA key, agent.token) on disk.
-; Before the app files are removed, run the bundled `ztlp.exe agent uninstall`
-; (elevated) through uninstall-service.ps1, which returns that command's own
-; exit code. The script is a separate file so there is NO nested-quote
-; command line to get wrong in NSIS. It ships as a bundle resource, so it is
-; installed next to ztlp.exe in $INSTDIR.
+; Windows per-user agent (docs/plans/2026-10-29-windows-agent-per-user-unelevated.md):
+; there is no ZtlpAgent service any more. The app runs the agent as the
+; signed-in user. Everything that needs admin happens here, once, behind ONE
+; UAC prompt: `ztlp.exe agent machine-setup` (DNS rule for .ztlp, machine CA
+; + LocalMachine\Root trust, removal of the old ZtlpAgent service). It runs
+; through machine.ps1, which self-elevates and returns the command's exit
+; code, so there is no nested-quote command line to get wrong in NSIS.
 ;
-; If the service cannot be removed (UAC declined / uninstall failed) the user
-; is asked whether to continue; declining aborts the uninstall so the service
-; and its state are not silently orphaned.
+; Uninstall: `machine-teardown` (one UAC prompt) removes what setup added.
+; Skipped during an in-place update (Tauri runs the old uninstaller with
+; /UPDATE), so updating keeps DNS + the CA and asks for admin only once.
+
+!macro ZTLP_STOP_RUNNING
+  ; Stop this user's app + agent so their files can be replaced/removed.
+  ; Unelevated taskkill only reaches the current user's processes; the
+  ; USERNAME filter keeps it off anyone else's ztlp.exe.
+  nsExec::Exec 'taskkill /F /T /IM ztlp-desktop.exe'
+  Pop $0
+  ReadEnvStr $1 USERNAME
+  nsExec::Exec 'taskkill /F /FI "USERNAME eq $1" /IM ztlp.exe'
+  Pop $0
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro ZTLP_STOP_RUNNING
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  DetailPrint "Setting up DNS and certificates for ZTLP (administrator permission needed once)..."
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\machine.ps1" -InstallDir "$INSTDIR" -Action setup'
+  Pop $0
+  DetailPrint "Machine setup finished (exit $0)"
+  StrCmp $0 "0" ztlp_setup_ok
+    IfSilent ztlp_setup_ok
+    MessageBox MB_OK|MB_ICONEXCLAMATION "ZTLP could not finish the one-time DNS and certificate setup (exit code $0).$\r$\n$\r$\nOpen ZTLP and click Fix on the DNS or HTTPS check to try again."
+  ztlp_setup_ok:
+  ; Start the app (tray) at every logon; it runs this user's agent.
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "ZTLP" '"$INSTDIR\ztlp-desktop.exe" --autostart'
+!macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  IfFileExists "$INSTDIR\ztlp.exe" 0 ztlp_skip_service_uninstall
-    DetailPrint "Removing ZTLP background service and its state..."
-    IfFileExists "$INSTDIR\uninstall-service.ps1" ztlp_have_script 0
-      MessageBox MB_OK|MB_ICONEXCLAMATION "uninstall-service.ps1 is missing from the install folder; the ZTLP background service cannot be removed automatically. Run 'ztlp.exe agent uninstall' from an administrator prompt afterwards."
-      Goto ztlp_skip_service_uninstall
-    ztlp_have_script:
-    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\uninstall-service.ps1" -InstallDir "$INSTDIR"'
+  !insertmacro ZTLP_STOP_RUNNING
+  StrCmp $UpdateMode 1 ztlp_skip_teardown
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "ZTLP"
+  IfFileExists "$INSTDIR\machine.ps1" 0 ztlp_skip_teardown
+    DetailPrint "Removing ZTLP DNS rule and certificates..."
+    nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\machine.ps1" -InstallDir "$INSTDIR" -Action teardown'
     Pop $0
-    DetailPrint "Service removal finished (exit $0)"
-    StrCmp $0 "0" ztlp_skip_service_uninstall
-      MessageBox MB_YESNO|MB_ICONEXCLAMATION "The ZTLP background service could not be removed (exit code $0). Its identity and certificate state will be left on this PC.$\r$\n$\r$\nContinue uninstalling anyway?" IDYES ztlp_skip_service_uninstall
-      Abort "Uninstall cancelled: the ZTLP background service was not removed."
-  ztlp_skip_service_uninstall:
+    DetailPrint "Machine teardown finished (exit $0)"
+    StrCmp $0 "0" ztlp_skip_teardown
+      ; Declined UAC / teardown failed: once ztlp.exe is gone nothing could
+      ; remove the DNS rule or the trusted root, so let the user stop here.
+      IfSilent ztlp_skip_teardown
+      MessageBox MB_YESNO|MB_ICONEXCLAMATION "ZTLP could not remove its DNS rule and certificate from this PC (exit code $0; administrator permission is needed).$\r$\n$\r$\nContinue uninstalling anyway? They would stay on this PC." IDYES ztlp_skip_teardown
+      Abort "Uninstall cancelled: the ZTLP DNS rule and certificate were not removed."
+  ztlp_skip_teardown:
 !macroend

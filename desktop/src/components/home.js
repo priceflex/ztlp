@@ -159,7 +159,137 @@ const HomeComponent = (() => {
     await load();
   }
 
+  // ── Windows per-user agent: four end-to-end checks ──────────────────
+  // Agent / Identity / DNS / HTTPS, computed in Rust (peruser.rs
+  // `health_report`). The only buttons: Enroll (identity) and Fix (DNS or
+  // HTTPS red -> one UAC prompt that re-runs the installer's machine setup).
+  function isPerUser() {
+    return !!(window.ZTLP_ENV && window.ZTLP_ENV.per_user_agent);
+  }
+
+  const lastRowState = {};
+  let healthInFlight = false;
+  let lastHealthAt = 0;
+  let repairing = false;
+
+  function healthBadge(state) {
+    switch (state) {
+      case 'ready': return { cls: 'ready', symbol: '✓' };
+      case 'action': return { cls: 'needs-action', symbol: '' };
+      case 'failed': return { cls: 'failed', symbol: '✕' };
+      default: return { cls: 'waiting', symbol: '' };
+    }
+  }
+
+  function renderHealth(report) {
+    const rowsEl = document.getElementById('home-readiness-rows');
+    const guidanceEl = document.getElementById('home-guidance');
+    if (!rowsEl) return;
+    rowsEl.innerHTML = report.rows
+      .map((row, i) => {
+        const badge = healthBadge(row.state);
+        const label = row.action === 'enroll' ? 'Enroll' : 'Fix';
+        const btn = row.action && (row.state === 'action' || row.state === 'failed')
+          ? `<button class="btn btn-sm readiness-action" data-action="${escapeHtml(row.action)}"${repairing && row.action === 'repair' ? ' disabled' : ''}>${escapeHtml(repairing && row.action === 'repair' ? 'Fixing…' : label)}</button>`
+          : '';
+        return `
+          <div class="readiness-row state-${badge.cls}" id="home.row.${escapeHtml(row.key)}">
+            <span class="readiness-badge ${badge.cls}">${badge.symbol}</span>
+            <div class="readiness-text">
+              <div class="readiness-title"><span class="readiness-num">${i + 1}.</span> ${escapeHtml(row.title)}</div>
+              <div class="readiness-detail">${escapeHtml(row.detail)}</div>
+            </div>
+            ${btn}
+          </div>
+        `;
+      })
+      .join('');
+    rowsEl.querySelectorAll('.readiness-action').forEach((b) => {
+      b.addEventListener('click', () => onHealthAction(b.dataset.action));
+    });
+
+    // Log each row's transitions once (not every poll).
+    report.rows.forEach((row) => {
+      const key = `${row.state}|${row.detail}`;
+      if (lastRowState[row.key] !== key) {
+        if (lastRowState[row.key] !== undefined || row.state !== 'waiting') {
+          if (row.state === 'ready') LiveLog.success(`${row.title}: ${row.detail}`);
+          else if (row.state === 'failed') LiveLog.fail(`${row.title}: ${row.detail}`);
+          else LiveLog.log('info', `${row.title}: ${row.detail}`);
+        }
+        lastRowState[row.key] = key;
+      }
+    });
+
+    if (guidanceEl) {
+      guidanceEl.textContent = report.all_ready
+        ? 'Everything works. Open any https://<service>.<zone>.ztlp address in your browser.'
+        : report.rows.some((r) => r.action === 'repair')
+          ? 'Click Fix to repair DNS / certificates (Windows asks for an administrator once).'
+          : report.rows.some((r) => r.action === 'enroll')
+            ? 'Enroll this device with the link from your administrator.'
+            : '';
+    }
+    currentZone = report.zone || currentZone;
+    const label = document.getElementById('home-status-label');
+    const sublabel = document.getElementById('home-status-sublabel');
+    if (label) label.textContent = report.all_ready ? 'Ready' : (report.in_use_by_other ? 'In use by another user' : 'Setting up');
+    if (sublabel) {
+      sublabel.textContent = report.all_ready ? (report.zone || '') : '';
+      sublabel.style.display = sublabel.textContent ? '' : 'none';
+    }
+  }
+
+  async function loadHealth(force) {
+    const now = Date.now();
+    if (healthInFlight || (!force && now - lastHealthAt < 4000)) return;
+    healthInFlight = true;
+    try {
+      const report = await invoke('health_report');
+      lastHealthAt = Date.now();
+      currentReadiness = report;
+      renderHealth(report);
+    } catch (e) {
+      LiveLog.fail(`Health check failed: ${e}`);
+    } finally {
+      healthInFlight = false;
+    }
+  }
+
+  async function onHealthAction(action) {
+    if (action === 'enroll') {
+      document.querySelector('.nav-item[data-page="setup"]').click();
+      return;
+    }
+    if (action === 'repair' && !repairing) {
+      repairing = true;
+      try {
+        LiveLog.setup('Repairing DNS and certificates (Windows will ask for an administrator)…');
+        await invoke('repair_machine');
+        // The elevated machine setup runs detached; re-check until green.
+        for (let i = 0; i < 45; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          await loadHealth(true);
+          const r = currentReadiness;
+          if (r && r.rows && !r.rows.some((x) => x.action === 'repair')) {
+            LiveLog.success('Repair done.');
+            break;
+          }
+        }
+      } catch (e) {
+        LiveLog.fail(`Repair failed: ${e}`);
+      } finally {
+        repairing = false;
+        await loadHealth(true);
+      }
+    }
+  }
+
   async function load() {
+    if (isPerUser()) {
+      await loadHealth(false);
+      return;
+    }
     try {
       const [status, identity] = await Promise.all([
         invoke('setup_status'),

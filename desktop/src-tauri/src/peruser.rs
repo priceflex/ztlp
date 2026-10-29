@@ -405,6 +405,32 @@ pub const IN_USE_RETRY: Duration = Duration::from_secs(30);
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub const HEALTHY_UPTIME: Duration = Duration::from_secs(60);
 
+/// Decode the start of a `WTSINFOEXW` (as u32 words) into "locked?".
+///
+/// Layout: `DWORD Level` then the `WTSINFOEX_LEVEL1_W` union, which holds
+/// `LARGE_INTEGER`s and is therefore 8-byte aligned: word 1 is padding,
+/// then SessionId, SessionState, SessionFlags. (Reading it unaligned took
+/// SessionId for the state and SessionState=WTSActive(0) for the lock flag,
+/// so an unlocked desktop looked locked.)
+/// SessionFlags: WTS_SESSIONSTATE_LOCK = 0, UNLOCK = 1, UNKNOWN = -1.
+/// SessionState 4 = WTSDisconnected (also treated as locked).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn wtsinfoex_locked(words: &[u32]) -> Option<bool> {
+    if words.len() < 5 || words[0] != 1 {
+        return None;
+    }
+    let state = words[3];
+    let flags = words[4] as i32;
+    if state == 4 {
+        return Some(true);
+    }
+    match flags {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
 /// What to send the agent when the session lock state changes. `prev` =
 /// last state we told it (None = never told).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -863,12 +889,9 @@ pub mod win {
             if ok == 0 || buf.is_null() {
                 return None;
             }
-            let words = buf as *const u32;
-            let result = if len >= 16 && *words == 1 {
-                let state = *words.add(2);
-                let flags = *words.add(3);
-                // WTS_SESSIONSTATE_LOCK = 0, UNLOCK = 1; WTSDisconnected = 4.
-                Some(flags == 0 || state == 4)
+            let result = if len >= 20 {
+                let words = std::slice::from_raw_parts(buf as *const u32, 5);
+                super::wtsinfoex_locked(words)
             } else {
                 None
             };
@@ -945,6 +968,29 @@ mod tests {
             r.rows.iter().map(|r| r.key).collect::<Vec<_>>(),
             vec!["agent", "identity", "dns", "https"]
         );
+    }
+
+    #[test]
+    fn wtsinfoex_is_read_with_the_union_8_byte_aligned() {
+        // Level=1, pad, SessionId=1, SessionState=WTSActive(0), flags
+        assert_eq!(
+            wtsinfoex_locked(&[1, 0, 1, 0, 1]),
+            Some(false),
+            "unlocked desktop"
+        );
+        assert_eq!(
+            wtsinfoex_locked(&[1, 0, 1, 0, 0]),
+            Some(true),
+            "locked desktop"
+        );
+        assert_eq!(
+            wtsinfoex_locked(&[1, 0, 1, 4, 1]),
+            Some(true),
+            "disconnected"
+        );
+        assert_eq!(wtsinfoex_locked(&[1, 0, 1, 0, u32::MAX]), None, "unknown");
+        assert_eq!(wtsinfoex_locked(&[1, 0, 1, 0]), None, "short buffer");
+        assert_eq!(wtsinfoex_locked(&[2, 0, 1, 0, 1]), None, "other level");
     }
 
     #[test]

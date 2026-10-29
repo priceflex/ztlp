@@ -31,7 +31,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 // ── freeze / thaw ─────────────────────────────────────────────────────
@@ -47,13 +47,35 @@ pub(crate) static FREEZE_TEST_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) static CHECKIN_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Is the agent frozen (session locked)?
+#[cfg(not(test))]
 pub fn is_frozen() -> bool {
-    FROZEN.load(Ordering::SeqCst)
+    FROZEN.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Set the frozen flag. Returns the previous value.
+#[cfg(not(test))]
 pub fn set_frozen(frozen: bool) -> bool {
-    FROZEN.swap(frozen, Ordering::SeqCst)
+    FROZEN.swap(frozen, std::sync::atomic::Ordering::SeqCst)
+}
+
+// Unit tests run in parallel threads and many of them resolve .ztlp names
+// (which read the flag). Per-thread in test builds so a freeze test cannot
+// leak into them; `#[tokio::test]` is current-thread, so a test's own
+// freeze -> query -> status still sees one flag.
+#[cfg(test)]
+thread_local! {
+    static TEST_FROZEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub fn is_frozen() -> bool {
+    let _ = &FROZEN;
+    TEST_FROZEN.with(|f| f.get())
+}
+
+#[cfg(test)]
+pub fn set_frozen(frozen: bool) -> bool {
+    TEST_FROZEN.with(|f| f.replace(frozen))
 }
 
 /// What the DNS stub should do with a query for a ZTLP name.
@@ -500,6 +522,26 @@ mod tests {
         assert!(control_addr_owned_by_other(&addr));
         drop(held);
         assert!(!control_addr_owned_by_other(&addr));
+    }
+
+    #[test]
+    fn a_test_freezing_the_agent_does_not_freeze_other_tests() {
+        // Other tests (e.g. every DNS test resolving a .ztlp name) run in
+        // parallel and read is_frozen(); a freeze test must not leak into
+        // them (seen as a 1-in-2000 failure in the CI perf-gate run).
+        let other = std::thread::spawn(|| {
+            set_frozen(true);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let seen = is_frozen();
+            set_frozen(false);
+            seen
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!is_frozen(), "another test's freeze leaked into this one");
+        assert!(
+            other.join().unwrap(),
+            "the freezing test sees its own freeze"
+        );
     }
 
     #[test]

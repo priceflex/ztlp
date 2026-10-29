@@ -13825,6 +13825,10 @@ fn cmd_agent_machine(setup: bool) -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     eprintln!("{} {}", c_red("✗"), e);
                     failed.push(e);
+                    // Never trust a root whose key could not be locked down.
+                    if ztlp_proto::agent::machine_setup::stop_after_failure(action) {
+                        break;
+                    }
                 }
             }
         }

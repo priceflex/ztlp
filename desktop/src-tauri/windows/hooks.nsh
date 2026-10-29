@@ -49,5 +49,11 @@
     nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\machine.ps1" -InstallDir "$INSTDIR" -Action teardown'
     Pop $0
     DetailPrint "Machine teardown finished (exit $0)"
+    StrCmp $0 "0" ztlp_skip_teardown
+      ; Declined UAC / teardown failed: once ztlp.exe is gone nothing could
+      ; remove the DNS rule or the trusted root, so let the user stop here.
+      IfSilent ztlp_skip_teardown
+      MessageBox MB_YESNO|MB_ICONEXCLAMATION "ZTLP could not remove its DNS rule and certificate from this PC (exit code $0; administrator permission is needed).$\r$\n$\r$\nContinue uninstalling anyway? They would stay on this PC." IDYES ztlp_skip_teardown
+      Abort "Uninstall cancelled: the ZTLP DNS rule and certificate were not removed."
   ztlp_skip_teardown:
 !macroend

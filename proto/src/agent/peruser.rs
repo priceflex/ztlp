@@ -42,6 +42,10 @@ static FROZEN: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static FREEZE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serializes tests that write the process-wide last check-in.
+#[cfg(test)]
+pub(crate) static CHECKIN_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Is the agent frozen (session locked)?
 pub fn is_frozen() -> bool {
     FROZEN.load(Ordering::SeqCst)
@@ -72,6 +76,21 @@ pub fn dns_decision(ztlp_name: &str, frozen: bool) -> DnsDecision {
         DnsDecision::Refuse
     } else {
         DnsDecision::Resolve
+    }
+}
+
+/// Clear the OS DNS client cache (Windows: `ipconfig /flushdns`, allowed
+/// for standard users), in the background. No-op elsewhere.
+pub fn flush_os_dns_cache() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::thread::Builder::new()
+            .name("ztlp-flushdns".into())
+            .spawn(|| {
+                let _ = std::process::Command::new("ipconfig")
+                    .arg("/flushdns")
+                    .output();
+            });
     }
 }
 
@@ -234,6 +253,21 @@ pub fn parent_watch_should_exit(parent_pid: Option<u32>, parent_alive: bool) -> 
     parent_pid.is_some() && !parent_alive
 }
 
+/// Consecutive "parent not running" probes before the agent exits. One
+/// failed `tasklist` (antivirus, ThreatLocker, timeout) must not kill a
+/// healthy agent.
+pub const PARENT_GONE_MISSES: u32 = 3;
+
+/// Update the miss counter after one probe; true = exit now.
+pub fn parent_watch_step(misses: &mut u32, parent_alive: bool) -> bool {
+    if parent_alive {
+        *misses = 0;
+    } else {
+        *misses += 1;
+    }
+    *misses >= PARENT_GONE_MISSES
+}
+
 /// Spawn the parent watch on a plain thread (works in standby and in the
 /// full daemon alike): every `poll`, check the parent; when it is gone,
 /// exit the process. Leaves no orphan agent holding the VIPs / DNS stub
@@ -241,13 +275,18 @@ pub fn parent_watch_should_exit(parent_pid: Option<u32>, parent_alive: bool) -> 
 pub fn spawn_parent_watch(parent_pid: u32, poll: std::time::Duration) {
     let _ = std::thread::Builder::new()
         .name("ztlp-parent-watch".into())
-        .spawn(move || loop {
-            std::thread::sleep(poll);
-            let alive = crate::agent::control::is_process_running(parent_pid);
-            if parent_watch_should_exit(Some(parent_pid), alive) {
-                tracing::info!("parent process {parent_pid} is gone; stopping the per-user agent");
-                let _ = std::fs::remove_file(crate::agent::control::default_pid_path());
-                std::process::exit(EXIT_PARENT_GONE);
+        .spawn(move || {
+            let mut misses = 0u32;
+            loop {
+                std::thread::sleep(poll);
+                let alive = crate::agent::control::is_process_running(parent_pid);
+                if parent_watch_step(&mut misses, alive) {
+                    tracing::info!(
+                        "parent process {parent_pid} is gone; stopping the per-user agent"
+                    );
+                    let _ = std::fs::remove_file(crate::agent::control::default_pid_path());
+                    std::process::exit(EXIT_PARENT_GONE);
+                }
             }
         });
 }
@@ -380,6 +419,7 @@ mod tests {
 
     #[test]
     fn record_checkin_is_readable_back() {
+        let _g = CHECKIN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         record_checkin("ok", "dev.trs.ztlp");
         let c = last_checkin().expect("recorded");
         assert_eq!(c.state, "ok");
@@ -460,6 +500,17 @@ mod tests {
         assert!(control_addr_owned_by_other(&addr));
         drop(held);
         assert!(!control_addr_owned_by_other(&addr));
+    }
+
+    #[test]
+    fn parent_watch_needs_three_consecutive_misses() {
+        let mut m = 0;
+        assert!(!parent_watch_step(&mut m, false));
+        assert!(!parent_watch_step(&mut m, false));
+        assert!(!parent_watch_step(&mut m, true), "a live probe resets");
+        assert!(!parent_watch_step(&mut m, false));
+        assert!(!parent_watch_step(&mut m, false));
+        assert!(parent_watch_step(&mut m, false));
     }
 
     #[test]

@@ -136,12 +136,24 @@ pub fn remove_ca_cert(cert_path: &Path) -> Result<()> {
     return Err(CaTrustError::UnsupportedPlatform);
 }
 
-/// Is the certificate at `cert_path` trusted as a root (Windows: by SHA1
-/// thumbprint in the machine or user Root store)? Used by
+/// Is the certificate at `cert_path` trusted machine-wide (Windows: by SHA1
+/// thumbprint in the machine store `install_windows` writes for
+/// `CertStoreScope::Machine`)? A copy only in the elevating admin's user
+/// store does not count: other users would not trust it. Used by
 /// `machine-status` for the installer-made machine CA.
 #[cfg(target_os = "windows")]
 pub fn is_cert_trusted(cert_path: &Path) -> bool {
-    cert_path.exists() && check_windows_installed_for(cert_path)
+    if !cert_path.exists() {
+        return false;
+    }
+    let Ok(thumbprint) = sha1_thumbprint_hex(cert_path) else {
+        return false;
+    };
+    Command::new("certutil")
+        .args(["-store", "-enterprise", "Root", thumbprint.as_str()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Check if the ZTLP CA is installed in the system trust store.

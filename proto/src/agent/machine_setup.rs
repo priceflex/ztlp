@@ -111,14 +111,14 @@ pub fn write_ca_chain(
     if dir.join("root.key").exists() {
         return Err(format!("CA already initialized at {}", dir.display()).into());
     }
+    // root.key is written LAST: its presence means the chain is complete,
+    // so a run that died half-way (disk full, AV) is simply redone.
     std::fs::write(dir.join("root.pem"), &chain.root_cert)?;
-    std::fs::write(dir.join("root.key"), &chain.root_key)?;
     std::fs::write(dir.join("intermediate.pem"), &chain.intermediate_cert)?;
     std::fs::write(dir.join("intermediate.key"), &chain.intermediate_key)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("root.key"), std::fs::Permissions::from_mode(0o600))?;
         std::fs::set_permissions(
             dir.join("intermediate.key"),
             std::fs::Permissions::from_mode(0o600),
@@ -134,6 +134,12 @@ pub fn write_ca_chain(
     std::fs::write(dir.join("ca.json"), serde_json::to_string_pretty(&meta)?)?;
     std::fs::create_dir_all(dir.join("certs"))?;
     std::fs::write(dir.join("certs").join("index.json"), "[]")?;
+    std::fs::write(dir.join("root.key"), &chain.root_key)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("root.key"), std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
@@ -209,6 +215,16 @@ pub fn teardown_plan(s: &MachineState) -> Vec<MachineAction> {
     plan
 }
 
+/// Stop the rest of `machine-setup` when this step fails? Yes for the CA
+/// steps: a root must not be trusted machine-wide unless it was created and
+/// its key locked down.
+pub fn stop_after_failure(action: &MachineAction) -> bool {
+    matches!(
+        action,
+        MachineAction::CreateCa | MachineAction::LockDownCaAcl | MachineAction::RemoveLegacyService
+    )
+}
+
 /// Well-known SIDs (locale-independent, unlike group names).
 const SID_ADMINISTRATORS: &str = "*S-1-5-32-544";
 const SID_SYSTEM: &str = "*S-1-5-18";
@@ -229,14 +245,18 @@ pub fn ca_acl_commands(dir: &Path) -> Vec<Vec<String>> {
             format!("{SID_ADMINISTRATORS}:(OI)(CI)F"),
             format!("{SID_SYSTEM}:(OI)(CI)F"),
             format!("{SID_USERS}:(OI)(CI)RX"),
-            "/T".into(),
             "/C".into(),
             "/Q".into(),
         ],
+        // Files inherit the directory ACL (no /T, which would stamp an
+        // explicit Users grant onto every file). For root.key: drop the
+        // inherited ACEs and any explicit Users grant, admins + SYSTEM only.
         vec![
             "icacls".into(),
             root_key,
             "/inheritance:r".into(),
+            "/remove:g".into(),
+            SID_USERS.into(),
             "/grant:r".into(),
             format!("{SID_ADMINISTRATORS}:F"),
             format!("{SID_SYSTEM}:F"),
@@ -457,6 +477,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_ca_steps_stop_setup_before_trust() {
+        assert!(stop_after_failure(&MachineAction::LockDownCaAcl));
+        assert!(stop_after_failure(&MachineAction::CreateCa));
+        assert!(!stop_after_failure(&MachineAction::SetupNrpt));
+        assert!(!stop_after_failure(&MachineAction::TrustCa));
+        // and the ACL step always comes before trust in the plan
+        let plan = setup_plan(&st(false, false, false, false));
+        let acl = plan
+            .iter()
+            .position(|a| *a == MachineAction::LockDownCaAcl)
+            .unwrap();
+        let trust = plan
+            .iter()
+            .position(|a| *a == MachineAction::TrustCa)
+            .unwrap();
+        assert!(acl < trust);
+    }
+
+    #[test]
     fn acl_commands_use_sids_and_lock_root_key() {
         let cmds = ca_acl_commands(Path::new(r"C:\ProgramData\ZTLP\ca"));
         assert_eq!(cmds.len(), 2);
@@ -471,9 +510,14 @@ mod tests {
         assert!(key.contains("root.key"));
         assert!(key.contains("/inheritance:r"));
         assert!(
-            !key.contains("S-1-5-32-545"),
-            "Users must not read the root key: {key}"
+            key.contains("/remove:g *S-1-5-32-545"),
+            "an explicit Users grant must be removed from the root key: {key}"
         );
+        assert!(
+            !key.contains("*S-1-5-32-545:"),
+            "Users must not be granted the root key: {key}"
+        );
+        assert!(!dir.contains("/T"), "no explicit per-file grants: {dir}");
     }
 
     #[test]
@@ -505,6 +549,22 @@ mod tests {
         assert!(!leaf.leaf_pem.is_empty());
         // never overwrite an existing root
         assert!(write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_half_written_chain_can_be_written_again() {
+        // root.key is the completion marker: a run that died before it
+        // must not block the next Fix / machine-setup.
+        let dir = std::env::temp_dir().join(format!("ztlp-machine-ca-half-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("root.pem"), "partial").unwrap();
+        std::fs::write(dir.join("intermediate.pem"), "partial").unwrap();
+        let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        assert!(dir.join("root.key").exists());
+        crate::agent::cert_mint::IntermediateCa::load_from_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

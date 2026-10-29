@@ -26,6 +26,20 @@ if (-not $Elevated -and -not $isAdmin) {
 }
 
 if (-not (Test-Path $ztlp)) { exit 3 }
+
+if ($Action -eq 'teardown') {
+  # ZTLP installs per user, but the DNS rule and the CA are machine-wide.
+  # Keep them while another Windows user on this PC still has ZTLP.
+  $mine = (Resolve-Path $InstallDir).Path.TrimEnd('\')
+  $others = Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    Join-Path $_.FullName 'AppData\Local\ZTLP\ztlp.exe'
+  } | Where-Object { (Test-Path $_) -and ((Split-Path $_ -Parent).TrimEnd('\') -ne $mine) }
+  if ($others) {
+    "ZTLP is still installed for another user ($($others -join ', ')); keeping the DNS rule and certificate." |
+      Out-File (Join-Path $env:ProgramData 'ZTLP-machine-teardown.log')
+    exit 0
+  }
+}
 $log = Join-Path $env:ProgramData "ZTLP-machine-$Action.log"
 & $ztlp agent "machine-$Action" *> $log
 $rc = $LASTEXITCODE

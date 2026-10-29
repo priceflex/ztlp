@@ -612,6 +612,11 @@ pub(crate) fn first_relay(cfg: &crate::agent::config::AgentConfig) -> String {
 /// answer NXDOMAIN; established streams run until they idle out.
 fn cmd_freeze(frozen: bool) -> ControlResponse {
     let was = crate::agent::peruser::set_frozen(frozen);
+    if was && !frozen {
+        // NXDOMAIN answers given while frozen sit in the Windows DNS client
+        // cache; clear it so names work right after unlock.
+        crate::agent::peruser::flush_os_dns_cache();
+    }
     if was != frozen {
         info!(
             "{}",
@@ -1931,7 +1936,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn status_reports_last_ns_checkin() {
+        let _g = crate::agent::peruser::CHECKIN_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         crate::agent::peruser::record_checkin("ok", "box.trs.ztlp");
         let state = AgentState::test_without_token();
         let s = handle_request_line(&state, r#"{"cmd":"status"}"#).await;

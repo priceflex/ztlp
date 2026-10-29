@@ -265,6 +265,36 @@ pub fn control_addr_owned_by_other(addr: &str) -> bool {
     }
 }
 
+/// Supervised by the desktop app with a pipe on stdin: exit when the pipe
+/// closes (the app exited or crashed; the OS closes its end). Instant, no
+/// polling. Only enabled when the app asks for it (`ZTLP_PARENT_STDIN=1`),
+/// because a null stdin would read EOF immediately.
+pub fn spawn_stdin_parent_watch() {
+    let _ = std::thread::Builder::new()
+        .name("ztlp-parent-stdin".into())
+        .spawn(|| {
+            use std::io::Read;
+            let mut buf = [0u8; 64];
+            let mut stdin = std::io::stdin();
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+            tracing::info!("parent closed our stdin; stopping the per-user agent");
+            let _ = std::fs::remove_file(crate::agent::control::default_pid_path());
+            std::process::exit(EXIT_PARENT_GONE);
+        });
+}
+
+/// Did the parent ask for the stdin watch?
+pub fn parent_stdin_watch_requested() -> bool {
+    std::env::var("ZTLP_PARENT_STDIN")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 /// `--parent-pid` from the environment variable the CLI sets
 /// (`ZTLP_PARENT_PID`), so the lifecycle code needs no new parameter.
 pub fn parent_pid_from_env() -> Option<u32> {

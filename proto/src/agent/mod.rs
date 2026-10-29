@@ -121,7 +121,11 @@ pub async fn run_agent_lifecycle(
 
     // Per-user agent (Windows): exit with the desktop app that started us.
     if let Some(ppid) = peruser::parent_pid_from_env() {
-        peruser::spawn_parent_watch(ppid, std::time::Duration::from_secs(3));
+        // Backstop poll (also covers a manual `--parent-pid` from a shell).
+        peruser::spawn_parent_watch(ppid, std::time::Duration::from_secs(10));
+        if peruser::parent_stdin_watch_requested() {
+            peruser::spawn_stdin_parent_watch();
+        }
     }
 
     // Another user's agent already owns the control socket (fast user

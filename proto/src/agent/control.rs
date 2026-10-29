@@ -133,6 +133,10 @@ pub struct StatusInfo {
     /// Last NS check-in outcome (None until the first one completes).
     #[serde(default)]
     pub ns_checkin: Option<crate::agent::peruser::CheckinRecord>,
+    /// Enrolled zone (from config.toml / agent.toml), empty if unknown.
+    /// Lets the desktop skip the heavier `setup_status` on every poll.
+    #[serde(default)]
+    pub zone: String,
 }
 
 /// Setup wizard status — what the UI shows on the Setup page.
@@ -640,6 +644,7 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
         .to_string(),
         frozen: crate::agent::peruser::is_frozen(),
         ns_checkin: crate::agent::peruser::last_checkin(),
+        zone: read_zone_from_config(&crate::agent::config::ztlp_state_dir()).unwrap_or_default(),
     };
     drop(dns);
     let mut status = status;
@@ -2033,6 +2038,7 @@ mod tests {
                 ns_trust: "legacy".into(),
                 frozen: false,
                 ns_checkin: None,
+                zone: String::new(),
             };
             let v = serde_json::to_value(s).unwrap();
             assert_eq!(v["relay"], "44.230.7.100:23095");

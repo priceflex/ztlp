@@ -136,6 +136,8 @@ pub fn compute_health(i: &HealthInputs) -> HealthReport {
             zone = setup
                 .get("zone")
                 .and_then(Value::as_str)
+                .filter(|z| !z.is_empty())
+                .or_else(|| status.get("zone").and_then(Value::as_str))
                 .unwrap_or_default()
                 .to_string();
             let ver = status
@@ -539,10 +541,13 @@ pub async fn health_report() -> HealthReport {
 
 fn health_report_sync() -> HealthReport {
     let status = crate::ipc::ipc_request_with_addr(IPC_ADDR, "status", None);
-    let setup = if status.is_ok() {
-        crate::ipc::ipc_request_with_addr(IPC_ADDR, "setup_status", None).ok()
-    } else {
-        None
+    // setup_status shells out inside the agent (cert store, NRPT probes):
+    // only ask an older agent whose `status` has no `zone` yet.
+    let setup = match &status {
+        Ok(s) if s.get("zone").is_none() && s.get("standby").is_none() => {
+            crate::ipc::ipc_request_with_addr(IPC_ADDR, "setup_status", None).ok()
+        }
+        _ => None,
     };
     let agent = AgentProbe::from_status_result(status, setup);
     let (dns, https) = if should_probe_network(&agent) {
@@ -630,6 +635,10 @@ pub mod win {
     struct SupState {
         child: Option<Child>,
         started_at: Option<Instant>,
+        /// The running agent started before the machine CA existed (so it
+        /// has no local TLS); restart it once the CA shows up (installer /
+        /// Fix finished).
+        started_without_machine_ca: bool,
         failures: u32,
         next_try: Option<Instant>,
         note: Option<String>,
@@ -691,6 +700,22 @@ pub mod win {
                             s.failures = 0;
                             s.note = None;
                         }
+                        if s.started_without_machine_ca
+                            && ztlp_proto::agent::peruser::machine_ca_available()
+                        {
+                            // The machine CA just appeared (installer / Fix
+                            // finished): restart so the agent loads it and
+                            // serves HTTPS.
+                            let _ = crate::ipc::ipc_request_with_addr(IPC_ADDR, "shutdown", None);
+                            std::thread::sleep(Duration::from_millis(500));
+                            if let Some(mut c) = s.child.take() {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                            }
+                            s.next_try = None;
+                            s.note =
+                                Some("restarting the agent to load the new certificates".into());
+                        }
                         return;
                     }
                     Ok(Some(status)) => {
@@ -735,6 +760,8 @@ pub mod win {
                 Ok(child) => {
                     s.child = Some(child);
                     s.started_at = Some(Instant::now());
+                    s.started_without_machine_ca =
+                        !ztlp_proto::agent::peruser::machine_ca_available();
                     s.note = None;
                 }
                 Err(e) => {
@@ -791,7 +818,10 @@ pub mod win {
             ])
             // ZTLP_HOME means "I am the LocalSystem service" to the agent.
             .env_remove("ZTLP_HOME")
-            .stdin(std::process::Stdio::null())
+            // The agent exits when this pipe closes (app quit or crash). The
+            // write end lives in `Child.stdin` for as long as we keep Child.
+            .env("ZTLP_PARENT_STDIN", "1")
+            .stdin(std::process::Stdio::piped())
             .stdout(file)
             .stderr(err)
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
@@ -915,6 +945,25 @@ mod tests {
             r.rows.iter().map(|r| r.key).collect::<Vec<_>>(),
             vec!["agent", "identity", "dns", "https"]
         );
+    }
+
+    #[test]
+    fn status_alone_is_enough_for_zone_and_enrollment() {
+        // New agents put the zone in `status`, so the app skips the heavier
+        // setup_status call on every poll.
+        let agent = up(
+            json!({"version":"0.37.0","zone":"trs.ztlp","ns_checkin":{"state":"ok","detail":"pc","at":1}}),
+            Value::Null,
+        );
+        assert!(should_probe_network(&agent));
+        let r = compute_health(&HealthInputs {
+            agent,
+            supervisor_note: None,
+            dns: Some(Ok(HEALTH_VIP)),
+            https: Some(Ok(())),
+        });
+        assert!(r.enrolled && r.all_ready);
+        assert_eq!(r.zone, "trs.ztlp");
     }
 
     #[test]

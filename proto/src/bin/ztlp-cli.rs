@@ -13829,6 +13829,11 @@ fn cmd_agent_machine(setup: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if setup {
+            // A negative answer Windows cached before the .ztlp rule existed
+            // would hide every ZTLP name for up to 15 minutes.
+            let _ = std::process::Command::new("ipconfig")
+                .arg("/flushdns")
+                .output();
             let after = probe_state();
             println!("{}", serde_json::to_string(&after)?);
             if !after.ready() && failed.is_empty() {

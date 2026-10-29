@@ -1148,8 +1148,8 @@ mod tests {
     #[test]
     fn device_name_is_computer_dash_user_as_a_dns_label() {
         assert_eq!(
-            default_device_name("DESKTOP-CBSQDNE", "trs"),
-            "desktop-cbsqdne-trs"
+            default_device_name("DESKTOP-AB12CDE", "trs"),
+            "desktop-ab12cde-trs"
         );
         assert_eq!(
             default_device_name("Front Desk PC", "Mary.O'Neil"),

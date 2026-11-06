@@ -12,6 +12,8 @@ on:
     paths:
       - 'desktop/**'
       - 'service/**'
+      - 'proto/**'
+      - '.github/workflows/desktop-build.yml'
   workflow_dispatch:
 
 jobs:

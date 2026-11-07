@@ -19,7 +19,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ─── Locations ──────────────────────────────────────────────────────────────
 
@@ -103,6 +103,48 @@ pub fn generate_launchdaemon_plist(ztlp_binary: &str) -> String {
 }
 
 // ─── Startup plan (pure) ────────────────────────────────────────────────────
+
+/// Stop and remove the legacy root `org.ztlp.agent` LaunchDaemon (the whole
+/// old root data plane). Root-only. Idempotent: booting out an unregistered
+/// label is a no-op, and removing an absent plist is a no-op.
+///
+/// This is the macOS counterpart of Windows' `windows_service_uninstall`
+/// (used by `machine-setup`'s `RemoveLegacyService` step). After it, the
+/// machine runs only the per-user agent + the tiny machine daemon.
+pub fn macos_daemon_uninstall() -> Result<(), String> {
+    let plist = std::path::Path::new(MACOS_LAUNCHDAEMON_PLIST_PATH);
+    // Boot out the running daemon (system domain). Tolerate "not loaded":
+    // an unregistered label returns nonzero but that's a success here.
+    let out = std::process::Command::new("launchctl")
+        .args(["bootout", "system", MACOS_LAUNCHDAEMON_LABEL])
+        .output()
+        .map_err(|e| format!("launchctl bootout: {e}"))?;
+    if !out.status.success() {
+        // bootout of an already-unloaded target is fine; only a hard spawn
+        // failure is a real error (checked by `.output()` above).
+        debug!(
+            "launchctl bootout {} (may not have been loaded): {}",
+            MACOS_LAUNCHDAEMON_LABEL,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    // Remove the plist. Absent file is fine.
+    if plist.exists() {
+        std::fs::remove_file(plist)
+            .map_err(|e| format!("removing {}: {e}", plist.display()))?;
+    }
+    // Kill any lingering foreground agent process the daemon started, so a
+    // reboot-less Fix doesn't leave the old root data plane still bound.
+    if let Err(e) = std::process::Command::new("pkill")
+        .args(["-f", &format!("ztlp agent start --foreground")])
+        .output()
+        .map_err(|e| format!("pkill: {e}"))
+    {
+        // pkill returns 1 when nothing matched — not a failure.
+        debug!("pkill lingering agent: {e}");
+    }
+    Ok(())
+}
 
 /// Everything the planner needs; gathered by `daemon.rs` at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]

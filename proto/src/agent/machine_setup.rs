@@ -283,6 +283,24 @@ pub fn ca_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(crate::agent::peruser::WINDOWS_MACHINE_CA_DIR))
 }
 
+/// macOS: the machine CA directory. Honors `ZTLP_MACHINE_CA_DIR` (same
+/// contract as [`ca_dir`], so tests can redirect it to a temp path); when
+/// unset, the machine CA lives in the existing system ZTLP tree
+/// (`/Library/Application Support/ZTLP/ca`), NOT the Windows ProgramData
+/// path. The constant is platform-neutral so the executor compiles on every
+/// OS; only the runtime default is macOS's.
+pub fn macos_machine_ca_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("ZTLP_MACHINE_CA_DIR") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    PathBuf::from(MACOS_MACHINE_CA_DIR)
+}
+
+/// The macOS machine CA directory default (see [`macos_machine_ca_dir`]).
+pub const MACOS_MACHINE_CA_DIR: &str = "/Library/Application Support/ZTLP/ca";
+
 // ── Windows executor ──────────────────────────────────────────────────
 
 /// Probe the real machine state (read-only; works unelevated).
@@ -392,6 +410,134 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
                     .map_err(|e| format!("removing {} failed: {e}", dir.display()))?;
             }
             // Remove C:\ProgramData\ZTLP too when nothing else is left in it.
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            Ok(format!("removed {}", dir.display()))
+        }
+    }
+}
+
+// ── macOS executor ─────────────────────────────────────────────────────
+
+/// macOS machine CA dir (see [`macos_machine_ca_dir`]).
+#[cfg(target_os = "macos")]
+fn macos_ca_dir() -> PathBuf {
+    macos_machine_ca_dir()
+}
+
+/// Probe the real macOS machine state (read-only; safe unelevated).
+///
+/// Field mapping (Windows → macOS):
+/// - `legacy_service_installed` → the old root `org.ztlp.agent` LaunchDaemon
+///   plist is present (its removal drops the whole legacy data plane).
+/// - `ca_present` → the machine CA can mint (intermediate cert + key present).
+/// - `ca_trusted` → the machine root is trusted in the System keychain.
+/// - `nrpt_present` → the `/etc/resolver/ztlp` umbrella file exists (macOS has
+///   no NRPT; the per-domain resolver file is the equivalent DNS anchor).
+#[cfg(target_os = "macos")]
+pub fn probe_state() -> MachineState {
+    let dir = macos_ca_dir();
+    let ca_present = crate::agent::peruser::ca_dir_can_mint(&dir);
+    // `is_ca_installed` probes the System keychain (macOS branch uses
+    // `security verify-cert`), gated on the default CA path's presence.
+    let ca_trusted = ca_present && crate::agent::ca_trust::is_ca_installed();
+    let nrpt_present =
+        Path::new(crate::agent::dns_setup::MACOS_RESOLVER_DIR_PUB).join("ztlp").exists();
+    MachineState {
+        legacy_service_installed: Path::new(crate::agent::macos_daemon::MACOS_LAUNCHDAEMON_PLIST_PATH)
+            .exists(),
+        ca_present,
+        ca_trusted,
+        nrpt_present,
+    }
+}
+
+/// Run one action (macOS). Returns a one-line description or the error.
+///
+/// Every step is idempotent. The CA dir and resolver file already exist
+/// (reused from the current root agent's `macos_daemon` startup hooks);
+/// `machine-setup` re-derives them from the shared plan so a fresh machine
+/// and a Fix both converge to the same state.
+#[cfg(target_os = "macos")]
+pub fn execute(action: &MachineAction) -> Result<String, String> {
+    let dir = macos_ca_dir();
+    match action {
+        MachineAction::RemoveLegacyService => {
+            crate::agent::macos_daemon::macos_daemon_uninstall()
+                .map_err(|e| format!("could not remove the old org.ztlp.agent LaunchDaemon: {e}"))?;
+            Ok("removed the old org.ztlp.agent LaunchDaemon".into())
+        }
+        MachineAction::CreateCa => {
+            let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN)
+                .map_err(|e| format!("CA generation failed: {e}"))?;
+            write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN)
+                .map_err(|e| format!("writing the CA failed: {e}"))?;
+            Ok(format!("created the machine CA in {}", dir.display()))
+        }
+        MachineAction::LockDownCaAcl => {
+            // macOS has no icacls/ACLs: the "lockdown" is the Unix mode bits
+            // (root.key 0600 root:wheel, dir 0755). `write_ca_chain` already
+            // set root.key 0600 on the Unix path; re-assert it here so a
+            // hand-loosened mode is repaired idempotently.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if dir.join("root.key").exists() {
+                    std::fs::set_permissions(
+                        dir.join("root.key"),
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .map_err(|e| format!("setting root.key 0600 failed: {e}"))?;
+                }
+                if dir.join("intermediate.key").exists() {
+                    std::fs::set_permissions(
+                        dir.join("intermediate.key"),
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .map_err(|e| format!("setting intermediate.key 0600 failed: {e}"))?;
+                }
+            }
+            Ok("machine CA permissions set (root key: root only)".into())
+        }
+        MachineAction::TrustCa => {
+            crate::agent::ca_trust::install_ca_cert_with_scope(
+                &dir.join("root.pem"),
+                crate::agent::ca_trust::CertStoreScope::Machine,
+            )
+            .map_err(|e| format!("trusting the machine CA failed: {e}"))?;
+            Ok("machine CA trusted in the System keychain".into())
+        }
+        MachineAction::SetupNrpt => {
+            // macOS: the "NRPT umbrella" is the /etc/resolver/ztlp per-domain
+            // resolver file (umbrella, no per-zone files). Reuse the existing
+            // resolver writer; the umbrella zone set is `.ztlp` -> the DNS
+            // stub on 127.0.0.55.
+            let listen = format!("{NRPT_DNS_SERVER}:15353");
+            crate::agent::dns_setup::setup_dns(&listen, &["ztlp".to_string()])
+                .map_err(|e| format!("resolver setup failed: {e}"))?;
+            Ok(format!("DNS resolver .ztlp -> {NRPT_DNS_SERVER} added"))
+        }
+        MachineAction::RemoveNrpt => {
+            let removed =
+                crate::agent::dns_setup::teardown_dns().map_err(|e| format!("resolver removal failed: {e}"))?;
+            Ok(format!("removed DNS resolver files: {:?}", removed.len()))
+        }
+        MachineAction::UntrustCa => {
+            let root = dir.join("root.pem");
+            if root.exists() {
+                crate::agent::ca_trust::remove_ca_cert(&root)
+                    .map_err(|e| format!("removing the machine CA from trust failed: {e}"))?;
+            }
+            Ok("machine CA removed from the System keychain".into())
+        }
+        MachineAction::RemoveCaDir => {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| format!("removing {} failed: {e}", dir.display()))?;
+            }
+            // Remove the parent Application Support/ZTLP dir too when it's
+            // now empty (the daemon state may still live under .ztlp/).
             if let Some(parent) = dir.parent() {
                 let _ = std::fs::remove_dir(parent);
             }
@@ -566,5 +712,129 @@ mod tests {
         assert!(dir.join("root.key").exists());
         crate::agent::cert_mint::IntermediateCa::load_from_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── macOS machine-setup (Task 1) ───────────────────────────────────────
+    // The plans (setup_plan/teardown_plan/stop_after_failure/ca_acl_commands)
+    // are already pure and cross-platform (verified: no cfg gate). These pin
+    // the macOS-specific pieces the executor consumes: the machine CA dir and
+    // the plan shape macOS runs through it.
+
+    #[test]
+    fn macos_machine_ca_dir_is_under_application_support_ztlp() {
+        // Env override must win (same contract as Windows/`machine_ca_dir`),
+        // so a test can point the dir at a temp path without touching the
+        // system location.
+        let tmp = std::env::temp_dir().join(format!("ztlp-macos-ca-{}", std::process::id()));
+        let _ = std::env::set_var("ZTLP_MACHINE_CA_DIR", &tmp);
+        let d = macos_machine_ca_dir();
+        let _ = std::env::remove_var("ZTLP_MACHINE_CA_DIR");
+        assert_eq!(d, tmp, "ZTLP_MACHINE_CA_DIR must win on macOS too: {d:?}");
+    }
+
+    #[test]
+    fn macos_machine_ca_dir_defaults_to_library_application_support() {
+        // When the override is unset, the macOS default is the existing
+        // system ZTLP tree, NOT the Windows ProgramData path.
+        let _ = std::env::remove_var("ZTLP_MACHINE_CA_DIR");
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                macos_machine_ca_dir(),
+                PathBuf::from("/Library/Application Support/ZTLP/ca")
+            );
+        } else {
+            // On non-macOS builds the constant still resolves and is a
+            // macOS-style path (so the executor is compilable anywhere);
+            // only the runtime default is platform-selected.
+            assert!(macos_machine_ca_dir()
+                .to_string_lossy()
+                .contains("Application Support/ZTLP"));
+        }
+    }
+
+    #[test]
+    fn macos_setup_plan_from_fresh_state_covers_ca_and_resolver() {
+        // A brand-new macOS machine: no legacy daemon, no CA, no resolver.
+        // The shared plan must produce exactly the machine bits the macOS
+        // executor implements — CA create + lockdown + trust + resolver.
+        // `nrpt_present` maps to the /etc/resolver/ztlp umbrella on macOS.
+        let s = MachineState {
+            legacy_service_installed: false,
+            ca_present: false,
+            ca_trusted: false,
+            nrpt_present: false,
+        };
+        let plan = setup_plan(&s);
+        // CA is created before it is trusted (the invariant the ACL step
+        // protects — a root must exist + be locked down before it's trusted).
+        let create = plan
+            .iter()
+            .position(|a| *a == MachineAction::CreateCa)
+            .unwrap_or_else(|| panic!("fresh machine must create the CA: {plan:?}"));
+        let lock = plan
+            .iter()
+            .position(|a| *a == MachineAction::LockDownCaAcl)
+            .unwrap_or_else(|| panic!("CA must be locked down: {plan:?}"));
+        let trust = plan
+            .iter()
+            .position(|a| *a == MachineAction::TrustCa)
+            .unwrap_or_else(|| panic!("CA must be trusted: {plan:?}"));
+        let resolver = plan
+            .iter()
+            .position(|a| *a == MachineAction::SetupNrpt)
+            .unwrap_or_else(|| panic!("macOS must add the resolver umbrella: {plan:?}"));
+        assert!(create < lock && lock < trust, "create < lock < trust: {plan:?}");
+        assert!(
+            trust < resolver,
+            "resolver after trust: {plan:?}"
+        );
+        // No legacy-service step on a fresh macOS machine.
+        assert!(!plan.contains(&MachineAction::RemoveLegacyService));
+    }
+
+    #[test]
+    fn macos_ready_state_reapplies_lockdown_only() {
+        // A healthy macOS machine (CA present+trusted, resolver umbrella in
+        // place): only the idempotent lockdown step runs.
+        let s = MachineState {
+            legacy_service_installed: false,
+            ca_present: true,
+            ca_trusted: true,
+            nrpt_present: true,
+        };
+        assert!(s.ready());
+        assert_eq!(setup_plan(&s), vec![MachineAction::LockDownCaAcl]);
+    }
+
+    #[test]
+    fn macos_teardown_removes_resolver_ca_and_daemon() {
+        // Teardown reverses setup: resolver first, then CA untrust + removal,
+        // and the legacy root daemon if it's still registered (upgrade path).
+        let s = MachineState {
+            legacy_service_installed: true,
+            ca_present: true,
+            ca_trusted: true,
+            nrpt_present: true,
+        };
+        let plan = teardown_plan(&s);
+        assert_eq!(
+            plan[0],
+            MachineAction::RemoveNrpt,
+            "resolver comes off first: {plan:?}"
+        );
+        let untrust = plan
+            .iter()
+            .position(|a| *a == MachineAction::UntrustCa)
+            .unwrap_or_else(|| panic!("CA must be untrusted: {plan:?}"));
+        let remove = plan
+            .iter()
+            .position(|a| *a == MachineAction::RemoveCaDir)
+            .unwrap_or_else(|| panic!("CA dir must be removed: {plan:?}"));
+        let legacy = plan
+            .iter()
+            .position(|a| *a == MachineAction::RemoveLegacyService)
+            .unwrap_or_else(|| panic!("legacy daemon must be removed: {plan:?}"));
+        assert!(untrust < remove);
+        assert!(remove < legacy);
     }
 }

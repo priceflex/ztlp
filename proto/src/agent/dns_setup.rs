@@ -276,7 +276,12 @@ fn teardown_resolv_conf() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 
 // ─── macOS /etc/resolver/ ───────────────────────────────────────────────────
 
-const MACOS_RESOLVER_DIR: &str = "/etc/resolver";
+/// The macOS `/etc/resolver` directory (the per-domain resolver file base).
+/// Public so `machine-setup` can probe/tear down the `.ztlp` umbrella without
+/// re-deriving the path.
+pub const MACOS_RESOLVER_DIR_PUB: &str = "/etc/resolver";
+
+const MACOS_RESOLVER_DIR: &str = MACOS_RESOLVER_DIR_PUB;
 
 /// Validate that a zone name is safe to use as a bare filename under
 /// MACOS_RESOLVER_DIR (or any other single-directory join). [CWE-22

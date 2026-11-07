@@ -36,6 +36,95 @@ pub const MACOS_LAUNCHDAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp
 /// launchd label.
 pub const MACOS_LAUNCHDAEMON_LABEL: &str = "org.ztlp.agent";
 
+/// The slim "machine daemon" label (Task 3): owns only the machine bits
+/// (CA + resolver + lo0 aliases) at boot, then exits. It is NOT the data
+/// plane — that's the per-user agent. Distinct from [`MACOS_LAUNCHDAEMON_LABEL`]
+/// (the legacy full root agent) so the two never collide and an upgrade
+/// removes the old one while keeping this one.
+pub const MACHINE_DAEMON_LABEL: &str = "org.ztlp.machine";
+
+/// The slim machine daemon's plist path.
+pub const MACHINE_DAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp.machine.plist";
+
+/// The argument the machine daemon runs: `agent machine-setup --boot`.
+/// `--boot` means "run the idempotent machine-setup plan, then exit" — no
+/// foreground data plane, no enrollment, no tunnels. Kept as a constant so
+/// the plist generator and the CLI dispatch agree on the exact argv.
+pub const MACHINE_DAEMON_BOOT_ARGS: &[&str] =
+    &["agent", "machine-setup", "--boot"];
+
+/// Generate the LaunchDaemon plist for the slim machine daemon. Root,
+/// RunAtLoad, KeepAlive so the machine bits are always re-asserted; it does
+/// no data plane work so KeepAlive cost is near-zero (it exits right after
+/// the idempotent plan).
+pub fn generate_machine_daemon_plist(ztlp_binary: &str) -> String {
+    let args: Vec<String> = std::iter::once(ztlp_binary.to_string())
+        .chain(MACHINE_DAEMON_BOOT_ARGS.iter().map(|s| s.to_string()))
+        .collect();
+    let args_xml = args
+        .iter()
+        .map(|a| format!("        <string>{}</string>", xml_escape(a)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args}
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
+    <key>UserName</key>
+    <string>root</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{logs}/machine.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{logs}/machine.stderr.log</string>
+</dict>
+</plist>
+"#,
+        label = MACHINE_DAEMON_LABEL,
+        args = args_xml,
+        home = xml_escape(MACOS_SYSTEM_CONFIG_DIR),
+        logs = MACOS_LOG_DIR,
+    )
+}
+
+/// Stop and remove the slim machine daemon (counterpart of the legacy
+/// [`macos_daemon_uninstall`], for the machine bits daemon). Root-only,
+/// idempotent.
+pub fn machine_daemon_uninstall() -> Result<(), String> {
+    let plist = std::path::Path::new(MACHINE_DAEMON_PLIST_PATH);
+    let out = std::process::Command::new("launchctl")
+        .args(["bootout", "system", MACHINE_DAEMON_LABEL])
+        .output()
+        .map_err(|e| format!("launchctl bootout: {e}"))?;
+    if !out.status.success() {
+        debug!(
+            "launchctl bootout {} (may not be loaded): {}",
+            MACHINE_DAEMON_LABEL,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if plist.exists() {
+        std::fs::remove_file(plist)
+            .map_err(|e| format!("removing {}: {e}", plist.display()))?;
+    }
+    Ok(())
+}
+
 const MACOS_LOG_DIR: &str = "/Library/Logs/ZTLP";
 
 /// `$HOME/.ztlp` as seen by the root daemon.
@@ -546,6 +635,67 @@ mod tests {
             MACOS_LAUNCHDAEMON_PLIST_PATH,
             "/Library/LaunchDaemons/org.ztlp.agent.plist"
         );
+    }
+
+    // ── Slim machine daemon plist (Task 3) ─────────────────────────────
+
+    #[test]
+    fn machine_daemon_plist_runs_machine_setup_boot_as_root() {
+        let plist = generate_machine_daemon_plist("/Applications/ZTLP.app/Contents/MacOS/ztlp");
+        assert!(plist.contains(
+            "<key>Label</key>\n    <string>org.ztlp.machine</string>"
+        ));
+        // The daemon runs `agent machine-setup --boot` — NOT `agent start
+        // --foreground` (that's the legacy data-plane daemon).
+        assert!(plist.contains(
+            "<string>/Applications/ZTLP.app/Contents/MacOS/ztlp</string>\n        \
+             <string>agent</string>\n        \
+             <string>machine-setup</string>\n        \
+             <string>--boot</string>"
+        ));
+        // ...and critically it must NOT run the foreground data plane.
+        assert!(!plist.contains("<string>start</string>"));
+        assert!(!plist.contains("--foreground"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+        assert!(plist.contains("<key>KeepAlive</key>\n    <true/>"));
+        assert!(plist.contains("<key>UserName</key>\n    <string>root</string>"));
+    }
+
+    #[test]
+    fn machine_daemon_plist_points_home_at_system_config_dir() {
+        let plist = generate_machine_daemon_plist("/usr/local/bin/ztlp");
+        assert!(plist.contains(&format!(
+            "<key>HOME</key>\n        <string>{}</string>",
+            MACOS_SYSTEM_CONFIG_DIR
+        )));
+    }
+
+    #[test]
+    fn machine_daemon_plist_logs_to_machine_logs() {
+        let plist = generate_machine_daemon_plist("/usr/local/bin/ztlp");
+        assert!(plist.contains("<string>/Library/Logs/ZTLP/machine.stdout.log</string>"));
+        assert!(plist.contains("<string>/Library/Logs/ZTLP/machine.stderr.log</string>"));
+        // Its own logs, not the legacy agent's (so the two daemons don't
+        // overwrite each other's logs during the upgrade window).
+        assert!(!plist.contains("agent.stdout.log"));
+    }
+
+    #[test]
+    fn machine_daemon_label_and_plist_distinct_from_legacy() {
+        // An upgrade removes the legacy full agent while keeping this slim
+        // daemon. The labels/paths MUST differ or the two collide.
+        assert_ne!(MACHINE_DAEMON_LABEL, MACOS_LAUNCHDAEMON_LABEL);
+        assert_ne!(
+            MACHINE_DAEMON_PLIST_PATH,
+            MACOS_LAUNCHDAEMON_PLIST_PATH
+        );
+        assert_eq!(MACHINE_DAEMON_LABEL, "org.ztlp.machine");
+        assert_eq!(
+            MACHINE_DAEMON_PLIST_PATH,
+            "/Library/LaunchDaemons/org.ztlp.machine.plist"
+        );
+        // The boot argv is a shared constant (plist + CLI must agree).
+        assert_eq!(MACHINE_DAEMON_BOOT_ARGS, &["agent", "machine-setup", "--boot"]);
     }
 
     // ── Startup plan ──────────────────────────────────────────────────

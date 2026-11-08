@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0B80A5FB021726A0CFAB7ABB /* org.ztlp.agent.plist in Bundle LaunchDaemon Plist */ = {isa = PBXBuildFile; fileRef = 79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */; };
+		C2M6DAE120261108000000A2 /* org.ztlp.machine.plist in Bundle LaunchDaemon Plist */ = {isa = PBXBuildFile; fileRef = C1M6DAE120261108000000A1 /* org.ztlp.machine.plist */; };
 		36E4621982918E5519BE8E9E /* ZTLPConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68000CF1453518BF6B39193B /* ZTLPConfiguration.swift */; };
 		3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD5C9716977DF801F33DA27 /* ZTLPIdentity.swift */; };
 		3E53F9DB00A270FDACCE5472 /* ztlp in Bundle ztlp Binary */ = {isa = PBXBuildFile; fileRef = 1101BB8FE029CD4D5E894920 /* ztlp */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
@@ -52,6 +53,7 @@
 			dstSubfolderSpec = 1;
 			files = (
 				0B80A5FB021726A0CFAB7ABB /* org.ztlp.agent.plist in Bundle LaunchDaemon Plist */,
+				C2M6DAE120261108000000A2 /* org.ztlp.machine.plist in Bundle LaunchDaemon Plist */,
 			);
 			name = "Bundle LaunchDaemon Plist";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -79,6 +81,7 @@
 		6A98A6B9F9DF87D848B72322 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		6DD8C98EB9C092C68D418163 /* EnrollmentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EnrollmentView.swift; sourceTree = "<group>"; };
 		79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.ztlp.agent.plist; sourceTree = "<group>"; };
+		C1M6DAE120261108000000A1 /* org.ztlp.machine.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.ztlp.machine.plist; sourceTree = "<group>"; };
 		7A6088FAAE6467A12BF10B72 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
 		89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		89C24BDC82DF690F24190B2D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
@@ -205,6 +208,7 @@
 				B88E916D9B29C330F84B3239 /* ViewModels */,
 				8A6DDBEB8E0D55F62738A81A /* Views */,
 				79CCC0A3305F1F54001350CE /* org.ztlp.agent.plist */,
+				C1M6DAE120261108000000A1 /* org.ztlp.machine.plist */,
 			);
 			path = ZTLP;
 			sourceTree = "<group>";

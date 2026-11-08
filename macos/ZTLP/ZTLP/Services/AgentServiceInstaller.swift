@@ -51,7 +51,15 @@ final class AgentServiceInstaller: ObservableObject {
     static let shared = AgentServiceInstaller()
 
     /// Must match Contents/Library/LaunchDaemons/<this>.plist exactly.
-    nonisolated static let plistName = "org.ztlp.agent.plist"
+    /// Task 6: the app now installs the slim machine daemon (machine bits
+    /// only — CA, resolver, lo0 aliases, kept idempotent at boot by
+    /// `agent machine-setup --boot`), NOT the full root agent. The data plane
+    /// is the per-user agent, started by the app.
+    nonisolated static let plistName = "org.ztlp.machine.plist"
+
+    /// The legacy full root agent daemon. Upgrades from 1.3.0 remove it (the
+    /// per-user model replaces it); a fresh install has nothing to remove.
+    nonisolated static let legacyAgentPlistName = "org.ztlp.agent.plist"
 
     @Published private(set) var state: AgentServiceState = .notRegistered
     @Published private(set) var lastError: String?
@@ -80,10 +88,15 @@ final class AgentServiceInstaller: ObservableObject {
         }
     }
 
-    /// Register the daemon. Triggers macOS's one-time "background item"
-    /// system prompt on first call (Steven's "one macOS system prompt,
-    /// like Windows UAC" requirement). No sudo, no Terminal.
+    /// Register the machine daemon. Triggers macOS's one-time "background
+    /// item" system prompt on first call (Steven's "one macOS system prompt,
+    /// like Windows UAC" requirement). No sudo, no Terminal. Also removes the
+    /// legacy full root agent daemon (upgrades from 1.3.0).
     func register() {
+        // Remove the legacy root agent first (off-main; don't block the UI on
+        // the synchronous unregister XPC call). The register below then
+        // installs the slim machine daemon.
+        Task { _ = await removeLegacyAgentDaemon() }
         do {
             try service.register()
             lastError = nil
@@ -156,8 +169,34 @@ final class AgentServiceInstaller: ObservableObject {
 
     func registerAsync() async {
         guard inFlight == nil else { return }  // a second click while busy is a no-op
+        // Remove the legacy root agent BEFORE installing the machine daemon so
+        // a 1.3.0 upgrade never has two data planes running at once.
+        _ = await removeLegacyAgentDaemon()
         let plist = Self.plistName
         _ = await startOperation { try SMAppService.daemon(plistName: plist).register() }.value
+    }
+
+    /// Stop + unregister the legacy full root agent daemon (`org.ztlp.agent`).
+    /// The per-user model (Task 1-6) replaces it with the slim machine daemon
+    /// + a per-user agent, so a 1.3.0 upgrade must remove the old root agent
+    /// to avoid two data planes. Best-effort: a fresh install has nothing to
+    /// remove and the call is a harmless no-op. Runs off-main (SMAppService
+    /// unregister is a synchronous XPC call).
+    @discardableResult
+    func removeLegacyAgentDaemon() async -> Bool {
+        let legacy = Self.legacyAgentPlistName
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try SMAppService.daemon(plistName: legacy).unregister()
+                    cont.resume(returning: true)
+                } catch {
+                    // .notFound / not registered is the expected fresh-install
+                    // outcome — not an error worth surfacing.
+                    cont.resume(returning: true)
+                }
+            }
+        }
     }
 
     /// Waits for any register/unregister already running, then unregisters.

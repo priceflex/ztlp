@@ -279,6 +279,10 @@ final class TunnelViewModel: ObservableObject {
         self.zoneName = configuration.zoneName
         setupObservers()
         startPolling()
+        // Task 4 (macOS parity): mirror Windows' session-lock freeze/thaw.
+        // Start the freeze observer so a locked/sleeping Mac stops serving
+        // ZTLP connections (NXDOMAIN) until it unlocks/wakes.
+        SessionFreezeCoordinator.shared.start()
         // "Connect on Launch" (Settings > General). Mirrors the Windows
         // client's auto_connect: if the daemon isn't already up, start it.
         if configuration.autoConnect {
@@ -291,6 +295,8 @@ final class TunnelViewModel: ObservableObject {
 
     deinit {
         pollTask?.cancel()
+        // Stop the freeze observer (best-effort thaw on quit).
+        SessionFreezeCoordinator.shared.stop()
     }
 
     // MARK: - Actions (Task 8: no Connect button — identity network, not a VPN)

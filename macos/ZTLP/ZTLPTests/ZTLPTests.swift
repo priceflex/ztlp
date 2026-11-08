@@ -161,7 +161,8 @@ final class ZTLPTests: XCTestCase {
     func testReadinessEnrolledButTlsPendingIsWaiting() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: false, dns: true)
+            daemon: snap(enrolled: true, ca: false, dns: true),
+            dnsProbe: true, httpsProbe: false
         )
         XCTAssertEqual(r.identity.state, .ready("Enrolled in defcon.ztlp"))
         XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
@@ -175,7 +176,8 @@ final class ZTLPTests: XCTestCase {
     func testReadinessCaMadeButUntrustedOffersTrustHTTPS() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: false, dns: true, caInit: true)
+            daemon: snap(enrolled: true, ca: false, dns: true, caInit: true),
+            dnsProbe: true, httpsProbe: false
         )
         XCTAssertEqual(r.https.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Step 3"), r.guidance(zone: "defcon.ztlp"))
@@ -236,7 +238,8 @@ final class ZTLPTests: XCTestCase {
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: true, dns: true)
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: true, httpsProbe: true
         )
         XCTAssertTrue(r.allReady)
         XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
@@ -254,6 +257,43 @@ final class ZTLPTests: XCTestCase {
         XCTAssertEqual(r.agent.state, .failed("boom"))
         let r2 = HomeReadiness.compute(serviceState: .notFound, daemonReachable: false, daemon: nil)
         if case .failed(let m) = r2.agent.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.agent.state)") }
+    }
+
+    // Task 5b: the live probes can disagree with the daemon's config flag.
+    func testReadinessDNSFlagButProbeFailsIsFailed() {
+        // Daemon says dns_configured=true but the live resolve did NOT land on
+        // the VIP -> the resolver isn't actually routing .ztlp.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: false
+        )
+        XCTAssertEqual(r.dns.state, .failed("DNS routing not working"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testReadinessDNSConfiguredButNotYetProbedIsWaiting() {
+        // Probes haven't run yet (nil) -> checking, not a false red.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: nil, httpsProbe: true
+        )
+        XCTAssertEqual(r.dns.state, .waiting("Checking…"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testDNSRowStateFold() {
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: true), .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: false), .failed("DNS routing not working"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: nil), .waiting("Checking…"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: false, probe: nil), .failed("DNS routing not set up"))
+    }
+
+    func testHTTPSRowStateFold() {
+        XCTAssertEqual(httpsRowState(caInstalled: true, caInitialized: true, probe: true), .ready("Browsers trust ZTLP certificates"))
+        XCTAssertEqual(httpsRowState(caInstalled: false, caInitialized: true, probe: nil), .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
+        XCTAssertEqual(httpsRowState(caInstalled: false, caInitialized: false, probe: nil), .waiting("Setting up certificate…"))
     }
 
     func testBackoffDoublesAndCapsAtTwoSeconds() {

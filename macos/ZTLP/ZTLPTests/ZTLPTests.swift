@@ -595,3 +595,46 @@ final class EnrollmentFieldFixTests: XCTestCase {
         XCTAssertTrue(s.lowercased().contains("switch on"))
     }
 }
+
+final class AgentSupervisorLogicTests: XCTestCase {
+
+    /// argv: agent start --foreground --parent-pid <pid>.
+    func testAgentSpawnArgs() {
+        let args = agentSpawnArgs(parentPid: 4321)
+        XCTAssertEqual(args, ["agent", "start", "--foreground", "--parent-pid", "4321"])
+    }
+
+    /// The env sets ZTLP_PARENT_STDIN=1 so the agent watches stdin for EOF.
+    func testAgentSpawnEnv() {
+        XCTAssertEqual(agentSpawnEnv(), ["ZTLP_PARENT_STDIN": "1"])
+    }
+
+    /// wantsRunning=false -> stop, no matter the exit code.
+    func testStopWhenNotWantsRunning() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: false, exitCode: 0, ranFor: 60), .stop)
+        XCTAssertEqual(supervisorDecision(wantsRunning: false, exitCode: 1, ranFor: 1), .stop)
+    }
+
+    /// The agent's "parent gone" exit code -> stop (app is quitting; don't
+    /// spawn a replacement).
+    func testParentGoneExitCodeStops() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: kAgentParentGoneExitCode, ranFor: 300), .stop)
+    }
+
+    /// A long-lived agent that crashes (non-zero) -> respawn immediately
+    /// (it was up long enough that a fast retry is warranted).
+    func testLongLivedCrashRespawns() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 139, ranFor: 10), .respawn)
+    }
+
+    /// A quick death (< threshold) -> back off to avoid a tight crash loop.
+    func testQuickDeathBacksOff() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 1, ranFor: 0.5), .backoff(kBackoffInterval))
+    }
+
+    /// A clean exit (0) while we still want it running -> respawn (a
+    /// foreground agent shouldn't just vanish cleanly).
+    func testCleanExitRespawns() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 0, ranFor: 5), .respawn)
+    }
+}

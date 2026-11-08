@@ -18,6 +18,7 @@
 		587746EDD9CB2F24306791AB /* EnrollmentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB39AED62EE8F69A116903FC /* EnrollmentViewModel.swift */; };
 		5B311BE765F5409E06135146 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */; };
 		5FD2DDD5E86D3BFA28EB21DF /* AgentServiceInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */; };
+		22C0E6B5E1B660DBE670EB26 /* AgentSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84BE4DF2E605F9409146809F /* AgentSupervisor.swift */; };
 		ABF4036D256F28A196C5C001 /* SessionFreeze.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5FD214F224E7CAFBD064BA5 /* SessionFreeze.swift */; };
 		647DCE564F86D5381FB8147F /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95679B026D6887C171A14A2A /* MenuBarView.swift */; };
 		7105614BAC2BE48DC291A8B0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89C24BDC82DF690F24190B2D /* HomeView.swift */; };
@@ -86,6 +87,7 @@
 		89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		89C24BDC82DF690F24190B2D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentServiceInstaller.swift; sourceTree = "<group>"; };
+		84BE4DF2E605F9409146809F /* AgentSupervisor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AgentSupervisor.swift; sourceTree = "<group>"; };
 		D5FD214F224E7CAFBD064BA5 /* SessionFreeze.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SessionFreeze.swift; sourceTree = "<group>"; };
 		95679B026D6887C171A14A2A /* MenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarView.swift; sourceTree = "<group>"; };
 		99D5B6DEC61F7610D170572A /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
@@ -189,6 +191,7 @@
 				89451A86BDBA5DE92F2F500F /* NetworkMonitor.swift */,
 				EA7349E042B8BAC7596BAA82 /* ZTLPBridge.swift */,
 				9482210D65648D67564CFCDD /* AgentServiceInstaller.swift */,
+				84BE4DF2E605F9409146809F /* AgentSupervisor.swift */,
 				D5FD214F224E7CAFBD064BA5 /* SessionFreeze.swift */,
 				C342F985ECC98E1EACD11B75 /* AgentControlClient.swift */,
 			);
@@ -349,6 +352,7 @@
 				3A194533CA22CEED32C8D416 /* ZTLPIdentity.swift in Sources */,
 				FE5E753515A12847AF6EFA6C /* ZTLPService.swift in Sources */,
 				5FD2DDD5E86D3BFA28EB21DF /* AgentServiceInstaller.swift in Sources */,
+				22C0E6B5E1B660DBE670EB26 /* AgentSupervisor.swift in Sources */,
 				ABF4036D256F28A196C5C001 /* SessionFreeze.swift in Sources */,
 				AE1EA558968AD12BA2CD8396 /* AgentControlClient.swift in Sources */,
 			);

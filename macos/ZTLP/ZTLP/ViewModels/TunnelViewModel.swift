@@ -318,6 +318,10 @@ final class TunnelViewModel: ObservableObject {
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
+
+    /// Spawns + keeps the per-user agent alive (the data plane). Stopped on
+    /// deinit so the agent never outlives the login session.
+    private let agentSupervisor: AgentSupervisor
     private let installer = AgentServiceInstaller.shared
     private var cancellables = Set<AnyCancellable>()
     private var pollTask: Task<Void, Never>?
@@ -330,12 +334,20 @@ final class TunnelViewModel: ObservableObject {
     init(configuration: ZTLPConfiguration) {
         self.configuration = configuration
         self.zoneName = configuration.zoneName
+        // Per-user data plane (macOS analog of Windows peruser.rs): assign the
+        // supervisor before any self method call; start it below. The app
+        // spawns + supervises the per-user agent itself — the slim machine
+        // daemon only does the machine bits and exits.
+        self.agentSupervisor = AgentSupervisor()
         setupObservers()
         startPolling()
         // Task 4 (macOS parity): mirror Windows' session-lock freeze/thaw.
         // Start the freeze observer so a locked/sleeping Mac stops serving
         // ZTLP connections (NXDOMAIN) until it unlocks/wakes.
         SessionFreezeCoordinator.shared.start()
+        // Start the per-user agent supervisor (control socket
+        // 127.100.255.1:4433 is served by THIS agent process).
+        self.agentSupervisor.start()
         // "Connect on Launch" (Settings > General). Mirrors the Windows
         // client's auto_connect: if the daemon isn't already up, start it.
         if configuration.autoConnect {
@@ -348,6 +360,13 @@ final class TunnelViewModel: ObservableObject {
 
     deinit {
         pollTask?.cancel()
+        // Stop the per-user agent supervisor (closes the stdin pipe -> the
+        // agent's stdin watch fires -> it removes its pidfile and exits; no
+        // orphan agent outliving the login session). deinit of a @MainActor
+        // object runs on the main thread, so assumeIsolated is sound here.
+        MainActor.assumeIsolated {
+            self.agentSupervisor.stop()
+        }
         // Stop the freeze observer (best-effort thaw on quit).
         SessionFreezeCoordinator.shared.stop()
     }

@@ -100,15 +100,20 @@ struct ReadinessRow: Equatable {
 /// snapshot, daemon reachable). Pure so XCTest can pin every branch
 /// without SMAppService or a live daemon.
 ///
+/// **4 rows** (Windows parity): Agent / Identity / DNS / HTTPS — the combined
+/// "Network ready" row is split so the user can see exactly which half of the
+/// network path is not ready and which one button to press.
+///
 /// Order of operations is enforced by the rows themselves — this is the
-/// user-facing half of the B4 fix: you cannot enroll before the service is
+/// user-facing half of the B4 fix: you cannot enroll before the agent is
 /// Running, and the UI says so instead of timing out.
 struct HomeReadiness: Equatable {
-    let service: ReadinessRow
+    let agent: ReadinessRow
     let identity: ReadinessRow
-    let network: ReadinessRow
+    let dns: ReadinessRow
+    let https: ReadinessRow
 
-    var rows: [ReadinessRow] { [service, identity, network] }
+    var rows: [ReadinessRow] { [agent, identity, dns, https] }
     var allReady: Bool { rows.allSatisfy { $0.state.isReady } }
 
     /// The one line of guidance under the checklist.
@@ -117,10 +122,13 @@ struct HomeReadiness: Equatable {
             let z = zone.isEmpty ? "<zone>" : zone
             return "Open any https://<name>.\(z) site in your browser. ZTLP connects on demand — there is nothing to switch on."
         }
-        if !service.state.isReady { return "Step 1: install the ZTLP background service." }
+        if !agent.state.isReady { return "Step 1: install the ZTLP background service." }
         if !identity.state.isReady { return "Step 2: enroll this Mac with the enrollment link from your administrator." }
-        if case .needsAction(_, .trustHTTPS) = network.state {
+        if case .needsAction(_, .trustHTTPS) = https.state {
             return "Step 3: press Trust HTTPS once so Safari trusts this Mac's ZTLP certificates for every .ztlp site. No password needed."
+        }
+        if case .failed = dns.state {
+            return "Step 3: DNS routing is not set up. Press Fix to add the .ztlp resolver (needs admin)."
         }
         return "Almost there — the service is finishing HTTPS and DNS setup."
     }
@@ -130,50 +138,50 @@ struct HomeReadiness: Equatable {
         daemonReachable: Bool,
         daemon: DaemonSnapshot?
     ) -> HomeReadiness {
-        // Row 1 — Service (SMAppService registration + daemon answering)
-        let service: ReadinessRow
+        // Row 1 — Agent (SMAppService registration + daemon answering)
+        let agent: ReadinessRow
         switch serviceState {
         case .running:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: daemonReachable
                     ? .ready("Running")
                     : .waiting("Starting…")
             )
         case .requiresApproval:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .needsAction("Needs your approval in System Settings", action: .openLoginItems)
             )
         case .notRegistered:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .needsAction("Not installed", action: .installService)
             )
         case .notFound:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
-                state: .failed("Service missing from this app bundle — reinstall ZTLP")
+                state: .failed("Agent missing from this app bundle — reinstall ZTLP")
             )
         case .failed(let msg):
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .failed(msg)
             )
         }
 
-        // Row 2 — Identity (the ROOT daemon's enrollment; that is what DNS/TLS use)
+        // Row 2 — Identity (the daemon's enrollment; that is what DNS/TLS use)
         let identity: ReadinessRow
-        if !service.state.isReady {
+        if !agent.state.isReady {
             identity = ReadinessRow(
                 title: "Identity",
                 systemImage: "person.badge.key",
-                state: .waiting("Waiting for service")
+                state: .waiting("Waiting for agent")
             )
         } else if let d = daemon, d.identityEnrolled {
             identity = ReadinessRow(
@@ -189,50 +197,72 @@ struct HomeReadiness: Equatable {
             )
         }
 
-        // Row 3 — Network ready (HTTPS trusted + DNS routed, from the daemon)
-        let network: ReadinessRow
+        // Row 3 — DNS (the .ztlp resolver is routed through the agent)
+        let dns: ReadinessRow
         if !identity.state.isReady {
-            network = ReadinessRow(
-                title: "Network ready",
+            dns = ReadinessRow(
+                title: "DNS",
                 systemImage: "network",
-                state: .waiting(service.state.isReady ? "Waiting for enrollment" : "Waiting for service")
+                state: .waiting("Waiting for enrollment")
+            )
+        } else if let d = daemon, d.dnsConfigured {
+            dns = ReadinessRow(
+                title: "DNS",
+                systemImage: "network",
+                state: .ready(".ztlp names resolve through ZTLP")
             )
         } else if let d = daemon {
-            if d.caInstalled && d.dnsConfigured {
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .ready("HTTPS trusted · DNS routed")
-                )
-            } else if d.caInitialized && !d.caInstalled {
-                // The daemon made the CA; only the human trust step remains.
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .needsAction(
-                        d.dnsConfigured ? "HTTPS not trusted yet" : "HTTPS not trusted yet · DNS routing pending",
-                        action: .trustHTTPS
-                    )
-                )
-            } else {
-                var missing: [String] = []
-                if !d.caInitialized { missing.append("HTTPS certificate") }
-                if !d.dnsConfigured { missing.append("DNS routing") }
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .waiting("Setting up \(missing.joined(separator: " and "))…")
-                )
-            }
-        } else {
-            network = ReadinessRow(
-                title: "Network ready",
+            dns = ReadinessRow(
+                title: "DNS",
                 systemImage: "network",
-                state: .waiting("Waiting for service")
+                state: .failed("DNS routing not set up")
+            )
+        } else {
+            dns = ReadinessRow(
+                title: "DNS",
+                systemImage: "network",
+                state: .waiting("Waiting for agent")
             )
         }
 
-        return HomeReadiness(service: service, identity: identity, network: network)
+        // Row 4 — HTTPS (browsers trust the daemon's CA)
+        let https: ReadinessRow
+        if !identity.state.isReady {
+            https = ReadinessRow(
+                title: "HTTPS",
+                systemImage: "lock",
+                state: .waiting("Waiting for enrollment")
+            )
+        } else if let d = daemon {
+            if d.caInstalled {
+                https = ReadinessRow(
+                    title: "HTTPS",
+                    systemImage: "lock",
+                    state: .ready("Browsers trust ZTLP certificates")
+                )
+            } else if d.caInitialized {
+                // The daemon made the CA; only the human trust step remains.
+                https = ReadinessRow(
+                    title: "HTTPS",
+                    systemImage: "lock",
+                    state: .needsAction("HTTPS not trusted yet", action: .trustHTTPS)
+                )
+            } else {
+                https = ReadinessRow(
+                    title: "HTTPS",
+                    systemImage: "lock",
+                    state: .waiting("Setting up certificate…")
+                )
+            }
+        } else {
+            https = ReadinessRow(
+                title: "HTTPS",
+                systemImage: "lock",
+                state: .waiting("Waiting for agent")
+            )
+        }
+
+        return HomeReadiness(agent: agent, identity: identity, dns: dns, https: https)
     }
 }
 

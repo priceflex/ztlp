@@ -122,37 +122,39 @@ final class ZTLPTests: XCTestCase {
 
     func testReadinessFreshMacServiceNotInstalledGatesEverything() {
         let r = HomeReadiness.compute(serviceState: .notRegistered, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .needsAction("Not installed", action: .installService))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .needsAction("Not installed", action: .installService))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
         XCTAssertFalse(r.allReady)
         XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 1"))
     }
 
     func testReadinessRequiresApprovalOffersLoginItems() {
         let r = HomeReadiness.compute(serviceState: .requiresApproval, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .needsAction("Needs your approval in System Settings", action: .openLoginItems))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .needsAction("Needs your approval in System Settings", action: .openLoginItems))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
     }
 
     func testReadinessRegisteredButNotAnsweringIsWaitingNotEnroll() {
         // B4 user-facing half: the daemon is registered but has not answered
         // yet -> Identity must NOT offer Enroll (that was the old timeout path).
         let r = HomeReadiness.compute(serviceState: .running, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .waiting("Starting…"))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .waiting("Starting…"))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
         XCTAssertFalse(r.allReady)
     }
 
     func testReadinessStandbyDaemonOffersEnroll() {
-        // Daemon up in unenrolled standby: Service green, Identity = Enroll.
+        // Daemon up in unenrolled standby: Agent green, Identity = Enroll.
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
             daemon: snap(enrolled: false, ca: false, dns: false, zone: "")
         )
-        XCTAssertEqual(r.service.state, .ready("Running"))
+        XCTAssertEqual(r.agent.state, .ready("Running"))
         XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
         XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 2"))
     }
 
@@ -162,7 +164,8 @@ final class ZTLPTests: XCTestCase {
             daemon: snap(enrolled: true, ca: false, dns: true)
         )
         XCTAssertEqual(r.identity.state, .ready("Enrolled in defcon.ztlp"))
-        XCTAssertEqual(r.network.state, .waiting("Setting up HTTPS certificate…"))
+        XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(r.https.state, .waiting("Setting up certificate…"))
         XCTAssertFalse(r.allReady)
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Almost there"))
     }
@@ -174,7 +177,7 @@ final class ZTLPTests: XCTestCase {
             serviceState: .running, daemonReachable: true,
             daemon: snap(enrolled: true, ca: false, dns: true, caInit: true)
         )
-        XCTAssertEqual(r.network.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
+        XCTAssertEqual(r.https.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Step 3"), r.guidance(zone: "defcon.ztlp"))
         XCTAssertFalse(r.allReady)
     }
@@ -186,7 +189,8 @@ final class ZTLPTests: XCTestCase {
             daemon: snap(enrolled: false, ca: false, dns: false, zone: "", caInit: true)
         )
         XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
     }
 
     // MARK: - Single enrollment (2026-09-20): token goes straight to the daemon
@@ -235,7 +239,8 @@ final class ZTLPTests: XCTestCase {
             daemon: snap(enrolled: true, ca: true, dns: true)
         )
         XCTAssertTrue(r.allReady)
-        XCTAssertEqual(r.network.state, .ready("HTTPS trusted · DNS routed"))
+        XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(r.https.state, .ready("Browsers trust ZTLP certificates"))
         let g = r.guidance(zone: "defcon.ztlp")
         XCTAssertTrue(g.contains("https://<name>.defcon.ztlp"), g)
         XCTAssertTrue(g.contains("on demand"), g)
@@ -246,9 +251,9 @@ final class ZTLPTests: XCTestCase {
 
     func testReadinessServiceFailedIsRed() {
         let r = HomeReadiness.compute(serviceState: .failed("boom"), daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .failed("boom"))
+        XCTAssertEqual(r.agent.state, .failed("boom"))
         let r2 = HomeReadiness.compute(serviceState: .notFound, daemonReachable: false, daemon: nil)
-        if case .failed(let m) = r2.service.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.service.state)") }
+        if case .failed(let m) = r2.agent.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.agent.state)") }
     }
 
     func testBackoffDoublesAndCapsAtTwoSeconds() {

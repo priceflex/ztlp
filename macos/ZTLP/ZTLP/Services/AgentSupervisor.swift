@@ -162,15 +162,25 @@ final class AgentSupervisor: ObservableObject {
 
     private func spawn() {
         guard wantsRunning else { return }
-        // Make sure the log dir exists.
-        let logURL = agentLogPath()
-        try? FileManager.default.createDirectory(
-            at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: helperPath)
         p.arguments = agentSpawnArgs(parentPid: ProcessInfo.processInfo.processIdentifier)
         p.environment = agentSpawnEnv()
+
+        // Create the log file if it doesn't exist (FileHandle(forWritingTo:)
+        // requires an existing file). Truncate when it passes 5 MB.
+        let logURL = agentLogPath()
+        try? FileManager.default.createDirectory(
+            at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path)
+        let size = attrs?[FileAttributeKey.size] as? Int ?? 0
+        if size > 5 * 1024 * 1024 {
+            try? FileManager.default.removeItem(at: logURL)
+        }
+        if !(FileManager.default.fileExists(atPath: logURL.path)) {
+            try? Data().write(to: logURL)
+        }
 
         // The stdin pipe is the parent signal: the agent reads EOF on it and
         // exits. We keep the write end (stdinPipe) for the lifetime of `p`.

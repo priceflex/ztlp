@@ -68,7 +68,10 @@ pub fn validate(req: &BindRequest) -> Result<(), String> {
         return Err(format!("{} is not a ZTLP VIP (127.100.0.0/16)", req.ip));
     }
     if o[2] == 255 {
-        return Err(format!("{} is in the reserved 127.100.255.0/24 block", req.ip));
+        return Err(format!(
+            "{} is in the reserved 127.100.255.0/24 block",
+            req.ip
+        ));
     }
     if req.port == 0 {
         return Err("port 0 is not a service port".into());
@@ -82,8 +85,10 @@ pub fn validate(req: &BindRequest) -> Result<(), String> {
 /// adds it), and only for ZTLP VIPs.
 pub fn should_ask_broker(kind: io::ErrorKind, ip: Ipv4Addr) -> bool {
     let vip = BindRequest { ip, port: 1 };
-    matches!(kind, io::ErrorKind::PermissionDenied | io::ErrorKind::AddrNotAvailable)
-        && validate(&vip).is_ok()
+    matches!(
+        kind,
+        io::ErrorKind::PermissionDenied | io::ErrorKind::AddrNotAvailable
+    ) && validate(&vip).is_ok()
 }
 
 /// Root side: serve bind requests forever on `path` (one thread per
@@ -252,7 +257,10 @@ pub fn serve_one(
     match result {
         Ok((req, fd)) => {
             send_fd(&conn, fd.as_raw_fd(), b"OK\n").map_err(|e| format!("send fd: {e}"))?;
-            Ok(format!("uid {uid}: handed {}:{} to the agent", req.ip, req.port))
+            Ok(format!(
+                "uid {uid}: handed {}:{} to the agent",
+                req.ip, req.port
+            ))
         }
         Err(e) => {
             let _ = conn.write_all(format!("ERR {e}\n").as_bytes());
@@ -320,7 +328,10 @@ mod tests {
     use super::*;
 
     fn req(ip: [u8; 4], port: u16) -> BindRequest {
-        BindRequest { ip: Ipv4Addr::from(ip), port }
+        BindRequest {
+            ip: Ipv4Addr::from(ip),
+            port,
+        }
     }
 
     #[test]
@@ -332,8 +343,15 @@ mod tests {
 
     #[test]
     fn malformed_requests_are_rejected() {
-        for bad in ["", "BIND", "BIND 127.100.0.3", "BIND x 443", "BIND 127.100.0.3 99999",
-                    "BIND 127.100.0.3 443 extra", "LISTEN 127.100.0.3 443"] {
+        for bad in [
+            "",
+            "BIND",
+            "BIND 127.100.0.3",
+            "BIND x 443",
+            "BIND 127.100.0.3 99999",
+            "BIND 127.100.0.3 443 extra",
+            "LISTEN 127.100.0.3 443",
+        ] {
             assert!(parse_request(bad).is_err(), "{bad:?} should be rejected");
         }
     }
@@ -363,8 +381,14 @@ mod tests {
         // port already taken: the broker can't help
         assert!(!should_ask_broker(AddrInUse, vip));
         // never for non-VIPs or the reserved control/health block
-        assert!(!should_ask_broker(PermissionDenied, Ipv4Addr::new(127, 0, 0, 1)));
-        assert!(!should_ask_broker(PermissionDenied, Ipv4Addr::new(127, 100, 255, 2)));
+        assert!(!should_ask_broker(
+            PermissionDenied,
+            Ipv4Addr::new(127, 0, 0, 1)
+        ));
+        assert!(!should_ask_broker(
+            PermissionDenied,
+            Ipv4Addr::new(127, 100, 255, 2)
+        ));
     }
 
     #[test]
@@ -381,17 +405,26 @@ mod tests {
             });
         });
         for _ in 0..50 {
-            if path.exists() { break; }
+            if path.exists() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o666);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o666
+        );
         let err = request_listener(&path, &req([10, 0, 0, 5], 443)).unwrap_err();
         assert!(err.to_string().contains("not a ZTLP VIP"), "{err}");
         // a second request on the same broker is served too (it loops)
         let err = request_listener(&path, &req([127, 0, 0, 1], 443)).unwrap_err();
         assert!(err.to_string().contains("not a ZTLP VIP"), "{err}");
-        assert_eq!(prepared.load(std::sync::atomic::Ordering::SeqCst), 0, "refused requests must not alias");
+        assert_eq!(
+            prepared.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "refused requests must not alias"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -440,11 +473,22 @@ mod tests {
         let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let t = std::thread::spawn(move || {
             let (conn, _) = server.accept().unwrap();
-            serve_one(conn, |_| Ok(()), |r| {
-                bind_listener(&BindRequest { ip: Ipv4Addr::LOCALHOST, port: r.port })
-            })
+            serve_one(
+                conn,
+                |_| Ok(()),
+                |r| {
+                    bind_listener(&BindRequest {
+                        ip: Ipv4Addr::LOCALHOST,
+                        port: r.port,
+                    })
+                },
+            )
         });
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let free = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let l = request_listener(&path, &req([127, 0, 0, 1], free)).unwrap();
         assert!(t.join().unwrap().is_ok());
         assert_eq!(l.local_addr().unwrap().port(), free);

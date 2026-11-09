@@ -51,8 +51,7 @@ pub const MACHINE_DAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp.mac
 /// `--boot` means "run the idempotent machine-setup plan, then serve the
 /// port broker" — no data plane, no enrollment, no tunnels. Kept as a constant so
 /// the plist generator and the CLI dispatch agree on the exact argv.
-pub const MACHINE_DAEMON_BOOT_ARGS: &[&str] =
-    &["agent", "machine-setup", "--boot"];
+pub const MACHINE_DAEMON_BOOT_ARGS: &[&str] = &["agent", "machine-setup", "--boot"];
 
 /// Generate the LaunchDaemon plist for the slim machine daemon. Root,
 /// RunAtLoad, KeepAlive so the machine bits are always re-asserted and the
@@ -120,8 +119,7 @@ pub fn machine_daemon_uninstall() -> Result<(), String> {
         );
     }
     if plist.exists() {
-        std::fs::remove_file(plist)
-            .map_err(|e| format!("removing {}: {e}", plist.display()))?;
+        std::fs::remove_file(plist).map_err(|e| format!("removing {}: {e}", plist.display()))?;
     }
     Ok(())
 }
@@ -220,8 +218,7 @@ pub fn macos_daemon_uninstall() -> Result<(), String> {
     }
     // Remove the plist. Absent file is fine.
     if plist.exists() {
-        std::fs::remove_file(plist)
-            .map_err(|e| format!("removing {}: {e}", plist.display()))?;
+        std::fs::remove_file(plist).map_err(|e| format!("removing {}: {e}", plist.display()))?;
     }
     // Kill any lingering foreground agent process the daemon started, so a
     // reboot-less Fix doesn't leave the old root data plane still bound.
@@ -654,9 +651,7 @@ mod tests {
     #[test]
     fn machine_daemon_plist_runs_machine_setup_boot_as_root() {
         let plist = generate_machine_daemon_plist("/Applications/ZTLP.app/Contents/MacOS/ztlp");
-        assert!(plist.contains(
-            "<key>Label</key>\n    <string>org.ztlp.machine</string>"
-        ));
+        assert!(plist.contains("<key>Label</key>\n    <string>org.ztlp.machine</string>"));
         // The daemon runs `agent machine-setup --boot` — NOT `agent start
         // --foreground` (that's the legacy data-plane daemon).
         assert!(plist.contains(
@@ -697,17 +692,17 @@ mod tests {
         // An upgrade removes the legacy full agent while keeping this slim
         // daemon. The labels/paths MUST differ or the two collide.
         assert_ne!(MACHINE_DAEMON_LABEL, MACOS_LAUNCHDAEMON_LABEL);
-        assert_ne!(
-            MACHINE_DAEMON_PLIST_PATH,
-            MACOS_LAUNCHDAEMON_PLIST_PATH
-        );
+        assert_ne!(MACHINE_DAEMON_PLIST_PATH, MACOS_LAUNCHDAEMON_PLIST_PATH);
         assert_eq!(MACHINE_DAEMON_LABEL, "org.ztlp.machine");
         assert_eq!(
             MACHINE_DAEMON_PLIST_PATH,
             "/Library/LaunchDaemons/org.ztlp.machine.plist"
         );
         // The boot argv is a shared constant (plist + CLI must agree).
-        assert_eq!(MACHINE_DAEMON_BOOT_ARGS, &["agent", "machine-setup", "--boot"]);
+        assert_eq!(
+            MACHINE_DAEMON_BOOT_ARGS,
+            &["agent", "machine-setup", "--boot"]
+        );
     }
 
     // ── Startup plan ──────────────────────────────────────────────────

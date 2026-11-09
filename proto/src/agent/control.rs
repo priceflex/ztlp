@@ -1789,8 +1789,14 @@ mod tests {
             assert!(!enroll_should_replace_identity(keep), "{keep:?}");
         }
         let c = cmd(Some("ztlp://enroll/abc123"), None, None);
-        assert!(build_enroll_exec_plan_with(&c, true).unwrap().args.contains(&"--force".to_string()));
-        assert!(!build_enroll_exec_plan_with(&c, false).unwrap().args.contains(&"--force".to_string()));
+        assert!(build_enroll_exec_plan_with(&c, true)
+            .unwrap()
+            .args
+            .contains(&"--force".to_string()));
+        assert!(!build_enroll_exec_plan_with(&c, false)
+            .unwrap()
+            .args
+            .contains(&"--force".to_string()));
         let err = build_enroll_exec_plan(&cmd(None, None, None)).unwrap_err();
         assert!(err.contains("enrollment_uri"));
     }
@@ -2038,8 +2044,8 @@ mod tests {
         let home = tmp_home("nozone");
         // Hermetic: no machine CA (the wrapper short-circuits to Ok(empty)
         // on any host that has a usable machine CA, e.g. a dev Mac).
-        let err = build_post_enroll_tls_plan_for(&home, cfg!(target_os = "macos"), false)
-            .unwrap_err();
+        let err =
+            build_post_enroll_tls_plan_for(&home, cfg!(target_os = "macos"), false).unwrap_err();
         assert!(err.contains("zone"), "{err}");
         let _ = std::fs::remove_dir_all(&home);
     }

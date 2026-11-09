@@ -227,7 +227,9 @@ pub fn setup_plan(s: &MachineState) -> Vec<MachineAction> {
 /// or the HTTPS health responder (peruser::HEALTH_VIP, 127.100.255.2).
 pub fn macos_machine_loopback_aliases() -> Vec<std::net::Ipv4Addr> {
     vec![
-        NRPT_DNS_SERVER.parse().expect("NRPT_DNS_SERVER is an IPv4 literal"),
+        NRPT_DNS_SERVER
+            .parse()
+            .expect("NRPT_DNS_SERVER is an IPv4 literal"),
         std::net::Ipv4Addr::new(127, 100, 255, 1),
         crate::agent::peruser::HEALTH_VIP,
     ]
@@ -486,11 +488,14 @@ pub fn probe_state() -> MachineState {
     // `security verify-cert`), gated on the default CA path's presence.
     let ca_trusted =
         ca_present && crate::agent::ca_trust::is_ca_installed_at(&dir.join("root.pem"));
-    let nrpt_present =
-        Path::new(crate::agent::dns_setup::MACOS_RESOLVER_DIR_PUB).join("ztlp").exists();
+    let nrpt_present = Path::new(crate::agent::dns_setup::MACOS_RESOLVER_DIR_PUB)
+        .join("ztlp")
+        .exists();
     MachineState {
-        legacy_service_installed: Path::new(crate::agent::macos_daemon::MACOS_LAUNCHDAEMON_PLIST_PATH)
-            .exists(),
+        legacy_service_installed: Path::new(
+            crate::agent::macos_daemon::MACOS_LAUNCHDAEMON_PLIST_PATH,
+        )
+        .exists(),
         ca_present,
         ca_trusted,
         nrpt_present,
@@ -508,8 +513,9 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
     let dir = macos_ca_dir();
     match action {
         MachineAction::RemoveLegacyService => {
-            crate::agent::macos_daemon::macos_daemon_uninstall()
-                .map_err(|e| format!("could not remove the old org.ztlp.agent LaunchDaemon: {e}"))?;
+            crate::agent::macos_daemon::macos_daemon_uninstall().map_err(|e| {
+                format!("could not remove the old org.ztlp.agent LaunchDaemon: {e}")
+            })?;
             Ok("removed the old org.ztlp.agent LaunchDaemon".into())
         }
         MachineAction::CreateCa => {
@@ -576,8 +582,8 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
             Ok(format!("DNS resolver .ztlp -> {NRPT_DNS_SERVER} added"))
         }
         MachineAction::RemoveNrpt => {
-            let removed =
-                crate::agent::dns_setup::teardown_dns().map_err(|e| format!("resolver removal failed: {e}"))?;
+            let removed = crate::agent::dns_setup::teardown_dns()
+                .map_err(|e| format!("resolver removal failed: {e}"))?;
             Ok(format!("removed DNS resolver files: {:?}", removed.len()))
         }
         MachineAction::UntrustCa => {
@@ -798,7 +804,8 @@ mod tests {
     /// agent got "Permission denied" loading a root-only intermediate key.
     #[test]
     fn ca_key_permissions_match_the_per_user_model() {
-        let dir = std::env::temp_dir().join(format!("ztlp-machine-ca-perms-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ztlp-machine-ca-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
         write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
@@ -824,8 +831,7 @@ mod tests {
             .mode()
             & 0o7777;
         assert_eq!(
-            root_mode,
-            0o600,
+            root_mode, 0o600,
             "root.key must be root-only (0600); got {root_mode:o}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -916,11 +922,11 @@ mod tests {
             .iter()
             .position(|a| *a == MachineAction::SetupNrpt)
             .unwrap_or_else(|| panic!("macOS must add the resolver umbrella: {plan:?}"));
-        assert!(create < lock && lock < trust, "create < lock < trust: {plan:?}");
         assert!(
-            trust < resolver,
-            "resolver after trust: {plan:?}"
+            create < lock && lock < trust,
+            "create < lock < trust: {plan:?}"
         );
+        assert!(trust < resolver, "resolver after trust: {plan:?}");
         // No legacy-service step on a fresh macOS machine.
         assert!(!plan.contains(&MachineAction::RemoveLegacyService));
     }

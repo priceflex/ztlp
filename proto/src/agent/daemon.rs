@@ -1667,17 +1667,17 @@ async fn bind_vip_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
             if let SocketAddr::V4(v4) = addr {
                 use crate::agent::port_broker as pb;
                 if pb::should_ask_broker(e.kind(), *v4.ip()) {
-                    let req = pb::BindRequest { ip: *v4.ip(), port: v4.port() };
+                    let req = pb::BindRequest {
+                        ip: *v4.ip(),
+                        port: v4.port(),
+                    };
                     // The agent can start before org.ztlp.machine has its
                     // socket up (login vs boot race, or a service restart):
                     // keep asking for up to 2 minutes instead of giving up.
                     let mut tries = 0u32;
                     let got = loop {
                         let r = tokio::task::spawn_blocking(move || {
-                            pb::request_listener(
-                                std::path::Path::new(pb::BROKER_SOCKET_PATH),
-                                &req,
-                            )
+                            pb::request_listener(std::path::Path::new(pb::BROKER_SOCKET_PATH), &req)
                         })
                         .await
                         .map_err(|j| std::io::Error::other(j.to_string()))?;

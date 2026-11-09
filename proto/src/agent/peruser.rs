@@ -235,7 +235,9 @@ pub fn machine_ca_dir() -> Option<PathBuf> {
         // Returning it here is what lets the per-user agent auto-mint leaf
         // certs from a machine-wide-trusted root without the user running
         // `ca-init` — the "set it up once" goal.
-        Some(PathBuf::from(crate::agent::machine_setup::MACOS_MACHINE_CA_DIR))
+        Some(PathBuf::from(
+            crate::agent::machine_setup::MACOS_MACHINE_CA_DIR,
+        ))
     } else {
         None
     }

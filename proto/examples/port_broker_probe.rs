@@ -9,7 +9,9 @@
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
-use ztlp_proto::agent::port_broker::{bind_listener, request_listener, serve_one, validate, BindRequest};
+use ztlp_proto::agent::port_broker::{
+    bind_listener, request_listener, serve_one, validate, BindRequest,
+};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -19,7 +21,9 @@ fn main() {
             let _ = std::fs::remove_file(path);
             let l = std::os::unix::net::UnixListener::bind(path).expect("bind broker socket");
             // let the non-root client connect (policy check is the boundary)
-            let _ = std::process::Command::new("chmod").args(["666", &a[2]]).status();
+            let _ = std::process::Command::new("chmod")
+                .args(["666", &a[2]])
+                .status();
             eprintln!("broker uid={} listening on {}", unsafe_uid(), a[2]);
             let (conn, _) = l.accept().expect("accept");
             match serve_one(conn, validate, bind_listener) {
@@ -33,7 +37,12 @@ fn main() {
                 ip: a[3].parse::<Ipv4Addr>().expect("ip"),
                 port: a[4].parse().expect("port"),
             };
-            eprintln!("client uid={} asking for {}:{}", unsafe_uid(), req.ip, req.port);
+            eprintln!(
+                "client uid={} asking for {}:{}",
+                unsafe_uid(),
+                req.ip,
+                req.port
+            );
             let l = match request_listener(Path::new(&a[2]), &req) {
                 Ok(l) => l,
                 Err(e) => {

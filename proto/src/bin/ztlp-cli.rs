@@ -13872,7 +13872,7 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
         {
             use ztlp_proto::agent::machine_setup::{
                 execute, macos_boot_plan, macos_machine_loopback_aliases, probe_state, setup_plan,
-                teardown_plan, stop_after_failure,
+                stop_after_failure, teardown_plan,
             };
             let state = probe_state();
             let plan = if setup {
@@ -13888,7 +13888,11 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
                 );
                 let p = setup_plan(&state);
                 // The boot daemon is root with no GUI: it can never set trust.
-                if boot { macos_boot_plan(p) } else { p }
+                if boot {
+                    macos_boot_plan(p)
+                } else {
+                    p
+                }
             } else {
                 teardown_plan(&state)
             };
@@ -13909,7 +13913,9 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
             if !boot && setup {
                 // A negative answer macOS cached before the .ztlp resolver
                 // rule existed would hide every ZTLP name; flush the cache.
-                let _ = std::process::Command::new("killall").args(["-HUP", "mDNSResponder"]).output();
+                let _ = std::process::Command::new("killall")
+                    .args(["-HUP", "mDNSResponder"])
+                    .output();
                 let after = probe_state();
                 println!("{}", serde_json::to_string(&after)?);
                 if !after.ready() && failed.is_empty() {
@@ -13922,7 +13928,10 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
                 // and new-VIP lo0 aliases from here. Setup failures are
                 // logged above but must not stop the broker.
                 use ztlp_proto::agent::port_broker::{run_broker, BROKER_SOCKET_PATH};
-                eprintln!("{} port broker listening on {BROKER_SOCKET_PATH}", c_green("✓"));
+                eprintln!(
+                    "{} port broker listening on {BROKER_SOCKET_PATH}",
+                    c_green("✓")
+                );
                 run_broker(std::path::Path::new(BROKER_SOCKET_PATH), |req| {
                     ztlp_proto::agent::macos_daemon::ensure_vip_alias(req.ip);
                 })?;

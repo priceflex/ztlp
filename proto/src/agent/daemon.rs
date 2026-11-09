@@ -1096,11 +1096,14 @@ pub async fn run_daemon(
             None
         };
 
-    // ── Per-user agent health probe (Windows) ─────────────────────────
+    // ── Per-user agent health probe (Windows + macOS) ─────────────────
     // TLS responder on peruser::HEALTH_VIP:443 so the desktop app can prove
-    // `.ztlp` DNS + machine-CA trust end to end. Windows only: macOS/Linux
-    // behaviour is unchanged.
-    let health_handle = if cfg!(target_os = "windows") {
+    // `.ztlp` DNS + machine-CA trust end to end. The macOS per-user model is
+    // the analog of Windows: the app's HTTPS row probes
+    // `https://ztlp-health.ztlp:443/` (which resolves to HEALTH_VIP) and
+    // expects the `ztlp-health-ok` body — so the macOS agent must serve it
+    // too. Linux keeps its per-device CA flow and has no such app probe.
+    let health_handle = if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
         tls_acceptor.as_ref().map(|acc| {
             let acc = (**acc).clone();
             tokio::spawn(async move {

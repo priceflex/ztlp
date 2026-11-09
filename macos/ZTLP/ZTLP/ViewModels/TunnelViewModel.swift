@@ -641,8 +641,9 @@ final class TunnelViewModel: ObservableObject {
     /// Fixed loopback address the health name must resolve to when the
     /// resolver is routing .ztlp through the agent (peruser::HEALTH_VIP).
     static let healthVIP = "127.100.255.2"
-    /// Health responder port (peruser::HEALTH_PORT).
-    static let healthPort: UInt16 = 443
+    /// Health responder port (peruser::HEALTH_PORT). 8443 (unprivileged):
+    /// the per-user agent is non-root and macOS only lets root bind <1024.
+    static let healthPort: UInt16 = 8443
 
     /// Live DNS probe: resolve `ztlp-health.ztlp` through the OS resolver and
     /// check it lands on the ZTLP VIP. `true` = resolves to the VIP, `false` =
@@ -678,11 +679,12 @@ final class TunnelViewModel: ObservableObject {
         }
     }
 
-    /// Live HTTPS probe: open TLS to `https://ztlp-health.ztlp:443/` the way
+    /// Live HTTPS probe: open TLS to `https://ztlp-health.ztlp:8443/` the way
     /// Safari would — the OS resolver routes the name to the loopback VIP (the
     /// agent), SNI = the health name, and the system trust store validates the
     /// chain. `true` = 2xx + the health body, `false` = error, `nil` = skip.
     /// Mirrors the Rust `probe_https` (SNI = health name, roots = OS store).
+    /// Port 8443 (unprivileged) so the non-root per-user agent can bind it.
     nonisolated static func probeHTTPS(enrolled: Bool, dnsOk: Bool) async -> Bool? {
         guard enrolled, dnsOk else { return nil }
         guard let url = URL(string: "https://\(Self.healthName):\(Self.healthPort)/") else { return false }

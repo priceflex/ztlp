@@ -313,7 +313,7 @@ pub fn macos_startup_plan(i: &MacosStartupInputs) -> Vec<MacosAction> {
     // The DNS stub IP, the control VIP, AND the health VIP (127.100.255.2)
     // must all be aliased on lo0 before the agent binds them. The health
     // VIP hosts the per-user agent's TLS health responder
-    // (HEALTH_VIP:443) that the desktop app's HTTPS row probes to prove
+    // (HEALTH_VIP:8443) that the desktop app's HTTPS row probes to prove
     // DNS + machine-CA trust end to end — it is needed on macOS too, not
     // just Windows.
     for listen in [&i.dns_listen, &i.control_listen] {
@@ -745,8 +745,8 @@ mod tests {
     }
 
     /// The health VIP (127.100.255.2) must be aliased on lo0 too: the
-    /// per-user agent's TLS health responder binds HEALTH_VIP:443, and the
-    /// desktop app's HTTPS row probes `https://ztlp-health.ztlp:443/` (which
+    /// per-user agent's TLS health responder binds HEALTH_VIP:8443, and the
+    /// desktop app's HTTPS row probes `https://ztlp-health.ztlp:8443/` (which
     /// resolves to that VIP). Without the alias, the bind fails and the
     /// HTTPS row can never go green on macOS.
     #[test]
@@ -756,7 +756,7 @@ mod tests {
             plan
                 .iter()
                 .any(|a| matches!(a, MacosAction::LoopbackAlias(ip) if *ip == Ipv4Addr::new(127, 100, 255, 2))),
-            "the health VIP (127.100.255.2) must be aliased on lo0 so the TLS health responder can bind HEALTH_VIP:443: {plan:?}"
+            "the health VIP (127.100.255.2) must be aliased on lo0 so the TLS health responder can bind HEALTH_VIP:8443: {plan:?}"
         );
     }
 

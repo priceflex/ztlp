@@ -1999,7 +1999,10 @@ mod tests {
     #[test]
     fn post_enroll_tls_plan_errors_without_zone() {
         let home = tmp_home("nozone");
-        let err = build_post_enroll_tls_plan(&home).unwrap_err();
+        // Hermetic: no machine CA (the wrapper short-circuits to Ok(empty)
+        // on any host that has a usable machine CA, e.g. a dev Mac).
+        let err = build_post_enroll_tls_plan_for(&home, cfg!(target_os = "macos"), false)
+            .unwrap_err();
         assert!(err.contains("zone"), "{err}");
         let _ = std::fs::remove_dir_all(&home);
     }

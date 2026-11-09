@@ -45,6 +45,8 @@ pub mod machine_setup;
 // daemon.rs behind cfg!(target_os = "macos").
 #[cfg(unix)]
 pub mod macos_daemon;
+#[cfg(unix)]
+pub mod port_broker;
 pub mod ns_checkin;
 pub mod ns_trust;
 pub mod nsset;

@@ -645,6 +645,19 @@ final class TunnelViewModel: ObservableObject {
     /// the per-user agent is non-root and macOS only lets root bind <1024.
     static let healthPort: UInt16 = 8443
 
+    /// Dotted-quad of an AF_INET `sockaddr`, or nil. The old probe rebound the
+    /// `sockaddr` itself to `in_addr` (reading sa_len/sa_family/port bytes,
+    /// not the address) and string-interpolated `inet_ntoa`'s C pointer
+    /// ("0x…"), so it NEVER equalled the health VIP and the DNS row always
+    /// said "DNS routing not working" even when DNS was fine.
+    nonisolated static func ipv4String(_ sa: UnsafePointer<sockaddr>) -> String? {
+        guard Int32(sa.pointee.sa_family) == AF_INET else { return nil }
+        var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return nil }
+        return String(cString: buf)
+    }
+
     /// Live DNS probe: resolve `ztlp-health.ztlp` through the OS resolver and
     /// check it lands on the ZTLP VIP. `true` = resolves to the VIP, `false` =
     /// resolves elsewhere or errors, `nil` = skip (not enrolled yet).
@@ -664,10 +677,10 @@ final class TunnelViewModel: ObservableObject {
                     defer { freeaddrinfo(addrs) }
                     var p = root.pointee
                     var ok = false
-                    while p.ai_addr != nil {
-                        if p.ai_family == AF_INET, let sockPtr = p.ai_addr {
-                            let inaddr = sockPtr.withMemoryRebound(to: in_addr.self, capacity: 1) { $0.pointee }
-                            if "\(inet_ntoa(inaddr))" == Self.healthVIP { ok = true }
+                    while true {
+                        if p.ai_family == AF_INET, let sa = p.ai_addr,
+                           Self.ipv4String(sa) == Self.healthVIP {
+                            ok = true
                         }
                         guard let next = p.ai_next else { break }
                         p = next.pointee

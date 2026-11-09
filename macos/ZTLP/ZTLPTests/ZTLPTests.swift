@@ -638,3 +638,34 @@ final class AgentSupervisorLogicTests: XCTestCase {
         XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 0, ranFor: 5), .respawn)
     }
 }
+
+/// The DNS row probe must read the real IPv4 out of a getaddrinfo result.
+/// The old code compared a C pointer's description ("0x…") to the VIP, so
+/// the DNS row was red on every Mac even when .ztlp DNS worked.
+final class DnsProbeAddressTests: XCTestCase {
+    private func sockaddrFor(_ ip: String) -> sockaddr_in {
+        var sin = sockaddr_in()
+        sin.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        sin.sin_family = sa_family_t(AF_INET)
+        sin.sin_port = in_port_t(443).bigEndian
+        _ = inet_pton(AF_INET, ip, &sin.sin_addr)
+        return sin
+    }
+
+    func testIpv4StringReadsTheHealthVip() {
+        var sin = sockaddrFor("127.100.255.2")
+        let s = withUnsafePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { TunnelViewModel.ipv4String($0) }
+        }
+        XCTAssertEqual(s, "127.100.255.2")
+    }
+
+    func testIpv4StringRejectsNonInet() {
+        var sin = sockaddrFor("127.100.255.2")
+        sin.sin_family = sa_family_t(AF_INET6)
+        let s = withUnsafePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { TunnelViewModel.ipv4String($0) }
+        }
+        XCTAssertNil(s)
+    }
+}

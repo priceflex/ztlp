@@ -13871,11 +13871,24 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
         #[cfg(target_os = "macos")]
         {
             use ztlp_proto::agent::machine_setup::{
-                execute, probe_state, setup_plan, teardown_plan, stop_after_failure,
+                execute, macos_boot_plan, macos_machine_loopback_aliases, probe_state, setup_plan,
+                teardown_plan, stop_after_failure,
             };
             let state = probe_state();
             let plan = if setup {
-                setup_plan(&state)
+                // lo0 aliases vanish at reboot and the per-user agent (not
+                // root) can't add them — re-assert them every run.
+                for ip in macos_machine_loopback_aliases() {
+                    ztlp_proto::agent::macos_daemon::ensure_vip_alias(ip);
+                }
+                eprintln!(
+                    "{} lo0 aliases: {:?}",
+                    c_green("✓"),
+                    macos_machine_loopback_aliases()
+                );
+                let p = setup_plan(&state);
+                // The boot daemon is root with no GUI: it can never set trust.
+                if boot { macos_boot_plan(p) } else { p }
             } else {
                 teardown_plan(&state)
             };

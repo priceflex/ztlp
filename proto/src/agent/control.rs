@@ -1128,10 +1128,11 @@ pub fn build_post_enroll_tls_plan_with(
 /// Returns `None` if neither file exists or neither yields a zone.
 /// The process-spawning part of `setup_status`. Runs on a blocking thread
 /// via [`SetupProbeCache`]; never call it from an async context directly.
-fn run_setup_probes(zone: &str) -> SetupProbes {
+fn run_setup_probes(zone: &str, ca_root: &std::path::Path) -> SetupProbes {
     // Windows-only: cert in machine root + NRPT rule present.
     #[cfg(target_os = "windows")]
     let (ca_installed_system_trust, dns_configured) = {
+        let _ = ca_root;
         let ca = Some(crate::agent::ca_trust::is_ca_installed());
         let dns = if !zone.is_empty() {
             let api = crate::agent::dns_setup_windows::default_nrpt_api();
@@ -1161,7 +1162,9 @@ fn run_setup_probes(zone: &str) -> SetupProbes {
     };
     #[cfg(not(target_os = "windows"))]
     let (ca_installed_system_trust, dns_configured) = {
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        // Trust of the root the agent actually mints from (machine CA on
+        // the per-user model) — see cmd_setup_status.
+        let ca = Some(crate::agent::ca_trust::is_ca_installed_at(ca_root));
         let dns = if !zone.is_empty() {
             Some(crate::agent::dns_setup::is_dns_configured())
         } else {
@@ -1229,8 +1232,17 @@ async fn cmd_setup_status(state: &AgentState) -> ControlResponse {
         return ControlResponse::err("cannot resolve home directory");
     }
     let identity_path = home.join(".ztlp").join("identity.json");
-    let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
-    let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
+    // Per-user model: the agent mints from the MACHINE CA when it is usable
+    // (peruser::effective_ca_dir), so report THAT CA — not the per-user
+    // ~/.ztlp/ca, which doesn't exist there. Reporting the per-user path
+    // left the HTTPS row on "Setting up certificate…" forever with no
+    // Trust HTTPS button, and pointed Trust HTTPS at a missing file.
+    let ca_dir = crate::agent::peruser::effective_ca_dir(
+        &home.join(".ztlp").join("ca"),
+        crate::agent::peruser::machine_ca_dir().as_deref(),
+    );
+    let ca_root_path = ca_dir.join("root.pem");
+    let ca_intermediate_path = ca_dir.join("intermediate.pem");
 
     // Identity presence: does identity.json exist and parse?
     //
@@ -1271,10 +1283,11 @@ async fn cmd_setup_status(state: &AgentState) -> ControlResponse {
     // blocking thread through the cache (ZT-11) so this handler, and every
     // other control command, answers in microseconds between refreshes.
     let zone_for_probe = zone.clone();
+    let root_for_probe = ca_root_path.clone();
     let probes = state
         .setup_probes
         .get_or_probe(&zone, Instant::now(), move || {
-            run_setup_probes(&zone_for_probe)
+            run_setup_probes(&zone_for_probe, &root_for_probe)
         })
         .await;
     let ca_installed_system_trust = probes.ca_installed_system_trust;

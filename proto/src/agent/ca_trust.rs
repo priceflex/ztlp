@@ -158,7 +158,15 @@ pub fn is_cert_trusted(cert_path: &Path) -> bool {
 
 /// Check if the ZTLP CA is installed in the system trust store.
 pub fn is_ca_installed() -> bool {
-    let cert_path = default_ca_cert_path();
+    is_ca_installed_at(&default_ca_cert_path())
+}
+
+/// Is THIS root (e.g. the machine CA's root.pem on the per-user model)
+/// trusted? `is_ca_installed` only looks at the per-user default
+/// `~/.ztlp/ca/root.pem`, which does not exist when the agent mints from the
+/// machine CA — so it reported "not trusted" forever, even after Trust HTTPS.
+pub fn is_ca_installed_at(cert_path: &Path) -> bool {
+    let cert_path = cert_path.to_path_buf();
     if !cert_path.exists() {
         return false;
     }

@@ -220,6 +220,30 @@ pub fn setup_plan(s: &MachineState) -> Vec<MachineAction> {
     plan
 }
 
+/// macOS: the loopback addresses the MACHINE daemon (root) must alias on
+/// lo0 at every boot. lo0 aliases don't survive a reboot, and the per-user
+/// agent is not root so it cannot add them itself — without these the agent
+/// can't bind its DNS stub (127.0.0.55), its control socket (127.100.255.1)
+/// or the HTTPS health responder (peruser::HEALTH_VIP, 127.100.255.2).
+pub fn macos_machine_loopback_aliases() -> Vec<std::net::Ipv4Addr> {
+    vec![
+        NRPT_DNS_SERVER.parse().expect("NRPT_DNS_SERVER is an IPv4 literal"),
+        std::net::Ipv4Addr::new(127, 100, 255, 1),
+        crate::agent::peruser::HEALTH_VIP,
+    ]
+}
+
+/// macOS boot plan = the shared plan minus `TrustCa`. The boot daemon runs
+/// as root with no GUI session, and macOS refuses a trust-settings write
+/// without user interaction ("no user interaction was possible") — so it
+/// failed on EVERY boot and the daemon exited 1 in a KeepAlive loop. Trust
+/// is a per-user keychain fact set by the app's "Trust HTTPS" button.
+pub fn macos_boot_plan(plan: Vec<MachineAction>) -> Vec<MachineAction> {
+    plan.into_iter()
+        .filter(|a| *a != MachineAction::TrustCa)
+        .collect()
+}
+
 /// `machine-teardown` (uninstaller): remove everything `machine-setup`
 /// added, plus a legacy service if one is still there.
 pub fn teardown_plan(s: &MachineState) -> Vec<MachineAction> {
@@ -460,7 +484,8 @@ pub fn probe_state() -> MachineState {
     let ca_present = crate::agent::peruser::ca_dir_can_mint(&dir);
     // `is_ca_installed` probes the System keychain (macOS branch uses
     // `security verify-cert`), gated on the default CA path's presence.
-    let ca_trusted = ca_present && crate::agent::ca_trust::is_ca_installed();
+    let ca_trusted =
+        ca_present && crate::agent::ca_trust::is_ca_installed_at(&dir.join("root.pem"));
     let nrpt_present =
         Path::new(crate::agent::dns_setup::MACOS_RESOLVER_DIR_PUB).join("ztlp").exists();
     MachineState {
@@ -713,6 +738,40 @@ mod tests {
         assert!(!nrpt_has_umbrella(&[r(".trs.ztlp", "127.0.0.55")]));
         assert!(!nrpt_has_umbrella(&[r(".ztlp", "127.0.0.53")]));
         assert!(!nrpt_has_umbrella(&[]));
+    }
+
+    /// The macOS machine daemon must alias the DNS stub, control VIP and
+    /// health VIP — the per-user agent is not root and can't add them, and
+    /// lo0 aliases don't survive a reboot.
+    #[test]
+    fn macos_machine_aliases_cover_dns_control_and_health() {
+        let a = macos_machine_loopback_aliases();
+        assert!(a.contains(&std::net::Ipv4Addr::new(127, 0, 0, 55)));
+        assert!(a.contains(&std::net::Ipv4Addr::new(127, 100, 255, 1)));
+        assert!(a.contains(&crate::agent::peruser::HEALTH_VIP));
+        assert_eq!(a.len(), 3);
+    }
+
+    /// The root boot daemon can never set trust (no GUI session) — keeping
+    /// TrustCa in its plan made it exit 1 on every boot.
+    #[test]
+    fn macos_boot_plan_drops_trust_but_keeps_everything_else() {
+        let fresh = MachineState {
+            legacy_service_installed: false,
+            ca_present: false,
+            ca_trusted: false,
+            nrpt_present: false,
+        };
+        let boot = macos_boot_plan(setup_plan(&fresh));
+        assert!(!boot.contains(&MachineAction::TrustCa), "{boot:?}");
+        assert_eq!(
+            boot,
+            vec![
+                MachineAction::CreateCa,
+                MachineAction::LockDownCaAcl,
+                MachineAction::SetupNrpt
+            ]
+        );
     }
 
     #[test]

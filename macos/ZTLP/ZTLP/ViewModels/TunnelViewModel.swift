@@ -35,6 +35,12 @@ struct DaemonSnapshot: Equatable {
     var uptimeSecs: Int = 0
     var zone: String = ""
     var identityEnrolled: Bool = false
+    /// The agent's last name-server check-in (`status.ns_checkin.state`):
+    /// "ok", "not_renewable", "not_registered", "revoked", "failed", or ""
+    /// before the first check-in. A local identity + zone is NOT enough —
+    /// if the name server has no record, the gateway can't name the device
+    /// or its owner (whoami shows Device/Person empty).
+    var nsCheckinState: String = ""
     var caInstalled: Bool = false
     /// The daemon has generated its device-local CA (ca/root.pem exists).
     var caInitialized: Bool = false
@@ -94,6 +100,17 @@ struct ReadinessRow: Equatable {
     let title: String
     let systemImage: String
     let state: ReadinessState
+}
+
+/// The name server's view of this device, as an Identity-row problem (nil =
+/// fine or not known yet). Only definite answers count: a failed check-in
+/// (network) must not turn a working device red.
+func nsRegistrationProblem(_ state: String) -> String? {
+    switch state {
+    case "not_registered": return "Not registered on the name server — enroll again"
+    case "revoked": return "This device was revoked — enroll again"
+    default: return nil
+    }
 }
 
 /// Pure fold: daemon `dns_configured` flag + the live resolve probe result ->
@@ -216,6 +233,13 @@ struct HomeReadiness: Equatable {
                 title: "Identity",
                 systemImage: "person.badge.key",
                 state: .waiting("Waiting for agent")
+            )
+        } else if let d = daemon, d.identityEnrolled,
+                  let problem = nsRegistrationProblem(d.nsCheckinState) {
+            identity = ReadinessRow(
+                title: "Identity",
+                systemImage: "person.badge.key",
+                state: .needsAction(problem, action: .enroll)
             )
         } else if let d = daemon, d.identityEnrolled {
             identity = ReadinessRow(
@@ -820,6 +844,11 @@ final class TunnelViewModel: ObservableObject {
             snap.relay = o["relay"]?.stringValue ?? snap.relay
             snap.vipAllocated = o["vip_allocated"]?.intValue ?? snap.vipAllocated
             snap.uptimeSecs = o["uptime_secs"]?.intValue ?? snap.uptimeSecs
+            if case .object(let ck)? = o["ns_checkin"] {
+                snap.nsCheckinState = ck["state"]?.stringValue ?? ""
+            } else {
+                snap.nsCheckinState = ""
+            }
         }
 
         if let ss = try? await AgentControlClient.send(cmd: "setup_status", timeout: 3),

@@ -145,6 +145,33 @@ final class ZTLPTests: XCTestCase {
         XCTAssertFalse(r.allReady)
     }
 
+    /// Live on the Studio: identity.json + zone present, but the name server
+    /// had no record -> whoami showed Device/Person empty while Identity was
+    /// green with no Enroll button. A definite "not registered" must offer
+    /// Enroll; a network failure must not.
+    func testReadinessNotRegisteredOnNameServerOffersEnroll() {
+        var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+        d.nsCheckinState = "not_registered"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        XCTAssertEqual(r.identity.state,
+                       .needsAction("Not registered on the name server — enroll again", action: .enroll))
+        XCTAssertFalse(r.allReady)
+        XCTAssertTrue(r.guidance(zone: "trs.ztlp").hasPrefix("Step 2"))
+    }
+
+    func testReadinessNameServerCheckinStatesThatStayGreen() {
+        for st in ["ok", "not_renewable", "failed", ""] {
+            var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+            d.nsCheckinState = st
+            let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+            XCTAssertEqual(r.identity.state, .ready("Enrolled in trs.ztlp"), "state \(st)")
+        }
+        var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+        d.nsCheckinState = "revoked"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        XCTAssertEqual(r.identity.state, .needsAction("This device was revoked — enroll again", action: .enroll))
+    }
+
     func testReadinessStandbyDaemonOffersEnroll() {
         // Daemon up in unenrolled standby: Agent green, Identity = Enroll.
         let r = HomeReadiness.compute(

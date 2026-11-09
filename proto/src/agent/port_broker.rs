@@ -263,26 +263,55 @@ pub fn serve_one(
 
 // ── agent (client) side ─────────────────────────────────────────────────
 
+/// Why the broker didn't hand over a listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerError {
+    /// No broker socket (yet) — e.g. the agent started before the machine
+    /// service finished booting. Worth retrying.
+    Unavailable(String),
+    /// The broker answered and said no (policy / bind failure). Final.
+    Refused(String),
+}
+
+impl std::fmt::Display for BrokerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BrokerError::Unavailable(m) | BrokerError::Refused(m) => f.write_str(m),
+        }
+    }
+}
+
+impl BrokerError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, BrokerError::Unavailable(_))
+    }
+}
+
 /// Ask the broker at `socket_path` for a listening socket on `req`.
 pub fn request_listener(
     socket_path: &Path,
     req: &BindRequest,
-) -> Result<std::net::TcpListener, String> {
-    let mut conn = UnixStream::connect(socket_path)
-        .map_err(|e| format!("port broker unavailable at {}: {e}", socket_path.display()))?;
+) -> Result<std::net::TcpListener, BrokerError> {
+    let mut conn = UnixStream::connect(socket_path).map_err(|e| {
+        BrokerError::Unavailable(format!(
+            "port broker unavailable at {}: {e}",
+            socket_path.display()
+        ))
+    })?;
     conn.write_all(req.to_line().as_bytes())
-        .map_err(|e| format!("port broker write: {e}"))?;
+        .map_err(|e| BrokerError::Unavailable(format!("port broker write: {e}")))?;
     let mut buf = [0u8; 256];
-    let (n, fd) = recv_fd(&conn, &mut buf).map_err(|e| format!("port broker read: {e}"))?;
+    let (n, fd) = recv_fd(&conn, &mut buf)
+        .map_err(|e| BrokerError::Unavailable(format!("port broker read: {e}")))?;
     let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     match (reply.as_str(), fd) {
         ("OK", Some(fd)) => Ok(std::net::TcpListener::from(fd)),
-        _ => Err(format!(
+        _ => Err(BrokerError::Refused(format!(
             "port broker refused {}:{}: {}",
             req.ip,
             req.port,
             reply.trim_start_matches("ERR ").trim()
-        )),
+        ))),
     }
 }
 
@@ -358,12 +387,24 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o666);
         let err = request_listener(&path, &req([10, 0, 0, 5], 443)).unwrap_err();
-        assert!(err.contains("not a ZTLP VIP"), "{err}");
+        assert!(err.to_string().contains("not a ZTLP VIP"), "{err}");
         // a second request on the same broker is served too (it loops)
         let err = request_listener(&path, &req([127, 0, 0, 1], 443)).unwrap_err();
-        assert!(err.contains("not a ZTLP VIP"), "{err}");
+        assert!(err.to_string().contains("not a ZTLP VIP"), "{err}");
         assert_eq!(prepared.load(std::sync::atomic::Ordering::SeqCst), 0, "refused requests must not alias");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Live on the Studio: the agent started before the machine service
+    /// had its socket up -> "No such file" -> the site's 443 never bound.
+    /// A missing broker must be reported as retryable.
+    #[test]
+    fn missing_broker_socket_is_retryable() {
+        let p = std::env::temp_dir().join(format!("ztlp-pb-none-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let err = request_listener(&p, &req([127, 100, 0, 3], 443)).unwrap_err();
+        assert!(err.is_retryable(), "{err}");
+        assert!(err.to_string().contains("unavailable"), "{err}");
     }
 
     #[test]
@@ -424,7 +465,8 @@ mod tests {
             serve_one(conn, validate, bind_listener)
         });
         let err = request_listener(&path, &req([10, 0, 0, 5], 443)).unwrap_err();
-        assert!(err.contains("not a ZTLP VIP"), "{err}");
+        assert!(err.to_string().contains("not a ZTLP VIP"), "{err}");
+        assert!(!err.is_retryable(), "a policy refusal is final");
         assert!(t.join().unwrap().is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -14,8 +14,10 @@
 //! - broker → agent: `OK\n` + the listening socket fd, or `ERR <reason>\n`
 //!
 //! The broker only binds ZTLP VIPs (127.100.0.0/16, excluding the reserved
-//! 127.100.255.0/24 control/health block) on privileged ports (1..=1023);
-//! everything else the agent can (and does) bind itself.
+//! 127.100.255.0/24 control/health block). The agent binds directly first
+//! and only asks the broker when that fails with "Permission denied"
+//! (privileged port) or "Can't assign requested address" (new VIP, no lo0
+//! alias yet — the broker adds it as root).
 #![cfg(unix)]
 
 use std::io::{self, Read, Write};
@@ -68,11 +70,48 @@ pub fn validate(req: &BindRequest) -> Result<(), String> {
     if o[2] == 255 {
         return Err(format!("{} is in the reserved 127.100.255.0/24 block", req.ip));
     }
-    if !needs_broker(req.port) {
-        return Err(format!(
-            "port {} is not privileged — the agent binds it itself",
-            req.port
-        ));
+    if req.port == 0 {
+        return Err("port 0 is not a service port".into());
+    }
+    Ok(())
+}
+
+/// Agent side: should a failed VIP bind be retried through the broker?
+/// Yes for "Permission denied" (privileged port, non-root) and "Can't assign
+/// requested address" (new VIP with no lo0 alias yet — the broker, as root,
+/// adds it), and only for ZTLP VIPs.
+pub fn should_ask_broker(kind: io::ErrorKind, ip: Ipv4Addr) -> bool {
+    let vip = BindRequest { ip, port: 1 };
+    matches!(kind, io::ErrorKind::PermissionDenied | io::ErrorKind::AddrNotAvailable)
+        && validate(&vip).is_ok()
+}
+
+/// Root side: serve bind requests forever on `path` (one thread per
+/// request). `prepare` runs before each bind (production: add the lo0
+/// alias for the VIP). Returns only if the socket can't be created.
+pub fn run_broker(
+    path: &Path,
+    prepare: impl Fn(&BindRequest) + Send + Sync + 'static,
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_file(path);
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    // Any local user's agent may ask; validate() is the boundary.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
+    let prepare = std::sync::Arc::new(prepare);
+    for conn in listener.incoming() {
+        let Ok(conn) = conn else { continue };
+        let prepare = prepare.clone();
+        std::thread::spawn(move || {
+            let r = serve_one(conn, validate, |req| {
+                prepare(req);
+                bind_listener(req)
+            });
+            match r {
+                Ok(m) => eprintln!("port broker: {m}"),
+                Err(e) => eprintln!("port broker: {e}"),
+            }
+        });
     }
     Ok(())
 }
@@ -281,9 +320,50 @@ mod tests {
         assert!(validate(&req([127, 0, 0, 1], 443)).is_err());
         // reserved control/health block
         assert!(validate(&req([127, 100, 255, 1], 443)).is_err());
-        // unprivileged ports: the agent binds those itself
-        assert!(validate(&req([127, 100, 0, 3], 8443)).is_err());
+        // unprivileged ports are allowed (new VIP needs the root alias)
+        assert!(validate(&req([127, 100, 0, 3], 8443)).is_ok());
         assert!(validate(&req([127, 100, 0, 3], 0)).is_err());
+    }
+
+    #[test]
+    fn agent_asks_broker_only_for_vip_permission_or_missing_alias() {
+        use io::ErrorKind::*;
+        let vip = Ipv4Addr::new(127, 100, 0, 3);
+        assert!(should_ask_broker(PermissionDenied, vip));
+        assert!(should_ask_broker(AddrNotAvailable, vip));
+        // port already taken: the broker can't help
+        assert!(!should_ask_broker(AddrInUse, vip));
+        // never for non-VIPs or the reserved control/health block
+        assert!(!should_ask_broker(PermissionDenied, Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!should_ask_broker(PermissionDenied, Ipv4Addr::new(127, 100, 255, 2)));
+    }
+
+    #[test]
+    fn run_broker_serves_requests_and_refuses_non_vips() {
+        let dir = std::env::temp_dir().join(format!("ztlp-pb-run-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("b.sock");
+        let p2 = path.clone();
+        let prepared = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pc = prepared.clone();
+        std::thread::spawn(move || {
+            let _ = run_broker(&p2, move |_| {
+                pc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+        for _ in 0..50 {
+            if path.exists() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o666);
+        let err = request_listener(&path, &req([10, 0, 0, 5], 443)).unwrap_err();
+        assert!(err.contains("not a ZTLP VIP"), "{err}");
+        // a second request on the same broker is served too (it loops)
+        let err = request_listener(&path, &req([127, 0, 0, 1], 443)).unwrap_err();
+        assert!(err.contains("not a ZTLP VIP"), "{err}");
+        assert_eq!(prepared.load(std::sync::atomic::Ordering::SeqCst), 0, "refused requests must not alias");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

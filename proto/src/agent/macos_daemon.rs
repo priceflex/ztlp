@@ -37,7 +37,8 @@ pub const MACOS_LAUNCHDAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp
 pub const MACOS_LAUNCHDAEMON_LABEL: &str = "org.ztlp.agent";
 
 /// The slim "machine daemon" label (Task 3): owns only the machine bits
-/// (CA + resolver + lo0 aliases) at boot, then exits. It is NOT the data
+/// (CA + resolver + lo0 aliases) at boot, then stays up as the port broker
+/// (agent::port_broker). It is NOT the data
 /// plane — that's the per-user agent. Distinct from [`MACOS_LAUNCHDAEMON_LABEL`]
 /// (the legacy full root agent) so the two never collide and an upgrade
 /// removes the old one while keeping this one.
@@ -47,16 +48,16 @@ pub const MACHINE_DAEMON_LABEL: &str = "org.ztlp.machine";
 pub const MACHINE_DAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp.machine.plist";
 
 /// The argument the machine daemon runs: `agent machine-setup --boot`.
-/// `--boot` means "run the idempotent machine-setup plan, then exit" — no
-/// foreground data plane, no enrollment, no tunnels. Kept as a constant so
+/// `--boot` means "run the idempotent machine-setup plan, then serve the
+/// port broker" — no data plane, no enrollment, no tunnels. Kept as a constant so
 /// the plist generator and the CLI dispatch agree on the exact argv.
 pub const MACHINE_DAEMON_BOOT_ARGS: &[&str] =
     &["agent", "machine-setup", "--boot"];
 
 /// Generate the LaunchDaemon plist for the slim machine daemon. Root,
-/// RunAtLoad, KeepAlive so the machine bits are always re-asserted; it does
-/// no data plane work so KeepAlive cost is near-zero (it exits right after
-/// the idempotent plan).
+/// RunAtLoad, KeepAlive so the machine bits are always re-asserted and the
+/// port broker is always up; it carries no traffic (it only binds sockets
+/// and hands the fds to the per-user agent).
 pub fn generate_machine_daemon_plist(ztlp_binary: &str) -> String {
     let args: Vec<String> = std::iter::once(ztlp_binary.to_string())
         .chain(MACHINE_DAEMON_BOOT_ARGS.iter().map(|s| s.to_string()))

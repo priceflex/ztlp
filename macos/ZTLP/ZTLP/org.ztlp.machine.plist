@@ -10,8 +10,10 @@
   legacy full root agent (org.ztlp.agent), which the installer removes on
   upgrade (see AgentServiceInstaller.removeLegacyAgentDaemon).
 
-  RunAtLoad + KeepAlive so the machine bits are always re-asserted; the
-  command exits right after running the plan so KeepAlive cost is ~zero.
+  RunAtLoad + KeepAlive: after re-asserting the machine bits it stays up as
+  the PORT BROKER (/var/run/ztlp-portbroker.sock) — it binds the per-user
+  agent's privileged VIP ports (443/80/22) as root and hands over the fd,
+  and adds lo0 aliases for new VIPs. It never carries traffic.
 -->
 <plist version="1.0">
 <dict>

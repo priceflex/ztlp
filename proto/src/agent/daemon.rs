@@ -1479,7 +1479,7 @@ async fn run_tcp_proxy(
                 let fbt = first_byte_timeout.clone();
 
                 tokio::spawn(async move {
-                    match TcpListener::bind(addr).await {
+                    match bind_vip_listener(addr).await {
                         Ok(listener) => {
                             debug!(
                                 "TCP proxy listening on {} for {} (port {})",
@@ -1651,6 +1651,42 @@ async fn run_tcp_proxy(
                     }
                 });
             }
+        }
+    }
+}
+
+/// Bind a VIP listener. Direct bind first; on macOS, when the non-root
+/// per-user agent is refused (privileged port, or a new VIP with no lo0
+/// alias yet), ask the root port broker in `org.ztlp.machine` for the REAL
+/// port — it binds and hands us the listening fd (agent::port_broker).
+async fn bind_vip_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    match TcpListener::bind(addr).await {
+        Ok(l) => Ok(l),
+        Err(e) => {
+            #[cfg(target_os = "macos")]
+            if let SocketAddr::V4(v4) = addr {
+                use crate::agent::port_broker as pb;
+                if pb::should_ask_broker(e.kind(), *v4.ip()) {
+                    let req = pb::BindRequest { ip: *v4.ip(), port: v4.port() };
+                    let got = tokio::task::spawn_blocking(move || {
+                        pb::request_listener(std::path::Path::new(pb::BROKER_SOCKET_PATH), &req)
+                    })
+                    .await
+                    .map_err(|j| std::io::Error::other(j.to_string()))?;
+                    return match got {
+                        Ok(std_l) => {
+                            std_l.set_nonblocking(true)?;
+                            info!("VIP {} bound via the port broker", addr);
+                            TcpListener::from_std(std_l)
+                        }
+                        Err(msg) => Err(std::io::Error::new(
+                            e.kind(),
+                            format!("{e}; port broker: {msg}"),
+                        )),
+                    };
+                }
+            }
+            Err(e)
         }
     }
 }

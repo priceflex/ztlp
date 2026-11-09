@@ -119,10 +119,29 @@ pub fn write_ca_chain(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // The intermediate key signs LEAF certs. On the per-user model the
+        // data-plane agent runs as the logged-in user (a `staff` member),
+        // not root, so it must be able to READ this key to mint on demand.
+        // `0640` + `chgrp staff` makes it group-readable to every local
+        // account (matching the agent-token 0640-staff trust model). The
+        // ROOT key (written below) stays 0600 root-only: the agent never
+        // needs the root key — only the intermediate mints leaves.
         std::fs::set_permissions(
             dir.join("intermediate.key"),
-            std::fs::Permissions::from_mode(0o600),
+            std::fs::Permissions::from_mode(0o640),
         )?;
+        // Best-effort `chgrp staff` so the group bit is meaningful. If
+        // `chgrp` is unavailable (shouldn't be on macOS) the mode bits
+        // alone still leave the key owner-readable to root, which is the
+        // minimum; the per-user agent's mint load will log clearly if it
+        // still can't read it.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("chgrp")
+                .arg("staff")
+                .arg(dir.join("intermediate.key"))
+                .status();
+        }
     }
     let meta = serde_json::json!({
         "scope": "machine",
@@ -476,10 +495,13 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
             Ok(format!("created the machine CA in {}", dir.display()))
         }
         MachineAction::LockDownCaAcl => {
-            // macOS has no icacls/ACLs: the "lockdown" is the Unix mode bits
-            // (root.key 0600 root:wheel, dir 0755). `write_ca_chain` already
-            // set root.key 0600 on the Unix path; re-assert it here so a
-            // hand-loosened mode is repaired idempotently.
+            // macOS has no icacls/ACLs: the "lockdown" is the Unix mode bits.
+            // root.key stays 0600 root-only (the agent never needs the root
+            // key). intermediate.key is 0640 + `chgrp staff`: the per-user
+            // data-plane agent (a `staff` member) must READ it to mint leaf
+            // certs on demand, so it cannot be root-only. `write_ca_chain`
+            // already sets both; re-assert here so a hand-loosened mode is
+            // repaired idempotently.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -493,12 +515,22 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
                 if dir.join("intermediate.key").exists() {
                     std::fs::set_permissions(
                         dir.join("intermediate.key"),
-                        std::fs::Permissions::from_mode(0o600),
+                        std::fs::Permissions::from_mode(0o640),
                     )
-                    .map_err(|e| format!("setting intermediate.key 0600 failed: {e}"))?;
+                    .map_err(|e| format!("setting intermediate.key 0640 failed: {e}"))?;
+                    // `chgrp staff` so the group bit grants read to the
+                    // per-user agent's account (best-effort; log on failure
+                    // rather than hard-fail the setup).
+                    let out = std::process::Command::new("chgrp")
+                        .arg("staff")
+                        .arg(dir.join("intermediate.key"))
+                        .output();
+                    if let Err(e) = out {
+                        eprintln!("chgrp staff on intermediate.key failed (non-fatal): {e}");
+                    }
                 }
             }
-            Ok("machine CA permissions set (root key: root only)".into())
+            Ok("machine CA permissions set (root key: root only; intermediate key: staff-readable for the per-user agent to mint)".into())
         }
         MachineAction::TrustCa => {
             crate::agent::ca_trust::install_ca_cert_with_scope(
@@ -695,6 +727,48 @@ mod tests {
         assert!(!leaf.leaf_pem.is_empty());
         // never overwrite an existing root
         assert!(write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-user data-plane agent (running as the logged-in `staff`
+    /// account, NOT root) must be able to READ the intermediate key to mint
+    /// leaf certs on demand. So the machine-setup must NOT lock it to
+    /// root-only (0600) — it must be group-readable (0640, `chgrp staff`).
+    /// The ROOT key stays 0600 root-only (the agent never needs the root
+    /// key). This is the bug that made the macOS HTTPS row stay red: the
+    /// agent got "Permission denied" loading a root-only intermediate key.
+    #[test]
+    fn ca_key_permissions_match_the_per_user_model() {
+        let dir = std::env::temp_dir().join(format!("ztlp-machine-ca-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        // `mode()` includes file-type bits (e.g. 0o100640 = regular file + 640);
+        // mask to the permission bits only.
+        let int_mode = std::fs::metadata(dir.join("intermediate.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        // Group-readable (0640): the per-user agent's account is in `staff`,
+        // so the group bit grants it read access to mint.
+        assert_eq!(
+            int_mode,
+            0o640,
+            "intermediate.key must be group-readable (0640) so the per-user agent can mint; got {int_mode:o}"
+        );
+        // The ROOT key is the top secret — root only (0600).
+        let root_mode = std::fs::metadata(dir.join("root.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            root_mode,
+            0o600,
+            "root.key must be root-only (0600); got {root_mode:o}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

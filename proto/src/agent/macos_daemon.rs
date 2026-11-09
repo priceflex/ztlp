@@ -779,14 +779,38 @@ mod tests {
 
     #[test]
     fn plan_skips_alias_for_127_0_0_1_and_dedupes() {
+        // 127.0.0.1 is the default lo0 address — it never gets an explicit
+        // alias. But the health VIP (127.100.255.2) is ALWAYS aliased (the
+        // per-user agent's health responder needs it), so even with both
+        // listen IPs on 127.0.0.1 the plan carries exactly 1 loopback
+        // alias: the health VIP.
         let mut i = inputs();
         i.dns_listen = "127.0.0.1:15353".to_string();
         i.control_listen = "127.0.0.1:4433".to_string();
         let plan = macos_startup_plan(&i);
-        assert!(!plan
+        let aliases: Vec<_> = plan
             .iter()
-            .any(|a| matches!(a, MacosAction::LoopbackAlias(_))));
+            .filter_map(|a| {
+                if let MacosAction::LoopbackAlias(ip) = a {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            aliases.len(),
+            1,
+            "127.0.0.1 listen IPs get no alias; only the always-present health VIP (127.100.255.2) should: {plan:?}"
+        );
+        assert_eq!(
+            aliases[0],
+            Ipv4Addr::new(127, 100, 255, 2),
+            "the sole alias must be the health VIP, not a 127.0.0.1 listen IP: {plan:?}"
+        );
 
+        // A non-127.0.0.1 control listen IP (127.0.0.55) DOES get an alias,
+        // in addition to the health VIP → 2 aliases total.
         let mut i = inputs();
         i.control_listen = "127.0.0.55:4433".to_string();
         let plan = macos_startup_plan(&i);
@@ -794,7 +818,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, MacosAction::LoopbackAlias(_)))
             .count();
-        assert_eq!(aliases, 1);
+        assert_eq!(
+            aliases, 2,
+            "control listen IP (127.0.0.55) + the health VIP = 2 loopback aliases: {plan:?}"
+        );
     }
 
     #[test]
@@ -847,8 +874,11 @@ mod tests {
     fn plan_splits_into_pre_bind_aliases_and_post_bind_rest() {
         // daemon.rs must alias lo0 BEFORE binding the DNS socket (os error 49
         // otherwise) but write /etc/resolver AFTER, with the effective port.
+        // The pre-bind phase carries 3 loopback aliases: the DNS stub IP,
+        // the control VIP, and the health VIP (127.100.255.2 — needed by the
+        // per-user agent's TLS health responder).
         let (pre, post) = macos_startup_phases(&inputs());
-        assert_eq!(pre.len(), 2);
+        assert_eq!(pre.len(), 3);
         assert!(pre
             .iter()
             .all(|a| matches!(a, MacosAction::LoopbackAlias(_))));

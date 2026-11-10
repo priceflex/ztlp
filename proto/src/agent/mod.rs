@@ -26,6 +26,8 @@ pub mod discovery;
 pub mod dns;
 #[cfg(unix)]
 pub mod dns_setup;
+#[cfg(windows)]
+pub mod os_trust;
 // dns_setup_windows defines the NrptApi trait + FakeNrptApi used everywhere
 // (so the agent crate builds on Linux/macOS CI). The production WindowsNrptApi
 // inside it is gated to `cfg(windows)` in D4.T2.

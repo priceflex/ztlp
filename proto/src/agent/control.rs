@@ -1158,8 +1158,9 @@ fn run_setup_probes(zone: &str, ca_root: &std::path::Path) -> SetupProbes {
     // Windows-only: cert in machine root + NRPT rule present.
     #[cfg(target_os = "windows")]
     let (ca_installed_system_trust, dns_configured) = {
-        let _ = ca_root;
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        // Probe the SAME root setup_status reports (the machine CA on the
+        // per-user model), not the per-user default path.
+        let ca = Some(crate::agent::ca_trust::is_ca_installed_at(ca_root));
         let dns = if !zone.is_empty() {
             let api = crate::agent::dns_setup_windows::default_nrpt_api();
             match api.list_rules() {

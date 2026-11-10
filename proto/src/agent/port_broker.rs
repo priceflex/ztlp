@@ -232,12 +232,20 @@ pub fn bind_listener(req: &BindRequest) -> io::Result<OwnedFd> {
 /// bind (injected so tests can use an unprivileged port without root);
 /// `check` is the policy (production: [`validate`]). Returns what was done,
 /// for the caller's log.
+/// How long the root broker waits on one client's request/reply.
+pub const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub fn serve_one(
     mut conn: UnixStream,
     check: impl Fn(&BindRequest) -> Result<(), String>,
     binder: impl Fn(&BindRequest) -> io::Result<OwnedFd>,
 ) -> Result<String, String> {
     let uid = peer_uid(&conn).map_err(|e| format!("peer uid: {e}"))?;
+    // The socket is world-connectable: never let one client hold this
+    // (root) thread longer than BROKER_IO_TIMEOUT.
+    conn.set_read_timeout(Some(BROKER_IO_TIMEOUT))
+        .and_then(|_| conn.set_write_timeout(Some(BROKER_IO_TIMEOUT)))
+        .map_err(|e| format!("socket timeout: {e}"))?;
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     while line.len() < 128 {
@@ -513,5 +521,22 @@ mod tests {
         assert!(!err.is_retryable(), "a policy refusal is final");
         assert!(t.join().unwrap().is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CodeRabbit #132: the socket is 0666, so any local process can connect
+    /// and send nothing; serve_one blocked in read() forever, pinning one
+    /// root thread per connection. It must give up after BROKER_IO_TIMEOUT.
+    #[test]
+    fn silent_client_times_out_instead_of_pinning_a_thread() {
+        let (server, _client_kept_open_but_silent) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = serve_one(server, |_| Ok(()), |_| Err(io::Error::other("unused")));
+            let _ = tx.send(r);
+        });
+        let got = rx
+            .recv_timeout(BROKER_IO_TIMEOUT + std::time::Duration::from_secs(3))
+            .expect("serve_one is still blocked on a silent client");
+        assert!(got.is_err(), "a silent client is a failed request: {got:?}");
     }
 }

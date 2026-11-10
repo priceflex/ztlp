@@ -199,6 +199,11 @@ pub fn generate_launchdaemon_plist(ztlp_binary: &str) -> String {
 /// This is the macOS counterpart of Windows' `windows_service_uninstall`
 /// (used by `machine-setup`'s `RemoveLegacyService` step). After it, the
 /// machine runs only the per-user agent + the tiny machine daemon.
+/// pkill/pgrep pattern for the legacy root data-plane agent. Anchored at
+/// the end: the legacy LaunchDaemon's argv ENDS with `--foreground`, while
+/// every per-user agent continues with `--parent-pid N` and must survive.
+pub const LEGACY_AGENT_KILL_PATTERN: &str = "ztlp agent start --foreground$";
+
 pub fn macos_daemon_uninstall() -> Result<(), String> {
     let plist = std::path::Path::new(MACOS_LAUNCHDAEMON_PLIST_PATH);
     // Boot out the running daemon (system domain). Tolerate "not loaded":
@@ -223,7 +228,7 @@ pub fn macos_daemon_uninstall() -> Result<(), String> {
     // Kill any lingering foreground agent process the daemon started, so a
     // reboot-less Fix doesn't leave the old root data plane still bound.
     if let Err(e) = std::process::Command::new("pkill")
-        .args(["-f", &format!("ztlp agent start --foreground")])
+        .args(["-f", LEGACY_AGENT_KILL_PATTERN])
         .output()
         .map_err(|e| format!("pkill: {e}"))
     {
@@ -1024,5 +1029,58 @@ mod tests {
         assert_eq!(i.control_listen, "127.100.255.9:4433");
         assert_eq!(i.zones, vec!["a.ztlp".to_string(), "b.ztlp".to_string()]);
         assert!(i.is_root);
+    }
+
+    /// CodeRabbit #132: the legacy-cleanup pkill used the substring
+    /// "ztlp agent start --foreground", which also matches every user's
+    /// per-user agent ("... --foreground --parent-pid N"). Checked with the
+    /// real pgrep (same matcher as pkill) against real processes.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_agent_kill_pattern_spares_per_user_agents() {
+        use std::process::{Command, Stdio};
+        let tag = format!("zz{}", std::process::id());
+        // argv after `sh -c 'sleep 30; :'` shows up verbatim in the cmdline
+        // (two commands: macOS sh would otherwise exec sleep and drop argv).
+        let spawn = |tail: &[&str]| {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 30; :", "x"])
+                .args(tail)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            c.spawn().unwrap()
+        };
+        let legacy_bin = format!("/opt/{tag}/ztlp");
+        let mut legacy = spawn(&[legacy_bin.as_str(), "agent", "start", "--foreground"]);
+        let peruser_bin = format!("/opt/{tag}/ztlp");
+        let mut peruser = spawn(&[
+            peruser_bin.as_str(),
+            "agent",
+            "start",
+            "--foreground",
+            "--parent-pid",
+            "1",
+        ]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pids = |pat: &str| -> Vec<u32> {
+            let out = Command::new("pgrep").args(["-f", pat]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        };
+        let hits = pids(LEGACY_AGENT_KILL_PATTERN);
+        let _ = legacy.kill();
+        let _ = peruser.kill();
+        let _ = legacy.wait();
+        let _ = peruser.wait();
+        assert!(
+            hits.contains(&legacy.id()),
+            "must still match the legacy root agent: {hits:?}"
+        );
+        assert!(
+            !hits.contains(&peruser.id()),
+            "must NOT match a per-user agent: {hits:?}"
+        );
     }
 }

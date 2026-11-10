@@ -802,6 +802,7 @@ mod tests {
     /// The ROOT key stays 0600 root-only (the agent never needs the root
     /// key). This is the bug that made the macOS HTTPS row stay red: the
     /// agent got "Permission denied" loading a root-only intermediate key.
+    #[cfg(unix)]
     #[test]
     fn ca_key_permissions_match_the_per_user_model() {
         let dir =

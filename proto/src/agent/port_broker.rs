@@ -104,10 +104,17 @@ pub fn run_broker(
     // Any local user's agent may ask; validate() is the boundary.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
     let prepare = std::sync::Arc::new(prepare);
+    let slots = ConnSlots::new(BROKER_MAX_CONNECTIONS);
     for conn in listener.incoming() {
-        let Ok(conn) = conn else { continue };
+        let Ok(mut conn) = conn else { continue };
+        let Some(slot) = slots.try_acquire() else {
+            let _ = conn.set_write_timeout(Some(std::time::Duration::from_millis(200)));
+            let _ = conn.write_all(b"ERR busy\n");
+            continue;
+        };
         let prepare = prepare.clone();
         std::thread::spawn(move || {
+            let _slot = slot;
             let r = serve_one(conn, validate, |req| {
                 prepare(req);
                 bind_listener(req)
@@ -232,6 +239,45 @@ pub fn bind_listener(req: &BindRequest) -> io::Result<OwnedFd> {
 /// bind (injected so tests can use an unprivileged port without root);
 /// `check` is the policy (production: [`validate`]). Returns what was done,
 /// for the caller's log.
+/// At most this many clients are served at once; more are refused with
+/// `ERR busy` instead of each getting a root thread.
+pub const BROKER_MAX_CONNECTIONS: usize = 16;
+
+/// Counting cap on concurrently served clients.
+#[derive(Clone)]
+pub struct ConnSlots {
+    active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    max: usize,
+}
+
+/// One held slot; released on drop.
+pub struct ConnSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+impl ConnSlots {
+    pub fn new(max: usize) -> Self {
+        ConnSlots {
+            active: Default::default(),
+            max,
+        }
+    }
+
+    pub fn try_acquire(&self) -> Option<ConnSlot> {
+        use std::sync::atomic::Ordering;
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.max).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| ConnSlot(self.active.clone()))
+    }
+}
+
 /// How long the root broker waits on one client's request/reply.
 pub const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -246,9 +292,19 @@ pub fn serve_one(
     conn.set_read_timeout(Some(BROKER_IO_TIMEOUT))
         .and_then(|_| conn.set_write_timeout(Some(BROKER_IO_TIMEOUT)))
         .map_err(|e| format!("socket timeout: {e}"))?;
+    // ONE deadline for the whole request line: a per-read timeout alone
+    // let a client trickle a byte every few seconds for minutes.
+    let deadline = std::time::Instant::now() + BROKER_IO_TIMEOUT;
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     while line.len() < 128 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(format!(
+                "uid {uid}: request not received within {BROKER_IO_TIMEOUT:?}"
+            ));
+        }
+        let _ = conn.set_read_timeout(Some(left));
         match conn.read(&mut byte) {
             Ok(1) if byte[0] == b'\n' => break,
             Ok(1) => line.push(byte[0]),
@@ -322,6 +378,10 @@ pub fn request_listener(
     let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     match (reply.as_str(), fd) {
         ("OK", Some(fd)) => Ok(std::net::TcpListener::from(fd)),
+        // At its connection cap: a later attempt will be served.
+        ("ERR busy", _) => Err(BrokerError::Unavailable(
+            "port broker busy (too many concurrent clients)".into(),
+        )),
         _ => Err(BrokerError::Refused(format!(
             "port broker refused {}:{}: {}",
             req.ip,
@@ -538,5 +598,71 @@ mod tests {
             .recv_timeout(BROKER_IO_TIMEOUT + std::time::Duration::from_secs(3))
             .expect("serve_one is still blocked on a silent client");
         assert!(got.is_err(), "a silent client is a failed request: {got:?}");
+    }
+
+    /// CodeRabbit #132 (re-review): a per-read timeout still let a client
+    /// trickle one byte every few seconds and hold a root thread for
+    /// minutes. The whole request line gets ONE deadline.
+    #[test]
+    fn trickling_client_hits_the_overall_deadline() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                if client.write_all(b"B").is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = serve_one(server, |_| Ok(()), |_| Err(io::Error::other("unused")));
+            let _ = tx.send(r);
+        });
+        let got = rx
+            .recv_timeout(BROKER_IO_TIMEOUT + std::time::Duration::from_secs(3))
+            .expect("a trickling client kept the broker thread past the deadline");
+        assert!(got.is_err(), "{got:?}");
+    }
+
+    /// ...and the number of concurrently served clients is capped, with a
+    /// slot freed as soon as a client is done.
+    #[test]
+    fn connection_slots_are_capped_and_released() {
+        let slots = ConnSlots::new(2);
+        let a = slots.try_acquire();
+        let b = slots.try_acquire();
+        assert!(a.is_some() && b.is_some());
+        assert!(
+            slots.try_acquire().is_none(),
+            "third concurrent client must be refused"
+        );
+        drop(a);
+        assert!(
+            slots.try_acquire().is_some(),
+            "a finished client frees its slot"
+        );
+        drop(b);
+    }
+
+    /// A broker at its connection cap answers `ERR busy`: the agent must
+    /// treat that as "try again", not as a final policy refusal.
+    #[test]
+    fn busy_broker_is_retryable() {
+        let dir = std::env::temp_dir().join(format!("ztlp-pb-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.sock");
+        let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let t = std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let _ = c.read(&mut buf);
+            c.write_all(b"ERR busy\n").unwrap();
+        });
+        let err = request_listener(&path, &req([127, 100, 0, 3], 443)).unwrap_err();
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.is_retryable(), "{err}");
     }
 }

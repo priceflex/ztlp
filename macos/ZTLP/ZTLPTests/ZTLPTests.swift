@@ -696,3 +696,93 @@ final class DnsProbeAddressTests: XCTestCase {
         XCTAssertNil(s)
     }
 }
+
+/// CodeRabbit review of PR #132 — each test pins one finding.
+@MainActor
+final class CodeRabbit132Tests: XCTestCase {
+
+    // Finding: Install returned early whenever the control socket answered.
+    // On the per-user model the app's OWN agent (or, mid-upgrade, the legacy
+    // root agent) always answers, so the machine daemon was never registered.
+    func testInstallDecisionFollowsRegistrationNotReachability() {
+        XCTAssertEqual(installStep(serviceState: .running), .nothingToDo)
+        for s: AgentServiceState in [.notRegistered, .notFound, .requiresApproval, .failed("x")] {
+            XCTAssertEqual(installStep(serviceState: s), .register, "\(s)")
+        }
+    }
+
+    // Finding: Uninstall waited for the socket to go quiet; the supervised
+    // per-user agent keeps serving it, so it always said "still running".
+    func testUninstallSucceedsOnceTheDaemonIsUnregistered() {
+        XCTAssertTrue(uninstallSucceeded(serviceState: .notRegistered))
+        XCTAssertTrue(uninstallSucceeded(serviceState: .notFound))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .running))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .requiresApproval))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .failed("x")))
+    }
+
+    // Finding: re-entrancy + ordering — the legacy agent must be removed
+    // BEFORE the machine daemon registers, inside ONE guarded operation, and
+    // a failed legacy removal (fresh install: nothing to remove) is fine.
+    func testRegistrationRemovesLegacyFirstThenRegisters() throws {
+        var calls: [String] = []
+        try AgentServiceInstaller.registrationSteps(
+            unregisterLegacy: { calls.append("legacy"); throw NSError(domain: "x", code: 1) },
+            register: { calls.append("register") }
+        )()
+        XCTAssertEqual(calls, ["legacy", "register"])
+    }
+
+    // Finding: waking from sleep thawed the agent while the lock screen was
+    // still up. Wake + locked must stay frozen; unlock sends the thaw.
+    func testWakeWhileLockedStaysFrozen() {
+        XCTAssertEqual(finalFreezeAction(for: .systemDidWake, locked: true), FreezeAction.none)
+        XCTAssertEqual(finalFreezeAction(for: .systemDidWake, locked: false), .thaw)
+        XCTAssertEqual(finalFreezeAction(for: .sessionResigned, locked: true), .freeze)
+        XCTAssertEqual(finalFreezeAction(for: .sessionResigned, locked: false), FreezeAction.none)
+        XCTAssertEqual(finalFreezeAction(for: .systemWillSleep, locked: false), .freeze)
+    }
+
+    // Finding: each respawn wrote the log from offset 0 (overwriting).
+    func testAgentLogHandleAppends() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ztlp-log-\(UUID().uuidString).log")
+        try Data("first\n".utf8).write(to: url)
+        let h = try openAgentLogForAppend(url)
+        h.write(Data("second\n".utf8))
+        try h.close()
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "first\nsecond\n")
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    // Finding: the DNS hint promised a Fix button the DNS row doesn't have.
+    func testDnsFailureGuidanceDoesNotPromiseAFixButton() {
+        var d = DaemonSnapshot()
+        d.identityEnrolled = true; d.caInstalled = true; d.caInitialized = true
+        d.dnsConfigured = false; d.zone = "trs.ztlp"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        guard case .failed = r.dns.state else { return XCTFail("dns should be failed: \(r.dns.state)") }
+        XCTAssertFalse(r.guidance(zone: "trs.ztlp").contains("Fix"), r.guidance(zone: "trs.ztlp"))
+    }
+
+    // Finding: the "service missing" error named the old plist.
+    func testServiceMissingMessageNamesTheMachinePlist() {
+        XCTAssertTrue(TunnelViewModel.serviceMissingMessage.contains("org.ztlp.machine.plist"))
+        XCTAssertFalse(TunnelViewModel.serviceMissingMessage.contains("org.ztlp.agent.plist"))
+    }
+
+    // Nitpick: the HTTPS probe ran every poll but never affected the row.
+    func testHttpsRowUsesAFailedProbe() {
+        guard case .failed = httpsRowState(caInstalled: true, caInitialized: true, probe: false) else {
+            return XCTFail("trusted CA + failed TLS probe must not show ready")
+        }
+        XCTAssertEqual(httpsRowState(caInstalled: true, caInitialized: true, probe: nil), .ready("Browsers trust ZTLP certificates"))
+    }
+
+    func testHttpsProbeIsThrottledWhileHealthy() {
+        let t0 = Date(timeIntervalSince1970: 1000)
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: nil, lastResult: nil, now: t0))
+        XCTAssertFalse(shouldProbeHTTPS(lastAt: t0, lastResult: true, now: t0.addingTimeInterval(10)))
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: t0, lastResult: true, now: t0.addingTimeInterval(31)))
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: t0, lastResult: false, now: t0.addingTimeInterval(2)))
+    }
+}

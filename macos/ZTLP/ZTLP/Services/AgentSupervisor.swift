@@ -97,6 +97,14 @@ nonisolated func agentSpawnEnv() -> [String: String] {
 
 // MARK: - The live supervisor (spawns + keeps the agent alive)
 
+/// The agent log handle, positioned at the END so each respawn appends
+/// (FileHandle(forWritingTo:) starts at offset 0 and overwrote old lines).
+nonisolated func openAgentLogForAppend(_ url: URL) throws -> FileHandle {
+    let h = try FileHandle(forWritingTo: url)
+    try h.seekToEnd()
+    return h
+}
+
 /// Spawns the per-user agent as the logged-in user and restarts it if it dies.
 /// Tied to the app's lifetime: the stdin pipe + --parent-pid make the agent
 /// exit when the app quits (no orphan agent).
@@ -190,10 +198,12 @@ final class AgentSupervisor: ObservableObject {
         // null stdin that reads EOF immediately); it then blocks reading until
         // we close it.
         do {
-            let out = try FileHandle(forWritingTo: logURL)
+            let out = try openAgentLogForAppend(logURL)
             p.standardOutput = out
             p.standardError = out
             try p.run()
+            // The child has its own copy now; don't leak ours per respawn.
+            try? out.close()
             try? stdin.fileHandleForWriting.write(Data([0x00]))
         } catch {
             // Couldn't spawn (e.g. helper missing / not executable). Surface it

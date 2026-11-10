@@ -131,12 +131,48 @@ func dnsRowState(dnsConfigured: Bool, probe: Bool?) -> ReadinessState {
     }
 }
 
+/// What Install (Home row 1, menu toggle, Connect on Launch) must do.
+/// Decided by the machine daemon's REGISTRATION, never by whether the
+/// control socket answers: on the per-user model that socket is served by
+/// the app's own supervised agent (and, mid-upgrade from 1.3.0, by the
+/// legacy root agent), so "reachable" says nothing about the daemon.
+enum InstallStep: Equatable { case nothingToDo, register }
+
+func installStep(serviceState: AgentServiceState) -> InstallStep {
+    if case .running = serviceState { return .nothingToDo }
+    return .register
+}
+
+/// Uninstall Service succeeded once the machine daemon is no longer
+/// registered. (The per-user agent keeps answering — it belongs to the app.)
+func uninstallSucceeded(serviceState: AgentServiceState) -> Bool {
+    switch serviceState {
+    case .notRegistered, .notFound: return true
+    default: return false
+    }
+}
+
+/// The HTTPS probe is a real TLS handshake (10 s timeout): run it at most
+/// every 30 s while it is passing, and on every poll while it is failing or
+/// unknown so a repair shows up at once.
+let httpsProbeHealthyInterval: TimeInterval = 30
+
+func shouldProbeHTTPS(lastAt: Date?, lastResult: Bool?, now: Date) -> Bool {
+    guard let lastAt, lastResult == true else { return true }
+    return now.timeIntervalSince(lastAt) >= httpsProbeHealthyInterval
+}
+
 /// Pure fold: daemon `ca_installed`/`ca_initialized` flags + the live TLS
 /// probe result -> the HTTPS row state. The flags are the source of truth for
 /// the row (trust is a per-user keychain fact the daemon cannot see); the
 /// probe is confirmatory.
 func httpsRowState(caInstalled: Bool, caInitialized: Bool, probe: Bool?) -> ReadinessState {
     if caInstalled {
+        // Trusted, but a real TLS handshake to the agent's health name just
+        // failed: don't claim ready. (nil = not probed yet / no DNS.)
+        if probe == false {
+            return .failed("Trusted, but the HTTPS check to the agent failed — it may be restarting")
+        }
         return .ready("Browsers trust ZTLP certificates")
     }
     if caInitialized {
@@ -177,7 +213,8 @@ struct HomeReadiness: Equatable {
             return "Step 3: press Trust HTTPS once so Safari trusts this Mac's ZTLP certificates for every .ztlp site. No password needed."
         }
         if case .failed = dns.state {
-            return "Step 3: DNS routing is not set up. Press Fix to add the .ztlp resolver (needs admin)."
+            // No Fix button here: the resolver belongs to the machine service.
+            return "Step 3: .ztlp DNS routing is not working. Check that ZTLP is allowed in System Settings › General › Login Items & Extensions, then restart the Mac if it persists."
         }
         return "Almost there — the service is finishing HTTPS and DNS setup."
     }
@@ -328,6 +365,7 @@ final class TunnelViewModel: ObservableObject {
     /// probed yet; refreshed on each poll while enrolled.
     private var dnsProbe: Bool? = nil
     private var httpsProbe: Bool? = nil
+    private var httpsProbeAt: Date? = nil
 
     // MARK: - Tunables (mirror desktop/src-tauri/src/tunnel.rs)
 
@@ -377,7 +415,8 @@ final class TunnelViewModel: ObservableObject {
         if configuration.autoConnect {
             Task { [weak self] in
                 guard let self else { return }
-                if await !Self.daemonReachable() { self.installService() }
+                self.installer.refreshState()
+                if installStep(serviceState: self.installer.state) == .register { self.installService() }
             }
         }
     }
@@ -408,7 +447,8 @@ final class TunnelViewModel: ObservableObject {
     /// toggle, "on" = make sure the service is installed; "off" = uninstall
     /// it (Settings > Service is the primary place for that).
     func toggleConnection() {
-        if daemonIsReachable { disconnect() } else { installService() }
+        installer.refreshState()
+        if installStep(serviceState: installer.state) == .nothingToDo { disconnect() } else { installService() }
     }
 
     /// Row 1 action: install (SMAppService register) the root service.
@@ -425,6 +465,8 @@ final class TunnelViewModel: ObservableObject {
     ///    .enabled but launchd never spawns the new binary. If the daemon
     ///    does not answer within `staleRegistrationTimeout`, we unregister +
     ///    register ONCE automatically — exactly what fixed it by hand.
+    static let serviceMissingMessage = "The ZTLP service is missing from this app bundle (\(AgentServiceInstaller.plistName)). Reinstall ZTLP."
+
     func installService() {
         guard !installInFlight else { return }
         lastError = nil
@@ -436,7 +478,8 @@ final class TunnelViewModel: ObservableObject {
         Task {
             defer { transitionInFlight = false; installInFlight = false }
 
-            if await Self.daemonReachable() {
+            installer.refreshState()
+            if installStep(serviceState: installer.state) == .nothingToDo {
                 await pollOnceUnlocked()
                 return
             }
@@ -489,7 +532,7 @@ final class TunnelViewModel: ObservableObject {
             return true
         case .notFound:
             status = .disconnected
-            lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
+            lastError = Self.serviceMissingMessage
             NSSound.beep()
             return true
         case .notRegistered:
@@ -541,12 +584,12 @@ final class TunnelViewModel: ObservableObject {
                 lastError = "Could not stop the ZTLP service: \(err)"
             }
 
-            _ = await Self.waitForDaemon(reachable: false, timeout: Self.stopTimeout)
-            let stillUp = await Self.daemonReachable()
-            if stillUp {
+            installer.refreshState()
+            serviceState = installer.state
+            if !uninstallSucceeded(serviceState: installer.state) {
                 status = .connected
                 if lastError == nil {
-                    lastError = "The ZTLP service is still running. Try again in a moment."
+                    lastError = "The ZTLP service is still installed. Try again in a moment."
                 }
             } else {
                 status = .disconnected
@@ -818,10 +861,17 @@ final class TunnelViewModel: ObservableObject {
         let enrolled = daemon?.identityEnrolled ?? false
         if daemonIsReachable && enrolled {
             dnsProbe = await Self.probeDNS(enrolled: enrolled)
-            httpsProbe = await Self.probeHTTPS(enrolled: enrolled, dnsOk: dnsProbe == true)
+            if dnsProbe != true {
+                httpsProbe = nil
+                httpsProbeAt = nil
+            } else if shouldProbeHTTPS(lastAt: httpsProbeAt, lastResult: httpsProbe, now: Date()) {
+                httpsProbe = await Self.probeHTTPS(enrolled: enrolled, dnsOk: true)
+                httpsProbeAt = Date()
+            }
         } else {
             dnsProbe = nil
             httpsProbe = nil
+            httpsProbeAt = nil
         }
         recomputeReadiness()
     }

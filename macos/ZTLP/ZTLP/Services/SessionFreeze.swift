@@ -85,6 +85,16 @@ func action(for event: SessionFreezeEvent) -> FreezeAction {
 /// Source of truth for lock state: `CGSessionCopyCurrentDictionary()`'s
 /// `CGSSessionScreenIsLocked` key (value 1/true when the screen is
 /// locked). Verified present on macOS 26.5.
+/// `action(for:)` refined with the lock fact. A Mac that locks on sleep
+/// wakes with the lock screen up: stay frozen until the unlock
+/// (`sessionBecameActive`) sends the thaw.
+func finalFreezeAction(for event: SessionFreezeEvent, locked: Bool) -> FreezeAction {
+    let a = action(for: event)
+    if event == .sessionResigned && a == .none { return locked ? .freeze : .none }
+    if event == .systemDidWake && locked { return .none }
+    return a
+}
+
 func sessionLocked() -> Bool {
     guard let cf = CGSessionCopyCurrentDictionary() else { return false }
     let dict = cf as NSDictionary
@@ -153,14 +163,7 @@ final class SessionFreezeObserver {
     }
 
     private func emit(_ event: SessionFreezeEvent) {
-        let action = action(for: event)
-        // Refine the pure `.none` for sessionResigned with the lock fact.
-        let final: FreezeAction
-        if event == .sessionResigned && action == .none {
-            final = sessionLocked() ? .freeze : .none
-        } else {
-            final = action
-        }
+        let final = finalFreezeAction(for: event, locked: sessionLocked())
         if final != .none {
             send(final)
         }

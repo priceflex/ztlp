@@ -93,12 +93,14 @@ final class AgentServiceInstaller: ObservableObject {
     /// like Windows UAC" requirement). No sudo, no Terminal. Also removes the
     /// legacy full root agent daemon (upgrades from 1.3.0).
     func register() {
-        // Remove the legacy root agent first (off-main; don't block the UI on
-        // the synchronous unregister XPC call). The register below then
-        // installs the slim machine daemon.
-        Task { _ = await removeLegacyAgentDaemon() }
+        // Legacy removal strictly BEFORE the register (was a concurrent Task).
+        let legacy = Self.legacyAgentPlistName
+        let svc = service
         do {
-            try service.register()
+            try Self.registrationSteps(
+                unregisterLegacy: { try SMAppService.daemon(plistName: legacy).unregister() },
+                register: { try svc.register() }
+            )()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -167,13 +169,30 @@ final class AgentServiceInstaller: ObservableObject {
         }
     }
 
+    /// One registration operation: remove the legacy root agent (best
+    /// effort — a fresh install has nothing to remove), THEN register the
+    /// machine daemon. Run as a single guarded operation so a second click
+    /// can't slip in between and the order is guaranteed.
+    nonisolated static func registrationSteps(
+        unregisterLegacy: @escaping @Sendable () throws -> Void,
+        register: @escaping @Sendable () throws -> Void
+    ) -> @Sendable () throws -> Void {
+        {
+            try? unregisterLegacy()
+            try register()
+        }
+    }
+
     func registerAsync() async {
         guard inFlight == nil else { return }  // a second click while busy is a no-op
-        // Remove the legacy root agent BEFORE installing the machine daemon so
-        // a 1.3.0 upgrade never has two data planes running at once.
-        _ = await removeLegacyAgentDaemon()
+        // startOperation sets inFlight synchronously (no await before it), and
+        // the legacy removal runs INSIDE it, before the register.
         let plist = Self.plistName
-        _ = await startOperation { try SMAppService.daemon(plistName: plist).register() }.value
+        let legacy = Self.legacyAgentPlistName
+        _ = await startOperation(Self.registrationSteps(
+            unregisterLegacy: { try SMAppService.daemon(plistName: legacy).unregister() },
+            register: { try SMAppService.daemon(plistName: plist).register() }
+        )).value
     }
 
     /// Stop + unregister the legacy full root agent daemon (`org.ztlp.agent`).

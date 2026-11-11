@@ -42,6 +42,9 @@ pub mod linux_daemon;
 pub mod local_tls;
 // Installer-time machine setup (NRPT + machine CA), Windows per-user agent.
 pub mod machine_setup;
+// macOS: hand the old root agent's enrollment to the per-user agent.
+#[cfg(unix)]
+pub mod legacy_migrate;
 // macOS root-LaunchDaemon planning (pure) + executor. Compiles on every
 // platform so the plan/plist tests run in Linux CI; only invoked from
 // daemon.rs behind cfg!(target_os = "macos").
@@ -146,6 +149,29 @@ pub async fn run_agent_lifecycle(
                 peruser::PORTS_OWNED_BY_OTHER
             )
             .into());
+        }
+    }
+
+    // macOS upgrade from the root agent (desktop <= 1.3.0): its enrollment
+    // is in a root-only directory this agent cannot read. Take it over
+    // through the machine service BEFORE anything below looks at ~/.ztlp
+    // (see `legacy_migrate`). A no-op on every Mac without such a directory.
+    #[cfg(target_os = "macos")]
+    if config_path.is_none() && !macos_daemon::is_root() {
+        let user_dir = config::ztlp_state_dir().join(".ztlp");
+        let outcome = tokio::task::spawn_blocking(move || {
+            legacy_migrate::migrate_if_needed(
+                std::path::Path::new(legacy_migrate::LEGACY_DIR),
+                &user_dir,
+                std::path::Path::new(port_broker::BROKER_SOCKET_PATH),
+                std::time::Duration::from_secs(20),
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(msg) = outcome {
+            tracing::warn!("{msg}");
         }
     }
 

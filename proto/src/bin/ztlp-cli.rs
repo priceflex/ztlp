@@ -13927,14 +13927,20 @@ fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::
                 // agent (non-root) gets its privileged VIP ports (443/80/22)
                 // and new-VIP lo0 aliases from here. Setup failures are
                 // logged above but must not stop the broker.
-                use ztlp_proto::agent::port_broker::{run_broker, BROKER_SOCKET_PATH};
+                use ztlp_proto::agent::port_broker::{run_broker_with, BROKER_SOCKET_PATH};
                 eprintln!(
                     "{} port broker listening on {BROKER_SOCKET_PATH}",
                     c_green("✓")
                 );
-                run_broker(std::path::Path::new(BROKER_SOCKET_PATH), |req| {
-                    ztlp_proto::agent::macos_daemon::ensure_vip_alias(req.ip);
-                })?;
+                run_broker_with(
+                    std::path::Path::new(BROKER_SOCKET_PATH),
+                    |req| {
+                        ztlp_proto::agent::macos_daemon::ensure_vip_alias(req.ip);
+                    },
+                    // Upgrades from the root agent: hand its enrollment to
+                    // the (administrator) user's agent that asks for it.
+                    ztlp_proto::agent::legacy_migrate::broker_hook,
+                )?;
                 return Err("port broker stopped".into());
             }
             if !failed.is_empty() {

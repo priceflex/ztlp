@@ -12,6 +12,19 @@
 //! Wire protocol (one request per connection):
 //! - agent → broker: `BIND <ipv4> <port>\n`
 //! - broker → agent: `OK\n` + the listening socket fd, or `ERR <reason>\n`
+//! - agent → broker: one ACK byte once it holds the fd
+//!
+//! The ACK is not optional politeness. macOS damages a socket that is still
+//! in flight when the sender closes its own copy: the receiver gets a
+//! listener whose receive buffer is 0, and every connection accepted on it
+//! is reset at once. Live on a MacBook: 5 of 8 VIPs had dead 22/80/443
+//! listeners, so some `.ztlp` sites refused while others worked. The broker
+//! therefore keeps its copy open until the agent says it has the fd, and
+//! the agent checks what it received (an older broker sends no such
+//! guarantee) and asks again when the socket is damaged.
+//!
+//! A second verb, `MIGRATE ...`, is served by [`super::legacy_migrate`]
+//! through the `extra` hook of [`serve_one_with`].
 //!
 //! The broker only binds ZTLP VIPs (127.100.0.0/16, excluding the reserved
 //! 127.100.255.0/24 control/health block). The agent binds directly first
@@ -98,12 +111,23 @@ pub fn run_broker(
     path: &Path,
     prepare: impl Fn(&BindRequest) + Send + Sync + 'static,
 ) -> io::Result<()> {
+    run_broker_with(path, prepare, |_, _| None)
+}
+
+/// [`run_broker`] plus a hook for verbs other than `BIND` (see
+/// [`serve_one_with`]).
+pub fn run_broker_with(
+    path: &Path,
+    prepare: impl Fn(&BindRequest) + Send + Sync + 'static,
+    extra: impl Fn(u32, &str) -> Option<Result<Vec<u8>, String>> + Send + Sync + 'static,
+) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::remove_file(path);
     let listener = std::os::unix::net::UnixListener::bind(path)?;
     // Any local user's agent may ask; validate() is the boundary.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
     let prepare = std::sync::Arc::new(prepare);
+    let extra = std::sync::Arc::new(extra);
     let slots = ConnSlots::new(BROKER_MAX_CONNECTIONS);
     for conn in listener.incoming() {
         let Ok(mut conn) = conn else { continue };
@@ -113,12 +137,18 @@ pub fn run_broker(
             continue;
         };
         let prepare = prepare.clone();
+        let extra = extra.clone();
         std::thread::spawn(move || {
             let _slot = slot;
-            let r = serve_one(conn, validate, |req| {
-                prepare(req);
-                bind_listener(req)
-            });
+            let r = serve_one_with(
+                conn,
+                validate,
+                |req| {
+                    prepare(req);
+                    bind_listener(req)
+                },
+                |uid, line| extra(uid, line),
+            );
             match r {
                 Ok(m) => eprintln!("port broker: {m}"),
                 Err(e) => eprintln!("port broker: {e}"),
@@ -282,9 +312,29 @@ impl ConnSlots {
 pub const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub fn serve_one(
+    conn: UnixStream,
+    check: impl Fn(&BindRequest) -> Result<(), String>,
+    binder: impl Fn(&BindRequest) -> io::Result<OwnedFd>,
+) -> Result<String, String> {
+    serve_one_with(conn, check, binder, |_, _| None)
+}
+
+/// How long the broker keeps its copy of a handed-over socket open while
+/// waiting for the agent's ACK.
+pub const BROKER_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The byte the agent sends once it holds the fd.
+pub const ACK: u8 = b'A';
+
+/// [`serve_one`] plus `extra`: called with the peer uid and the request
+/// line first; `Some(Ok(payload))` answers `OK\n` + payload, `Some(Err(e))`
+/// answers `ERR e`, `None` means "not mine" and the line is treated as a
+/// `BIND` request.
+pub fn serve_one_with(
     mut conn: UnixStream,
     check: impl Fn(&BindRequest) -> Result<(), String>,
     binder: impl Fn(&BindRequest) -> io::Result<OwnedFd>,
+    extra: impl Fn(u32, &str) -> Option<Result<Vec<u8>, String>>,
 ) -> Result<String, String> {
     let uid = peer_uid(&conn).map_err(|e| format!("peer uid: {e}"))?;
     // The socket is world-connectable: never let one client hold this
@@ -312,6 +362,22 @@ pub fn serve_one(
         }
     }
     let line = String::from_utf8_lossy(&line).into_owned();
+    let _ = conn.set_read_timeout(Some(BROKER_IO_TIMEOUT));
+    if let Some(answer) = extra(uid, line.trim()) {
+        let verb = line.split_whitespace().next().unwrap_or("").to_string();
+        return match answer {
+            Ok(payload) => {
+                conn.write_all(b"OK\n")
+                    .and_then(|_| conn.write_all(&payload))
+                    .map_err(|e| format!("uid {uid}: {verb}: send: {e}"))?;
+                Ok(format!("uid {uid}: {verb}: served"))
+            }
+            Err(e) => {
+                let _ = conn.write_all(format!("ERR {e}\n").as_bytes());
+                Err(format!("uid {uid}: {verb}: refused: {e}"))
+            }
+        };
+    }
     let result = parse_request(&line).and_then(|req| {
         check(&req)?;
         binder(&req)
@@ -321,9 +387,18 @@ pub fn serve_one(
     match result {
         Ok((req, fd)) => {
             send_fd(&conn, fd.as_raw_fd(), b"OK\n").map_err(|e| format!("send fd: {e}"))?;
+            // Keep OUR copy open until the agent holds the fd (see the
+            // module docs). An agent that closes without an ACK (older
+            // build) has received it too, so EOF also ends the wait.
+            let _ = conn.set_read_timeout(Some(BROKER_ACK_TIMEOUT));
+            let mut ack = [0u8; 1];
+            let acked = matches!(conn.read(&mut ack), Ok(1) if ack[0] == ACK);
+            drop(fd);
             Ok(format!(
-                "uid {uid}: handed {}:{} to the agent",
-                req.ip, req.port
+                "uid {uid}: handed {}:{} to the agent{}",
+                req.ip,
+                req.port,
+                if acked { "" } else { " (no ACK)" }
             ))
         }
         Err(e) => {
@@ -377,7 +452,19 @@ pub fn request_listener(
         .map_err(|e| BrokerError::Unavailable(format!("port broker read: {e}")))?;
     let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     match (reply.as_str(), fd) {
-        ("OK", Some(fd)) => Ok(std::net::TcpListener::from(fd)),
+        ("OK", Some(fd)) => {
+            // We hold the fd: the broker may close its copy now.
+            let _ = conn.write_all(&[ACK]);
+            let listener = std::net::TcpListener::from(fd);
+            if listener_is_damaged(&listener) {
+                // Dropping it frees the address for the next attempt.
+                return Err(BrokerError::Unavailable(format!(
+                    "port broker handed over a damaged socket for {}:{} (asking again)",
+                    req.ip, req.port
+                )));
+            }
+            Ok(listener)
+        }
         // At its connection cap: a later attempt will be served.
         ("ERR busy", _) => Err(BrokerError::Unavailable(
             "port broker busy (too many concurrent clients)".into(),
@@ -389,6 +476,13 @@ pub fn request_listener(
             reply.trim_start_matches("ERR ").trim()
         ))),
     }
+}
+
+/// Was this listener damaged in transit? A healthy socket always has a
+/// receive buffer; the macOS in-flight close leaves it at 0 (see the module
+/// docs), and connections accepted on such a listener are reset at once.
+pub fn listener_is_damaged(listener: &std::net::TcpListener) -> bool {
+    matches!(socket2::SockRef::from(listener).recv_buffer_size(), Ok(0))
 }
 
 #[cfg(test)]
@@ -581,6 +675,134 @@ mod tests {
         assert!(!err.is_retryable(), "a policy refusal is final");
         assert!(t.join().unwrap().is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Live on a MacBook: the broker closed its copy right after sending
+    /// the fd, macOS damaged the in-flight socket, and sites on those VIPs
+    /// were reset. The broker must hold its copy until the agent's ACK.
+    #[test]
+    fn broker_keeps_its_copy_until_the_agent_acks() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = serve_one(
+                server,
+                |_| Ok(()),
+                |_| {
+                    bind_listener(&BindRequest {
+                        ip: Ipv4Addr::LOCALHOST,
+                        port: 0,
+                    })
+                },
+            );
+            let _ = tx.send(r);
+        });
+        client.write_all(b"BIND 127.100.0.3 443\n").unwrap();
+        // A slow agent: it takes the fd late. The broker must still be
+        // holding its copy (i.e. serve_one has not returned).
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            rx.try_recv().is_err(),
+            "broker closed its copy before the agent took the fd"
+        );
+        let mut buf = [0u8; 8];
+        let (n, fd) = recv_fd(&client, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"OK\n");
+        let l = std::net::TcpListener::from(fd.expect("fd"));
+        client.write_all(&[ACK]).unwrap();
+        let done = rx
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .expect("broker did not finish after the ACK")
+            .expect("served");
+        assert!(!done.contains("no ACK"), "{done}");
+        assert!(!listener_is_damaged(&l));
+        let _c = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        assert!(l.accept().is_ok());
+    }
+
+    /// An agent from before the ACK closes the connection once it has the
+    /// fd: that must end the broker's wait at once, not after the timeout.
+    #[test]
+    fn agent_without_ack_does_not_hold_the_broker() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = serve_one(
+                server,
+                |_| Ok(()),
+                |_| {
+                    bind_listener(&BindRequest {
+                        ip: Ipv4Addr::LOCALHOST,
+                        port: 0,
+                    })
+                },
+            );
+            let _ = tx.send(r);
+        });
+        client.write_all(b"BIND 127.100.0.3 443\n").unwrap();
+        let mut buf = [0u8; 8];
+        let (_, fd) = recv_fd(&client, &mut buf).unwrap();
+        let _l = std::net::TcpListener::from(fd.expect("fd"));
+        drop(client);
+        let done = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("broker waited for an ACK that an old agent never sends")
+            .expect("served");
+        assert!(done.contains("no ACK"), "{done}");
+    }
+
+    /// The client side of the same bug, against a broker from before the
+    /// ACK (still running until the next reboot after an app update): the
+    /// agent must notice a damaged socket and report it as retryable.
+    #[test]
+    fn damaged_listener_is_detected() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(!listener_is_damaged(&l));
+        // shutdown(read) is what the kernel does to an in-flight socket it
+        // gives up on; it empties the receive buffer the same way.
+        socket2::SockRef::from(&l)
+            .shutdown(std::net::Shutdown::Read)
+            .ok();
+        if matches!(socket2::SockRef::from(&l).recv_buffer_size(), Ok(0)) {
+            assert!(listener_is_damaged(&l));
+        }
+    }
+
+    /// The real thing, many times: a listener passed through a broker and
+    /// taken late by the agent must work. Before the ACK this failed every
+    /// time on macOS (200 of 200 on a Mac Studio).
+    #[test]
+    fn late_receive_still_gets_a_working_listener() {
+        for _ in 0..25 {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let t = std::thread::spawn(move || {
+                serve_one(
+                    server,
+                    |_| Ok(()),
+                    |_| {
+                        bind_listener(&BindRequest {
+                            ip: Ipv4Addr::LOCALHOST,
+                            port: 0,
+                        })
+                    },
+                )
+            });
+            client.write_all(b"BIND 127.100.0.3 443\n").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let mut buf = [0u8; 8];
+            let (_, fd) = recv_fd(&client, &mut buf).unwrap();
+            let l = std::net::TcpListener::from(fd.expect("fd"));
+            client.write_all(&[ACK]).unwrap();
+            assert!(t.join().unwrap().is_ok());
+            assert!(!listener_is_damaged(&l), "listener damaged in transit");
+            let mut c = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+            let (mut a, _) = l.accept().unwrap();
+            c.write_all(b"ping").unwrap();
+            let mut got = [0u8; 4];
+            a.read_exact(&mut got)
+                .expect("accepted connection was reset");
+            assert_eq!(&got, b"ping");
+        }
     }
 
     /// CodeRabbit #132: the socket is 0666, so any local process can connect

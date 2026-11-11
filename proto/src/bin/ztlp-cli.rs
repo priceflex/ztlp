@@ -515,19 +515,6 @@ enum Commands {
         #[arg(long)]
         ns_register_name: Option<String>,
 
-        /// Ed25519 public key (64 hex) of the name server this gateway trusts
-        /// for identity/authorization lookups (issue #128). When set, every
-        /// DEVICE / USER / GROUP record the gateway reads is signature-
-        /// verified before it is used for admission or identity headers; a
-        /// reply that does not verify is treated as not found (can only
-        /// deny). When unset, the gateway runs in legacy mode (no signature
-        /// check) — the pre-#128 behavior.
-        ///
-        /// Obtain the key from the admin panel's install script
-        /// (`zones.ns_pubkey_hex`) or `ztlp admin enroll` output.
-        #[arg(long)]
-        ns_key: Option<String>,
-
         /// Enable HTTP X-ZTLP-* header injection for passwordless admin auth.
         ///
         /// When set, the FIRST HTTP request on each forwarded TCP connection
@@ -549,6 +536,17 @@ enum Commands {
         /// Example: `--admin-pubkey-email deadbeef...=ops@trs.com`
         #[arg(long, value_name = "HEX=EMAIL")]
         admin_pubkey_email: Vec<String>,
+
+        /// Ed25519 public key (64 hex) of the name server this gateway trusts
+        /// (issue #128). When set, every NS record the gateway uses for
+        /// admission or identity headers (pubkey->device KEY, DEVICE, USER,
+        /// GROUP) must be signed by this key, and the KEY record must bind the
+        /// peer's own tunnel key; anything else reads as not found (deny).
+        /// Requires `--ns-server`; a bad key or an unresolvable NS aborts
+        /// startup. Get it from the admin panel (zone page) or from the NS log
+        /// line "NS registration public key".
+        #[arg(long, value_name = "HEX")]
+        ns_key: Option<String>,
 
         /// Enable NS-coordinated hole punching on the gateway side.
         ///
@@ -2560,17 +2558,6 @@ const NS_QUERY_PAD_BYTES: usize = 256;
 /// Docker Compose / service-name deployments (e.g. `ns:23096` on a
 /// compose network) where the NS is reached by service name rather than IP.
 ///
-/// Resolve an `ip:port` NS address without a reactor (for sync call sites;
-/// mirrors the fast path of `resolve_ns_address`).
-fn resolve_ns_address_sync(ns_server: &str) -> Option<SocketAddr> {
-    let mut host_port = ns_server.rsplitn(2, ':');
-    let port_str = host_port.next()?;
-    let host = host_port.next()?;
-    let port: u16 = port_str.parse().ok()?;
-    let ip: std::net::IpAddr = host.parse().ok()?;
-    Some(SocketAddr::new(ip, port))
-}
-
 /// TDD-pinned by `mod tests::resolve_ns_address` (3 tests).
 async fn resolve_ns_address(ns_server: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     // Fast path: already an IP:PORT.
@@ -2803,59 +2790,6 @@ async fn ns_pubkey_lookup(
     }
 }
 
-/// NS resolver for the policy engine that verifies every GROUP / USER /
-/// DEVICE reply against the pinned NS key before it can influence a policy
-/// decision (#128). Without a pinned key (legacy mode) it behaves exactly
-/// like the pre-#128 `UdpNsResolver`.
-struct VerifiedNsResolver {
-    ns: std::net::SocketAddr,
-    ns_key: Option<[u8; 32]>,
-}
-
-impl ztlp_proto::policy::NsResolver for VerifiedNsResolver {
-    fn group_members(
-        &self,
-        group_name: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + '_>> {
-        let ns = self.ns;
-        let key = self.ns_key;
-        let name = group_name.to_string();
-        Box::pin(async move {
-            let lookup = ztlp_proto::gateway_ns_verify::VerifiedNsLookup::from_key(key);
-            match lookup.record(ns, &name, 0x12).await {
-                Some(rec) => rec.data_str_array("members").unwrap_or_default(),
-                None => Vec::new(),
-            }
-        })
-    }
-
-    fn user_role(
-        &self,
-        user_name: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
-        let ns = self.ns;
-        let key = self.ns_key;
-        let name = user_name.to_string();
-        Box::pin(async move {
-            let lookup = ztlp_proto::gateway_ns_verify::VerifiedNsLookup::from_key(key);
-            lookup.record(ns, &name, 0x11).await.and_then(|r| r.data_str("role"))
-        })
-    }
-
-    fn device_owner(
-        &self,
-        device_name: &str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
-        let ns = self.ns;
-        let key = self.ns_key;
-        let name = device_name.to_string();
-        Box::pin(async move {
-            let lookup = ztlp_proto::gateway_ns_verify::VerifiedNsLookup::from_key(key);
-            lookup.record(ns, &name, 0x10).await.and_then(|r| r.data_str("owner"))
-        })
-    }
-}
-
 // ── NS Resolver for Policy Engine ────────────────────────────────────────
 //
 // Queries ZTLP-NS for GROUP, USER, and DEVICE records to support
@@ -2870,15 +2804,70 @@ use ztlp_proto::policy::NsResolver;
 /// because they're the obvious wire-up for the multi-session listener
 /// path when that path is implemented.
 #[allow(dead_code)]
+/// The NS a gateway trusts for identity/authorization lookups, resolved once
+/// at startup (#128). `lookup` carries the pinned `--ns-key` (or legacy mode).
+#[derive(Clone, Copy)]
+struct NsTrust {
+    lookup: ztlp_proto::gateway_ns_verify::VerifiedNsLookup,
+    addr: SocketAddr,
+}
+
+/// Startup decision for #128, fail closed:
+/// * `--ns-key` without `--ns-server`, or with one that does not resolve, is
+///   an error (never silently run unverified);
+/// * with a resolvable `--ns-server`, every identity/authorization lookup
+///   goes through the binding/name/type-checked path (signature-verified
+///   when a key is pinned);
+/// * legacy (no key) with an unresolvable NS keeps the old per-query path.
+async fn build_ns_trust(
+    ns_server: &Option<String>,
+    ns_key: Option<[u8; 32]>,
+) -> Result<Option<NsTrust>, String> {
+    let lookup = ztlp_proto::gateway_ns_verify::VerifiedNsLookup::from_key(ns_key);
+    let Some(ns) = ns_server.as_deref() else {
+        return match ns_key {
+            Some(_) => Err("--ns-key needs --ns-server (the name server it pins)".into()),
+            None => Ok(None),
+        };
+    };
+    match resolve_ns_address(ns).await {
+        Ok(addr) => Ok(Some(NsTrust { lookup, addr })),
+        Err(e) if ns_key.is_some() => {
+            Err(format!("--ns-key: cannot resolve --ns-server {ns}: {e}"))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Peer tunnel pubkey -> NS device name. Through the trust when there is one
+/// (the KEY record must bind exactly this key); else the legacy lookup.
+async fn peer_ns_name(
+    trust: Option<&NsTrust>,
+    ns_server: &str,
+    pubkey_hex: &str,
+) -> Option<String> {
+    match trust {
+        Some(t) => t.lookup.pubkey_name(t.addr, pubkey_hex).await,
+        None => ns_pubkey_lookup(pubkey_hex, ns_server).await.ok().flatten(),
+    }
+}
+
 struct UdpNsResolver {
     ns_server: String,
+    /// #128: when set, GROUP/USER/DEVICE records come from the checked path.
+    trust: Option<NsTrust>,
 }
 
 #[allow(dead_code)]
 impl UdpNsResolver {
     fn new(ns_server: &str) -> Self {
+        Self::with_trust(ns_server, None)
+    }
+
+    fn with_trust(ns_server: &str, trust: Option<NsTrust>) -> Self {
         Self {
             ns_server: ns_server.to_string(),
+            trust,
         }
     }
 }
@@ -2890,7 +2879,16 @@ impl NsResolver for UdpNsResolver {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + '_>> {
         let group = group_name.to_string();
         let ns = self.ns_server.clone();
+        let trust = self.trust;
         Box::pin(async move {
+            if let Some(t) = trust {
+                return t
+                    .lookup
+                    .record(t.addr, &group, ztlp_proto::gateway_ns_verify::RECORD_GROUP)
+                    .await
+                    .and_then(|r| r.data_str_array("members"))
+                    .unwrap_or_default();
+            }
             // Query GROUP record (type 0x12)
             match ns_query_raw(&group, &ns, 0x12).await {
                 Ok(Some(result)) => {
@@ -2908,7 +2906,15 @@ impl NsResolver for UdpNsResolver {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
         let user = user_name.to_string();
         let ns = self.ns_server.clone();
+        let trust = self.trust;
         Box::pin(async move {
+            if let Some(t) = trust {
+                return t
+                    .lookup
+                    .record(t.addr, &user, ztlp_proto::gateway_ns_verify::RECORD_USER)
+                    .await
+                    .and_then(|r| r.data_str("role"));
+            }
             // Query USER record (type 0x11)
             match ns_query_raw(&user, &ns, 0x11).await {
                 Ok(Some(result)) => cbor_extract_string(&result.data_bytes, "role"),
@@ -2923,7 +2929,19 @@ impl NsResolver for UdpNsResolver {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
         let device = device_name.to_string();
         let ns = self.ns_server.clone();
+        let trust = self.trust;
         Box::pin(async move {
+            if let Some(t) = trust {
+                return t
+                    .lookup
+                    .record(
+                        t.addr,
+                        &device,
+                        ztlp_proto::gateway_ns_verify::RECORD_DEVICE,
+                    )
+                    .await
+                    .and_then(|r| r.data_str("owner"));
+            }
             // Query DEVICE record (type 0x10)
             match ns_query_raw(&device, &ns, 0x10).await {
                 Ok(Some(result)) => cbor_extract_string(&result.data_bytes, "owner"),
@@ -5262,7 +5280,7 @@ async fn resolve_identity_bundle(
     admin_map: &std::collections::HashMap<String, String>,
     policy: &PolicyEngine,
     audience: &str,
-    ns_key: Option<[u8; 32]>,
+    trust: Option<NsTrust>,
 ) -> ztlp_proto::http_injector::IdentityBundle {
     let pubkey_lower = pubkey_hex.to_lowercase();
     let fingerprint = pubkey_lower.chars().take(16).collect::<String>();
@@ -5279,10 +5297,11 @@ async fn resolve_identity_bundle(
         }
     };
 
-    // 1. pubkey -> device_name (reverse lookup, NS query type 0x05).
-    let device_name = match ns_pubkey_lookup(&pubkey_lower, &ns).await {
-        Ok(Some(name)) => name,
-        _ => {
+    // 1. pubkey -> device_name (reverse lookup, NS query type 0x05). With a
+    // trust (#128) the KEY record must bind exactly this pubkey.
+    let device_name = match peer_ns_name(trust.as_ref(), &ns, &pubkey_lower).await {
+        Some(name) => name,
+        None => {
             // No DEVICE enrolled for this pubkey in NS — fall back to the
             // static admin map so existing `--admin-map` deployments keep
             // working while NS-backed enrollment rolls out.
@@ -5294,47 +5313,60 @@ async fn resolve_identity_bundle(
         }
     };
 
-    // 2. device_name -> DEVICE record (owner, zone, assurance), verified
-    // against the pinned NS key when one was given (#128). An unverifiable
-    // record is treated as not found: without a trusted owner this bundle
-    // carries no identity at all, so a forged record can only ever deny.
-    // 2. device_name -> DEVICE record (owner, zone, assurance), verified
-    // against the pinned NS key when one was given (#128). An unverifiable
-    // record is treated as not found: without a trusted owner this bundle
-    // carries no identity at all, so a forged record can only ever deny.
-    let ns_addr = match resolve_ns_address(&ns).await {
-        Ok(a) => a,
-        Err(_) => {
-            return ztlp_proto::http_injector::IdentityBundle {
-                owner_email: admin_map.get(&pubkey_lower).cloned().unwrap_or_default(),
-                pubkey_fingerprint: fingerprint,
-                ..Default::default()
-            };
-        }
-    };
-    let lookup = ztlp_proto::gateway_ns_verify::VerifiedNsLookup::from_key(ns_key);
-    let (owner, zone, assurance) = match lookup.record(ns_addr, &device_name, 0x10).await {
-        Some(rec) => {
-            let owner = rec.data_str("owner").unwrap_or_default();
-            let zone = rec.data_str("zone").unwrap_or_default();
+    // 2. device_name -> DEVICE record (owner, zone, assurance). With a trust
+    // (#128) the record is checked (signature when a key is pinned); one that
+    // does not pass reads as absent, so the bundle carries no NS identity.
+    if let Some(t) = trust {
+        let (owner, zone, assurance) = match t
+            .lookup
+            .record(
+                t.addr,
+                &device_name,
+                ztlp_proto::gateway_ns_verify::RECORD_DEVICE,
+            )
+            .await
+        {
+            Some(rec) => (
+                rec.data_str("owner").unwrap_or_default(),
+                rec.data_str("zone").unwrap_or_default(),
+                rec.data_str("assurance")
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ),
+            None => (String::new(), String::new(), "unknown".to_string()),
+        };
+        let resolver = UdpNsResolver::with_trust(&ns, Some(t));
+        let group = policy.matched_group_for(&owner, audience, &resolver).await;
+        return ztlp_proto::http_injector::IdentityBundle {
+            owner_email: if owner.is_empty() {
+                admin_map.get(&pubkey_lower).cloned().unwrap_or_default()
+            } else {
+                owner
+            },
+            device_name,
+            zone,
+            group: group.unwrap_or_default(),
+            assurance,
+            pubkey_fingerprint: fingerprint,
+        };
+    }
+    let (owner, zone, assurance) = match ns_query_raw(&device_name, &ns, 0x10).await {
+        Ok(Some(result)) => {
+            let owner = cbor_extract_string(&result.data_bytes, "owner").unwrap_or_default();
+            let zone = cbor_extract_string(&result.data_bytes, "zone").unwrap_or_default();
             // "assurance" is only present if it was recorded at enrollment
             // time (see agent/hardware_key.rs::assurance_level) — not
             // currently attested, so treat as advisory.
-            let assurance = rec.data_str("assurance").unwrap_or_else(|| "unknown".to_string());
+            let assurance = cbor_extract_string(&result.data_bytes, "assurance")
+                .unwrap_or_else(|| "unknown".to_string());
             (owner, zone, assurance)
         }
-        None => (String::new(), String::new(), "unknown".to_string()),
+        _ => (String::new(), String::new(), "unknown".to_string()),
     };
 
     // 3. owner + this service's policy rules -> which group: pattern (if
     // any) actually authorized access, so we can surface it without
-    // disclosing the owner's full group membership list. The resolver
-    // verifies every GROUP/USER/DEVICE reply it hands the policy engine
-    // (#128).
-    let resolver = VerifiedNsResolver {
-        ns: ns_addr,
-        ns_key,
-    };
+    // disclosing the owner's full group membership list.
+    let resolver = UdpNsResolver::new(&ns);
     let group = policy.matched_group_for(&owner, audience, &resolver).await;
 
     ztlp_proto::http_injector::IdentityBundle {
@@ -5370,7 +5402,6 @@ async fn cmd_listen(
     zone: Option<&str>,
     zone_hmac_secret_env: Option<&str>,
     ns_register_name: Option<&str>,
-    ns_key: Option<&str>,
     http_inject_headers: bool,
     header_hmac_secret: Option<&str>,
     admin_pubkey_email: &[String],
@@ -5379,6 +5410,7 @@ async fn cmd_listen(
     advertise_interface: &[String],
     no_advertise_interface: &[String],
     advertise_all_interfaces: bool,
+    ns_key: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::quic_transport::{tokio_endpoint::QuicEndpoint, QuicEndpointConfig};
 
@@ -5386,36 +5418,31 @@ async fn cmd_listen(
     // below (identity bundle resolution needs NS server + policy engine
     // available inside `tokio::spawn`).
     let ns_server_owned: Option<String> = ns_server.clone();
-    // #128: the NS public key this gateway trusts for identity/authorization
-    // lookups. Parsed once; a bad value aborts startup (fail closed) rather
-    // than silently running unverified.
+    // #128: which NS this gateway trusts, decided ONCE and fail closed — a
+    // bad --ns-key, or one whose --ns-server cannot be resolved, aborts
+    // startup instead of running unverified.
     let ns_key: Option<[u8; 32]> = match ns_key {
-        Some(h) => match parse_ns_key_hex(h) {
-            Ok(k) => Some(k),
-            Err(e) => {
-                eprintln!("✗ {}", c_red("--ns-key"));
-                eprintln!("  {e}");
-                return Err(e.into());
-            }
-        },
+        Some(h) => Some(
+            ztlp_proto::gateway_ns_verify::parse_ns_key_hex(h).map_err(|e| {
+                eprintln!("{} {e}", c_red("✗"));
+                e
+            })?,
+        ),
         None => None,
     };
-    // Resolved NS address for the verified-lookup path (the QUIC admission
-    // block and the identity bundle are the sync call sites; DNS lookups
-    // would need the async resolver, which is only supported by the 0x01
-    // record queries via the async `resolve_ns_address` in the legacy path).
-    let ns_key_resolved: Option<std::net::SocketAddr> = ns_key
-        .is_some()
-        .then(|| ns_server.as_deref().and_then(resolve_ns_address_sync))
-        .flatten();
-    if ns_key.is_some() && ns_key_resolved.is_none() {
-        eprintln!(
-            "{} --ns-key was given but --ns-server is not a plain ip:port; identity \
-             lookups will run in legacy (unverified) mode.",
-            c_red("⚠")
-        );
+    let ns_trust: Option<NsTrust> = build_ns_trust(ns_server, ns_key).await.map_err(|e| {
+        eprintln!("{} {e}", c_red("✗"));
+        e
+    })?;
+    match (ns_key.is_some(), ns_trust.as_ref()) {
+        (true, Some(t)) => eprintln!(
+            "  NS records: signature-verified against the pinned --ns-key (NS {})",
+            t.addr
+        ),
+        _ => eprintln!(
+            "  NS records: NOT signature-verified (no --ns-key; pass the zone's NS key to pin it)"
+        ),
     }
-    let ns_key_pinned: Option<[u8; 32]> = ns_key;
     // No --policy = allow all; a --policy file that does not load = deny all
     // (it used to fall back to allow-all, silently opening every service).
     let policy_engine: std::sync::Arc<PolicyEngine> =
@@ -5976,24 +6003,17 @@ async fn cmd_listen(
             let admission = tokio::time::timeout(QUIC_ADMISSION_TIMEOUT, async {
                 let peer_identity = match ns_server_owned.as_deref() {
                     Some(ns) if !peer_pubkey_hex.is_empty() => {
-                        // 0x05 pubkey->name is unsigned by design (module docs
-                        // in gateway_ns_verify); the name only becomes an
-                        // identity after the signed lookups below.
-                        match ns_pubkey_lookup(&peer_pubkey_hex, ns).await {
-                            Ok(Some(name)) => name,
-                            _ => peer_pubkey_hex.clone(),
-                        }
+                        peer_ns_name(ns_trust.as_ref(), ns, &peer_pubkey_hex)
+                            .await
+                            .unwrap_or_else(|| peer_pubkey_hex.clone())
                     }
                     _ => peer_pubkey_hex.clone(),
                 };
-                // #128: admission GROUP/USER/DEVICE lookups are verified
-                // against the pinned NS key (legacy when none is pinned).
-                let admission_resolver = ns_server_owned.as_ref().and_then(|ns| {
-                    resolve_ns_address_sync(ns).map(|addr| VerifiedNsResolver {
-                        ns: addr,
-                        ns_key,
-                    })
-                });
+                // #128: GROUP/USER/DEVICE records for group:/role: rules come
+                // through the trust (signature-checked when --ns-key is set).
+                let admission_resolver = ns_server_owned
+                    .as_deref()
+                    .map(|ns| UdpNsResolver::with_trust(ns, ns_trust));
                 let admitted = policy_engine
                     .authorize_peer(
                         &peer_identity,
@@ -6050,7 +6070,7 @@ async fn cmd_listen(
                     &admin_map,
                     &policy_engine,
                     &audience,
-                    ns_key_pinned,
+                    ns_trust,
                 )
                 .await
             } else {
@@ -6383,10 +6403,7 @@ async fn handle_new_session(
         pipeline.register_session(session);
     }
 
-    // Resolve client identity for policy.
-    // #128: when a --ns-key is pinned, the pubkey->name lookup uses the
-    // verified-lookup path (the 0x05 reply is unsigned by design, but the
-    // name it yields is only ever trusted after the signed lookups below).
+    // Resolve client identity for policy
     let client_identity = if let (Some(ns), Some(pk_hex)) = (ns_server.as_ref(), &peer_pubkey_hex) {
         match ns_pubkey_lookup(pk_hex, ns).await {
             Ok(Some(name)) => name,
@@ -6423,9 +6440,7 @@ async fn handle_new_session(
         }
     };
 
-    // Policy check — use the verified async resolver for group:/role:
-    // patterns (#128): every GROUP/USER/DEVICE reply is signature-checked
-    // before it can influence admission.
+    // Policy check — use async resolver for group:/role: patterns
     let policy_allowed = if policy.has_identity_patterns() {
         if let Some(ns) = ns_server.as_ref() {
             let resolver = UdpNsResolver::new(ns);
@@ -14764,10 +14779,10 @@ async fn main() {
             zone,
             zone_hmac_secret_env,
             ns_register_name,
-            ns_key,
             http_inject_headers,
             header_hmac_secret,
             admin_pubkey_email,
+            ns_key,
             quic,
             punch,
             no_punch,
@@ -14803,7 +14818,6 @@ async fn main() {
                 zone.as_deref(),
                 zone_hmac_secret_env.as_deref(),
                 ns_register_name.as_deref(),
-                ns_key.as_deref(),
                 *http_inject_headers,
                 header_hmac_secret.as_deref(),
                 admin_pubkey_email,
@@ -14812,6 +14826,7 @@ async fn main() {
                 advertise_interface,
                 no_advertise_interface,
                 *advertise_all_interfaces,
+                ns_key.as_deref(),
             )
             .await
         }
@@ -18162,113 +18177,150 @@ mod tests {
             assert_eq!(resolver.calls(), 1, "should NOT retry after user interrupt");
         }
     }
-}
 
-#[cfg(test)]
-mod ns_key_gateway_tests {
-    use super::*;
+    // ── #128: gateway NS trust wiring ─────────────────────────────────
 
-    /// Build a signed NS reply (`0x02 || Record.encode`) for a DEVICE record.
-    fn signed_device_reply(name: &str, owner: &str) -> (Vec<u8>, String) {
-        let sk = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
-        let mut canonical = Vec::new();
-        canonical.push(0x10);
-        let nb = name.as_bytes();
-        canonical.extend_from_slice(&(nb.len() as u16).to_be_bytes());
-        canonical.extend_from_slice(nb);
-        // CBOR map {owner: <owner>}
-        let map = ciborium::value::Value::Map(vec![(
-            ciborium::value::Value::Text("owner".into()),
-            ciborium::value::Value::Text(owner.into()),
-        )]);
-        let mut cbor = Vec::new();
-        ciborium::ser::into_writer(&map, &mut cbor).unwrap();
-        canonical.extend_from_slice(&(cbor.len() as u32).to_be_bytes());
-        canonical.extend_from_slice(&cbor);
-        let now = 4_102_400_000u64;
-        canonical.extend_from_slice(&now.to_be_bytes());
-        canonical.extend_from_slice(&86_400u32.to_be_bytes());
-        canonical.extend_from_slice(&now.to_be_bytes());
-        let sig = sk.sign(&canonical);
-        let vk = sk.verifying_key().to_bytes();
-        let mut out = vec![0x02];
-        out.extend_from_slice(&canonical);
-        out.extend_from_slice(&64u16.to_be_bytes());
-        out.extend_from_slice(sig.to_bytes());
-        out.extend_from_slice(&32u16.to_be_bytes());
-        out.extend_from_slice(&vk);
-        (out, hex::encode(vk))
+    const NS128_SEED: [u8; 32] = [0x42; 32];
+    const NS128_OTHER: [u8; 32] = [0x27; 32];
+    const NS128_PEER: &str = "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44";
+    const NS128_VICTIM: &str = "0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff";
+
+    fn ns128_key(seed: [u8; 32]) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes()
     }
 
-    /// Run a throwaway UDP socket that answers the next datagram with `reply`.
-    async fn serve(reply: Vec<u8>) -> std::net::SocketAddr {
-        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    fn ns128_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn ns128_cbor(key: &str, v: ciborium::value::Value) -> Vec<u8> {
+        let map = ciborium::value::Value::Map(vec![(ciborium::value::Value::Text(key.into()), v)]);
+        let mut out = Vec::new();
+        ciborium::ser::into_writer(&map, &mut out).unwrap();
+        out
+    }
+
+    /// A UDP "NS" answering every query with `reply` (several lookups may hit it).
+    async fn ns128_fake(reply: Vec<u8>) -> SocketAddr {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65535];
-            let (n, from) = sock.recv_from(&mut buf).await.unwrap();
-            let _ = sock.send_to(&reply, from);
-            let _ = n;
+            while let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                let _ = sock.send_to(&reply, from).await;
+            }
         });
         addr
     }
 
-    #[tokio::test]
-    async fn verified_resolver_trusts_a_good_record_and_deny_only_on_bad() {
-        let (reply, key) = signed_device_reply("dev1.ztlp", "a@x.ztlp");
-        let addr = serve(reply.clone()).await;
-        let key_bytes: [u8; 32] = hex::decode(&key).unwrap().try_into().unwrap();
-        let resolver = VerifiedNsResolver {
-            ns: addr,
-            ns_key: Some(key_bytes),
-        };
-        assert_eq!(resolver.device_owner("dev1.ztlp").await.as_deref(), Some("a@x.ztlp"));
-
-        // Same reply, wrong pinned key -> None (deny).
-        let other = ed25519_dalek::SigningKey::from_bytes(&[0x27; 32]);
-        let other_bytes = *other.verifying_key().as_bytes();
-        let addr2 = serve(reply).await;
-        let bad = VerifiedNsResolver {
-            ns: addr2,
-            ns_key: Some(other_bytes),
-        };
-        assert!(bad.device_owner("dev1.ztlp").await.is_none());
+    async fn ns128_pinned_trust(addr: SocketAddr) -> NsTrust {
+        build_ns_trust(&Some(addr.to_string()), Some(ns128_key(NS128_SEED)))
+            .await
+            .unwrap()
+            .expect("a pinned key with a usable --ns-server yields a trust")
     }
 
     #[tokio::test]
-    async fn legacy_mode_without_a_key_still_returns_the_owner() {
-        let (reply, _key) = signed_device_reply("dev1.ztlp", "a@x.ztlp");
-        let addr = serve(reply).await;
-        let resolver = VerifiedNsResolver {
-            ns: addr,
-            ns_key: None,
-        };
+    async fn ns_trust_startup_fails_closed_when_a_key_is_pinned() {
+        let key = Some(ns128_key(NS128_SEED));
+        assert!(
+            build_ns_trust(&None, key).await.is_err(),
+            "key without --ns-server"
+        );
+        assert!(
+            build_ns_trust(&Some("no-such-ns.invalid:23096".into()), key)
+                .await
+                .is_err(),
+            "key with an unresolvable --ns-server must not run unverified"
+        );
+        let t = build_ns_trust(&Some("127.0.0.1:23096".into()), key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(t.lookup.verifies_signatures());
+        // Legacy (no key): an unresolvable NS keeps the old per-query path.
+        assert!(
+            build_ns_trust(&Some("no-such-ns.invalid:23096".into()), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(build_ns_trust(&None, None).await.unwrap().is_none());
+    }
+
+    /// The #128 attack end to end at the gateway's pubkey->name step: a
+    /// validly NS-signed KEY record for a VICTIM's key must not name the peer.
+    #[tokio::test]
+    async fn pinned_peer_name_rejects_a_replayed_key_record() {
+        let victim = ztlp_proto::gateway_ns_verify::encode_signed_reply_for_tests(
+            NS128_SEED,
+            "ceo-laptop.acme.ztlp",
+            0x01,
+            &ns128_cbor(
+                "public_key",
+                ciborium::value::Value::Text(NS128_VICTIM.into()),
+            ),
+            ns128_now(),
+            86_400,
+        );
+        let addr = ns128_fake(victim).await;
+        let trust = ns128_pinned_trust(addr).await;
         assert_eq!(
-            resolver.device_owner("dev1.ztlp").await.as_deref(),
-            Some("a@x.ztlp")
+            peer_ns_name(Some(&trust), &addr.to_string(), NS128_PEER).await,
+            None
         );
-    }
-
-    #[test]
-    fn ns_key_flag_rejects_bad_hex() {
-        assert!(parse_ns_key_hex("zz").is_err());
-        assert!(parse_ns_key_hex("abcd").is_err());
-        let good = parse_ns_key_hex(
-            "8339e10261b7135a9b92ed5f3b342b26fb7195a7950392e344eb6e11b8275a2a7",
-        );
-        assert!(good.is_ok());
     }
 
     #[tokio::test]
-    async fn verified_pubkey_lookup_parses_name_reply() {
-        // 0x05 reply shape: <<0x02, name_len:16, name>>
-        let name = b"dev1.ztlp";
-        let mut reply = vec![0x02];
-        reply.extend_from_slice(&(name.len() as u16).to_be_bytes());
-        reply.extend_from_slice(name);
-        let addr = serve(reply).await;
-        let lookup = VerifiedNsLookup::default();
-        let got = lookup.pubkey_name(addr, "aa").await;
-        assert_eq!(got.map(|g| g.name), Some("dev1.ztlp".to_string()));
+    async fn pinned_policy_resolver_ignores_records_from_another_signer() {
+        let group = ztlp_proto::gateway_ns_verify::encode_signed_reply_for_tests(
+            NS128_OTHER,
+            "eng.acme.ztlp",
+            0x12,
+            &ns128_cbor(
+                "members",
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Text(
+                    "a@acme.ztlp".into(),
+                )]),
+            ),
+            ns128_now(),
+            86_400,
+        );
+        let addr = ns128_fake(group).await;
+        let trust = ns128_pinned_trust(addr).await;
+        let r = UdpNsResolver::with_trust(&addr.to_string(), Some(trust));
+        assert!(
+            r.group_members("eng.acme.ztlp").await.is_empty(),
+            "unverified GROUP must read as empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_policy_resolver_reads_signed_records() {
+        let group = ztlp_proto::gateway_ns_verify::encode_signed_reply_for_tests(
+            NS128_SEED,
+            "eng.acme.ztlp",
+            0x12,
+            &ns128_cbor(
+                "members",
+                ciborium::value::Value::Array(vec![ciborium::value::Value::Text(
+                    "a@acme.ztlp".into(),
+                )]),
+            ),
+            ns128_now(),
+            86_400,
+        );
+        let addr = ns128_fake(group).await;
+        let trust = ns128_pinned_trust(addr).await;
+        let r = UdpNsResolver::with_trust(&addr.to_string(), Some(trust));
+        assert_eq!(
+            r.group_members("eng.acme.ztlp").await,
+            vec!["a@acme.ztlp".to_string()]
+        );
     }
 }

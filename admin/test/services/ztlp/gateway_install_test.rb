@@ -154,4 +154,42 @@ class GatewayInstallTest < ActiveSupport::TestCase
       Ztlp::GatewayInstall.script(@gw, relay_secret: "x\nZTLP_ENV\nrm -rf /", header_secret: HEADER)
     end
   end
+
+  # Issue #128: the gateway verifies NS record signatures when it is given the zone's NS key.
+  NS_KEY = "5a" * 32
+
+  def compose_args = Ztlp::GatewayInstall.compose(@gw).lines.grep(/\A\s+- /).map { |l| l.strip.delete_prefix("- ").delete('"') }
+
+  test "pins the zone's NS key on a gateway release that supports --ns-key" do
+    @zone.update!(ns_pubkey_hex: NS_KEY)
+    @gw.update!(image_tag: "ztlp-gateway-rust:v#{Ztlp::GatewayInstall::NS_KEY_MIN_VERSION}")
+    args = compose_args
+    i = args.index("--ns-key")
+    assert i, "expected --ns-key in #{args.inspect}"
+    assert_equal NS_KEY, args[i + 1]
+  end
+
+  test "never passes --ns-key to an older release: it would refuse to start" do
+    @zone.update!(ns_pubkey_hex: NS_KEY)
+    @gw.update!(image_tag: "ztlp-gateway-rust:v0.36.0")
+    refute_includes compose_args, "--ns-key"
+  end
+
+  test "no --ns-key for a custom image whose version is unknown" do
+    @zone.update!(ns_pubkey_hex: NS_KEY)
+    @gw.update!(image_tag: "registry.example/gw:latest")
+    refute_includes compose_args, "--ns-key"
+  end
+
+  test "no --ns-key when the zone has no NS key yet" do
+    @zone.update!(ns_pubkey_hex: nil)
+    @gw.update!(image_tag: "ztlp-gateway-rust:v#{Ztlp::GatewayInstall::NS_KEY_MIN_VERSION}")
+    refute_includes compose_args, "--ns-key"
+  end
+
+  test "a malformed zone NS key is refused, not written into the compose file" do
+    @zone.update_columns(ns_pubkey_hex: "zz; rm -rf /")
+    @gw.update!(image_tag: "ztlp-gateway-rust:v#{Ztlp::GatewayInstall::NS_KEY_MIN_VERSION}")
+    refute_includes compose_args, "--ns-key"
+  end
 end

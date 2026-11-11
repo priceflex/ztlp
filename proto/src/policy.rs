@@ -565,10 +565,8 @@ fn extract_string_array(line: &str) -> Option<Vec<String>> {
 // ==========================================================================
 
 #[cfg(test)]
-    use ed25519_dalek::SigningKey;
 mod tests {
-    use ed25519_dalek::SigningKey;
-use super::*;
+    use super::*;
 
     #[test]
     fn test_matches_pattern_exact() {
@@ -1299,59 +1297,3 @@ allow = ["group:techs@tunnel.ztlp"]
         );
     }
 }
-
-    #[tokio::test]
-    async fn verified_resolver_deny_only_on_bad_signature() {
-        // #128: a GROUP/USER/DEVICE reply that does not verify against the
-        // pinned NS key must read as NOT FOUND (deny), never as data.
-        struct FakeVerified {
-            ok: bool,
-        }
-        impl NsResolver for FakeVerified {
-            fn group_members(
-                &self,
-                _g: &str,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send + '_>> {
-                Box::pin(async move {
-                    if self.ok { vec!["a@x.ztlp".into()] } else { vec![] }
-                })
-            }
-            fn user_role(
-                &self,
-                _u: &str,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
-                Box::pin(async move { None })
-            }
-            fn device_owner(
-                &self,
-                _d: &str,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
-                Box::pin(async move {
-                    if self.ok { Some("a@x.ztlp".into()) } else { None }
-                })
-            }
-        }
-        let engine = PolicyEngine::from_toml(
-            r#"default = "deny"
-
-[[services]]
-name = "svc.ztlp"
-allow = ["group:staff"]
-"#,
-        )
-        .unwrap();
-        let good = FakeVerified { ok: true };
-        assert!(
-            engine
-                .authorize_async("dev1.ztlp", "svc.ztlp", &good)
-                .await
-        );
-        // Unverifiable reply -> owner reads None -> the group rule cannot
-        // match -> deny.
-        let bad = FakeVerified { ok: false };
-        assert!(
-            !engine
-                .authorize_async("dev1.ztlp", "svc.ztlp", &bad)
-                .await
-        );
-    }

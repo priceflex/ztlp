@@ -19,7 +19,11 @@
 //! * the pubkey reverse lookup must return a KEY record whose `public_key`
 //!   IS the peer's key (a validly signed record for someone else's key is a
 //!   replay, not an answer),
-//! * the record must carry the name and type that were asked for.
+//! * the record must carry the name (ASCII case-insensitive, as the NS
+//!   compares names) and type that were asked for,
+//! * a record the NS stored from an unauthenticated (dev/demo) registration
+//!   (`registered_unsigned: true`) is rejected — the NS signature on it
+//!   vouches for nothing.
 //!
 //! Any failure is "not found", so an unverifiable answer can only DENY.
 //! Without a pinned key (legacy mode) signatures are not checked, but the
@@ -145,11 +149,17 @@ impl VerifiedNsLookup {
         if parsed.type_byte != record_type {
             return None;
         }
-        if name.is_some_and(|n| parsed.name != n) {
+        // The NS canonicalizes names to ASCII lowercase for lookup, so case
+        // differences are the same name.
+        if name.is_some_and(|n| !parsed.name.eq_ignore_ascii_case(n)) {
             return None;
         }
         match &self.key {
-            Some(key) => ns_verify::verify(&parsed, &[*key], unix_now()).ok(),
+            // A dev/demo NS signs UNAUTHENTICATED registrations with its own
+            // key too (`registered_unsigned`): that vouches for nothing.
+            Some(key) => ns_verify::verify(&parsed, &[*key], unix_now())
+                .ok()
+                .filter(|record| !record.registered_unsigned()),
             None => ns_verify::unverified(&parsed).ok(),
         }
     }
@@ -537,6 +547,58 @@ mod tests {
             .await
             .is_none());
         assert!(t0.elapsed() < NS_QUERY_TIMEOUT + Duration::from_secs(2));
+    }
+
+    /// CodeRabbit #131: the NS looks names up case-insensitively
+    /// (`NameValidator.canonicalize`), so a mixed-case rule name gets the
+    /// stored spelling back; that is the same name, not a mismatch.
+    #[tokio::test]
+    async fn record_name_match_ignores_ascii_case() {
+        let owner = cbor(&[("owner", text("a@acme.ztlp"))]);
+        let (ns, _q) = fake_ns(signed_reply(
+            NS_SEED,
+            "eng.acme.ztlp",
+            RECORD_GROUP,
+            &owner,
+            now(),
+            86_400,
+        ))
+        .await;
+        assert!(pinned()
+            .record(ns, "Eng.ACME.ztlp", RECORD_GROUP)
+            .await
+            .is_some());
+    }
+
+    /// CodeRabbit #131: a dev/demo NS signs records from UNAUTHENTICATED
+    /// registrations with its own key and marks them `registered_unsigned`;
+    /// that signature vouches for nothing, so a pinned gateway rejects them
+    /// (as the agent does). Legacy mode keeps accepting them.
+    #[tokio::test]
+    async fn pinned_mode_rejects_records_from_unauthenticated_registrations() {
+        let data = cbor(&[
+            ("public_key", text(PEER)),
+            ("registered_unsigned", ciborium::value::Value::Bool(true)),
+        ]);
+        let reply = signed_reply(
+            NS_SEED,
+            "laptop.acme.ztlp",
+            RECORD_KEY,
+            &data,
+            now(),
+            86_400,
+        );
+        let (ns, _q) = fake_ns(reply.clone()).await;
+        assert_eq!(pinned().pubkey_name(ns, PEER).await, None, "pinned");
+        let (ns, _q) = fake_ns(reply).await;
+        assert_eq!(
+            VerifiedNsLookup::default()
+                .pubkey_name(ns, PEER)
+                .await
+                .as_deref(),
+            Some("laptop.acme.ztlp"),
+            "legacy"
+        );
     }
 
     // ── --ns-key parsing ────────────────────────────────────────────────

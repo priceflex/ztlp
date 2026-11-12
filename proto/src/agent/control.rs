@@ -752,6 +752,24 @@ pub struct EnrollExecPlan {
 /// Returns `Err` with a user-facing message if the command is missing its
 /// required `enrollment_uri` field — enroll can't proceed without one.
 pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, String> {
+    build_enroll_exec_plan_with(cmd, false)
+}
+
+/// Should an app-driven enroll replace the existing identity? Only when the
+/// name server has definitively said this device is unknown or revoked —
+/// then the local identity is useless (whoami: Device/Person empty) and
+/// `ztlp setup` would otherwise refuse with "already enrolled". `setup
+/// --force` backs the old files up to *.bak first. A failed check-in
+/// (network) or a healthy one never replaces anything.
+pub fn enroll_should_replace_identity(last_checkin_state: Option<&str>) -> bool {
+    matches!(last_checkin_state, Some("not_registered") | Some("revoked"))
+}
+
+/// [`build_enroll_exec_plan`] with `replace_existing` -> `--force`.
+pub fn build_enroll_exec_plan_with(
+    cmd: &ControlCommand,
+    replace_existing: bool,
+) -> Result<EnrollExecPlan, String> {
     let uri = cmd
         .enrollment_uri
         .as_deref()
@@ -764,6 +782,9 @@ pub fn build_enroll_exec_plan(cmd: &ControlCommand) -> Result<EnrollExecPlan, St
         uri.to_string(),
         "--yes".to_string(),
     ];
+    if replace_existing {
+        args.push("--force".to_string());
+    }
 
     if let Some(name) = cmd.name.as_deref().filter(|s| !s.trim().is_empty()) {
         args.push("--name".to_string());
@@ -846,7 +867,12 @@ pub fn resolve_enroll_exec_path(current_exe: &std::path::Path) -> std::path::Pat
 /// environment (including `HOME`), so `~/.ztlp` resolves to the daemon's
 /// own config dir, not a human user's.
 async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
-    let plan = match build_enroll_exec_plan(cmd) {
+    let last = crate::agent::peruser::last_checkin();
+    let replace = enroll_should_replace_identity(last.as_ref().map(|r| r.state.as_str()));
+    if replace {
+        info!("enroll: the name server has no record of this device — replacing the old identity (backed up to *.bak)");
+    }
+    let plan = match build_enroll_exec_plan_with(cmd, replace) {
         Ok(p) => p,
         Err(e) => return ControlResponse::err(e),
     };
@@ -1128,11 +1154,13 @@ pub fn build_post_enroll_tls_plan_with(
 /// Returns `None` if neither file exists or neither yields a zone.
 /// The process-spawning part of `setup_status`. Runs on a blocking thread
 /// via [`SetupProbeCache`]; never call it from an async context directly.
-fn run_setup_probes(zone: &str) -> SetupProbes {
+fn run_setup_probes(zone: &str, ca_root: &std::path::Path) -> SetupProbes {
     // Windows-only: cert in machine root + NRPT rule present.
     #[cfg(target_os = "windows")]
     let (ca_installed_system_trust, dns_configured) = {
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        // Probe the SAME root setup_status reports (the machine CA on the
+        // per-user model), not the per-user default path.
+        let ca = Some(crate::agent::ca_trust::is_ca_installed_at(ca_root));
         let dns = if !zone.is_empty() {
             let api = crate::agent::dns_setup_windows::default_nrpt_api();
             match api.list_rules() {
@@ -1161,7 +1189,9 @@ fn run_setup_probes(zone: &str) -> SetupProbes {
     };
     #[cfg(not(target_os = "windows"))]
     let (ca_installed_system_trust, dns_configured) = {
-        let ca = Some(crate::agent::ca_trust::is_ca_installed());
+        // Trust of the root the agent actually mints from (machine CA on
+        // the per-user model) — see cmd_setup_status.
+        let ca = Some(crate::agent::ca_trust::is_ca_installed_at(ca_root));
         let dns = if !zone.is_empty() {
             Some(crate::agent::dns_setup::is_dns_configured())
         } else {
@@ -1229,8 +1259,17 @@ async fn cmd_setup_status(state: &AgentState) -> ControlResponse {
         return ControlResponse::err("cannot resolve home directory");
     }
     let identity_path = home.join(".ztlp").join("identity.json");
-    let ca_root_path = home.join(".ztlp").join("ca").join("root.pem");
-    let ca_intermediate_path = home.join(".ztlp").join("ca").join("intermediate.pem");
+    // Per-user model: the agent mints from the MACHINE CA when it is usable
+    // (peruser::effective_ca_dir), so report THAT CA — not the per-user
+    // ~/.ztlp/ca, which doesn't exist there. Reporting the per-user path
+    // left the HTTPS row on "Setting up certificate…" forever with no
+    // Trust HTTPS button, and pointed Trust HTTPS at a missing file.
+    let ca_dir = crate::agent::peruser::effective_ca_dir(
+        &home.join(".ztlp").join("ca"),
+        crate::agent::peruser::machine_ca_dir().as_deref(),
+    );
+    let ca_root_path = ca_dir.join("root.pem");
+    let ca_intermediate_path = ca_dir.join("intermediate.pem");
 
     // Identity presence: does identity.json exist and parse?
     //
@@ -1271,10 +1310,11 @@ async fn cmd_setup_status(state: &AgentState) -> ControlResponse {
     // blocking thread through the cache (ZT-11) so this handler, and every
     // other control command, answers in microseconds between refreshes.
     let zone_for_probe = zone.clone();
+    let root_for_probe = ca_root_path.clone();
     let probes = state
         .setup_probes
         .get_or_probe(&zone, Instant::now(), move || {
-            run_setup_probes(&zone_for_probe)
+            run_setup_probes(&zone_for_probe, &root_for_probe)
         })
         .await;
     let ca_installed_system_trust = probes.ca_installed_system_trust;
@@ -1741,6 +1781,23 @@ mod tests {
 
     #[test]
     fn enroll_plan_requires_enrollment_uri() {
+        // Re-enroll over a dead identity: only a definite NS "unknown /
+        // revoked" adds --force (live on the Studio: identity.json existed
+        // but the NS had no record, and setup refused "already enrolled").
+        assert!(enroll_should_replace_identity(Some("not_registered")));
+        assert!(enroll_should_replace_identity(Some("revoked")));
+        for keep in [None, Some("ok"), Some("not_renewable"), Some("failed")] {
+            assert!(!enroll_should_replace_identity(keep), "{keep:?}");
+        }
+        let c = cmd(Some("ztlp://enroll/abc123"), None, None);
+        assert!(build_enroll_exec_plan_with(&c, true)
+            .unwrap()
+            .args
+            .contains(&"--force".to_string()));
+        assert!(!build_enroll_exec_plan_with(&c, false)
+            .unwrap()
+            .args
+            .contains(&"--force".to_string()));
         let err = build_enroll_exec_plan(&cmd(None, None, None)).unwrap_err();
         assert!(err.contains("enrollment_uri"));
     }
@@ -1986,7 +2043,10 @@ mod tests {
     #[test]
     fn post_enroll_tls_plan_errors_without_zone() {
         let home = tmp_home("nozone");
-        let err = build_post_enroll_tls_plan(&home).unwrap_err();
+        // Hermetic: no machine CA (the wrapper short-circuits to Ok(empty)
+        // on any host that has a usable machine CA, e.g. a dev Mac).
+        let err =
+            build_post_enroll_tls_plan_for(&home, cfg!(target_os = "macos"), false).unwrap_err();
         assert!(err.contains("zone"), "{err}");
         let _ = std::fs::remove_dir_all(&home);
     }

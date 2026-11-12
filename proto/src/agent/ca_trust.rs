@@ -158,7 +158,15 @@ pub fn is_cert_trusted(cert_path: &Path) -> bool {
 
 /// Check if the ZTLP CA is installed in the system trust store.
 pub fn is_ca_installed() -> bool {
-    let cert_path = default_ca_cert_path();
+    is_ca_installed_at(&default_ca_cert_path())
+}
+
+/// Is THIS root (e.g. the machine CA's root.pem on the per-user model)
+/// trusted? `is_ca_installed` only looks at the per-user default
+/// `~/.ztlp/ca/root.pem`, which does not exist when the agent mints from the
+/// machine CA — so it reported "not trusted" forever, even after Trust HTTPS.
+pub fn is_ca_installed_at(cert_path: &Path) -> bool {
+    let cert_path = cert_path.to_path_buf();
     if !cert_path.exists() {
         return false;
     }
@@ -167,10 +175,13 @@ pub fn is_ca_installed() -> bool {
     return check_macos_installed(&cert_path);
 
     #[cfg(target_os = "linux")]
-    return check_linux_installed();
+    return linux_installed_for(
+        &cert_path,
+        Path::new("/usr/local/share/ca-certificates/ztlp-root-ca.crt"),
+    );
 
     #[cfg(target_os = "windows")]
-    return check_windows_installed();
+    return check_windows_installed_for(&cert_path);
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return false;
@@ -284,10 +295,13 @@ fn remove_linux(_cert_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn check_linux_installed() -> bool {
-    let dest = Path::new("/usr/local/share/ca-certificates/ztlp-root-ca.crt");
-    dest.exists()
+/// Is `cert_path` the root installed at `installed` (the system copy)?
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+fn linux_installed_for(cert_path: &Path, installed: &Path) -> bool {
+    match (std::fs::read(cert_path), std::fs::read(installed)) {
+        (Ok(mine), Ok(sys)) => mine == sys,
+        _ => false,
+    }
 }
 
 // ── Windows ───────────────────────────────────────────────────────
@@ -400,12 +414,6 @@ fn sha1_thumbprint_hex(cert_path: &Path) -> Result<String> {
 fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, &'static str> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.decode(s.as_bytes()).map_err(|_| "invalid base64")
-}
-
-#[cfg(target_os = "windows")]
-fn check_windows_installed() -> bool {
-    let cert_path = default_ca_cert_path();
-    check_windows_installed_for(&cert_path)
 }
 
 /// Testable core of `check_windows_installed` — takes the cert path
@@ -618,5 +626,36 @@ mod tests {
         let path = std::path::PathBuf::from("/definitely/does/not/exist.pem");
         let result = sha1_thumbprint_hex(&path);
         assert!(result.is_err());
+    }
+
+    /// CodeRabbit #132: is_ca_installed_at ignored its path on Linux/Windows.
+    /// On Linux "installed" must mean the system copy IS this root.
+    #[test]
+    fn linux_installed_check_compares_the_given_root() {
+        let dir = std::env::temp_dir().join(format!("ztlp-linux-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("root.pem");
+        let installed = dir.join("ztlp-root-ca.crt");
+        std::fs::write(
+            &mine,
+            "-----BEGIN CERTIFICATE-----\nMINE\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        assert!(!linux_installed_for(&mine, &installed), "nothing installed");
+        std::fs::write(
+            &installed,
+            "-----BEGIN CERTIFICATE-----\nOTHER\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        assert!(
+            !linux_installed_for(&mine, &installed),
+            "a different root is installed"
+        );
+        std::fs::copy(&mine, &installed).unwrap();
+        assert!(
+            linux_installed_for(&mine, &installed),
+            "this root is installed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

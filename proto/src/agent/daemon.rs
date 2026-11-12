@@ -1096,11 +1096,14 @@ pub async fn run_daemon(
             None
         };
 
-    // ── Per-user agent health probe (Windows) ─────────────────────────
-    // TLS responder on peruser::HEALTH_VIP:443 so the desktop app can prove
-    // `.ztlp` DNS + machine-CA trust end to end. Windows only: macOS/Linux
-    // behaviour is unchanged.
-    let health_handle = if cfg!(target_os = "windows") {
+    // ── Per-user agent health probe (Windows + macOS) ─────────────────
+    // TLS responder on peruser::HEALTH_VIP:8443 so the desktop app can prove
+    // `.ztlp` DNS + machine-CA trust end to end. The macOS per-user model is
+    // the analog of Windows: the app's HTTPS row probes
+    // `https://ztlp-health.ztlp:8443/` (which resolves to HEALTH_VIP) and
+    // expects the `ztlp-health-ok` body — so the macOS agent must serve it
+    // too. Linux keeps its per-device CA flow and has no such app probe.
+    let health_handle = if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
         tls_acceptor.as_ref().map(|acc| {
             let acc = (**acc).clone();
             tokio::spawn(async move {
@@ -1476,7 +1479,7 @@ async fn run_tcp_proxy(
                 let fbt = first_byte_timeout.clone();
 
                 tokio::spawn(async move {
-                    match TcpListener::bind(addr).await {
+                    match bind_vip_listener(addr).await {
                         Ok(listener) => {
                             debug!(
                                 "TCP proxy listening on {} for {} (port {})",
@@ -1648,6 +1651,61 @@ async fn run_tcp_proxy(
                     }
                 });
             }
+        }
+    }
+}
+
+/// Bind a VIP listener. Direct bind first; on macOS, when the non-root
+/// per-user agent is refused (privileged port, or a new VIP with no lo0
+/// alias yet), ask the root port broker in `org.ztlp.machine` for the REAL
+/// port — it binds and hands us the listening fd (agent::port_broker).
+async fn bind_vip_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    match TcpListener::bind(addr).await {
+        Ok(l) => Ok(l),
+        Err(e) => {
+            #[cfg(target_os = "macos")]
+            if let SocketAddr::V4(v4) = addr {
+                use crate::agent::port_broker as pb;
+                if pb::should_ask_broker(e.kind(), *v4.ip()) {
+                    let req = pb::BindRequest {
+                        ip: *v4.ip(),
+                        port: v4.port(),
+                    };
+                    // The agent can start before org.ztlp.machine has its
+                    // socket up (login vs boot race, or a service restart):
+                    // keep asking for up to 2 minutes instead of giving up.
+                    let mut tries = 0u32;
+                    let got = loop {
+                        let r = tokio::task::spawn_blocking(move || {
+                            pb::request_listener(std::path::Path::new(pb::BROKER_SOCKET_PATH), &req)
+                        })
+                        .await
+                        .map_err(|j| std::io::Error::other(j.to_string()))?;
+                        match r {
+                            Err(be) if be.is_retryable() && tries < 120 => {
+                                if tries == 0 {
+                                    info!("VIP {}: waiting for the port broker ({be})", addr);
+                                }
+                                tries += 1;
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                            other => break other,
+                        }
+                    };
+                    return match got {
+                        Ok(std_l) => {
+                            std_l.set_nonblocking(true)?;
+                            info!("VIP {} bound via the port broker", addr);
+                            TcpListener::from_std(std_l)
+                        }
+                        Err(msg) => Err(std::io::Error::new(
+                            e.kind(),
+                            format!("{e}; port broker: {msg}"),
+                        )),
+                    };
+                }
+            }
+            Err(e)
         }
     }
 }

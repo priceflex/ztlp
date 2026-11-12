@@ -52,22 +52,37 @@ enum AgentControlClient {
     /// Where the root daemon's own bearer token lives (F7a: macOS daemon
     /// HOME is pinned to `/Library/Application Support/ZTLP`, so its
     /// `~/.ztlp` resolves under there — NOT the invoking user's home).
-    static let daemonTokenPath =
+    ///
+    /// Per-user model (Task 6+): the agent the UI talks to is the PER-USER
+    /// agent the app spawns (not a root daemon), so its control token lives in
+    /// the invoking user's home (`~/.ztlp/agent.token`). We check the user
+    /// location first and fall back to the legacy machine dir (in case a
+    /// machine-scope agent is what's running) so both layouts work.
+    static var daemonTokenPath: String {
+        let userDir = (NSHomeDirectory() as NSString).appendingPathComponent(".ztlp")
+        return (userDir as NSString).appendingPathComponent("agent.token")
+    }
+
+    /// Legacy machine-dir token (a machine-scope agent writes here). Checked
+    /// only if the per-user location is absent.
+    static let legacyDaemonTokenPath =
         "/Library/Application Support/ZTLP/.ztlp/agent.token"
 
     /// Read the daemon's control-socket bearer token from disk.
     ///
-    /// Returns `nil` (not an error) if the file doesn't exist yet — the
-    /// daemon may be running in legacy/no-auth mode, or not installed at
-    /// all. Callers send `token: nil` in that case; the daemon's own
-    /// `expected_token` gate decides whether that's accepted.
+    /// Per-user model (Task 6+): prefer the invoking user's
+    /// `~/.ztlp/agent.token` (where the per-user agent the app spawns writes
+    /// it); fall back to the legacy machine dir in case a machine-scope agent
+    /// is running. Returns `nil` (not an error) if neither exists — the agent
+    /// may be in legacy/no-auth mode, or not started yet.
     static func readDaemonToken() -> String? {
-        guard let data = FileManager.default.contents(atPath: daemonTokenPath),
-              let text = String(data: data, encoding: .utf8) else {
-            return nil
+        for path in [daemonTokenPath, legacyDaemonTokenPath] {
+            guard let data = FileManager.default.contents(atPath: path),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return nil
     }
 
     /// Send one control command and return the raw decoded response.

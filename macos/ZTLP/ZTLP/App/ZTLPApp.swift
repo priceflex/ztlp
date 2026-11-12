@@ -92,7 +92,7 @@ struct ZTLPApp: App {
         return vm
     }
 
-    /// Menu bar logo strength. Ready (all three rows green): full.
+    /// Menu bar logo strength. Ready (all four rows green): full.
     /// Transitioning: 0.7. Not ready: 0.45, the same "dimmed" convention
     /// macOS uses for inactive status items.
     private var menuBarIconOpacity: Double {

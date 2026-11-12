@@ -122,47 +122,78 @@ final class ZTLPTests: XCTestCase {
 
     func testReadinessFreshMacServiceNotInstalledGatesEverything() {
         let r = HomeReadiness.compute(serviceState: .notRegistered, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .needsAction("Not installed", action: .installService))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .needsAction("Not installed", action: .installService))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
         XCTAssertFalse(r.allReady)
         XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 1"))
     }
 
     func testReadinessRequiresApprovalOffersLoginItems() {
         let r = HomeReadiness.compute(serviceState: .requiresApproval, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .needsAction("Needs your approval in System Settings", action: .openLoginItems))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .needsAction("Needs your approval in System Settings", action: .openLoginItems))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
     }
 
     func testReadinessRegisteredButNotAnsweringIsWaitingNotEnroll() {
         // B4 user-facing half: the daemon is registered but has not answered
         // yet -> Identity must NOT offer Enroll (that was the old timeout path).
         let r = HomeReadiness.compute(serviceState: .running, daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .waiting("Starting…"))
-        XCTAssertEqual(r.identity.state, .waiting("Waiting for service"))
+        XCTAssertEqual(r.agent.state, .waiting("Starting…"))
+        XCTAssertEqual(r.identity.state, .waiting("Waiting for agent"))
         XCTAssertFalse(r.allReady)
     }
 
+    /// Live on the Studio: identity.json + zone present, but the name server
+    /// had no record -> whoami showed Device/Person empty while Identity was
+    /// green with no Enroll button. A definite "not registered" must offer
+    /// Enroll; a network failure must not.
+    func testReadinessNotRegisteredOnNameServerOffersEnroll() {
+        var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+        d.nsCheckinState = "not_registered"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        XCTAssertEqual(r.identity.state,
+                       .needsAction("Not registered on the name server — enroll again", action: .enroll))
+        XCTAssertFalse(r.allReady)
+        XCTAssertTrue(r.guidance(zone: "trs.ztlp").hasPrefix("Step 2"))
+    }
+
+    func testReadinessNameServerCheckinStatesThatStayGreen() {
+        for st in ["ok", "not_renewable", "failed", ""] {
+            var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+            d.nsCheckinState = st
+            let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+            XCTAssertEqual(r.identity.state, .ready("Enrolled in trs.ztlp"), "state \(st)")
+        }
+        var d = snap(enrolled: true, ca: true, dns: true, zone: "trs.ztlp")
+        d.nsCheckinState = "revoked"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        XCTAssertEqual(r.identity.state, .needsAction("This device was revoked — enroll again", action: .enroll))
+    }
+
     func testReadinessStandbyDaemonOffersEnroll() {
-        // Daemon up in unenrolled standby: Service green, Identity = Enroll.
+        // Daemon up in unenrolled standby: Agent green, Identity = Enroll.
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
             daemon: snap(enrolled: false, ca: false, dns: false, zone: "")
         )
-        XCTAssertEqual(r.service.state, .ready("Running"))
+        XCTAssertEqual(r.agent.state, .ready("Running"))
         XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
         XCTAssertTrue(r.guidance(zone: "").hasPrefix("Step 2"))
     }
 
     func testReadinessEnrolledButTlsPendingIsWaiting() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: false, dns: true)
+            daemon: snap(enrolled: true, ca: false, dns: true),
+            dnsProbe: true, httpsProbe: false
         )
         XCTAssertEqual(r.identity.state, .ready("Enrolled in defcon.ztlp"))
-        XCTAssertEqual(r.network.state, .waiting("Setting up HTTPS certificate…"))
+        XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(r.https.state, .waiting("Setting up certificate…"))
         XCTAssertFalse(r.allReady)
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Almost there"))
     }
@@ -172,9 +203,10 @@ final class ZTLPTests: XCTestCase {
     func testReadinessCaMadeButUntrustedOffersTrustHTTPS() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: false, dns: true, caInit: true)
+            daemon: snap(enrolled: true, ca: false, dns: true, caInit: true),
+            dnsProbe: true, httpsProbe: false
         )
-        XCTAssertEqual(r.network.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
+        XCTAssertEqual(r.https.state, .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
         XCTAssertTrue(r.guidance(zone: "defcon.ztlp").hasPrefix("Step 3"), r.guidance(zone: "defcon.ztlp"))
         XCTAssertFalse(r.allReady)
     }
@@ -186,7 +218,8 @@ final class ZTLPTests: XCTestCase {
             daemon: snap(enrolled: false, ca: false, dns: false, zone: "", caInit: true)
         )
         XCTAssertEqual(r.identity.state, .needsAction("Not enrolled", action: .enroll))
-        XCTAssertEqual(r.network.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.dns.state, .waiting("Waiting for enrollment"))
+        XCTAssertEqual(r.https.state, .waiting("Waiting for enrollment"))
     }
 
     // MARK: - Single enrollment (2026-09-20): token goes straight to the daemon
@@ -232,10 +265,12 @@ final class ZTLPTests: XCTestCase {
     func testReadinessAllGreenGuidanceHasNoConnectVerb() {
         let r = HomeReadiness.compute(
             serviceState: .running, daemonReachable: true,
-            daemon: snap(enrolled: true, ca: true, dns: true)
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: true, httpsProbe: true
         )
         XCTAssertTrue(r.allReady)
-        XCTAssertEqual(r.network.state, .ready("HTTPS trusted · DNS routed"))
+        XCTAssertEqual(r.dns.state, .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(r.https.state, .ready("Browsers trust ZTLP certificates"))
         let g = r.guidance(zone: "defcon.ztlp")
         XCTAssertTrue(g.contains("https://<name>.defcon.ztlp"), g)
         XCTAssertTrue(g.contains("on demand"), g)
@@ -246,9 +281,46 @@ final class ZTLPTests: XCTestCase {
 
     func testReadinessServiceFailedIsRed() {
         let r = HomeReadiness.compute(serviceState: .failed("boom"), daemonReachable: false, daemon: nil)
-        XCTAssertEqual(r.service.state, .failed("boom"))
+        XCTAssertEqual(r.agent.state, .failed("boom"))
         let r2 = HomeReadiness.compute(serviceState: .notFound, daemonReachable: false, daemon: nil)
-        if case .failed(let m) = r2.service.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.service.state)") }
+        if case .failed(let m) = r2.agent.state { XCTAssertTrue(m.contains("reinstall")) } else { XCTFail("\(r2.agent.state)") }
+    }
+
+    // Task 5b: the live probes can disagree with the daemon's config flag.
+    func testReadinessDNSFlagButProbeFailsIsFailed() {
+        // Daemon says dns_configured=true but the live resolve did NOT land on
+        // the VIP -> the resolver isn't actually routing .ztlp.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: false
+        )
+        XCTAssertEqual(r.dns.state, .failed("DNS routing not working"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testReadinessDNSConfiguredButNotYetProbedIsWaiting() {
+        // Probes haven't run yet (nil) -> checking, not a false red.
+        let r = HomeReadiness.compute(
+            serviceState: .running, daemonReachable: true,
+            daemon: snap(enrolled: true, ca: true, dns: true),
+            dnsProbe: nil, httpsProbe: true
+        )
+        XCTAssertEqual(r.dns.state, .waiting("Checking…"))
+        XCTAssertFalse(r.allReady)
+    }
+
+    func testDNSRowStateFold() {
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: true), .ready(".ztlp names resolve through ZTLP"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: false), .failed("DNS routing not working"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: true, probe: nil), .waiting("Checking…"))
+        XCTAssertEqual(dnsRowState(dnsConfigured: false, probe: nil), .failed("DNS routing not set up"))
+    }
+
+    func testHTTPSRowStateFold() {
+        XCTAssertEqual(httpsRowState(caInstalled: true, caInitialized: true, probe: true), .ready("Browsers trust ZTLP certificates"))
+        XCTAssertEqual(httpsRowState(caInstalled: false, caInitialized: true, probe: nil), .needsAction("HTTPS not trusted yet", action: .trustHTTPS))
+        XCTAssertEqual(httpsRowState(caInstalled: false, caInitialized: false, probe: nil), .waiting("Setting up certificate…"))
     }
 
     func testBackoffDoublesAndCapsAtTwoSeconds() {
@@ -548,5 +620,209 @@ final class EnrollmentFieldFixTests: XCTestCase {
         XCTAssertTrue(s.contains("Allow in the Background"))
         XCTAssertTrue(s.contains("ZTLP"))
         XCTAssertTrue(s.lowercased().contains("switch on"))
+    }
+}
+
+final class AgentSupervisorLogicTests: XCTestCase {
+
+    /// argv: agent start --foreground --parent-pid <pid>.
+    func testAgentSpawnArgs() {
+        let args = agentSpawnArgs(parentPid: 4321)
+        XCTAssertEqual(args, ["agent", "start", "--foreground", "--parent-pid", "4321"])
+    }
+
+    /// The env sets ZTLP_PARENT_STDIN=1 so the agent watches stdin for EOF.
+    func testAgentSpawnEnv() {
+        XCTAssertEqual(agentSpawnEnv(), ["ZTLP_PARENT_STDIN": "1"])
+    }
+
+    /// wantsRunning=false -> stop, no matter the exit code.
+    func testStopWhenNotWantsRunning() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: false, exitCode: 0, ranFor: 60), .stop)
+        XCTAssertEqual(supervisorDecision(wantsRunning: false, exitCode: 1, ranFor: 1), .stop)
+    }
+
+    /// The agent's "parent gone" exit code -> stop (app is quitting; don't
+    /// spawn a replacement).
+    func testParentGoneExitCodeStops() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: kAgentParentGoneExitCode, ranFor: 300), .stop)
+    }
+
+    /// A long-lived agent that crashes (non-zero) -> respawn immediately
+    /// (it was up long enough that a fast retry is warranted).
+    func testLongLivedCrashRespawns() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 139, ranFor: 10), .respawn)
+    }
+
+    /// A quick death (< threshold) -> back off to avoid a tight crash loop.
+    func testQuickDeathBacksOff() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 1, ranFor: 0.5), .backoff(kBackoffInterval))
+    }
+
+    /// A clean exit (0) while we still want it running -> respawn (a
+    /// foreground agent shouldn't just vanish cleanly).
+    func testCleanExitRespawns() {
+        XCTAssertEqual(supervisorDecision(wantsRunning: true, exitCode: 0, ranFor: 5), .respawn)
+    }
+}
+
+/// The DNS row probe must read the real IPv4 out of a getaddrinfo result.
+/// The old code compared a C pointer's description ("0x…") to the VIP, so
+/// the DNS row was red on every Mac even when .ztlp DNS worked.
+final class DnsProbeAddressTests: XCTestCase {
+    private func sockaddrFor(_ ip: String) -> sockaddr_in {
+        var sin = sockaddr_in()
+        sin.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        sin.sin_family = sa_family_t(AF_INET)
+        sin.sin_port = in_port_t(443).bigEndian
+        _ = inet_pton(AF_INET, ip, &sin.sin_addr)
+        return sin
+    }
+
+    func testIpv4StringReadsTheHealthVip() {
+        var sin = sockaddrFor("127.100.255.2")
+        let s = withUnsafePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { TunnelViewModel.ipv4String($0) }
+        }
+        XCTAssertEqual(s, "127.100.255.2")
+    }
+
+    func testIpv4StringRejectsNonInet() {
+        var sin = sockaddrFor("127.100.255.2")
+        sin.sin_family = sa_family_t(AF_INET6)
+        let s = withUnsafePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { TunnelViewModel.ipv4String($0) }
+        }
+        XCTAssertNil(s)
+    }
+}
+
+/// CodeRabbit review of PR #132 — each test pins one finding.
+@MainActor
+final class CodeRabbit132Tests: XCTestCase {
+
+    // Finding: Install returned early whenever the control socket answered.
+    // On the per-user model the app's OWN agent (or, mid-upgrade, the legacy
+    // root agent) always answers, so the machine daemon was never registered.
+    func testInstallDecisionFollowsRegistrationNotReachability() {
+        XCTAssertEqual(installStep(serviceState: .running), .nothingToDo)
+        for s: AgentServiceState in [.notRegistered, .notFound, .requiresApproval, .failed("x")] {
+            XCTAssertEqual(installStep(serviceState: s), .register, "\(s)")
+        }
+    }
+
+    // Finding: Uninstall waited for the socket to go quiet; the supervised
+    // per-user agent keeps serving it, so it always said "still running".
+    func testUninstallSucceedsOnceTheDaemonIsUnregistered() {
+        XCTAssertTrue(uninstallSucceeded(serviceState: .notRegistered))
+        XCTAssertTrue(uninstallSucceeded(serviceState: .notFound))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .running))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .requiresApproval))
+        XCTAssertFalse(uninstallSucceeded(serviceState: .failed("x")))
+    }
+
+    // Finding: re-entrancy + ordering — the legacy agent must be removed
+    // BEFORE the machine daemon registers, inside ONE guarded operation, and
+    // a failed legacy removal (fresh install: nothing to remove) is fine.
+    func testRegistrationRemovesLegacyFirstThenRegisters() throws {
+        var calls: [String] = []
+        try AgentServiceInstaller.registrationSteps(
+            unregisterLegacy: { calls.append("legacy"); throw NSError(domain: "x", code: 1) },
+            register: { calls.append("register") }
+        )()
+        XCTAssertEqual(calls, ["legacy", "register"])
+    }
+
+    // Finding: waking from sleep thawed the agent while the lock screen was
+    // still up. Wake + locked must stay frozen; unlock sends the thaw.
+    func testWakeWhileLockedStaysFrozen() {
+        XCTAssertEqual(finalFreezeAction(for: .systemDidWake, locked: true), FreezeAction.none)
+        XCTAssertEqual(finalFreezeAction(for: .systemDidWake, locked: false), .thaw)
+        XCTAssertEqual(finalFreezeAction(for: .sessionResigned, locked: true), .freeze)
+        XCTAssertEqual(finalFreezeAction(for: .sessionResigned, locked: false), FreezeAction.none)
+        XCTAssertEqual(finalFreezeAction(for: .systemWillSleep, locked: false), .freeze)
+    }
+
+    // Field bug (MacBook, 2026-11-11): the Mac woke to the lock screen, so
+    // the wake sent no thaw; the unlock never sent one either, because the
+    // only "unlock" signal observed was the fast-user-switching one. The
+    // agent stayed frozen until the app was restarted.
+    func testScreenUnlockThawsAndScreenLockFreezes() {
+        XCTAssertEqual(finalFreezeAction(for: .screenUnlocked, locked: false), .thaw)
+        // The lock flag can lag the notification; the unlock must still thaw.
+        XCTAssertEqual(finalFreezeAction(for: .screenUnlocked, locked: true), .thaw)
+        XCTAssertEqual(finalFreezeAction(for: .screenLocked, locked: true), .freeze)
+        XCTAssertEqual(finalFreezeAction(for: .screenLocked, locked: false), .freeze)
+    }
+
+    func testSleepWakeLockedThenUnlockEndsThawed() {
+        var locked = false
+        var sent: [FreezeAction] = []
+        let obs = SessionFreezeObserver(send: { sent.append($0) }, sessionLocked: { locked })
+        obs.emit(.systemWillSleep)
+        XCTAssertTrue(obs.systemAsleep)
+        locked = true
+        obs.emit(.systemDidWake)          // lock screen is up: stay frozen
+        XCTAssertFalse(obs.systemAsleep)
+        XCTAssertEqual(sent, [.freeze])
+        locked = false
+        obs.emit(.screenUnlocked)
+        XCTAssertEqual(sent, [.freeze, .thaw])
+    }
+
+    // Safety net on the status poll: frozen must equal (locked || asleep).
+    func testReconcileFreezeAction() {
+        // The field bug: frozen, unlocked, awake -> thaw.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: false, systemAsleep: false), .thaw)
+        // Just frozen for sleep, screen not locked yet -> leave it frozen.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: false, systemAsleep: true), FreezeAction.none)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: true, systemAsleep: false), FreezeAction.none)
+        // A missed lock (or a respawned agent while locked) -> freeze.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: true, systemAsleep: false), .freeze)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: false, systemAsleep: true), .freeze)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: false, systemAsleep: false), FreezeAction.none)
+    }
+
+    // Finding: each respawn wrote the log from offset 0 (overwriting).
+    func testAgentLogHandleAppends() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ztlp-log-\(UUID().uuidString).log")
+        try Data("first\n".utf8).write(to: url)
+        let h = try openAgentLogForAppend(url)
+        h.write(Data("second\n".utf8))
+        try h.close()
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "first\nsecond\n")
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    // Finding: the DNS hint promised a Fix button the DNS row doesn't have.
+    func testDnsFailureGuidanceDoesNotPromiseAFixButton() {
+        var d = DaemonSnapshot()
+        d.identityEnrolled = true; d.caInstalled = true; d.caInitialized = true
+        d.dnsConfigured = false; d.zone = "trs.ztlp"
+        let r = HomeReadiness.compute(serviceState: .running, daemonReachable: true, daemon: d)
+        guard case .failed = r.dns.state else { return XCTFail("dns should be failed: \(r.dns.state)") }
+        XCTAssertFalse(r.guidance(zone: "trs.ztlp").contains("Fix"), r.guidance(zone: "trs.ztlp"))
+    }
+
+    // Finding: the "service missing" error named the old plist.
+    func testServiceMissingMessageNamesTheMachinePlist() {
+        XCTAssertTrue(TunnelViewModel.serviceMissingMessage.contains("org.ztlp.machine.plist"))
+        XCTAssertFalse(TunnelViewModel.serviceMissingMessage.contains("org.ztlp.agent.plist"))
+    }
+
+    // Nitpick: the HTTPS probe ran every poll but never affected the row.
+    func testHttpsRowUsesAFailedProbe() {
+        guard case .failed = httpsRowState(caInstalled: true, caInitialized: true, probe: false) else {
+            return XCTFail("trusted CA + failed TLS probe must not show ready")
+        }
+        XCTAssertEqual(httpsRowState(caInstalled: true, caInitialized: true, probe: nil), .ready("Browsers trust ZTLP certificates"))
+    }
+
+    func testHttpsProbeIsThrottledWhileHealthy() {
+        let t0 = Date(timeIntervalSince1970: 1000)
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: nil, lastResult: nil, now: t0))
+        XCTAssertFalse(shouldProbeHTTPS(lastAt: t0, lastResult: true, now: t0.addingTimeInterval(10)))
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: t0, lastResult: true, now: t0.addingTimeInterval(31)))
+        XCTAssertTrue(shouldProbeHTTPS(lastAt: t0, lastResult: false, now: t0.addingTimeInterval(2)))
     }
 }

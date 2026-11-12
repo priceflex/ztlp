@@ -51,7 +51,15 @@ final class AgentServiceInstaller: ObservableObject {
     static let shared = AgentServiceInstaller()
 
     /// Must match Contents/Library/LaunchDaemons/<this>.plist exactly.
-    nonisolated static let plistName = "org.ztlp.agent.plist"
+    /// Task 6: the app now installs the slim machine daemon (machine bits
+    /// only — CA, resolver, lo0 aliases, kept idempotent at boot by
+    /// `agent machine-setup --boot`), NOT the full root agent. The data plane
+    /// is the per-user agent, started by the app.
+    nonisolated static let plistName = "org.ztlp.machine.plist"
+
+    /// The legacy full root agent daemon. Upgrades from 1.3.0 remove it (the
+    /// per-user model replaces it); a fresh install has nothing to remove.
+    nonisolated static let legacyAgentPlistName = "org.ztlp.agent.plist"
 
     @Published private(set) var state: AgentServiceState = .notRegistered
     @Published private(set) var lastError: String?
@@ -80,12 +88,19 @@ final class AgentServiceInstaller: ObservableObject {
         }
     }
 
-    /// Register the daemon. Triggers macOS's one-time "background item"
-    /// system prompt on first call (Steven's "one macOS system prompt,
-    /// like Windows UAC" requirement). No sudo, no Terminal.
+    /// Register the machine daemon. Triggers macOS's one-time "background
+    /// item" system prompt on first call (Steven's "one macOS system prompt,
+    /// like Windows UAC" requirement). No sudo, no Terminal. Also removes the
+    /// legacy full root agent daemon (upgrades from 1.3.0).
     func register() {
+        // Legacy removal strictly BEFORE the register (was a concurrent Task).
+        let legacy = Self.legacyAgentPlistName
+        let svc = service
         do {
-            try service.register()
+            try Self.registrationSteps(
+                unregisterLegacy: { try SMAppService.daemon(plistName: legacy).unregister() },
+                register: { try svc.register() }
+            )()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -154,10 +169,53 @@ final class AgentServiceInstaller: ObservableObject {
         }
     }
 
+    /// One registration operation: remove the legacy root agent (best
+    /// effort — a fresh install has nothing to remove), THEN register the
+    /// machine daemon. Run as a single guarded operation so a second click
+    /// can't slip in between and the order is guaranteed.
+    nonisolated static func registrationSteps(
+        unregisterLegacy: @escaping @Sendable () throws -> Void,
+        register: @escaping @Sendable () throws -> Void
+    ) -> @Sendable () throws -> Void {
+        {
+            try? unregisterLegacy()
+            try register()
+        }
+    }
+
     func registerAsync() async {
         guard inFlight == nil else { return }  // a second click while busy is a no-op
+        // startOperation sets inFlight synchronously (no await before it), and
+        // the legacy removal runs INSIDE it, before the register.
         let plist = Self.plistName
-        _ = await startOperation { try SMAppService.daemon(plistName: plist).register() }.value
+        let legacy = Self.legacyAgentPlistName
+        _ = await startOperation(Self.registrationSteps(
+            unregisterLegacy: { try SMAppService.daemon(plistName: legacy).unregister() },
+            register: { try SMAppService.daemon(plistName: plist).register() }
+        )).value
+    }
+
+    /// Stop + unregister the legacy full root agent daemon (`org.ztlp.agent`).
+    /// The per-user model (Task 1-6) replaces it with the slim machine daemon
+    /// + a per-user agent, so a 1.3.0 upgrade must remove the old root agent
+    /// to avoid two data planes. Best-effort: a fresh install has nothing to
+    /// remove and the call is a harmless no-op. Runs off-main (SMAppService
+    /// unregister is a synchronous XPC call).
+    @discardableResult
+    func removeLegacyAgentDaemon() async -> Bool {
+        let legacy = Self.legacyAgentPlistName
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try SMAppService.daemon(plistName: legacy).unregister()
+                    cont.resume(returning: true)
+                } catch {
+                    // .notFound / not registered is the expected fresh-install
+                    // outcome — not an error worth surfacing.
+                    cont.resume(returning: true)
+                }
+            }
+        }
     }
 
     /// Waits for any register/unregister already running, then unregisters.

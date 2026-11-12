@@ -471,8 +471,15 @@ pub fn probe_https(ip: Ipv4Addr) -> Result<(), String> {
 
 fn native_roots() -> Result<rustls::RootCertStore, String> {
     let mut roots = rustls::RootCertStore::empty();
-    let res = rustls_native_certs::load_native_certs();
-    for c in res.certs {
+    // Windows: read the Root store directly. rustls-native-certs swaps the
+    // OS store for SSL_CERT_FILE when that is set (the Z2LS agent sets it
+    // machine-wide), which made this check say "not trusted" while browsers
+    // — which never read it — trusted every .ztlp site.
+    #[cfg(target_os = "windows")]
+    let certs = ztlp_proto::agent::os_trust::windows_root_certs();
+    #[cfg(not(target_os = "windows"))]
+    let certs = rustls_native_certs::load_native_certs().certs;
+    for c in certs {
         let _ = roots.add(c);
     }
     if roots.is_empty() {

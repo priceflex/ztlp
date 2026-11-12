@@ -35,6 +35,12 @@ struct DaemonSnapshot: Equatable {
     var uptimeSecs: Int = 0
     var zone: String = ""
     var identityEnrolled: Bool = false
+    /// The agent's last name-server check-in (`status.ns_checkin.state`):
+    /// "ok", "not_renewable", "not_registered", "revoked", "failed", or ""
+    /// before the first check-in. A local identity + zone is NOT enough —
+    /// if the name server has no record, the gateway can't name the device
+    /// or its owner (whoami shows Device/Person empty).
+    var nsCheckinState: String = ""
     var caInstalled: Bool = false
     /// The daemon has generated its device-local CA (ca/root.pem exists).
     var caInitialized: Bool = false
@@ -96,19 +102,103 @@ struct ReadinessRow: Equatable {
     let state: ReadinessState
 }
 
+/// The name server's view of this device, as an Identity-row problem (nil =
+/// fine or not known yet). Only definite answers count: a failed check-in
+/// (network) must not turn a working device red.
+func nsRegistrationProblem(_ state: String) -> String? {
+    switch state {
+    case "not_registered": return "Not registered on the name server — enroll again"
+    case "revoked": return "This device was revoked — enroll again"
+    default: return nil
+    }
+}
+
+/// Pure fold: daemon `dns_configured` flag + the live resolve probe result ->
+/// the DNS row state. `probe` is nil (not probed / not enrolled yet), true
+/// (`ztlp-health.ztlp` resolved to the ZTLP VIP), or false (resolved
+/// elsewhere / error). The flag says the *config* exists; the probe says the
+/// *resolver* is actually routing. Both must agree for green.
+func dnsRowState(dnsConfigured: Bool, probe: Bool?) -> ReadinessState {
+    switch (dnsConfigured, probe) {
+    case (true, true):
+        return .ready(".ztlp names resolve through ZTLP")
+    case (true, false):
+        return .failed("DNS routing not working")
+    case (true, nil):
+        return .waiting("Checking…")
+    case (false, _):
+        return .failed("DNS routing not set up")
+    }
+}
+
+/// What Install (Home row 1, menu toggle, Connect on Launch) must do.
+/// Decided by the machine daemon's REGISTRATION, never by whether the
+/// control socket answers: on the per-user model that socket is served by
+/// the app's own supervised agent (and, mid-upgrade from 1.3.0, by the
+/// legacy root agent), so "reachable" says nothing about the daemon.
+enum InstallStep: Equatable { case nothingToDo, register }
+
+func installStep(serviceState: AgentServiceState) -> InstallStep {
+    if case .running = serviceState { return .nothingToDo }
+    return .register
+}
+
+/// Uninstall Service succeeded once the machine daemon is no longer
+/// registered. (The per-user agent keeps answering — it belongs to the app.)
+func uninstallSucceeded(serviceState: AgentServiceState) -> Bool {
+    switch serviceState {
+    case .notRegistered, .notFound: return true
+    default: return false
+    }
+}
+
+/// The HTTPS probe is a real TLS handshake (10 s timeout): run it at most
+/// every 30 s while it is passing, and on every poll while it is failing or
+/// unknown so a repair shows up at once.
+let httpsProbeHealthyInterval: TimeInterval = 30
+
+func shouldProbeHTTPS(lastAt: Date?, lastResult: Bool?, now: Date) -> Bool {
+    guard let lastAt, lastResult == true else { return true }
+    return now.timeIntervalSince(lastAt) >= httpsProbeHealthyInterval
+}
+
+/// Pure fold: daemon `ca_installed`/`ca_initialized` flags + the live TLS
+/// probe result -> the HTTPS row state. The flags are the source of truth for
+/// the row (trust is a per-user keychain fact the daemon cannot see); the
+/// probe is confirmatory.
+func httpsRowState(caInstalled: Bool, caInitialized: Bool, probe: Bool?) -> ReadinessState {
+    if caInstalled {
+        // Trusted, but a real TLS handshake to the agent's health name just
+        // failed: don't claim ready. (nil = not probed yet / no DNS.)
+        if probe == false {
+            return .failed("Trusted, but the HTTPS check to the agent failed — it may be restarting")
+        }
+        return .ready("Browsers trust ZTLP certificates")
+    }
+    if caInitialized {
+        return .needsAction("HTTPS not trusted yet", action: .trustHTTPS)
+    }
+    return .waiting("Setting up certificate…")
+}
+
 /// The whole Home page, derived purely from (service state, daemon
-/// snapshot, daemon reachable). Pure so XCTest can pin every branch
-/// without SMAppService or a live daemon.
+/// snapshot, daemon reachable, live DNS/HTTPS probe results). Pure so XCTest
+/// can pin every branch without SMAppService or a live daemon.
+///
+/// **4 rows** (Windows parity): Agent / Identity / DNS / HTTPS — the combined
+/// "Network ready" row is split so the user can see exactly which half of the
+/// network path is not ready and which one button to press.
 ///
 /// Order of operations is enforced by the rows themselves — this is the
-/// user-facing half of the B4 fix: you cannot enroll before the service is
+/// user-facing half of the B4 fix: you cannot enroll before the agent is
 /// Running, and the UI says so instead of timing out.
 struct HomeReadiness: Equatable {
-    let service: ReadinessRow
+    let agent: ReadinessRow
     let identity: ReadinessRow
-    let network: ReadinessRow
+    let dns: ReadinessRow
+    let https: ReadinessRow
 
-    var rows: [ReadinessRow] { [service, identity, network] }
+    var rows: [ReadinessRow] { [agent, identity, dns, https] }
     var allReady: Bool { rows.allSatisfy { $0.state.isReady } }
 
     /// The one line of guidance under the checklist.
@@ -117,10 +207,14 @@ struct HomeReadiness: Equatable {
             let z = zone.isEmpty ? "<zone>" : zone
             return "Open any https://<name>.\(z) site in your browser. ZTLP connects on demand — there is nothing to switch on."
         }
-        if !service.state.isReady { return "Step 1: install the ZTLP background service." }
+        if !agent.state.isReady { return "Step 1: install the ZTLP background service." }
         if !identity.state.isReady { return "Step 2: enroll this Mac with the enrollment link from your administrator." }
-        if case .needsAction(_, .trustHTTPS) = network.state {
+        if case .needsAction(_, .trustHTTPS) = https.state {
             return "Step 3: press Trust HTTPS once so Safari trusts this Mac's ZTLP certificates for every .ztlp site. No password needed."
+        }
+        if case .failed = dns.state {
+            // No Fix button here: the resolver belongs to the machine service.
+            return "Step 3: .ztlp DNS routing is not working. Check that ZTLP is allowed in System Settings › General › Login Items & Extensions, then restart the Mac if it persists."
         }
         return "Almost there — the service is finishing HTTPS and DNS setup."
     }
@@ -128,52 +222,61 @@ struct HomeReadiness: Equatable {
     static func compute(
         serviceState: AgentServiceState,
         daemonReachable: Bool,
-        daemon: DaemonSnapshot?
+        daemon: DaemonSnapshot?,
+        dnsProbe: Bool? = nil,
+        httpsProbe: Bool? = nil
     ) -> HomeReadiness {
-        // Row 1 — Service (SMAppService registration + daemon answering)
-        let service: ReadinessRow
+        // Row 1 — Agent (SMAppService registration + daemon answering)
+        let agent: ReadinessRow
         switch serviceState {
         case .running:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: daemonReachable
                     ? .ready("Running")
                     : .waiting("Starting…")
             )
         case .requiresApproval:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .needsAction("Needs your approval in System Settings", action: .openLoginItems)
             )
         case .notRegistered:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .needsAction("Not installed", action: .installService)
             )
         case .notFound:
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
-                state: .failed("Service missing from this app bundle — reinstall ZTLP")
+                state: .failed("Agent missing from this app bundle — reinstall ZTLP")
             )
         case .failed(let msg):
-            service = ReadinessRow(
-                title: "Service",
+            agent = ReadinessRow(
+                title: "Agent",
                 systemImage: "gearshape.2",
                 state: .failed(msg)
             )
         }
 
-        // Row 2 — Identity (the ROOT daemon's enrollment; that is what DNS/TLS use)
+        // Row 2 — Identity (the daemon's enrollment; that is what DNS/TLS use)
         let identity: ReadinessRow
-        if !service.state.isReady {
+        if !agent.state.isReady {
             identity = ReadinessRow(
                 title: "Identity",
                 systemImage: "person.badge.key",
-                state: .waiting("Waiting for service")
+                state: .waiting("Waiting for agent")
+            )
+        } else if let d = daemon, d.identityEnrolled,
+                  let problem = nsRegistrationProblem(d.nsCheckinState) {
+            identity = ReadinessRow(
+                title: "Identity",
+                systemImage: "person.badge.key",
+                state: .needsAction(problem, action: .enroll)
             )
         } else if let d = daemon, d.identityEnrolled {
             identity = ReadinessRow(
@@ -189,50 +292,57 @@ struct HomeReadiness: Equatable {
             )
         }
 
-        // Row 3 — Network ready (HTTPS trusted + DNS routed, from the daemon)
-        let network: ReadinessRow
+        // Row 3 — DNS (the .ztlp resolver is routed through the agent).
+        // The daemon's `dns_configured` flag says the config exists; the live
+        // `dnsProbe` (resolve ztlp-health.ztlp) says the resolver is actually
+        // routing. Both must agree for green.
+        let dns: ReadinessRow
         if !identity.state.isReady {
-            network = ReadinessRow(
-                title: "Network ready",
+            dns = ReadinessRow(
+                title: "DNS",
                 systemImage: "network",
-                state: .waiting(service.state.isReady ? "Waiting for enrollment" : "Waiting for service")
+                state: .waiting("Waiting for enrollment")
             )
-        } else if let d = daemon {
-            if d.caInstalled && d.dnsConfigured {
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .ready("HTTPS trusted · DNS routed")
-                )
-            } else if d.caInitialized && !d.caInstalled {
-                // The daemon made the CA; only the human trust step remains.
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .needsAction(
-                        d.dnsConfigured ? "HTTPS not trusted yet" : "HTTPS not trusted yet · DNS routing pending",
-                        action: .trustHTTPS
-                    )
-                )
-            } else {
-                var missing: [String] = []
-                if !d.caInitialized { missing.append("HTTPS certificate") }
-                if !d.dnsConfigured { missing.append("DNS routing") }
-                network = ReadinessRow(
-                    title: "Network ready",
-                    systemImage: "network",
-                    state: .waiting("Setting up \(missing.joined(separator: " and "))…")
-                )
-            }
-        } else {
-            network = ReadinessRow(
-                title: "Network ready",
+        } else if daemon == nil {
+            dns = ReadinessRow(
+                title: "DNS",
                 systemImage: "network",
-                state: .waiting("Waiting for service")
+                state: .waiting("Waiting for agent")
+            )
+        } else {
+            dns = ReadinessRow(
+                title: "DNS",
+                systemImage: "network",
+                state: dnsRowState(dnsConfigured: daemon!.dnsConfigured, probe: dnsProbe)
             )
         }
 
-        return HomeReadiness(service: service, identity: identity, network: network)
+        // Row 4 — HTTPS (browsers trust the daemon's CA). The flags are the
+        // source of truth (trust is a per-user keychain fact the daemon cannot
+        // see); the live `httpsProbe` (TLS to the health responder) is
+        // confirmatory.
+        let https: ReadinessRow
+        if !identity.state.isReady {
+            https = ReadinessRow(
+                title: "HTTPS",
+                systemImage: "lock",
+                state: .waiting("Waiting for enrollment")
+            )
+        } else if daemon == nil {
+            https = ReadinessRow(
+                title: "HTTPS",
+                systemImage: "lock",
+                state: .waiting("Waiting for agent")
+            )
+        } else {
+            https = ReadinessRow(
+                title: "HTTPS",
+                systemImage: "lock",
+                state: httpsRowState(caInstalled: daemon!.caInstalled, caInitialized: daemon!.caInitialized, probe: httpsProbe)
+            )
+        }
+
+        return HomeReadiness(agent: agent, identity: identity, dns: dns, https: https)
     }
 }
 
@@ -251,6 +361,11 @@ final class TunnelViewModel: ObservableObject {
     /// Mirrors AgentServiceInstaller.state so Home can say "Needs approval"
     /// (System Settings > Login Items) instead of a generic "Disconnected".
     @Published private(set) var serviceState: AgentServiceState = .notRegistered
+    /// Live probe results feeding the DNS/HTTPS rows (Task 5b). nil = not
+    /// probed yet; refreshed on each poll while enrolled.
+    private var dnsProbe: Bool? = nil
+    private var httpsProbe: Bool? = nil
+    private var httpsProbeAt: Date? = nil
 
     // MARK: - Tunables (mirror desktop/src-tauri/src/tunnel.rs)
 
@@ -265,6 +380,10 @@ final class TunnelViewModel: ObservableObject {
     // MARK: - Dependencies
 
     private let configuration: ZTLPConfiguration
+
+    /// Spawns + keeps the per-user agent alive (the data plane). Stopped on
+    /// deinit so the agent never outlives the login session.
+    private let agentSupervisor: AgentSupervisor
     private let installer = AgentServiceInstaller.shared
     private var cancellables = Set<AnyCancellable>()
     private var pollTask: Task<Void, Never>?
@@ -277,20 +396,42 @@ final class TunnelViewModel: ObservableObject {
     init(configuration: ZTLPConfiguration) {
         self.configuration = configuration
         self.zoneName = configuration.zoneName
+        // Per-user data plane (macOS analog of Windows peruser.rs): assign the
+        // supervisor before any self method call; start it below. The app
+        // spawns + supervises the per-user agent itself — the slim machine
+        // daemon only does the machine bits and exits.
+        self.agentSupervisor = AgentSupervisor()
         setupObservers()
         startPolling()
+        // Task 4 (macOS parity): mirror Windows' session-lock freeze/thaw.
+        // Start the freeze observer so a locked/sleeping Mac stops serving
+        // ZTLP connections (NXDOMAIN) until it unlocks/wakes.
+        SessionFreezeCoordinator.shared.start()
+        // Start the per-user agent supervisor (control socket
+        // 127.100.255.1:4433 is served by THIS agent process).
+        self.agentSupervisor.start()
         // "Connect on Launch" (Settings > General). Mirrors the Windows
         // client's auto_connect: if the daemon isn't already up, start it.
         if configuration.autoConnect {
             Task { [weak self] in
                 guard let self else { return }
-                if await !Self.daemonReachable() { self.installService() }
+                self.installer.refreshState()
+                if installStep(serviceState: self.installer.state) == .register { self.installService() }
             }
         }
     }
 
     deinit {
         pollTask?.cancel()
+        // Stop the per-user agent supervisor (closes the stdin pipe -> the
+        // agent's stdin watch fires -> it removes its pidfile and exits; no
+        // orphan agent outliving the login session). deinit of a @MainActor
+        // object runs on the main thread, so assumeIsolated is sound here.
+        MainActor.assumeIsolated {
+            self.agentSupervisor.stop()
+        }
+        // Stop the freeze observer (best-effort thaw on quit).
+        SessionFreezeCoordinator.shared.stop()
     }
 
     // MARK: - Actions (Task 8: no Connect button — identity network, not a VPN)
@@ -306,7 +447,8 @@ final class TunnelViewModel: ObservableObject {
     /// toggle, "on" = make sure the service is installed; "off" = uninstall
     /// it (Settings > Service is the primary place for that).
     func toggleConnection() {
-        if daemonIsReachable { disconnect() } else { installService() }
+        installer.refreshState()
+        if installStep(serviceState: installer.state) == .nothingToDo { disconnect() } else { installService() }
     }
 
     /// Row 1 action: install (SMAppService register) the root service.
@@ -323,6 +465,8 @@ final class TunnelViewModel: ObservableObject {
     ///    .enabled but launchd never spawns the new binary. If the daemon
     ///    does not answer within `staleRegistrationTimeout`, we unregister +
     ///    register ONCE automatically — exactly what fixed it by hand.
+    static let serviceMissingMessage = "The ZTLP service is missing from this app bundle (\(AgentServiceInstaller.plistName)). Reinstall ZTLP."
+
     func installService() {
         guard !installInFlight else { return }
         lastError = nil
@@ -334,7 +478,8 @@ final class TunnelViewModel: ObservableObject {
         Task {
             defer { transitionInFlight = false; installInFlight = false }
 
-            if await Self.daemonReachable() {
+            installer.refreshState()
+            if installStep(serviceState: installer.state) == .nothingToDo {
                 await pollOnceUnlocked()
                 return
             }
@@ -387,7 +532,7 @@ final class TunnelViewModel: ObservableObject {
             return true
         case .notFound:
             status = .disconnected
-            lastError = "The ZTLP service is missing from this app bundle (org.ztlp.agent.plist). Reinstall ZTLP."
+            lastError = Self.serviceMissingMessage
             NSSound.beep()
             return true
         case .notRegistered:
@@ -439,12 +584,12 @@ final class TunnelViewModel: ObservableObject {
                 lastError = "Could not stop the ZTLP service: \(err)"
             }
 
-            _ = await Self.waitForDaemon(reachable: false, timeout: Self.stopTimeout)
-            let stillUp = await Self.daemonReachable()
-            if stillUp {
+            installer.refreshState()
+            serviceState = installer.state
+            if !uninstallSucceeded(serviceState: installer.state) {
                 status = .connected
                 if lastError == nil {
-                    lastError = "The ZTLP service is still running. Try again in a moment."
+                    lastError = "The ZTLP service is still installed. Try again in a moment."
                 }
             } else {
                 status = .disconnected
@@ -556,11 +701,93 @@ final class TunnelViewModel: ObservableObject {
         Task { await pollOnce() }
     }
 
+    // MARK: - Live DNS/HTTPS probes (Task 5b: rows reflect real network state)
+
+    /// Reserved health name the daemon answers (mirrors peruser::HEALTH_NAME).
+    static let healthName = "ztlp-health.ztlp"
+    /// Fixed loopback address the health name must resolve to when the
+    /// resolver is routing .ztlp through the agent (peruser::HEALTH_VIP).
+    static let healthVIP = "127.100.255.2"
+    /// Health responder port (peruser::HEALTH_PORT). 8443 (unprivileged):
+    /// the per-user agent is non-root and macOS only lets root bind <1024.
+    static let healthPort: UInt16 = 8443
+
+    /// Dotted-quad of an AF_INET `sockaddr`, or nil. The old probe rebound the
+    /// `sockaddr` itself to `in_addr` (reading sa_len/sa_family/port bytes,
+    /// not the address) and string-interpolated `inet_ntoa`'s C pointer
+    /// ("0x…"), so it NEVER equalled the health VIP and the DNS row always
+    /// said "DNS routing not working" even when DNS was fine.
+    nonisolated static func ipv4String(_ sa: UnsafePointer<sockaddr>) -> String? {
+        guard Int32(sa.pointee.sa_family) == AF_INET else { return nil }
+        var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return nil }
+        return String(cString: buf)
+    }
+
+    /// Live DNS probe: resolve `ztlp-health.ztlp` through the OS resolver and
+    /// check it lands on the ZTLP VIP. `true` = resolves to the VIP, `false` =
+    /// resolves elsewhere or errors, `nil` = skip (not enrolled yet).
+    nonisolated static func probeDNS(enrolled: Bool) async -> Bool? {
+        guard enrolled else { return nil }
+        let host = Self.healthName
+        return await withCheckedContinuation { cont in
+            Task.detached(priority: .utility) {
+                let resolved = host.withCString { h in
+                    var addrs: UnsafeMutablePointer<addrinfo>?
+                    var hints = addrinfo()
+                    hints.ai_family = AF_INET
+                    hints.ai_socktype = SOCK_STREAM
+                    guard getaddrinfo(h, nil, &hints, &addrs) == 0, let root = addrs else {
+                        return false
+                    }
+                    defer { freeaddrinfo(addrs) }
+                    var p = root.pointee
+                    var ok = false
+                    while true {
+                        if p.ai_family == AF_INET, let sa = p.ai_addr,
+                           Self.ipv4String(sa) == Self.healthVIP {
+                            ok = true
+                        }
+                        guard let next = p.ai_next else { break }
+                        p = next.pointee
+                    }
+                    return ok
+                }
+                cont.resume(returning: resolved)
+            }
+        }
+    }
+
+    /// Live HTTPS probe: open TLS to `https://ztlp-health.ztlp:8443/` the way
+    /// Safari would — the OS resolver routes the name to the loopback VIP (the
+    /// agent), SNI = the health name, and the system trust store validates the
+    /// chain. `true` = 2xx + the health body, `false` = error, `nil` = skip.
+    /// Mirrors the Rust `probe_https` (SNI = health name, roots = OS store).
+    /// Port 8443 (unprivileged) so the non-root per-user agent can bind it.
+    nonisolated static func probeHTTPS(enrolled: Bool, dnsOk: Bool) async -> Bool? {
+        guard enrolled, dnsOk else { return nil }
+        guard let url = URL(string: "https://\(Self.healthName):\(Self.healthPort)/") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return (200..<400).contains(code) && body.contains("ztlp-health-ok")
+        } catch {
+            return false
+        }
+    }
+
     private func recomputeReadiness() {
         let r = HomeReadiness.compute(
             serviceState: serviceState,
             daemonReachable: daemonIsReachable,
-            daemon: daemon
+            daemon: daemon,
+            dnsProbe: dnsProbe,
+            httpsProbe: httpsProbe
         )
         if r != readiness { readiness = r }
     }
@@ -627,6 +854,25 @@ final class TunnelViewModel: ObservableObject {
         } else {
             daemonIsReachable = false
         }
+        // Task 5b: while enrolled + the daemon is up, refresh the live
+        // DNS/HTTPS probes so the rows reflect real network state, not just
+        // the daemon's config flags. Skip the probes (nil) when not enrolled
+        // or the daemon is down — the rows then show the waiting state.
+        let enrolled = daemon?.identityEnrolled ?? false
+        if daemonIsReachable && enrolled {
+            dnsProbe = await Self.probeDNS(enrolled: enrolled)
+            if dnsProbe != true {
+                httpsProbe = nil
+                httpsProbeAt = nil
+            } else if shouldProbeHTTPS(lastAt: httpsProbeAt, lastResult: httpsProbe, now: Date()) {
+                httpsProbe = await Self.probeHTTPS(enrolled: enrolled, dnsOk: true)
+                httpsProbeAt = Date()
+            }
+        } else {
+            dnsProbe = nil
+            httpsProbe = nil
+            httpsProbeAt = nil
+        }
         recomputeReadiness()
     }
 
@@ -648,6 +894,18 @@ final class TunnelViewModel: ObservableObject {
             snap.relay = o["relay"]?.stringValue ?? snap.relay
             snap.vipAllocated = o["vip_allocated"]?.intValue ?? snap.vipAllocated
             snap.uptimeSecs = o["uptime_secs"]?.intValue ?? snap.uptimeSecs
+            if case .object(let ck)? = o["ns_checkin"] {
+                snap.nsCheckinState = ck["state"]?.stringValue ?? ""
+            } else {
+                snap.nsCheckinState = ""
+            }
+            // Safety net for a missed lock/unlock/wake notification: the
+            // agent must be frozen exactly while the screen is locked or the
+            // Mac is asleep. An agent stuck frozen answers "not found" for
+            // every .ztlp name until the app is restarted.
+            if let frozen = o["frozen"]?.boolValue {
+                await SessionFreezeCoordinator.shared.reconcile(agentFrozen: frozen)
+            }
         }
 
         if let ss = try? await AgentControlClient.send(cmd: "setup_status", timeout: 3),

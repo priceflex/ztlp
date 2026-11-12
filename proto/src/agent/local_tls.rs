@@ -703,7 +703,7 @@ fn expand_tilde(path: &str) -> PathBuf {
 // ─── Per-user agent health responder ───────────────────────────────────────
 
 /// Serve the TLS health probe on `listener` (bound to
-/// `peruser::HEALTH_VIP:443` by the daemon): complete the TLS handshake with
+/// `peruser::HEALTH_VIP:8443` by the daemon): complete the TLS handshake with
 /// a leaf minted for whatever SNI the client sent (`ztlp-health.ztlp`),
 /// answer one fixed `200 OK`, close. The desktop app validates that chain
 /// against the Windows trust store, so a green result proves a browser

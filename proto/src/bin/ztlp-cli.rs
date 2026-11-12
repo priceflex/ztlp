@@ -853,11 +853,17 @@ enum AgentCommands {
         parent_pid: Option<u32>,
     },
 
-    /// Windows, admin: one-time machine setup for the per-user agent
-    /// (DNS rule for .ztlp, machine CA + trust, removes the old service).
-    /// Run by the installer; idempotent, safe to re-run as a repair.
+    /// One-time machine setup for the per-user agent (DNS rule for .ztlp,
+    /// machine CA + trust, removes the old service). Run by the installer;
+    /// idempotent, safe to re-run as a repair.
+    /// `--boot`: run the idempotent plan and exit (used by the slim
+    /// `org.ztlp.machine` daemon at every boot — no data plane, no prompt).
     #[command(name = "machine-setup")]
-    MachineSetup,
+    MachineSetup {
+        /// Run the idempotent machine-setup plan, then exit (no data plane).
+        #[arg(long)]
+        boot: bool,
+    },
 
     /// Windows, admin: undo `machine-setup` (run by the uninstaller)
     #[command(name = "machine-teardown")]
@@ -13808,9 +13814,10 @@ async fn cmd_agent_install_windows(
 /// `ztlp agent machine-setup` / `machine-teardown` (Windows, elevated).
 /// Prints one line per step; exits non-zero if any step failed so the
 /// installer can tell.
-fn cmd_agent_machine(setup: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_agent_machine(setup: bool, boot: bool) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
     {
+        let _ = boot;
         use ztlp_proto::agent::machine_setup::{execute, probe_state, setup_plan, teardown_plan};
         let state = probe_state();
         let plan = if setup {
@@ -13856,22 +13863,115 @@ fn cmd_agent_machine(setup: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     #[cfg(not(windows))]
     {
-        let _ = setup;
-        Err("machine-setup / machine-teardown are Windows-only".into())
+        // macOS: the machine-setup plan + executor are cross-platform
+        // (Task 1 added the macOS executor). Run the same idempotent plan the
+        // Windows path runs — `--boot` just means "don't flush DNS / don't
+        // print the post-state JSON" (the boot daemon runs it silently at
+        // every boot). Linux has no machine CA flow, so it stays an error.
+        #[cfg(target_os = "macos")]
+        {
+            use ztlp_proto::agent::machine_setup::{
+                execute, macos_boot_plan, macos_machine_loopback_aliases, probe_state, setup_plan,
+                stop_after_failure, teardown_plan,
+            };
+            let state = probe_state();
+            let plan = if setup {
+                // lo0 aliases vanish at reboot and the per-user agent (not
+                // root) can't add them — re-assert them every run.
+                for ip in macos_machine_loopback_aliases() {
+                    ztlp_proto::agent::macos_daemon::ensure_vip_alias(ip);
+                }
+                eprintln!(
+                    "{} lo0 aliases: {:?}",
+                    c_green("✓"),
+                    macos_machine_loopback_aliases()
+                );
+                let p = setup_plan(&state);
+                // The boot daemon is root with no GUI: it can never set trust.
+                if boot {
+                    macos_boot_plan(p)
+                } else {
+                    p
+                }
+            } else {
+                teardown_plan(&state)
+            };
+            let mut failed = Vec::new();
+            for action in &plan {
+                match execute(action) {
+                    Ok(msg) => eprintln!("{} {}", c_green("✓"), msg),
+                    Err(e) => {
+                        eprintln!("{} {}", c_red("✗"), e);
+                        failed.push(e);
+                        // Never trust a root whose key could not be locked down.
+                        if stop_after_failure(action) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if !boot && setup {
+                // A negative answer macOS cached before the .ztlp resolver
+                // rule existed would hide every ZTLP name; flush the cache.
+                let _ = std::process::Command::new("killall")
+                    .args(["-HUP", "mDNSResponder"])
+                    .output();
+                let after = probe_state();
+                println!("{}", serde_json::to_string(&after)?);
+                if !after.ready() && failed.is_empty() {
+                    failed.push("machine setup finished but not every check passed".into());
+                }
+            }
+            if boot && setup {
+                // The boot daemon stays up as the port broker: the per-user
+                // agent (non-root) gets its privileged VIP ports (443/80/22)
+                // and new-VIP lo0 aliases from here. Setup failures are
+                // logged above but must not stop the broker.
+                use ztlp_proto::agent::port_broker::{run_broker_with, BROKER_SOCKET_PATH};
+                eprintln!(
+                    "{} port broker listening on {BROKER_SOCKET_PATH}",
+                    c_green("✓")
+                );
+                run_broker_with(
+                    std::path::Path::new(BROKER_SOCKET_PATH),
+                    |req| {
+                        ztlp_proto::agent::macos_daemon::ensure_vip_alias(req.ip);
+                    },
+                    // Upgrades from the root agent: hand its enrollment to
+                    // the (administrator) user's agent that asks for it.
+                    ztlp_proto::agent::legacy_migrate::broker_hook,
+                )?;
+                return Err("port broker stopped".into());
+            }
+            if !failed.is_empty() {
+                return Err(format!(
+                    "{} step(s) failed (run as root / an administrator): {}",
+                    failed.len(),
+                    failed.join("; ")
+                )
+                .into());
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (setup, boot);
+            Err("machine-setup / machine-teardown are Windows- or macOS-only".into())
+        }
     }
 }
 
 /// `ztlp agent machine-status`: JSON of what machine-setup put in place.
 fn cmd_agent_machine_status() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         let s = ztlp_proto::agent::machine_setup::probe_state();
         println!("{}", serde_json::to_string(&s)?);
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
-        Err("machine-status is Windows-only".into())
+        Err("machine-status is Windows- or macOS-only".into())
     }
 }
 
@@ -14909,8 +15009,8 @@ async fn main() {
                 }
                 cmd_agent_start(*foreground, config).await
             }
-            AgentCommands::MachineSetup => cmd_agent_machine(true),
-            AgentCommands::MachineTeardown => cmd_agent_machine(false),
+            AgentCommands::MachineSetup { boot } => cmd_agent_machine(true, *boot),
+            AgentCommands::MachineTeardown => cmd_agent_machine(false, false),
             AgentCommands::MachineStatus => cmd_agent_machine_status(),
             AgentCommands::Stop => cmd_agent_stop().await,
             AgentCommands::Status => cmd_agent_status().await,

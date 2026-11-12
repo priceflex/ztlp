@@ -743,6 +743,46 @@ final class CodeRabbit132Tests: XCTestCase {
         XCTAssertEqual(finalFreezeAction(for: .systemWillSleep, locked: false), .freeze)
     }
 
+    // Field bug (MacBook, 2026-11-11): the Mac woke to the lock screen, so
+    // the wake sent no thaw; the unlock never sent one either, because the
+    // only "unlock" signal observed was the fast-user-switching one. The
+    // agent stayed frozen until the app was restarted.
+    func testScreenUnlockThawsAndScreenLockFreezes() {
+        XCTAssertEqual(finalFreezeAction(for: .screenUnlocked, locked: false), .thaw)
+        // The lock flag can lag the notification; the unlock must still thaw.
+        XCTAssertEqual(finalFreezeAction(for: .screenUnlocked, locked: true), .thaw)
+        XCTAssertEqual(finalFreezeAction(for: .screenLocked, locked: true), .freeze)
+        XCTAssertEqual(finalFreezeAction(for: .screenLocked, locked: false), .freeze)
+    }
+
+    func testSleepWakeLockedThenUnlockEndsThawed() {
+        var locked = false
+        var sent: [FreezeAction] = []
+        let obs = SessionFreezeObserver(send: { sent.append($0) }, sessionLocked: { locked })
+        obs.emit(.systemWillSleep)
+        XCTAssertTrue(obs.systemAsleep)
+        locked = true
+        obs.emit(.systemDidWake)          // lock screen is up: stay frozen
+        XCTAssertFalse(obs.systemAsleep)
+        XCTAssertEqual(sent, [.freeze])
+        locked = false
+        obs.emit(.screenUnlocked)
+        XCTAssertEqual(sent, [.freeze, .thaw])
+    }
+
+    // Safety net on the status poll: frozen must equal (locked || asleep).
+    func testReconcileFreezeAction() {
+        // The field bug: frozen, unlocked, awake -> thaw.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: false, systemAsleep: false), .thaw)
+        // Just frozen for sleep, screen not locked yet -> leave it frozen.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: false, systemAsleep: true), FreezeAction.none)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: true, locked: true, systemAsleep: false), FreezeAction.none)
+        // A missed lock (or a respawned agent while locked) -> freeze.
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: true, systemAsleep: false), .freeze)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: false, systemAsleep: true), .freeze)
+        XCTAssertEqual(reconcileFreezeAction(agentFrozen: false, locked: false, systemAsleep: false), FreezeAction.none)
+    }
+
     // Finding: each respawn wrote the log from offset 0 (overwriting).
     func testAgentLogHandleAppends() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("ztlp-log-\(UUID().uuidString).log")

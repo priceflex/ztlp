@@ -899,6 +899,13 @@ final class TunnelViewModel: ObservableObject {
             } else {
                 snap.nsCheckinState = ""
             }
+            // Safety net for a missed lock/unlock/wake notification: the
+            // agent must be frozen exactly while the screen is locked or the
+            // Mac is asleep. An agent stuck frozen answers "not found" for
+            // every .ztlp name until the app is restarted.
+            if let frozen = o["frozen"]?.boolValue {
+                await SessionFreezeCoordinator.shared.reconcile(agentFrozen: frozen)
+            }
         }
 
         if let ss = try? await AgentControlClient.send(cmd: "setup_status", timeout: 3),

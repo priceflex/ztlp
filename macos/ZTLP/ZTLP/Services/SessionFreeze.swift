@@ -20,18 +20,19 @@
 //      pure function, and forwards to an injected `send` closure (tests pass
 //      a recorder; the app passes `AgentControlClient.send`).
 //
-// Lock detection: macOS has no public NSWorkspace "screen locked"
-// notification. We use `NSWorkspaceSessionDidResignActiveNotification`
-// (fired on screen-lock and on session sleep) as the lock trigger, and
-// `NSWorkspaceSessionDidBecomeActiveNotification` as the unlock trigger, with
+// Lock detection: NSWorkspace has no "screen locked" notification, and its
+// session resign/become-active pair only fires on fast user switching. The
+// screen lock/unlock signals are the distributed notifications
+// `com.apple.screenIsLocked` / `com.apple.screenIsUnlocked`, with
 // `CGSessionCopyCurrentDictionary()`'s `CGSSessionScreenIsLocked` as the
-// source of truth for whether the session is actually locked when a resign
-// fires. A wake after a lock is a thaw even if the lock screen is still up;
-// the subsequent unlock sends a second (idempotent) thaw. Both directions are
-// idempotent on the Rust side (`is_frozen()` is a flag), so over-sending is
-// harmless. This is a deliberate, documented heuristic with the same
-// tradeoff as the Windows side (a missed lock event costs at most a stale
-// "still available" window until the next event).
+// source of truth for the current lock state. A wake with the lock screen up
+// stays frozen; the unlock sends the thaw. Both commands are idempotent on
+// the Rust side (`is_frozen()` is a flag), so over-sending is harmless.
+//
+// Notifications can be missed and a send can fail right after wake, so the
+// status poll also calls `SessionFreezeCoordinator.reconcile`, which repairs
+// any mismatch between the agent's `frozen` flag and the real lock/sleep
+// state within one poll.
 
 import AppKit
 import CoreGraphics
@@ -61,7 +62,13 @@ enum SessionFreezeEvent: Equatable {
     /// observer checks `sessionLocked()` to decide freeze vs none.
     case sessionResigned
     /// Session became active again (NSWorkspace.sessionDidBecomeActiveNotification).
+    /// Fast user switching only: macOS does NOT post it for a screen unlock.
     case sessionBecameActive
+    /// Screen locked (distributed notification `com.apple.screenIsLocked`).
+    case screenLocked
+    /// Screen unlocked (distributed notification `com.apple.screenIsUnlocked`).
+    /// This is the event that ends a wake-while-locked freeze.
+    case screenUnlocked
 }
 
 /// Map a session event to the agent command. PURE — no AppKit, no I/O.
@@ -79,7 +86,25 @@ func action(for event: SessionFreezeEvent) -> FreezeAction {
         return .none
     case .sessionBecameActive:
         return .thaw
+    case .screenLocked:
+        return .freeze
+    case .screenUnlocked:
+        return .thaw
     }
+}
+
+/// Safety net, run on every status poll: the agent must be frozen exactly
+/// while the screen is locked or the Mac is going to sleep. Returns the
+/// command that repairs a mismatch, `.none` when the agent already agrees.
+///
+/// Why: freeze/thaw are sent once per OS notification. A notification that
+/// never arrives (or a send that fails right after wake) used to leave the
+/// agent frozen until the user quit the app — every `.ztlp` name answered
+/// "not found" on an unlocked Mac.
+func reconcileFreezeAction(agentFrozen: Bool, locked: Bool, systemAsleep: Bool) -> FreezeAction {
+    let shouldBeFrozen = locked || systemAsleep
+    if agentFrozen == shouldBeFrozen { return .none }
+    return shouldBeFrozen ? .freeze : .thaw
 }
 
 /// Source of truth for lock state: `CGSessionCopyCurrentDictionary()`'s
@@ -111,11 +136,20 @@ func sessionLocked() -> Bool {
     return false
 }
 
+/// Posted by loginwindow when the screen locks / unlocks.
+let screenIsLockedNotification = Notification.Name("com.apple.screenIsLocked")
+let screenIsUnlockedNotification = Notification.Name("com.apple.screenIsUnlocked")
+
 /// Thin AppKit glue: subscribe to the OS sleep/wake/session events and forward
 /// the mapped action to the agent. Created once at app launch; `stop()`
 /// unsubscribes.
 final class SessionFreezeObserver {
     private var observers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
+    /// True between willSleep and didWake. The status-poll safety net must
+    /// not thaw an agent that was just frozen for sleep (the screen is not
+    /// locked yet at that moment).
+    private(set) var systemAsleep = false
     private let send: (FreezeAction) -> Void
     private let sessionLocked: () -> Bool
 
@@ -154,15 +188,31 @@ final class SessionFreezeObserver {
         observers.append(ws.addObserver(
             forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.emit(.sessionBecameActive) })
+        // Screen lock / unlock. NSWorkspace has no notification for these;
+        // the session ones above only fire on fast user switching. Without
+        // the unlock one a Mac that wakes to the lock screen never thawed.
+        let dn = DistributedNotificationCenter.default()
+        distributedObservers.append(dn.addObserver(
+            forName: screenIsLockedNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.emit(.screenLocked) })
+        distributedObservers.append(dn.addObserver(
+            forName: screenIsUnlockedNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.emit(.screenUnlocked) })
     }
 
     func stop() {
         let ws = NSWorkspace.shared.notificationCenter
         for o in observers { ws.removeObserver(o) }
         observers.removeAll()
+        let dn = DistributedNotificationCenter.default()
+        for o in distributedObservers { dn.removeObserver(o) }
+        distributedObservers.removeAll()
     }
 
-    private func emit(_ event: SessionFreezeEvent) {
+    /// Internal (not private) so tests can drive events without the OS.
+    func emit(_ event: SessionFreezeEvent) {
+        if event == .systemWillSleep { systemAsleep = true }
+        if event == .systemDidWake { systemAsleep = false }
         let final = finalFreezeAction(for: event, locked: sessionLocked())
         if final != .none {
             send(final)
@@ -202,6 +252,23 @@ final class SessionFreezeCoordinator {
     private var running = false
 
     private init() {}
+
+    /// Status-poll safety net: `agentFrozen` is the `frozen` flag from the
+    /// agent's `status` reply. Sends the repairing freeze/thaw when the agent
+    /// disagrees with the real lock/sleep state. No-op until `start()`.
+    func reconcile(agentFrozen: Bool) async {
+        guard running, let observer else { return }
+        let action = reconcileFreezeAction(
+            agentFrozen: agentFrozen,
+            locked: defaultSessionLockedDetector(),
+            systemAsleep: observer.systemAsleep
+        )
+        guard action != .none else { return }
+        let cmd = (action == .freeze) ? "freeze" : "thaw"
+        NSLog("[ztlp] freeze state mismatch (agent frozen=\(agentFrozen)); sending \(cmd)")
+        if let r = try? await AgentControlClient.send(cmd: cmd, timeout: 3), r.ok { return }
+        NSLog("[ztlp] freeze/thaw \(cmd) (reconcile) failed; retrying on the next poll")
+    }
 
     /// Start observing sleep/wake/lock and freeze the agent on lock.
     /// Idempotent — safe to call from multiple init paths.

@@ -1217,14 +1217,46 @@ pub mod tokio_endpoint {
             relayed_service: Option<&str>,
             expect: super::CertExpectation,
         ) -> Result<QuicConnection, QuicTransportError> {
+            Self::connect_with_socket_in_pin_dir(
+                cfg,
+                remote,
+                server_name,
+                std_socket,
+                relayed_service,
+                expect,
+                None,
+            )
+            .await
+        }
+
+        /// Same as [`Self::connect_with_socket_for_service`], with the TOFU
+        /// pin directory made explicit. `pin_dir = None` is the default
+        /// `~/.ztlp/quic_pins` and is what every production caller passes;
+        /// `Some(dir)` lets a caller (tests) keep its pins out of the user's
+        /// real pin directory. The pin key, the certificate decision and the
+        /// TLS signature check are identical in both cases.
+        pub async fn connect_with_socket_in_pin_dir(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+            std_socket: std::net::UdpSocket,
+            relayed_service: Option<&str>,
+            expect: super::CertExpectation,
+            pin_dir: Option<std::path::PathBuf>,
+        ) -> Result<QuicConnection, QuicTransportError> {
             ensure_crypto();
-            cleanup_legacy_pins_once(server_name);
+            let mut verifier = TofuCertVerifier::with_expectation(
+                &pin_key_for_service(remote, server_name, relayed_service),
+                expect,
+            );
+            match pin_dir {
+                Some(dir) => verifier.pin_dir = dir,
+                // The legacy per-SNI pin only ever lived in the default dir.
+                None => cleanup_legacy_pins_once(server_name),
+            }
             let mut client_crypto = rustls::ClientConfig::builder()
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(TofuCertVerifier::with_expectation(
-                    &pin_key_for_service(remote, server_name, relayed_service),
-                    expect,
-                )))
+                .with_custom_certificate_verifier(Arc::new(verifier))
                 .with_no_client_auth();
 
             client_crypto.alpn_protocols = cfg.alpn.clone();

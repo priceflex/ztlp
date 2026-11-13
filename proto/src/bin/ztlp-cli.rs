@@ -2880,12 +2880,11 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 #[allow(clippy::too_many_arguments)]
 /// v0.32.2 (A1): pick the address to dial in the QUIC path.
 ///
-/// Given the NS-resolved peer address (typically the relay) and an
-/// optional multi-candidate winning address (a LAN-direct host candidate
-/// from PUNCH_REPORT), prefer the multi-candidate winner. When the
-/// winner is `None` — multi-candidate disabled, no NodeID, NS query
-/// failed, or no candidate succeeded — fall back to the NS-resolved
-/// address unchanged. Extracted as a free fn so the override logic is
+/// Given the NS-resolved peer address and the optional target chosen by
+/// the direct-first race (a direct candidate that completed a QUIC
+/// handshake, or the relay when none did), prefer the race's choice. When
+/// it is `None` — multi-candidate disabled, no NodeID, or no direct path
+/// and no relay to fall back to — keep the NS-resolved address unchanged. Extracted as a free fn so the override logic is
 /// directly unit-testable without spinning up the full QUIC stack.
 fn pick_quic_dial_target(
     ns_resolved: SocketAddr,
@@ -2951,28 +2950,6 @@ fn derive_relay_fallback_addr(ns_server: Option<&str>, relay: Option<&str>) -> O
     None
 }
 
-/// v0.35.2: choose the "relay backstop" address fed into the multi-candidate
-/// dial race (`try_multi_candidate_connect`'s `relay_addr` arg).
-///
-/// The race already tries the gateway's PEER_ENDPOINTS host candidates; the
-/// backstop is the resilient `CandidateClass::Relay` competitor that must be
-/// in the race from t0 so a NAT'd, relay-routed gateway is reachable even when
-/// every direct candidate is dead.
-///
-/// - `relay_fallback` — the derived/explicit relay (`derive_relay_fallback_addr`),
-///   or `None` when no relay could be derived OR the operator passed
-///   `--no-relay-fallback` (fail-closed: caller sets this to `None`).
-/// - `ns_resolved` — the NS-resolved peer address used pre-fix as the backstop.
-///   For a relay-routed gateway with no `--relay` flag this is the gateway's
-///   own (unroutable) LAN address — the very candidate the race already covers,
-///   so using it as the "relay" backstop is a no-op that leaves the real relay
-///   out of the race entirely (the KELLYMANCINO-PC bug).
-///
-/// Prefer the real relay; fall back to the NS-resolved addr only when no relay
-/// exists (legacy direct-listener mode / fail-closed), preserving prior behavior.
-fn pick_race_backstop(relay_fallback: Option<SocketAddr>, ns_resolved: SocketAddr) -> SocketAddr {
-    relay_fallback.unwrap_or(ns_resolved)
-}
 //
 // Wraps cmd_connect's dial-and-tunnel logic in a supervisor loop that detects
 // QUIC session loss via quinn::Connection::closed(), classifies the disconnect
@@ -3997,6 +3974,145 @@ Only enable for legacy NAT-traversal compatibility."
     };
     let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
 
+    let node_id = peer_node_id.unwrap_or(ztlp_proto::identity::NodeId([0; 16]));
+    let identity = load_or_generate_identity(key)?;
+
+    // ── Direct-first dial (v0.37.1) ──────────────────────────────────
+    //
+    // With `--multi-candidate` (the default when `--ns-server` is set) and
+    // an NS-resolved peer NodeID, find out which of the peer's DIRECT
+    // addresses this client can reach by racing a real QUIC handshake
+    // against each of them, and keep the winning connection.
+    //
+    // Candidates = the SVC record's addresses + the name server's
+    // PEER_ENDPOINTS answer, minus the relay. The relay is the backstop,
+    // not a candidate: when no direct handshake completes we route through
+    // it (CLIENT_ROUTE below), and that decision comes after at most
+    // LAN_CANDIDATE_TIMEOUT for LAN-only candidate sets.
+    //
+    // History: v0.32.2 raced a 9-byte UDP probe here and took any reply as
+    // "reachable". Neither the QUIC listener nor the relay answers that
+    // probe, so every candidate timed out (2 s), a reachable LAN gateway
+    // was never picked, and every connect-by-name went through the relay
+    // ~2.3 s late. See `multi_candidate_dial` for the details.
+    //
+    // Honors --no-relay-fallback: no relay is synthesized (v0.34.12), so a
+    // failed race leaves the NS-resolved address in place, as before.
+    // `--no-multi-candidate` skips this block entirely.
+    let mut direct_conn: Option<ztlp_proto::quic_transport::tokio_endpoint::QuicConnection> = None;
+    let mut multi_candidate_winner: Option<SocketAddr> = None;
+    if multi_candidate && peer_node_id.is_some() {
+        use ztlp_proto::multi_candidate_dial::{
+            connect_direct_first, direct_dial_policy, query_peer_endpoints, rank_direct_candidates,
+            DialRoute, QuicHandshakeDialer, DIRECT_PEER_ENDPOINTS_TIMEOUT,
+        };
+
+        // The relay this connect would be routed through (explicit --relay,
+        // else derived from the NS host). Known even under
+        // --no-relay-fallback so it is never dialed as a "direct" candidate:
+        // a relay only forwards QUIC after a CLIENT_ROUTE frame.
+        let known_relay = derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref());
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            known_relay.filter(|r| *r != peer_addr)
+        };
+
+        eprintln!(
+            "{} multi-candidate dial enabled (direct-first, QUIC handshake)",
+            c_dim("[v0.37.1]")
+        );
+
+        // PEER_ENDPOINTS adds addresses the peer reported to the name server
+        // (LAN NICs, NAT mapping). Best effort: without it we still race the
+        // SVC record's candidates.
+        let mut peer_endpoints: Vec<SocketAddr> = Vec::new();
+        if let Some(ns_addr) = ns_server
+            .as_deref()
+            .and_then(|s| s.parse::<SocketAddr>().ok())
+        {
+            let bind_addr = if ns_addr.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let queried = match tokio::net::UdpSocket::bind(bind_addr).await {
+                Ok(sock) => query_peer_endpoints(
+                    node_id,
+                    ns_addr,
+                    &sock,
+                    &identity,
+                    DIRECT_PEER_ENDPOINTS_TIMEOUT,
+                )
+                .await
+                .map_err(|e| format!("{:?}", e)),
+                Err(e) => Err(format!("bind {}: {}", bind_addr, e)),
+            };
+            match queried {
+                Ok(eps) => peer_endpoints = eps,
+                Err(e) => eprintln!(
+                    "{} PEER_ENDPOINTS unavailable ({}); racing the SVC candidates only",
+                    c_dim("·"),
+                    e
+                ),
+            }
+        }
+
+        let relays: Vec<SocketAddr> = known_relay.into_iter().collect();
+        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+        let candidates =
+            rank_direct_candidates(&dial_candidates, &peer_endpoints, &relays, &local_subnets);
+        // Same endpoint config and TLS server name as the dial below, so the
+        // handed-over connection is the one that dial would have produced.
+        let dialer = std::sync::Arc::new(QuicHandshakeDialer::new(
+            QuicEndpointConfig::default(),
+            "localhost",
+        ));
+        let race_started = Instant::now();
+        match connect_direct_first(candidates, relay_fallback, dialer, direct_dial_policy()).await {
+            DialRoute::Direct(direct) => {
+                eprintln!(
+                    "{} multi-candidate dial succeeded: {} ({:?}) in {} ms",
+                    c_green("✓"),
+                    direct.addr,
+                    direct.class,
+                    race_started.elapsed().as_millis()
+                );
+                multi_candidate_winner = Some(direct.addr);
+                direct_conn = Some(direct.conn);
+            }
+            DialRoute::Relay {
+                addr,
+                direct_failure,
+            } => {
+                eprintln!(
+                    "{} no direct path after {} ms ({:?}); using RELAY-forwarding via {}",
+                    c_dim("[v0.34.12]"),
+                    race_started.elapsed().as_millis(),
+                    direct_failure,
+                    addr
+                );
+                multi_candidate_winner = Some(addr);
+            }
+            DialRoute::Unresolved { direct_failure } => {
+                eprintln!(
+                    "{} no direct path after {} ms ({:?}); falling back to NS-resolved addr",
+                    c_dim("[v0.32.2]"),
+                    race_started.elapsed().as_millis(),
+                    direct_failure
+                );
+            }
+        }
+    }
+
+    // `--persistent-ep` owns its endpoint and connection (see below), so
+    // the race only chooses the address there; its connection is closed.
+    if persistent_ep {
+        if let Some(conn) = direct_conn.take() {
+            conn.close();
+        }
+    }
+
     // ── Stage 2 (v0.35.x): multi-candidate pre-selection ─────────────
     //
     // `dial_candidates` is the client-RANKED SVC candidate set (best-first):
@@ -4011,7 +4127,12 @@ Only enable for legacy NAT-traversal compatibility."
     // candidate it can actually reach. If none answer (or there's only one
     // candidate, the common case) we keep candidate[0] and let the existing
     // QUIC handshake + auto-reconnect supervisor handle it exactly as before.
-    let peer_addr = if dial_candidates.len() > 1 {
+    //
+    // v0.37.1: this advisory probe (it reports "reachable" for anything that
+    // does not send an ICMP error within 200 ms) only runs when the
+    // direct-first race above did not pick a target: `--no-multi-candidate`,
+    // no peer NodeID, or a failed race with no relay to fall back to.
+    let peer_addr = if multi_candidate_winner.is_none() && dial_candidates.len() > 1 {
         match select_reachable_candidate(&dial_candidates).await {
             Some(a) => {
                 if a != peer_addr {
@@ -4038,171 +4159,6 @@ Only enable for legacy NAT-traversal compatibility."
     } else {
         peer_addr
     };
-
-    let node_id = peer_node_id.unwrap_or_else(|| ztlp_proto::identity::NodeId([0; 16]));
-    let identity = load_or_generate_identity(key)?;
-
-    // ── v0.32.2 (A1): multi-candidate dial moved into the QUIC path ──
-    //
-    // When `--multi-candidate` is set AND we have an NS-resolved peer
-    // NodeID, race the host candidates from PUNCH_REPORT alongside the
-    // NS-resolved `peer_addr` (which is typically the relay backstop).
-    // The winning path's address overrides `peer_addr` for the rest of
-    // this function — both CLIENT_ROUTE and the subsequent QUIC handshake
-    // then target the LAN-direct winner. Failure (NS query timeout, no
-    // candidate succeeded, parse error, probe bind failure) falls back
-    // to the NS-resolved `peer_addr` unchanged — same outcome as if
-    // `--multi-candidate` weren't passed at all. This is the "safe
-    // default" the original M6 commit was designed around.
-    //
-    // Crucially this is decoupled from `punch_enabled`. The pre-fix M6
-    // block lived in the legacy-UDP branch and was gated on `punch`,
-    // which meant `--multi-candidate --ns-server NAME` silently fell
-    // back to the broken legacy parallel-session handshake. The QUIC
-    // path is the path that actually completes end-to-end against the
-    // v0.30 production relay, so multi-candidate logic belongs here.
-    //
-    // The probe uses a fresh ephemeral UDP socket — NOT `std_socket`,
-    // which Quinn takes ownership of below. Sharing a single fd with
-    // Quinn led to the v0.31 punch fd-aliasing trap; a separate probe
-    // socket sidesteps it entirely.
-    let multi_candidate_winner: Option<SocketAddr> = if multi_candidate && peer_node_id.is_some() {
-        // v0.34.12: relay-forwarding fallback. When every DIRECT candidate
-        // (LAN + srflx/NAT-punch) times out, the pre-fix code fell back to the
-        // NS-resolved LAN address — the candidate that just failed — so a NAT'd
-        // endpoint became unreachable the instant its NAT mapping rotated and
-        // the SVC record's srflx port went stale. The relay always knows the
-        // gateway's live mapping (re-registered ~every 10s), so we instead fall
-        // back to relay-forwarding (CLIENT_ROUTE to the relay, routed by the
-        // NS-resolved gateway NodeID). This makes reachability independent of
-        // SVC-record freshness. See derive_relay_fallback_addr for derivation.
-        //
-        // Honors --no-relay-fallback: if the operator explicitly opted out of
-        // relay routing (as the legacy/punch path already respects), we do NOT
-        // synthesize a relay candidate — the dial fails through to the
-        // NS-resolved addr exactly as pre-fix, and the operator gets the
-        // fail-closed behavior they asked for.
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref())
-                .filter(|r| *r != peer_addr)
-        };
-        match ns_server
-            .as_deref()
-            .and_then(|s| s.parse::<SocketAddr>().ok())
-        {
-            Some(ns_addr) => {
-                eprintln!(
-                    "{} multi-candidate dial enabled (v0.32.2)",
-                    c_dim("[v0.32.2]")
-                );
-                match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                    Ok(probe_sock) => {
-                        let probe_sock = std::sync::Arc::new(probe_sock);
-                        let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
-                        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
-                        // v0.35.2: race the REAL relay as the backstop, not the
-                        // NS-resolved `peer_addr`.
-                        //
-                        // Pre-fix this passed `Some(peer_addr)`. When the target
-                        // is a relay-routed NAT'd gateway the operator typically
-                        // has no `--relay` flag, so `peer_addr` is the gateway's
-                        // own NS-resolved address (its private LAN IP) — exactly
-                        // the candidate the parallel race is already trying via
-                        // PEER_ENDPOINTS. Passing it AGAIN as the "relay backstop"
-                        // meant the genuinely reachable relay never entered the
-                        // race at all; the client only reached it AFTER the whole
-                        // race failed, via the post-race relay fallback below.
-                        // That made connect slow and fragile (KELLYMANCINO-PC,
-                        // 2026-06-15: race = [LAN, srflx, LAN], all dead).
-                        //
-                        // Prefer the derived relay (`relay_fallback`) so the relay
-                        // is a first-class CandidateClass::Relay competitor in the
-                        // bounded race from t0. Fall back to `peer_addr` only when
-                        // no relay could be derived (legacy direct-listener mode),
-                        // preserving prior behavior. Honors --no-relay-fallback:
-                        // `relay_fallback` is already None in that case, so we pass
-                        // `peer_addr` and never synthesize a relay candidate.
-                        let race_backstop = pick_race_backstop(relay_fallback, peer_addr);
-                        match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
-                            peer_node_id.unwrap(),
-                            ns_addr,
-                            probe_sock,
-                            &identity,
-                            &local_subnets,
-                            Some(race_backstop),
-                            policy,
-                        )
-                        .await
-                        {
-                            Ok(outcome) => {
-                                eprintln!(
-                                    "{} multi-candidate dial succeeded: {} ({:?})",
-                                    c_green("✓"),
-                                    outcome.winning_addr,
-                                    outcome.class
-                                );
-                                Some(outcome.winning_addr)
-                            }
-                            Err(e) => {
-                                // Direct candidates all failed. Prefer the relay
-                                // (resilient) over the NS-resolved LAN addr (dead).
-                                match relay_fallback {
-                                    Some(r) => {
-                                        eprintln!(
-                                            "{} multi-candidate dial failed: {:?}; \
-                                             falling back to RELAY-forwarding via {}",
-                                            c_dim("[v0.34.12]"),
-                                            e,
-                                            r
-                                        );
-                                        Some(r)
-                                    }
-                                    None => {
-                                        eprintln!(
-                                            "{} multi-candidate dial failed: {:?}; \
-                                             falling back to NS-resolved addr",
-                                            c_dim("[v0.32.2]"),
-                                            e
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Probe socket bind failed — still prefer relay-forwarding
-                        // over the NS-resolved LAN addr when a relay is known.
-                        match relay_fallback {
-                            Some(r) => {
-                                eprintln!(
-                                    "{} multi-candidate probe socket bind failed: {}; \
-                                     falling back to RELAY-forwarding via {}",
-                                    c_dim("[v0.34.12]"),
-                                    e,
-                                    r
-                                );
-                                Some(r)
-                            }
-                            None => {
-                                eprintln!(
-                                    "{} multi-candidate probe socket bind failed: {}; falling back",
-                                    c_dim("[v0.32.2]"),
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    }
-                }
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
     let peer_addr = pick_quic_dial_target(peer_addr, multi_candidate_winner);
 
     // Bind a UDP socket Quinn will reuse for the QUIC connection.
@@ -4226,10 +4182,15 @@ Only enable for legacy NAT-traversal compatibility."
     // the right default, even when the caller doesn't know whether the
     // peer is a relay or a gateway.
     //
+    // v0.37.1: skipped when the direct-first race already holds an
+    // established connection to the gateway itself (`direct_conn`). The
+    // frame is a routing hint for a relay, and that connection has no relay
+    // in its path.
+    //
     // Replaces the rejected dummy-Noise-UDP-HELLO hack (see prior
     // session handoff Decisions #3); validated by the relay's
     // CLIENT_ROUTE unit tests in `relay/test/.../udp_listener_test.exs`.
-    if let Some(svc_name) = service.as_deref() {
+    if let Some(svc_name) = service.as_deref().filter(|_| direct_conn.is_none()) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4294,7 +4255,12 @@ Only enable for legacy NAT-traversal compatibility."
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let client = if persistent_ep {
+    let client = if let Some(conn) = direct_conn {
+        // Direct-first race winner: the QUIC handshake to `peer_addr` is
+        // already done on the race's own socket.
+        drop(std_socket);
+        conn
+    } else if persistent_ep {
         // Opt-in persistent-endpoint path (feature/quic-churn-stability).
         // Uses QuicClientEndpoint (a long-lived quinn Endpoint reused across
         // connections) instead of the per-connection connect_with_socket.
@@ -17186,71 +17152,6 @@ mod tests {
             derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
         };
         assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
-    }
-
-    // ── v0.35.2: pick_race_backstop — the multi-candidate race must get the
-    // REAL relay as its backstop, not the NS-resolved peer address. ──
-    // Regression guard for KELLYMANCINO-PC (2026-06-15): a relay-routed NAT'd
-    // gateway connected-to with no --relay flag had `peer_addr` == its own
-    // unroutable LAN address fed in as the "relay backstop", so the genuinely
-    // reachable relay never entered the bounded parallel-dial race and connect
-    // only recovered via the slow post-race fallback.
-    #[test]
-    fn race_backstop_prefers_derived_relay_over_ns_resolved_lan() {
-        use std::net::SocketAddr;
-        // The bug shape: target is a NAT'd gateway, no --relay, so the
-        // NS-resolved peer addr is the gateway's private LAN address.
-        let ns_resolved_lan: SocketAddr = "10.210.1.164:23095".parse().unwrap();
-        let derived_relay: SocketAddr = "44.230.7.100:23095".parse().unwrap();
-        assert_eq!(
-            pick_race_backstop(Some(derived_relay), ns_resolved_lan),
-            derived_relay,
-            "the real relay must be the race backstop, not the dead LAN addr"
-        );
-    }
-
-    #[test]
-    fn race_backstop_falls_back_to_ns_resolved_when_no_relay() {
-        use std::net::SocketAddr;
-        // Legacy direct-listener mode / fail-closed (--no-relay-fallback sets
-        // relay_fallback to None upstream): preserve prior behavior and use the
-        // NS-resolved address as the backstop.
-        let ns_resolved: SocketAddr = "10.0.0.5:23095".parse().unwrap();
-        assert_eq!(pick_race_backstop(None, ns_resolved), ns_resolved);
-    }
-
-    #[test]
-    fn race_backstop_end_to_end_with_no_relay_fallback_gate() {
-        use std::net::SocketAddr;
-        // Mirror the cmd_connect call site: relay_fallback is gated behind
-        // --no-relay-fallback, then pick_race_backstop chooses. With the flag
-        // ON, no relay is synthesized and the race backstop is the NS addr
-        // (fail-closed — operator opted out of relay routing).
-        let ns_resolved: SocketAddr = "10.210.1.164:23095".parse().unwrap();
-
-        let no_relay_fallback = true;
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
-        };
-        assert_eq!(
-            pick_race_backstop(relay_fallback, ns_resolved),
-            ns_resolved,
-            "--no-relay-fallback must keep the relay out of the race"
-        );
-
-        // With the flag OFF, the derived relay becomes the backstop.
-        let no_relay_fallback = false;
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
-        };
-        assert_eq!(
-            pick_race_backstop(relay_fallback, ns_resolved),
-            "44.230.7.100:23095".parse::<SocketAddr>().unwrap()
-        );
     }
 
     // ── decode_registration_error ──────────────────────────────────

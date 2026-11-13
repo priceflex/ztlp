@@ -60,12 +60,23 @@ def _backend():
     except Exception:
         return _py_pub, _py_sign
 
+SEED_FIELDS = ("signing_key_seed", "ed25519_seed")
+
 def load_seed(path):
     with open(os.path.expanduser(path)) as f:
         d = json.load(f)
-    s = d.get("signing_key_seed")
-    if not s:
-        sys.exit("identity.json has no signing_key_seed (run `ztlp keygen` with a current ztlp first)")
+    # `ztlp keygen` writes `ed25519_seed`; the daemon (`NodeIdentity::save`)
+    # writes `signing_key_seed`. Both are the same Ed25519 seed, and a file
+    # that carries one is never rewritten by the daemon, so accept either.
+    found = {k: d.get(k) for k in SEED_FIELDS if d.get(k)}
+    if not found:
+        sys.exit("identity.json has no %s (run `ztlp keygen` with a current ztlp first)"
+                 % " or ".join(SEED_FIELDS))
+    values = {v.lower() if isinstance(v, str) else v for v in found.values()}
+    if len(values) > 1:
+        sys.exit("identity.json has conflicting seeds under %s; refusing to guess"
+                 % ", ".join(sorted(found)))
+    s = next(iter(found.values()))
     return bytes.fromhex(s) if isinstance(s, str) else bytes(s)
 
 def canonical(obj):

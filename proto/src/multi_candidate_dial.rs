@@ -224,10 +224,20 @@ pub const PUBLIC_CANDIDATE_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Head start the LAN band gets over the public band in the direct race.
 pub const DIRECT_BAND_DELAY: Duration = Duration::from_millis(250);
 
-/// Upper bound on the whole direct race. The slowest schedule is the public
-/// band starting [`DIRECT_BAND_DELAY`] in and running its full
-/// [`PUBLIC_CANDIDATE_TIMEOUT`] (1.25 s); this adds a little slack on top.
-pub const DIRECT_RACE_BUDGET: Duration = Duration::from_millis(1500);
+/// Upper bound on the whole direct race.
+///
+/// The orchestrator starts each priority band [`DIRECT_BAND_DELAY`] after the
+/// one above it, so a candidate's handshake has to fit in what is left of this
+/// budget when its band spawns. The ladder has up to six bands below the top
+/// one (see `CandidateClass`: 250 → 200 → 180 → 160 → 140 → 100), so the last
+/// band can start 1.25 s in; with the 1 s public handshake budget that needs
+/// 2.25 s. Anything tighter would cancel a candidate that was still within its
+/// own timeout, which is exactly the failure this module fixes. The LAN-only
+/// case — by far the common one — is bounded by
+/// [`LAN_CANDIDATE_TIMEOUT`] plus at most one band delay instead of by this
+/// value, so a peer that publishes only private addresses still falls back to
+/// the relay in well under a second.
+pub const DIRECT_RACE_BUDGET: Duration = Duration::from_millis(2250);
 
 /// How long the QUIC connect path waits for the name server's
 /// PEER_ENDPOINTS answer before racing the candidates it already has from
@@ -310,17 +320,35 @@ pub fn rank_direct_candidates(
 }
 
 #[cfg(feature = "quic-transport")]
-pub use quic_direct::{connect_direct_first, DialRoute, DirectConnection, QuicHandshakeDialer};
+pub use quic_direct::{
+    connect_direct_first, CandidateTrust, DialRoute, DirectConnection, QuicHandshakeDialer,
+};
 
 #[cfg(feature = "quic-transport")]
 mod quic_direct {
     use super::*;
-    use crate::quic_transport::tokio_endpoint::{QuicConnection, QuicEndpoint};
+    use crate::quic_transport::tokio_endpoint::{pinned_cert_sha256, QuicConnection, QuicEndpoint};
     use crate::quic_transport::{CertExpectation, QuicEndpointConfig};
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    /// Certificates a direct candidate is allowed to present.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CandidateTrust {
+        /// Nothing is known about the peer's certificate yet: each candidate
+        /// gets its own trust-on-first-use pin, keyed on its address (the
+        /// pre-existing behaviour).
+        TofuPerAddress,
+        /// The device already trusts this certificate — read from the TOFU pin
+        /// of the address it resolved the name to (typically the relay), or
+        /// from the name server's signed `quic_cert_sha256`. A candidate wins
+        /// only if it presents exactly this certificate, so a different
+        /// gateway that happens to own the same private address on another
+        /// network cannot be selected in place of the peer.
+        KnownFingerprint(String),
+    }
 
     /// [`Dialer`] that tests a candidate by completing a real QUIC handshake
     /// with it, exactly as `ztlp connect <ip:port>` would
@@ -343,11 +371,13 @@ mod quic_direct {
         pin_dir: Option<PathBuf>,
         lan_timeout: Duration,
         public_timeout: Duration,
-        established: Mutex<HashMap<SocketAddr, QuicConnection>>,
+        trust: CandidateTrust,
+        established: Mutex<HashMap<SocketAddr, (QuicConnection, Option<String>)>>,
     }
 
     impl QuicHandshakeDialer {
-        /// Dialer with the production timeouts and the default pin store.
+        /// Dialer with the production timeouts, the default pin store and no
+        /// prior knowledge of the peer's certificate ([`CandidateTrust::TofuPerAddress`]).
         /// `server_name` is the TLS server name (ZTLP dials use `localhost`).
         pub fn new(cfg: QuicEndpointConfig, server_name: &str) -> Self {
             Self {
@@ -356,7 +386,58 @@ mod quic_direct {
                 pin_dir: None,
                 lan_timeout: LAN_CANDIDATE_TIMEOUT,
                 public_timeout: PUBLIC_CANDIDATE_TIMEOUT,
+                trust: CandidateTrust::TofuPerAddress,
                 established: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// Only select a candidate that presents `fingerprint` (lowercase hex
+        /// SHA-256 of its DER certificate) — the certificate this device
+        /// already trusts for the peer being dialed. See
+        /// [`QuicHandshakeDialer::trust`] and
+        /// [`crate::quic_transport::tokio_endpoint::pinned_cert_sha256`].
+        pub fn trusting_fingerprint(mut self, fingerprint: &str) -> Self {
+            self.trust = CandidateTrust::KnownFingerprint(fingerprint.trim().to_ascii_lowercase());
+            self
+        }
+
+        /// What this dialer requires of a candidate's certificate.
+        pub fn trust(&self) -> &CandidateTrust {
+            &self.trust
+        }
+
+        /// Resolve the fingerprint (if any) that direct candidates for a
+        /// dialed name have to match, from what this device already trusts.
+        ///
+        /// Two sources, in order of authority:
+        ///
+        /// 1. `ns_fingerprint` — `quic_cert_sha256` from the peer's
+        ///    name-server record. Only usable when that record verified
+        ///    against a trusted NS key (`ns_verified`); an unverified answer
+        ///    carries no trust.
+        /// 2. The TOFU pin this device wrote for the address the name resolved
+        ///    to — usually the relay, always `resolved_addr`. A device that has
+        ///    ever connected through the relay knows exactly which certificate
+        ///    the gateway behind it presents.
+        ///
+        /// `None` means "nothing known": the caller falls back to
+        /// [`CandidateTrust::TofuPerAddress`], i.e. the same trust-on-first-use
+        /// a direct `ztlp connect <ip:port>` would apply.
+        pub fn resolve_candidate_trust(
+            ns_fingerprint: Option<&str>,
+            ns_verified: bool,
+            resolved_addr: SocketAddr,
+            service: Option<&str>,
+            pin_dir: &std::path::Path,
+        ) -> CandidateTrust {
+            if ns_verified {
+                if let Some(fp) = ns_fingerprint.map(str::trim).filter(|f| !f.is_empty()) {
+                    return CandidateTrust::KnownFingerprint(fp.to_ascii_lowercase());
+                }
+            }
+            match pinned_cert_sha256(resolved_addr, "localhost", service, pin_dir) {
+                Some(fp) => CandidateTrust::KnownFingerprint(fp),
+                None => CandidateTrust::TofuPerAddress,
             }
         }
 
@@ -379,12 +460,23 @@ mod quic_direct {
         pub fn take_connection(&self, addr: SocketAddr) -> Option<QuicConnection> {
             let winner = self.lock_established().remove(&addr);
             self.close_all();
-            winner
+            winner.map(|(conn, _fp)| conn)
+        }
+
+        /// The fingerprint (lowercase hex SHA-256 of the DER certificate) the
+        /// peer at `addr` presented on the connection this dialer established,
+        /// if that connection is still held. Lets the caller compare what two
+        /// candidates presented without keeping the connections around.
+        pub fn peer_cert_sha256(&self, addr: SocketAddr) -> Option<String> {
+            self.lock_established().get(&addr).and_then(|(conn, fp)| {
+                fp.clone()
+                    .or_else(|| conn.peer_cert_sha256().map(String::from))
+            })
         }
 
         /// Close every connection this dialer still holds.
         pub fn close_all(&self) {
-            for (_, spare) in self.lock_established().drain() {
+            for (_, (spare, _)) in self.lock_established().drain() {
                 spare.close();
             }
         }
@@ -393,7 +485,8 @@ mod quic_direct {
         /// still consistent if another thread panicked while holding it.
         fn lock_established(
             &self,
-        ) -> std::sync::MutexGuard<'_, HashMap<SocketAddr, QuicConnection>> {
+        ) -> std::sync::MutexGuard<'_, HashMap<SocketAddr, (QuicConnection, Option<String>)>>
+        {
             self.established
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -424,7 +517,33 @@ mod quic_direct {
             .await
             .map_err(|e| DialError::Other(e.to_string()))?;
 
-            self.lock_established().insert(addr, conn);
+            // Gateway-scoped trust (v0.37.1): when the device already knows
+            // which certificate this peer presents — its pin for the address
+            // the name resolved to, or the NS-signed fingerprint — a candidate
+            // is only that peer if it presents the same certificate. Without
+            // this check a QUIC gateway on some other network that happens to
+            // own the same private address would win the race on its own
+            // trust-on-first-use pin and the tunnel would carry traffic to the
+            // wrong gateway.
+            let presented = conn.peer_cert_sha256().map(str::to_string);
+            if let CandidateTrust::KnownFingerprint(expected) = &self.trust {
+                match presented.as_deref() {
+                    Some(fp) if fp.eq_ignore_ascii_case(expected) => {}
+                    other => {
+                        conn.close();
+                        return Err(DialError::Other(format!(
+                            "{addr} is not the peer being dialed: certificate {} , expected {}",
+                            match other {
+                                Some(fp) => format!("is {fp}"),
+                                None => "was not presented".to_string(),
+                            },
+                            expected
+                        )));
+                    }
+                }
+            }
+
+            self.lock_established().insert(addr, (conn, presented));
             Ok(DialSuccess { addr })
         }
 
@@ -1082,11 +1201,31 @@ mod tests {
         assert!(LAN_CANDIDATE_TIMEOUT < Duration::from_secs(1));
         assert!(LAN_CANDIDATE_TIMEOUT <= PUBLIC_CANDIDATE_TIMEOUT);
         assert!(DIRECT_BAND_DELAY + PUBLIC_CANDIDATE_TIMEOUT <= DIRECT_RACE_BUDGET);
-        assert!(DIRECT_RACE_BUDGET < Duration::from_secs(2));
         let policy = direct_dial_policy();
         assert_eq!(policy.per_candidate_timeout, PUBLIC_CANDIDATE_TIMEOUT);
         assert_eq!(policy.band_delay, DIRECT_BAND_DELAY);
         assert_eq!(policy.total_budget, DIRECT_RACE_BUDGET);
+    }
+
+    /// Every band the priority ladder can produce has to be able to run its
+    /// own handshake inside the race budget. A budget that only fits two bands
+    /// silently cancels a lower-band candidate that was still within its
+    /// timeout (the failure mode this module exists to remove).
+    #[test]
+    fn every_priority_band_fits_inside_the_race_budget() {
+        let band_count = 6_u32; // 250, 200, 180, 160, 140, 100
+        let last_band_starts_at = DIRECT_BAND_DELAY * (band_count - 1);
+        assert!(
+            last_band_starts_at + PUBLIC_CANDIDATE_TIMEOUT <= DIRECT_RACE_BUDGET,
+            "band {} starts at {:?} and needs {:?}, budget is {:?}",
+            band_count,
+            last_band_starts_at,
+            PUBLIC_CANDIDATE_TIMEOUT,
+            DIRECT_RACE_BUDGET
+        );
+        // The common case (private candidates only) stays fast: a LAN
+        // candidate times out on its own long before the budget matters.
+        assert!(LAN_CANDIDATE_TIMEOUT + DIRECT_BAND_DELAY < Duration::from_secs(1));
     }
 
     #[test]
@@ -1133,6 +1272,7 @@ mod tests {
 
     #[cfg(feature = "quic-transport")]
     mod direct_first {
+        use super::super::quic_direct::CandidateTrust;
         use super::*;
         use crate::quic_transport::tokio_endpoint::QuicEndpoint;
         use crate::quic_transport::QuicEndpointConfig;
@@ -1464,6 +1604,173 @@ mod tests {
 
             assert!(matches!(res, Err(MultiCandidateError::NsQueryFailed(_))));
             assert!(started.elapsed() < Duration::from_secs(1));
+        }
+
+        // ── Gateway-scoped trust (CodeRabbit finding, PR #134) ──────────
+
+        /// A candidate whose certificate is not the one this device trusts for
+        /// the peer must lose the race even though its handshake succeeds —
+        /// that is a different gateway on an overlapping private address.
+        #[tokio::test]
+        async fn a_candidate_with_a_different_certificate_loses_to_the_relay() {
+            let pins = tempfile::tempdir().unwrap();
+            let (peer, _pc) = spawn_quic_listener().await;
+            let (impostor, _ic) = spawn_quic_listener().await;
+
+            // Learn the peer's fingerprint the way a device that has already
+            // connected through the relay knows it: its TOFU pin.
+            let first =
+                connect_direct_first(ranked(&[peer]), None, dialer(&pins), direct_dial_policy())
+                    .await;
+            let peer_fp = match &first {
+                DialRoute::Direct(d) => d.conn.peer_cert_sha256().map(str::to_string),
+                other => panic!("expected a direct win, got {other:?}"),
+            }
+            .expect("the handshake must expose the peer certificate");
+
+            let relay = sa("203.0.113.9:23095");
+            let trusting = Arc::new(
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .with_pin_dir(pins.path().to_path_buf())
+                    .trusting_fingerprint(&peer_fp),
+            );
+            let route = connect_direct_first(
+                ranked(&[impostor]),
+                Some(relay),
+                trusting.clone(),
+                direct_dial_policy(),
+            )
+            .await;
+            assert!(
+                matches!(&route, DialRoute::Relay { addr, .. } if *addr == relay),
+                "a different gateway's certificate must not be adopted, got {route:?}"
+            );
+            let failure = match route {
+                DialRoute::Relay {
+                    direct_failure: MultiCandidateError::AllFailed(f),
+                    ..
+                } => f,
+                other => panic!("got {other:?}"),
+            };
+            assert!(
+                failure.contains("not the peer being dialed"),
+                "the reason must say why, got {failure}"
+            );
+
+            // The same dialer DOES select the peer it trusts.
+            let route =
+                connect_direct_first(ranked(&[peer]), Some(relay), trusting, direct_dial_policy())
+                    .await;
+            assert!(
+                matches!(&route, DialRoute::Direct(d) if d.addr == peer),
+                "the trusted gateway must still win, got {route:?}"
+            );
+        }
+
+        /// `resolve_candidate_trust` prefers a verified NS fingerprint, then the
+        /// local pin for the address the name resolved to, and otherwise says
+        /// "nothing known".
+        #[test]
+        fn candidate_trust_prefers_the_verified_ns_fingerprint() {
+            let pins = tempfile::tempdir().unwrap();
+            let relay = sa("203.0.113.9:23095");
+
+            assert_eq!(
+                QuicHandshakeDialer::resolve_candidate_trust(None, false, relay, None, pins.path()),
+                CandidateTrust::TofuPerAddress,
+                "nothing pinned, nothing verified"
+            );
+
+            // An unverified NS answer carries no trust.
+            assert_eq!(
+                QuicHandshakeDialer::resolve_candidate_trust(
+                    Some("ab"),
+                    false,
+                    relay,
+                    None,
+                    pins.path()
+                ),
+                CandidateTrust::TofuPerAddress
+            );
+
+            assert_eq!(
+                QuicHandshakeDialer::resolve_candidate_trust(
+                    Some(" AB "),
+                    true,
+                    relay,
+                    None,
+                    pins.path()
+                ),
+                CandidateTrust::KnownFingerprint("ab".to_string()),
+                "verified NS fingerprint wins and is normalized"
+            );
+        }
+
+        #[test]
+        fn candidate_trust_falls_back_to_the_pin_of_the_resolved_address() {
+            let pins = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(pins.path()).unwrap();
+            let relay = sa("203.0.113.9:23095");
+            let fp = "cd".repeat(32);
+
+            // Write the pin exactly as the verifier would for a relayed `ssh`
+            // dial at this relay address: same key derivation, same directory.
+            // (A tiny mirror of `TofuCertVerifier::pin_path`, which is private.)
+            let pin_path = {
+                let key = crate::quic_transport::tokio_endpoint::pin_key_for_service(
+                    relay,
+                    "localhost",
+                    Some("ssh"),
+                );
+                let safe: String = key
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let mut collapsed = String::new();
+                let mut last_us = false;
+                for c in safe.chars() {
+                    if c == '_' {
+                        if !last_us {
+                            collapsed.push(c);
+                        }
+                        last_us = true;
+                    } else {
+                        collapsed.push(c);
+                        last_us = false;
+                    }
+                }
+                pins.path().join(format!("{collapsed}.pin"))
+            };
+            std::fs::write(&pin_path, format!("{fp}\n")).unwrap();
+
+            assert_eq!(
+                QuicHandshakeDialer::resolve_candidate_trust(
+                    None,
+                    false,
+                    relay,
+                    Some("SSH"),
+                    pins.path()
+                ),
+                CandidateTrust::KnownFingerprint(fp),
+                "the relay's service-scoped pin identifies the gateway behind it"
+            );
+            assert_eq!(
+                QuicHandshakeDialer::resolve_candidate_trust(
+                    None,
+                    false,
+                    relay,
+                    Some("www"),
+                    pins.path()
+                ),
+                CandidateTrust::TofuPerAddress,
+                "a pin for another service says nothing about this one"
+            );
         }
     }
 }

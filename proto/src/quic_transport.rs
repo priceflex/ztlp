@@ -585,7 +585,7 @@ pub mod tokio_endpoint {
     /// Keying on `ip:port` + SNI gives each gateway its own pin while the
     /// on-wire SNI is unchanged. `TofuCertVerifier::pin_path` sanitizes the
     /// result into one flat filename.
-    pub(crate) fn pin_key_for(remote: SocketAddr, server_name: &str) -> String {
+    pub fn pin_key_for(remote: SocketAddr, server_name: &str) -> String {
         format!("{}@{}", server_name, remote)
     }
 
@@ -605,7 +605,7 @@ pub mod tokio_endpoint {
     /// The result still goes through `TofuCertVerifier::pin_path`, which
     /// sanitizes it into one flat filename, so the service name cannot
     /// traverse out of the pin directory.
-    pub(crate) fn pin_key_for_service(
+    pub fn pin_key_for_service(
         remote: SocketAddr,
         server_name: &str,
         relayed_service: Option<&str>,
@@ -634,6 +634,41 @@ pub mod tokio_endpoint {
             Ok(()) => 1,
             Err(_) => 0,
         }
+    }
+
+    /// Lowercase hex SHA-256 of the DER certificate a QUIC endpoint presents,
+    /// read from its TOFU pin file — or `None` when nothing is pinned for it.
+    ///
+    /// This is the same value [`decide_cert`] compares against, so a caller
+    /// can ask "what does this device already trust about that endpoint?"
+    /// without dialing it. `pin_key_for_service` gives the key; the file name
+    /// derivation lives in [`TofuCertVerifier::pin_path`].
+    pub fn pinned_cert_sha256(
+        remote: SocketAddr,
+        server_name: &str,
+        relayed_service: Option<&str>,
+        pin_dir: &std::path::Path,
+    ) -> Option<String> {
+        let verifier = TofuCertVerifier::with_pin_dir_pub(
+            &pin_key_for_service(remote, server_name, relayed_service),
+            pin_dir.to_path_buf(),
+        );
+        read_pin_file(&verifier.pin_path())
+    }
+
+    /// Directory holding this device's TOFU pins (`$HOME/.ztlp/quic_pins`).
+    pub fn default_pin_dir() -> std::path::PathBuf {
+        TofuCertVerifier::default_pin_dir()
+    }
+
+    /// Read a pin file: trimmed, lowercased, `None` when absent or blank.
+    /// Split out so the callers of [`pinned_cert_sha256`] and the verifier
+    /// agree on what "pinned" means.
+    fn read_pin_file(path: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
     }
 
     /// Remove the legacy pin for `sni` unless this process already did so,
@@ -1035,9 +1070,43 @@ pub mod tokio_endpoint {
     #[derive(Debug, Clone)]
     pub struct QuicConnection {
         pub inner: quinn::Connection,
+        /// Lowercase hex SHA-256 of the peer's DER certificate, captured from
+        /// the finished TLS handshake. `None` for a connection this crate did
+        /// not establish (or when rustls exposes no leaf).
+        peer_cert_sha256: Option<String>,
     }
 
     impl QuicConnection {
+        /// Lowercase hex SHA-256 of the certificate the peer presented, or
+        /// `None` when unknown.
+        ///
+        /// The value is what a gateway publishes as `quic_cert_sha256` in its
+        /// SVC record and what a TOFU pin file holds, so it can be compared
+        /// against either — that is how the direct-first dial checks that two
+        /// candidate addresses belong to the SAME gateway
+        /// (`multi_candidate_dial::QuicHandshakeDialer`).
+        pub fn peer_cert_sha256(&self) -> Option<&str> {
+            self.peer_cert_sha256.as_deref()
+        }
+
+        /// Wrap a quinn connection, reading the peer leaf certificate from it.
+        fn from_connection(conn: quinn::Connection) -> Self {
+            // `rustls` is re-exported by quinn (not a direct dependency of
+            // this crate), and this accessor takes quinn's own rustls type.
+            // rustls hands up the peer's chain as `Vec<CertificateDer>`; the
+            // leaf is the first entry.
+            let der = conn.peer_identity().and_then(|id| {
+                id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                    .ok()
+                    .and_then(|chain| chain.first().cloned())
+                    .map(|cert| cert_sha256_hex(cert.as_ref()))
+            });
+            Self {
+                inner: conn,
+                peer_cert_sha256: der,
+            }
+        }
+
         pub async fn open_bi(
             &self,
         ) -> Result<(quinn::SendStream, quinn::RecvStream), QuicTransportError> {
@@ -1284,7 +1353,7 @@ pub mod tokio_endpoint {
             endpoint.set_default_client_config(client_config);
 
             let conn = endpoint.connect(remote, server_name)?.await?;
-            Ok(QuicConnection { inner: conn })
+            Ok(QuicConnection::from_connection(conn))
         }
 
         pub async fn connect(
@@ -1321,7 +1390,7 @@ pub mod tokio_endpoint {
             endpoint.set_default_client_config(client_config);
 
             let conn = endpoint.connect(remote, server_name)?.await?;
-            Ok(QuicConnection { inner: conn })
+            Ok(QuicConnection::from_connection(conn))
         }
 
         pub async fn accept(&self) -> Result<QuicConnection, QuicTransportError> {
@@ -1331,9 +1400,7 @@ pub mod tokio_endpoint {
                     "endpoint closed",
                 ))
             })?;
-            Ok(QuicConnection {
-                inner: incoming.await?,
-            })
+            Ok(QuicConnection::from_connection(incoming.await?))
         }
     }
 
@@ -1474,7 +1541,7 @@ pub mod tokio_endpoint {
             server_name: &str,
         ) -> Result<QuicConnection, QuicTransportError> {
             let conn = self.inner.connect(remote, server_name)?.await?;
-            Ok(QuicConnection { inner: conn })
+            Ok(QuicConnection::from_connection(conn))
         }
 
         /// The local (ip, port) this endpoint is bound to. The relay's
@@ -1495,6 +1562,7 @@ pub mod tokio_endpoint {
 
     #[cfg(test)]
     mod tofu_tests {
+        // Used by `pinned_lookup_tests` below as well.
         use super::*;
         use rustls::client::danger::ServerCertVerifier;
 
@@ -2010,7 +2078,7 @@ pub mod tokio_endpoint {
 
         /// Loopback server serving exactly what a gateway with
         /// `ZTLP_QUIC_CERT_DIR=<dir>` serves (no env mutation in tests).
-        fn loopback_server(cert_dir: &std::path::Path) -> quinn::Endpoint {
+        pub(super) fn loopback_server(cert_dir: &std::path::Path) -> quinn::Endpoint {
             ensure_crypto();
             let (certs, key) = load_or_generate_self_signed_in(cert_dir);
             let mut sc = rustls::ServerConfig::builder()
@@ -2351,7 +2419,7 @@ pub mod tokio_endpoint {
             let _ = std::fs::remove_dir_all(dir);
         }
 
-        fn tempfile_dir() -> std::path::PathBuf {
+        pub(super) fn tempfile_dir() -> std::path::PathBuf {
             // A per-process counter makes every name unique. The timestamp
             // alone collided on macOS (microsecond clock): two back-to-back
             // calls returned the SAME dir, so "two different certs" were one
@@ -2370,7 +2438,121 @@ pub mod tokio_endpoint {
             dir
         }
     }
+
+    /// [`pinned_cert_sha256`] is how the direct-first dial carries existing
+    /// trust to a candidate address, so it has to read exactly what the
+    /// verifier writes and nothing that is pinned for another endpoint.
+    #[cfg(test)]
+    mod pinned_lookup_tests {
+        use super::tofu_tests::{loopback_server, tempfile_dir};
+        use super::*;
+
+        fn addr(s: &str) -> SocketAddr {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn reads_the_pin_written_for_that_endpoint_and_service() {
+            let dir = tempfile_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let relay = addr("203.0.113.9:23095");
+            let fp_upper = "AA".repeat(32);
+            let fp = fp_upper.to_ascii_lowercase();
+
+            // Nothing pinned yet.
+            assert_eq!(
+                pinned_cert_sha256(relay, "localhost", Some("ssh"), &dir),
+                None
+            );
+
+            let verifier = TofuCertVerifier::with_pin_dir_pub(
+                &pin_key_for_service(relay, "localhost", Some("ssh")),
+                dir.clone(),
+            );
+            std::fs::write(verifier.pin_path(), format!("{fp_upper}\n")).unwrap();
+
+            assert_eq!(
+                pinned_cert_sha256(relay, "localhost", Some("SSH"), &dir).as_deref(),
+                Some(fp.as_str()),
+                "service matching is case-insensitive and the value is lowercased"
+            );
+            // A different service or a different endpoint has no pin.
+            assert_eq!(
+                pinned_cert_sha256(relay, "localhost", Some("www"), &dir),
+                None
+            );
+            assert_eq!(
+                pinned_cert_sha256(addr("203.0.113.10:23095"), "localhost", Some("ssh"), &dir),
+                None
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn ignores_a_missing_or_blank_pin_file() {
+            let dir = tempfile_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let gw = addr("10.69.91.243:23095");
+            let verifier =
+                TofuCertVerifier::with_pin_dir_pub(&pin_key_for(gw, "localhost"), dir.clone());
+            std::fs::write(verifier.pin_path(), "   \n").unwrap();
+            assert_eq!(pinned_cert_sha256(gw, "localhost", None, &dir), None);
+            // A directory that does not exist is simply "nothing pinned".
+            assert_eq!(
+                pinned_cert_sha256(gw, "localhost", None, &dir.join("nope")),
+                None
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// The loopback handshake really does expose the peer certificate, so
+        /// `QuicHandshakeDialer` has a fingerprint to compare at all. If this
+        /// ever returns None on a real handshake, the gateway-scoped trust
+        /// check would reject every candidate.
+        #[tokio::test]
+        async fn a_connected_client_sees_the_peers_certificate() {
+            let cert_dir = tempfile_dir();
+            std::fs::create_dir_all(&cert_dir).unwrap();
+            let (certs, _) = load_or_generate_self_signed_in(&cert_dir);
+            let expected = cert_sha256_hex(certs[0].as_ref());
+
+            let server = loopback_server(&cert_dir);
+            let addr = server.local_addr().unwrap();
+            let srv = server.clone();
+            let accept = tokio::spawn(async move {
+                if let Some(inc) = srv.accept().await {
+                    let _ = inc.await;
+                }
+            });
+
+            let conn = QuicEndpoint::connect(
+                QuicEndpointConfig {
+                    alpn: vec![b"ztlp-test".to_vec()],
+                    ..Default::default()
+                },
+                addr,
+                "localhost",
+            )
+            .await
+            .expect("loopback connect");
+
+            let seen: Option<&str> = conn.peer_cert_sha256();
+            assert_eq!(
+                seen,
+                Some(expected.as_str()),
+                "the fingerprint the client sees must equal the published one"
+            );
+            conn.close();
+            accept.abort();
+            let _ = std::fs::remove_dir_all(&cert_dir);
+        }
+    }
 }
+
+/// Re-exports so a caller without the `tokio_endpoint` path in mind can read
+/// the device's TOFU pins (used by `ztlp connect`'s direct-first race).
+#[cfg(feature = "tokio-runtime")]
+pub use tokio_endpoint::{default_pin_dir, pinned_cert_sha256};
 
 pub mod noise_stream {
     use super::tokio_endpoint::QuicConnection;

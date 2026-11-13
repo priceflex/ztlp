@@ -2899,6 +2899,19 @@ fn pick_quic_dial_target(
     multi_candidate_winner.unwrap_or(ns_resolved)
 }
 
+/// Wildcard bind address whose family matches `peer`'s.
+///
+/// A UDP socket bound to `0.0.0.0:0` cannot be used for an IPv6 remote (quinn
+/// fails the connect with `InvalidRemoteAddress`), so the connect path binds
+/// `[::]:0` when the selected peer is IPv6.
+fn udp_wildcard_for(peer: SocketAddr) -> SocketAddr {
+    if peer.is_ipv6() {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+}
+
 /// Well-known ZTLP relay UDP port. The NS server and the relay are co-located
 /// in the standard ZTLP control-plane deployment (NS on 23096, relay on 23095),
 /// so a relay address can be derived from the NS-server host when the gateway's
@@ -4010,7 +4023,7 @@ Only enable for legacy NAT-traversal compatibility."
     if multi_candidate && peer_node_id.is_some() {
         use ztlp_proto::multi_candidate_dial::{
             connect_direct_first, direct_dial_policy, query_peer_endpoints, rank_direct_candidates,
-            DialRoute, QuicHandshakeDialer, DIRECT_PEER_ENDPOINTS_TIMEOUT,
+            CandidateTrust, DialRoute, QuicHandshakeDialer, DIRECT_PEER_ENDPOINTS_TIMEOUT,
         };
 
         // The relay this connect would be routed through (explicit --relay,
@@ -4068,12 +4081,44 @@ Only enable for legacy NAT-traversal compatibility."
         let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
         let candidates =
             rank_direct_candidates(&dial_candidates, &peer_endpoints, &relays, &local_subnets);
+
+        // Carry the trust this device ALREADY has for this peer onto the
+        // candidates. Without it every candidate is judged on its own
+        // address-scoped TOFU pin, so a QUIC gateway on some other network that
+        // happens to own the same private address (10.x/192.168.x are free-for-
+        // all) could win the race and the tunnel would carry traffic to the
+        // wrong gateway. `peer_addr` is what the name resolved to — normally the
+        // relay, whose pin for `--service` is exactly the certificate of the
+        // gateway behind it (ZT-04 pins are service-scoped).
+        //
+        // The NS's signed `quic_cert_sha256` would be the stronger source, but
+        // `resolve_target` above does not verify the SVC record against an NS
+        // trust anchor yet, and an unverified fingerprint is no trust at all —
+        // so only the local pin is used here (ns_verified = false). Adding NS
+        // verification to the connect path is tracked separately.
+        let trust = QuicHandshakeDialer::resolve_candidate_trust(
+            None,
+            false,
+            peer_addr,
+            service.as_deref(),
+            &ztlp_proto::quic_transport::default_pin_dir(),
+        );
         // Same endpoint config and TLS server name as the dial below, so the
         // handed-over connection is the one that dial would have produced.
-        let dialer = std::sync::Arc::new(QuicHandshakeDialer::new(
-            QuicEndpointConfig::default(),
-            "localhost",
-        ));
+        let dialer = std::sync::Arc::new(match trust {
+            CandidateTrust::KnownFingerprint(fp) => {
+                eprintln!(
+                    "{} direct candidates must present the trusted certificate {}",
+                    c_dim("[v0.37.1]"),
+                    &fp[..16.min(fp.len())]
+                );
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .trusting_fingerprint(&fp)
+            }
+            CandidateTrust::TofuPerAddress => {
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+            }
+        });
         let race_started = Instant::now();
         match connect_direct_first(candidates, relay_fallback, dialer, direct_dial_policy()).await {
             DialRoute::Direct(direct) => {
@@ -4167,8 +4212,11 @@ Only enable for legacy NAT-traversal compatibility."
     };
     let peer_addr = pick_quic_dial_target(peer_addr, multi_candidate_winner);
 
-    // Bind a UDP socket Quinn will reuse for the QUIC connection.
-    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+    // Bind a UDP socket Quinn will reuse for the QUIC connection. The wildcard
+    // family has to match the peer's address family: quinn rejects an IPv6
+    // remote address from an IPv4-only socket (`InvalidRemoteAddress`), which
+    // would break an IPv6 candidate picked by the direct-first race below.
+    let std_socket = std::net::UdpSocket::bind(udp_wildcard_for(peer_addr))
         .expect("Failed to bind UDP socket for QUIC signaling");
 
     // ─── α-relay routing setup (FRAME_CLIENT_ROUTE) ──────────────────
@@ -17406,6 +17454,21 @@ mod tests {
         use std::net::SocketAddr;
         let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap();
         assert_eq!(pick_quic_dial_target(ns, None), ns);
+    }
+
+    /// The connect path binds its QUIC socket before dialing; binding the
+    /// wrong family makes quinn reject the peer outright.
+    #[test]
+    fn udp_wildcard_matches_the_peer_address_family() {
+        use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+        let v4: SocketAddr = "34.218.240.106:23095".parse().unwrap();
+        let v6: SocketAddr = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            23095,
+        );
+        assert_eq!(udp_wildcard_for(v4).to_string(), "0.0.0.0:0");
+        assert_eq!(udp_wildcard_for(v6).to_string(), "[::]:0");
+        assert!(udp_wildcard_for(v6).is_ipv6());
     }
 
     // ── v0.34.12: derive_relay_fallback_addr — relay-forwarding fallback ──

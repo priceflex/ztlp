@@ -26,8 +26,17 @@ namespace :zone do
   task :import_authority, [ :path ] => :environment do |_t, args|
     path = args[:path].presence || abort("usage: rails zone:import_authority[/path/to/identity.json]")
     doc = JSON.parse(File.read(path))
-    seed = doc.is_a?(Hash) ? doc["signing_key_seed"] : nil
-    abort "identity.json has no 64-hex signing_key_seed" unless seed.is_a?(String) && seed.match?(/\A\h{64}\z/)
+    # `ztlp keygen` writes the seed as `ed25519_seed`, the daemon as
+    # `signing_key_seed`. Same Ed25519 seed, and a file that already carries
+    # one is never rewritten by the daemon, so accept either spelling — but
+    # never a choice between two different ones.
+    seeds = %w[signing_key_seed ed25519_seed].filter_map do |field|
+      v = doc.is_a?(Hash) ? doc[field] : nil
+      v if v.is_a?(String) && v.match?(/\A\h{64}\z/)
+    end
+    abort "identity.json has no 64-hex signing_key_seed or ed25519_seed" if seeds.empty?
+    abort "identity.json has conflicting seeds under signing_key_seed and ed25519_seed" if seeds.uniq.size > 1
+    seed = seeds.first
 
     pubkey = OpenSSL::PKey.new_raw_private_key("ED25519", [ seed ].pack("H*")).raw_public_key.unpack1("H*")
     zone = Zone.resolve!(ENV["ZONE"])

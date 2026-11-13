@@ -20,7 +20,7 @@ class ZoneTasksTest < ActiveSupport::TestCase
   # so other tests (which use transactional fixtures) don't hit unique-name
   # collisions.
   teardown do
-    Zone.where(name: %w[test.ztlp bad.ztlp empty.ztlp short.ztlp]).delete_all
+    Zone.where(name: %w[test.ztlp bad.ztlp empty.ztlp short.ztlp keygen.ztlp conflict.ztlp]).delete_all
     AuditLog.where(action: %w[zone.authority_imported zone.authority_exported zone.enrollment_secret_set
                               zone.relay_secret_set zone.ns_admin_api_secret_set]).delete_all
   end
@@ -85,6 +85,36 @@ class ZoneTasksTest < ActiveSupport::TestCase
     zone.reload
     assert_nil zone.authority_seed_ct
     refute AuditLog.where(action: "zone.authority_imported", target_id: zone.id).any?
+    File.delete(path)
+  end
+
+  # `ztlp keygen` writes the seed as `ed25519_seed`, and since the daemon loads
+  # such a file without re-keying it, that is the shape it stays on disk.
+  test "import_authority accepts the ztlp keygen ed25519_seed spelling" do
+    zone = with_zone(name: "keygen.ztlp")
+    seed, pub = Ztlp::Ed25519.generate
+    path = File.join(Dir.tmpdir, "identity_keygen_#{rand(1 << 32)}.json")
+    File.write(path, {
+                "node_id" => "node-1234",
+                "ed25519_public_key" => pub,
+                "ed25519_seed" => seed
+              }.to_json)
+    assert run_rake("import_authority", path), "a keygen-format identity.json must import"
+    zone.reload
+    assert_equal seed, zone.authority_seed_ct
+    assert_equal pub, zone.authority_pubkey_hex
+    File.delete(path)
+  end
+
+  test "import_authority refuses a file with two different seeds" do
+    zone = with_zone(name: "conflict.ztlp")
+    seed, _ = Ztlp::Ed25519.generate
+    other, _ = Ztlp::Ed25519.generate
+    path = File.join(Dir.tmpdir, "identity_conflict_#{rand(1 << 32)}.json")
+    File.write(path, { "signing_key_seed" => seed, "ed25519_seed" => other }.to_json)
+    refute run_rake("import_authority", path), "a conflicting identity.json must exit nonzero"
+    zone.reload
+    assert_nil zone.authority_seed_ct
     File.delete(path)
   end
 

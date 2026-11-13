@@ -15,10 +15,14 @@ all on v0.37.0). Rust (`proto/`) only; no wire-format change.
   plus PEER_ENDPOINTS) and keeps the winning connection, so a reachable LAN
   gateway is selected in one round trip. The relay is no longer a candidate
   in that race: it is the fallback when no direct handshake completes, after
-  at most 600 ms for private/LAN candidates (1 s for public ones, 1.5 s for
-  the whole race). A candidate whose certificate does not match its pin is
-  not selected. Loopback candidates are ignored. `--no-multi-candidate` and
-  `--no-relay-fallback` behave as before. The advisory 200 ms pre-probe of
+  at most 600 ms for private/LAN candidates (1 s for public ones, 2.25 s as
+  the outer bound on the whole race). A candidate whose certificate does not
+  match its pin is not selected, and when the device already trusts a certificate for this
+  peer (its TOFU pin for the address the name resolved to) a direct
+  candidate has to present that same certificate, so another gateway that
+  happens to own the same private address cannot be adopted. Loopback
+  candidates are ignored. `--no-multi-candidate` and `--no-relay-fallback`
+  behave as before. The advisory 200 ms pre-probe of
   the SVC candidates now only runs when the race does not pick a target.
 - **An identity file written by `ztlp keygen` is no longer re-keyed.**
   `ztlp keygen` writes the Ed25519 seed as `ed25519_seed`, the loader only
@@ -28,7 +32,10 @@ all on v0.37.0). Rust (`proto/`) only; no wire-format change.
   name server answered `unauthorized`. Both field names are now accepted and
   a file that has a seed is left untouched. A file with both fields set to
   different seeds, or a seed that is not 32 bytes, is refused with an error
-  instead of being guessed at.
+  instead of being guessed at. The two admin readers of that file
+  (`admin/public/ztlp-admin-sign.py`, `rails zone:import_authority`) read
+  only `signing_key_seed` and now accept either spelling too, refusing a
+  file that carries two different seeds.
 - **`ztlp listen` no longer logs a name-server error on every start.** The
   listener published its records and the heartbeat task published them again
   a few seconds later; the name server allows one registration per name per

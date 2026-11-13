@@ -1984,6 +1984,12 @@ fn format_msg_type(mt: MsgType) -> &'static str {
 ///
 /// Wire format must stay in sync with the NS module. New codes must be
 /// appended (never renumbered) to preserve compatibility.
+///
+/// Text for reason code 0x09 (`:rate_limited`). A constant because the NS
+/// heartbeat recognises this rejection by it ([`is_ns_rate_limited`]).
+const NS_REJECT_RATE_LIMITED: &str =
+    "rejected: rate-limited (too many registrations for this name; retry later)";
+
 fn decode_registration_error(resp: &[u8]) -> &'static str {
     // Old servers: bare <<0xFF>>
     if resp.len() < 2 {
@@ -2004,7 +2010,7 @@ fn decode_registration_error(resp: &[u8]) -> &'static str {
         0x06 => "rejected: name is owned by a different key (key-overwrite protection)",
         0x07 => "rejected: your key or NodeID has been revoked",
         0x08 => "rejected: this name has been revoked and cannot be re-registered",
-        0x09 => "rejected: rate-limited (too many registrations for this name; retry later)",
+        0x09 => NS_REJECT_RATE_LIMITED,
         0x0A => "rejected: invalid record data (CBOR decode failed or required field missing)",
         0x0B => "rejected: storage error on the NS server (retry may succeed)",
         other => {
@@ -7408,6 +7414,91 @@ async fn ns_publish_self(
     Ok(())
 }
 
+/// How long the NS heartbeat waits before retrying a publish the name
+/// server rejected as rate-limited.
+///
+/// The name server allows one registration per 60 s per {name, record
+/// type}. 90 s clears that window with margin for clock and delivery skew.
+const NS_RATE_LIMIT_RETRY: Duration = Duration::from_secs(90);
+
+/// Upper bound of the random delay added to [`NS_RATE_LIMIT_RETRY`], so a
+/// fleet that was rate-limited together does not retry together.
+const NS_RATE_LIMIT_RETRY_JITTER: Duration = Duration::from_secs(30);
+
+/// Result of one heartbeat publish, as far as scheduling is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPublish {
+    /// The records were accepted.
+    Published,
+    /// The name server refused the registration as rate-limited: the name
+    /// was registered moments ago (by this process's own startup publish,
+    /// by a previous instance that just restarted, or out of band). The
+    /// record is therefore fresh; this is not a fault.
+    RateLimited,
+    /// Anything else (network error, timeout, authorization, ...).
+    Failed,
+}
+
+/// True when a publish error is the name server's rate-limit rejection
+/// (registration error code 0x09, see [`decode_registration_error`]).
+fn is_ns_rate_limited(error: &str) -> bool {
+    error.contains(NS_REJECT_RATE_LIMITED)
+}
+
+/// Classify the result of a heartbeat publish ([`ns_publish_self`], with
+/// its error rendered to text).
+fn classify_heartbeat_publish(result: &Result<(), String>) -> HeartbeatPublish {
+    match result {
+        Ok(()) => HeartbeatPublish::Published,
+        Err(e) if is_ns_rate_limited(e) => HeartbeatPublish::RateLimited,
+        Err(_) => HeartbeatPublish::Failed,
+    }
+}
+
+/// How long the heartbeat sleeps after a publish attempt (pure, tested).
+///
+/// - `Published` / `Failed`: one nominal `interval` plus `interval_jitter`,
+///   as before.
+/// - `RateLimited`: [`NS_RATE_LIMIT_RETRY`] plus `retry_jitter`, because
+///   the limit lifts within a minute and waiting a whole interval (8 h in
+///   production) would leave the record un-refreshed for no reason. Never
+///   longer than the normal delay, so a short `interval` is not stretched.
+///
+/// The jitter values are passed in (see [`heartbeat_jitter`]) to keep this
+/// function deterministic.
+fn ns_heartbeat_delay(
+    outcome: HeartbeatPublish,
+    interval: Duration,
+    interval_jitter: Duration,
+    retry_jitter: Duration,
+) -> Duration {
+    let normal = interval + interval_jitter;
+    match outcome {
+        HeartbeatPublish::Published | HeartbeatPublish::Failed => normal,
+        HeartbeatPublish::RateLimited => (NS_RATE_LIMIT_RETRY + retry_jitter).min(normal),
+    }
+}
+
+/// Uniform-ish random delay in `[0, max)` (zero when `max` is zero).
+///
+/// Smears load so a large fleet sharing one interval does not hit the name
+/// server at the same instant. Cheap LCG seeded from current-time nanos;
+/// cryptographic randomness is not required for load smearing.
+fn heartbeat_jitter(max: Duration) -> Duration {
+    if max.is_zero() {
+        return Duration::ZERO;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let r = nanos
+        .wrapping_mul(2862933555777941757)
+        .wrapping_add(3037000493);
+    let bound = (max.as_millis() as u64).max(1);
+    Duration::from_millis(r % bound)
+}
+
 /// Heartbeat loop that republishes this listener's NS records before the 24h
 /// TTL expires. Spawned by `cmd_listen` when NS settings are configured.
 ///
@@ -7415,8 +7506,16 @@ async fn ns_publish_self(
 /// `jitter_max` adds [0, jitter_max) random delay each cycle to smear load
 /// from a large fleet (10min in production).
 ///
-/// Failures are logged at WARN and retried on the next tick — the listener
-/// keeps serving traffic regardless of NS health.
+/// The caller has ALREADY published once (the synchronous, fail-fast publish
+/// in `cmd_listen`), so the first heartbeat publish happens one interval
+/// after the task starts, not immediately. Publishing again right away is
+/// what the name server's 60 s per-name rate limit rejects: every listener
+/// start used to log a `rate-limited` failure and then wait a full interval.
+///
+/// A rate-limited publish is retried after [`NS_RATE_LIMIT_RETRY`]; any
+/// other failure is logged at WARN and retried on the next tick. The
+/// listener keeps serving traffic regardless of NS health.
+#[allow(clippy::too_many_arguments)]
 async fn ns_heartbeat_task(
     name: String,
     zone: String,
@@ -7429,8 +7528,8 @@ async fn ns_heartbeat_task(
     interval: Duration,
     jitter_max: Duration,
 ) {
-    loop {
-        match ns_publish_self(
+    ns_heartbeat_loop(&name, &ns_server, interval, jitter_max, || async {
+        ns_publish_self(
             &name,
             &zone,
             &identity,
@@ -7439,8 +7538,48 @@ async fn ns_heartbeat_task(
             addresses.as_deref(),
         )
         .await
-        {
-            Ok(()) => {
+        .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// The heartbeat schedule, separated from the network publish so it can be
+/// driven by a scripted `publish` under a paused clock in tests.
+///
+/// Sleeps first, then publishes, forever: see [`ns_heartbeat_task`] for why
+/// the first publish is one interval out, and [`ns_heartbeat_delay`] for
+/// the delay after each outcome. `name` and `ns_server` are for log lines.
+async fn ns_heartbeat_loop<F, Fut>(
+    name: &str,
+    ns_server: &str,
+    interval: Duration,
+    jitter_max: Duration,
+    mut publish: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    // First tick: one interval after the caller's initial publish.
+    let mut delay = ns_heartbeat_delay(
+        HeartbeatPublish::Published,
+        interval,
+        heartbeat_jitter(jitter_max),
+        Duration::ZERO,
+    );
+    loop {
+        tokio::time::sleep(delay).await;
+
+        let result = publish().await;
+        let outcome = classify_heartbeat_publish(&result);
+        delay = ns_heartbeat_delay(
+            outcome,
+            interval,
+            heartbeat_jitter(jitter_max),
+            heartbeat_jitter(NS_RATE_LIMIT_RETRY_JITTER),
+        );
+
+        match (outcome, result) {
+            (HeartbeatPublish::Published, _) => {
                 eprintln!(
                     "{} [ns_heartbeat] published {} to {}",
                     c_dim("→"),
@@ -7448,36 +7587,25 @@ async fn ns_heartbeat_task(
                     ns_server
                 );
             }
-            Err(e) => {
+            (HeartbeatPublish::RateLimited, _) => {
+                eprintln!(
+                    "{} [ns_heartbeat] {} was registered less than a minute ago \
+                     (name server rate limit); refreshing again in {:?}",
+                    c_dim("→"),
+                    name,
+                    delay
+                );
+            }
+            (HeartbeatPublish::Failed, result) => {
                 eprintln!(
                     "{} [ns_heartbeat] publish failed ({}): {} — will retry in {:?}",
                     c_yellow("⚠"),
                     name,
-                    e,
-                    interval
+                    result.err().unwrap_or_default(),
+                    delay
                 );
             }
         }
-
-        // Sleep with jitter — uniform [0, jitter_max) added to the nominal
-        // interval. Avoids stampeding NS at the top of each cycle when 1000
-        // listeners share the same interval. Cheap LCG seeded from
-        // current-time nanos; cryptographic randomness is not required for
-        // load smearing.
-        let jitter = if jitter_max.is_zero() {
-            Duration::ZERO
-        } else {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(0);
-            let r = nanos
-                .wrapping_mul(2862933555777941757)
-                .wrapping_add(3037000493);
-            let bound = (jitter_max.as_millis() as u64).max(1);
-            Duration::from_millis(r % bound)
-        };
-        tokio::time::sleep(interval + jitter).await;
     }
 }
 
@@ -17035,20 +17163,231 @@ mod tests {
             std::time::Duration::from_millis(0), // no jitter for determinism
         ));
 
-        // Wait long enough for at least 3 heartbeats (initial + 2 ticks).
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        // Wait long enough for at least 2 heartbeats. Each cycle is the
+        // 150 ms interval plus ~100 ms inside ns_publish_self.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         handle.abort();
 
         let pkts = captured.lock().await;
         // Register opcode = 0x09.
         let registers: Vec<_> = pkts.iter().filter(|p| p.first() == Some(&0x09)).collect();
-        // 3 cycles × 2 registers per cycle (KEY+SVC) = ≥6 register packets.
-        // Be permissive: ≥4 confirms heartbeat is actually republishing.
+        // 2 register packets per cycle (KEY+SVC); ≥4 confirms the heartbeat
+        // keeps republishing.
         assert!(
             registers.len() >= 4,
             "expected ≥4 register packets across heartbeats, got {}",
             registers.len()
         );
+    }
+
+    /// The listener publishes once itself before spawning the heartbeat, so
+    /// the heartbeat must NOT publish again at startup: two registrations a
+    /// few seconds apart is what the name server's per-name rate limit
+    /// rejects (the `rate-limited ... will retry in 28800s` startup log).
+    #[tokio::test]
+    async fn ns_heartbeat_task_waits_one_interval_before_first_publish() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = std::sync::Arc::new(ztlp_proto::identity::NodeIdentity::generate().unwrap());
+
+        let handle = tokio::spawn(ns_heartbeat_task(
+            "node.example.ztlp".to_string(),
+            "example.ztlp".to_string(),
+            identity,
+            ns_addr.to_string(),
+            Some("10.0.0.1:23095".to_string()),
+            None,
+            std::time::Duration::from_millis(800),
+            std::time::Duration::from_millis(0),
+        ));
+
+        // Well inside the first interval: nothing may have been sent.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            captured.lock().await.is_empty(),
+            "heartbeat published before its first interval elapsed"
+        );
+
+        // After the interval the first heartbeat publish goes out.
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        handle.abort();
+        let pkts = captured.lock().await;
+        assert!(
+            pkts.iter().any(|p| p.first() == Some(&0x09)),
+            "heartbeat never published after its first interval"
+        );
+    }
+
+    // ── NS heartbeat scheduling (pure) ──────────────────────────────
+
+    const HB_INTERVAL: Duration = Duration::from_secs(8 * 3600);
+
+    #[test]
+    fn heartbeat_delay_after_success_is_one_interval_plus_jitter() {
+        let jitter = Duration::from_secs(123);
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::Published,
+                HB_INTERVAL,
+                jitter,
+                Duration::from_secs(7)
+            ),
+            HB_INTERVAL + jitter,
+            "retry jitter must not leak into the normal schedule"
+        );
+    }
+
+    #[test]
+    fn heartbeat_delay_after_rate_limit_is_a_short_retry() {
+        // No jitter: exactly the base retry.
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::RateLimited,
+                HB_INTERVAL,
+                Duration::from_secs(300),
+                Duration::ZERO
+            ),
+            NS_RATE_LIMIT_RETRY
+        );
+        // With jitter: base + jitter, nowhere near the 8 h interval.
+        let d = ns_heartbeat_delay(
+            HeartbeatPublish::RateLimited,
+            HB_INTERVAL,
+            Duration::from_secs(300),
+            Duration::from_secs(20),
+        );
+        assert_eq!(d, Duration::from_secs(110));
+        // The retry must clear the name server's 60 s window.
+        assert!(NS_RATE_LIMIT_RETRY > Duration::from_secs(60));
+        assert!(NS_RATE_LIMIT_RETRY + NS_RATE_LIMIT_RETRY_JITTER < Duration::from_secs(300));
+    }
+
+    #[test]
+    fn heartbeat_delay_after_rate_limit_never_exceeds_the_interval() {
+        // A short interval (tests, aggressive configs) is not stretched.
+        let interval = Duration::from_secs(30);
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::RateLimited,
+                interval,
+                Duration::from_secs(2),
+                Duration::from_secs(10)
+            ),
+            Duration::from_secs(32)
+        );
+    }
+
+    #[test]
+    fn heartbeat_delay_after_other_failure_is_unchanged() {
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::Failed,
+                HB_INTERVAL,
+                Duration::from_secs(5),
+                Duration::from_secs(20)
+            ),
+            HB_INTERVAL + Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn heartbeat_classifies_publish_results() {
+        assert_eq!(
+            classify_heartbeat_publish(&Ok(())),
+            HeartbeatPublish::Published
+        );
+
+        // The exact error ns_publish_self builds for reason code 0x09.
+        let rate_limited = Err(format!(
+            "KEY registration failed: {}",
+            decode_registration_error(&[0xFF, 0x09])
+        ));
+        assert_eq!(
+            classify_heartbeat_publish(&rate_limited),
+            HeartbeatPublish::RateLimited
+        );
+
+        // Every other rejection, and transport errors, are real failures.
+        for code in (0x00u8..=0x0B).filter(|c| *c != 0x09) {
+            let rejected = Err(format!(
+                "KEY registration failed: {}",
+                decode_registration_error(&[0xFF, code])
+            ));
+            assert_eq!(
+                classify_heartbeat_publish(&rejected),
+                HeartbeatPublish::Failed,
+                "code 0x{code:02X}"
+            );
+        }
+        let timeout = Err("timeout waiting for NS server response at 127.0.0.1:23096".to_string());
+        assert_eq!(
+            classify_heartbeat_publish(&timeout),
+            HeartbeatPublish::Failed
+        );
+    }
+
+    #[test]
+    fn heartbeat_jitter_stays_below_its_bound() {
+        assert_eq!(heartbeat_jitter(Duration::ZERO), Duration::ZERO);
+        for _ in 0..100 {
+            assert!(heartbeat_jitter(Duration::from_secs(30)) < Duration::from_secs(30));
+        }
+    }
+
+    /// The whole schedule under a paused clock, with a scripted publish
+    /// (no sockets, so virtual time is exact): nothing at startup, first
+    /// publish one interval in, a short retry after a rate-limit, and a
+    /// full interval after a success or an ordinary failure.
+    #[tokio::test(start_paused = true)]
+    async fn ns_heartbeat_loop_schedule() {
+        let started = tokio::time::Instant::now();
+        let script = vec![
+            Err(format!("KEY registration failed: {NS_REJECT_RATE_LIMITED}")),
+            Ok(()),
+            Err("timeout waiting for NS server response at 127.0.0.1:1".to_string()),
+            Ok(()),
+        ];
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Duration>::new()));
+        let recorded = calls.clone();
+        let mut script = script.into_iter();
+
+        let heartbeat = tokio::spawn(async move {
+            ns_heartbeat_loop(
+                "node.example.ztlp",
+                "127.0.0.1:1",
+                HB_INTERVAL,
+                Duration::ZERO, // no interval jitter: exact times below
+                move || {
+                    recorded.lock().unwrap().push(started.elapsed());
+                    let result = script.next().unwrap_or(Ok(()));
+                    async move { result }
+                },
+            )
+            .await
+        });
+
+        // Long enough for all four scripted publishes, short of a fifth.
+        tokio::time::sleep(HB_INTERVAL * 3 + Duration::from_secs(600)).await;
+        heartbeat.abort();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4, "publish times: {calls:?}");
+
+        // 1. No publish at startup; the first is exactly one interval in.
+        assert_eq!(calls[0], HB_INTERVAL);
+
+        // 2. Rate-limited -> retried after 90 s plus up to 30 s of jitter,
+        //    not after another 8 h.
+        let retry = calls[1] - calls[0];
+        assert!(
+            retry >= NS_RATE_LIMIT_RETRY
+                && retry < NS_RATE_LIMIT_RETRY + NS_RATE_LIMIT_RETRY_JITTER,
+            "rate-limit retry after {retry:?}"
+        );
+
+        // 3. Success -> next publish a full interval later.
+        assert_eq!(calls[2] - calls[1], HB_INTERVAL);
+
+        // 4. Ordinary failure -> also a full interval (unchanged).
+        assert_eq!(calls[3] - calls[2], HB_INTERVAL);
     }
 
     // ── v0.32.2 A1: pick_quic_dial_target — multi-candidate winner overrides

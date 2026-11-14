@@ -2940,6 +2940,41 @@ fn relay_pin_scope(
     format!("{}@{}", service.trim().to_ascii_lowercase(), peer)
 }
 
+/// The certificate `ztlp connect` already trusts for a peer, used to judge
+/// the direct candidates of the handshake race.
+///
+/// 1. The pin of the last relayed connect to this peer (relay address +
+///    `relay_pin_scope`).
+/// 2. Else the address-only pin of the address the name resolved to: that
+///    is the pin a direct dial writes. Skipped when that address is the
+///    relay itself, because the relay-wide pin older builds wrote there
+///    belongs to whichever gateway was reached first, not to this peer.
+/// 3. Else nothing is known and each candidate is pinned on first use.
+fn connect_candidate_trust(
+    known_relay: Option<SocketAddr>,
+    relay_pin: Option<&str>,
+    peer_addr: SocketAddr,
+    pin_dir: &std::path::Path,
+) -> ztlp_proto::multi_candidate_dial::CandidateTrust {
+    use ztlp_proto::multi_candidate_dial::{CandidateTrust, QuicHandshakeDialer};
+    if let (Some(relay_addr), Some(scope)) = (known_relay, relay_pin) {
+        let trust = QuicHandshakeDialer::resolve_candidate_trust(
+            None,
+            false,
+            relay_addr,
+            Some(scope),
+            pin_dir,
+        );
+        if trust != CandidateTrust::TofuPerAddress {
+            return trust;
+        }
+    }
+    if known_relay == Some(peer_addr) {
+        return CandidateTrust::TofuPerAddress;
+    }
+    QuicHandshakeDialer::resolve_candidate_trust(None, false, peer_addr, None, pin_dir)
+}
+
 /// Well-known ZTLP relay UDP port. The NS server and the relay are co-located
 /// in the standard ZTLP control-plane deployment (NS on 23096, relay on 23095),
 /// so a relay address can be derived from the NS-server host when the gateway's
@@ -4135,15 +4170,10 @@ Only enable for legacy NAT-traversal compatibility."
         // trust anchor yet, and an unverified fingerprint is no trust at all —
         // so only the local pin is used here (ns_verified = false). Adding NS
         // verification to the connect path is tracked separately.
-        let (trust_addr, trust_scope) = match (known_relay, relay_pin.as_deref()) {
-            (Some(relay_addr), Some(scope)) => (relay_addr, Some(scope)),
-            _ => (peer_addr, service.as_deref()),
-        };
-        let trust = QuicHandshakeDialer::resolve_candidate_trust(
-            None,
-            false,
-            trust_addr,
-            trust_scope,
+        let trust = connect_candidate_trust(
+            known_relay,
+            relay_pin.as_deref(),
+            peer_addr,
             &ztlp_proto::quic_transport::default_pin_dir(),
         );
         // Same endpoint config and TLS server name as the dial below, so the
@@ -17565,6 +17595,77 @@ mod tests {
         assert_ne!(
             relay_pin_scope("ssh", None, "ssh.host-a.example.ztlp"),
             relay_pin_scope("ssh", None, "ssh.host-b.example.ztlp"),
+        );
+    }
+
+    // ── connect_candidate_trust: which certificate the race insists on ──
+    fn write_test_pin(dir: &std::path::Path, addr: SocketAddr, scope: Option<&str>, fp: &str) {
+        // Mirror of the verifier's private pin_path: sanitized pin key + ".pin".
+        let key = ztlp_proto::quic_transport::tokio_endpoint::pin_key_for_service(
+            addr,
+            "localhost",
+            scope,
+        );
+        let safe: String = key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        std::fs::write(dir.join(format!("{safe}.pin")), fp).unwrap();
+    }
+
+    #[test]
+    fn connect_candidate_trust_order() {
+        use ztlp_proto::multi_candidate_dial::CandidateTrust;
+        let pins = tempfile::tempdir().unwrap();
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        let lan: SocketAddr = "10.20.30.40:23095".parse().unwrap();
+        let scope = "ssh@00112233445566778899aabbccddeeff";
+        let relay_fp = "ab".repeat(32);
+        let direct_fp = "cd".repeat(32);
+
+        // Nothing pinned: first use.
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::TofuPerAddress
+        );
+
+        // Only a direct (address-only) pin: it is the trust, with or without
+        // a relay and a service in play.
+        write_test_pin(pins.path(), lan, None, &direct_fp);
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(direct_fp.clone())
+        );
+        assert_eq!(
+            connect_candidate_trust(None, Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(direct_fp.clone())
+        );
+
+        // The per-peer relay pin wins over the address pin.
+        write_test_pin(pins.path(), relay, Some(scope), &relay_fp);
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(relay_fp)
+        );
+    }
+
+    #[test]
+    fn connect_candidate_trust_ignores_the_relay_wide_pin() {
+        use ztlp_proto::multi_candidate_dial::CandidateTrust;
+        let pins = tempfile::tempdir().unwrap();
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        // The pin an older build wrote for "whatever gateway answered at the
+        // relay first". It says nothing about this peer.
+        write_test_pin(pins.path(), relay, None, &"ef".repeat(32));
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some("ssh@peer"), relay, pins.path()),
+            CandidateTrust::TofuPerAddress
         );
     }
 

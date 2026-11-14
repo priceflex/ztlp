@@ -535,8 +535,19 @@ mod quic_direct {
             // - else the candidate's own address-scoped pin (first use pins).
             let ns_fingerprint =
                 matches!(self.expect.record, RecordState::Verified { fp: Some(_) });
+            // A strict device (it holds a name-server key for this name's
+            // zone) with no verified record refuses the certificate whatever
+            // is pinned: that refusal lives in `decide_cert`, so such a dial
+            // must go through the expectation-checked arm.
+            let strict_unverified = self.expect.strict
+                && matches!(
+                    self.expect.record,
+                    RecordState::Unverified | RecordState::None
+                );
             let conn = match &self.trust {
-                CandidateTrust::KnownFingerprint(trusted) if !ns_fingerprint => {
+                CandidateTrust::KnownFingerprint(trusted)
+                    if !ns_fingerprint && !strict_unverified =>
+                {
                     QuicEndpoint::connect_with_socket_trusting(
                         self.cfg.clone(),
                         addr,
@@ -1848,6 +1859,52 @@ mod tests {
                 0,
                 "a refused certificate must not be pinned"
             );
+        }
+
+        /// v0.37.2: a strict device without a verified record refuses the
+        /// gateway even when the caller also names a trusted fingerprint and
+        /// the candidate presents exactly that certificate.
+        #[tokio::test]
+        async fn a_strict_device_without_a_verified_record_refuses_a_pinned_certificate() {
+            use crate::quic_transport::{CertExpectation, RecordState};
+            for record in [RecordState::Unverified, RecordState::None] {
+                let pins = tempfile::tempdir().unwrap();
+                let (peer, _pc) = spawn_quic_listener().await;
+                let first = connect_direct_first(
+                    ranked(&[peer]),
+                    None,
+                    dialer(&pins),
+                    direct_dial_policy(),
+                )
+                .await;
+                let peer_fp = match &first {
+                    DialRoute::Direct(d) => d.conn.peer_cert_sha256().map(str::to_string),
+                    other => panic!("expected a direct win, got {other:?}"),
+                }
+                .expect("the handshake must expose the peer certificate");
+
+                let relay = sa("203.0.113.9:23095");
+                let strict = Arc::new(
+                    QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                        .with_pin_dir(pins.path().to_path_buf())
+                        .with_expectation(CertExpectation {
+                            record: record.clone(),
+                            strict: true,
+                        })
+                        .trusting_fingerprint(&peer_fp),
+                );
+                let route = connect_direct_first(
+                    ranked(&[peer]),
+                    Some(relay),
+                    strict,
+                    direct_dial_policy(),
+                )
+                .await;
+                assert!(
+                    matches!(&route, DialRoute::Relay { addr, .. } if *addr == relay),
+                    "{record:?}: a strict device must refuse, got {route:?}"
+                );
+            }
         }
 
         /// `resolve_candidate_trust` prefers a verified NS fingerprint, then the

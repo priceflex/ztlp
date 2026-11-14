@@ -4107,13 +4107,10 @@ Only enable for legacy NAT-traversal compatibility."
         tokio_endpoint::{QuicClientEndpoint, QuicEndpoint},
         QuicEndpointConfig,
     };
-    let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
-
     // ── NS-anchored gateway trust (v0.37.2) ──────────────────────────
     //
     // A device that enrolled with a name-server key (`ns_trust.toml`) for
-    // this name's zone does not trust the answer above, which is unverified:
-    // it resolves the name again through the verifying resolver the agent
+    // this name's zone resolves it through the verifying resolver the agent
     // uses, and takes the addresses, the NodeID and the gateway's
     // `quic_cert_sha256` from the record the name server signed. The
     // gateway must then present exactly that certificate, on the direct
@@ -4121,49 +4118,76 @@ Only enable for legacy NAT-traversal compatibility."
     // that replaced its certificate is trusted again as soon as it has
     // re-registered, with no pin file to clear on any client.
     //
+    // The unverified lookup (`resolve_target`) is not run at all for such a
+    // name: its answer would not be used, and its failure (name server
+    // down) must not pre-empt the verifying resolver, which can still answer
+    // from its cache of signed records.
+    //
     // A device without a name-server key for the zone (a raw `ip:port`
-    // target, a zone it never enrolled in) keeps the local pins below.
-    let ns_verified = match connect_trust_name(
-        target,
-        &ztlp_proto::agent::ns_trust::load_cached().map_err(|e| {
-            format!(
-                "cannot connect to '{target}': {e} (fix or re-enroll; refusing unverified answers)"
-            )
-        })?,
-    ) {
-        Some(name) => {
-            let ns_addr = effective_ns_server(ns_server);
-            let resolved = ztlp_proto::agent::proxy::ns_resolve(&name, &ns_addr)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "'{name}' did not verify against the name-server key this device \
-                         trusts for its zone: {e}"
-                    )
-                })?;
-            eprintln!(
-                "  {} name-server record verified{}",
-                c_green("✓"),
-                match &resolved.cert.record {
-                    ztlp_proto::quic_transport::RecordState::Verified { fp: Some(fp) } =>
-                        format!("; gateway certificate {}", &fp[..16.min(fp.len())]),
-                    _ => " (the gateway publishes no certificate fingerprint; \
-                          using its local pin)"
-                        .to_string(),
+    // target, a zone it never enrolled in) keeps `resolve_target` and the
+    // local pins below.
+    let trust_store = ztlp_proto::agent::ns_trust::load_cached().map_err(|e| {
+        format!("cannot connect to '{target}': {e} (fix or re-enroll; refusing unverified answers)")
+    })?;
+    let (peer_addr, dial_candidates, peer_node_id, ns_expect) =
+        match connect_trust_name(target, &trust_store) {
+            Some(name) => {
+                eprintln!(
+                    "{} {} via ZTLP-NS (signed record)...",
+                    c_dim("Resolving"),
+                    c_bold(&name)
+                );
+                // `--ns-server` may be HOST:PORT; the verifying resolver
+                // takes a numeric address.
+                let ns_addr = resolve_ns_address(&effective_ns_server(ns_server))
+                    .await?
+                    .to_string();
+                eprintln!("  {} {}", c_dim("NS server:"), ns_addr);
+                let resolved = ztlp_proto::agent::proxy::ns_resolve(&name, &ns_addr)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "cannot resolve '{name}' with the name-server key this device \
+                             trusts for its zone: {e}"
+                        )
+                    })?;
+                eprintln!(
+                    "  {} name-server record verified{}",
+                    c_green("✓"),
+                    match &resolved.cert.record {
+                        ztlp_proto::quic_transport::RecordState::Verified { fp: Some(fp) } =>
+                            format!("; gateway certificate {}", &fp[..16.min(fp.len())]),
+                        _ => " (the gateway publishes no certificate fingerprint; \
+                              using its local pin)"
+                            .to_string(),
+                    }
+                );
+                if let Some(id) = &resolved.node_id {
+                    eprintln!("  {} NodeID: {}", c_cyan("ℹ"), id);
                 }
-            );
-            Some(resolved)
-        }
-        None => None,
-    };
-    let ns_expect = ns_verified
-        .as_ref()
-        .map(|r| r.cert.clone())
-        .unwrap_or_default();
-    let (peer_addr, dial_candidates, peer_node_id) = match ns_verified {
-        Some(r) => (r.addr, r.candidates, r.node_id),
-        None => (peer_addr, dial_candidates, peer_node_id),
-    };
+                eprintln!(
+                    "  {} {}",
+                    c_dim("Resolved:"),
+                    c_green(&resolved.addr.to_string())
+                );
+                eprintln!();
+                (
+                    resolved.addr,
+                    resolved.candidates,
+                    resolved.node_id,
+                    resolved.cert,
+                )
+            }
+            None => {
+                let (addr, candidates, node_id) = resolve_target(target, ns_server).await?;
+                (
+                    addr,
+                    candidates,
+                    node_id,
+                    ztlp_proto::quic_transport::CertExpectation::default(),
+                )
+            }
+        };
 
     let node_id = peer_node_id.unwrap_or(ztlp_proto::identity::NodeId([0; 16]));
     let identity = load_or_generate_identity(key)?;

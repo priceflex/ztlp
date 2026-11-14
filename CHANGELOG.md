@@ -32,7 +32,10 @@ changes there.
   that replaced its certificate is reachable again as soon as it has
   re-registered, with no pin file to clear on any client; a pin left over from
   the old certificate is removed on the next connect. A record that does not
-  verify fails the connect; there is no fallback to an unverified answer. A
+  verify fails the connect; there is no fallback to an unverified answer, and
+  the unverified lookup is not run for such a name, so the resolver's cache of
+  signed records still answers when the name server is unreachable.
+  `--ns-server` may be a host name as before. A
   raw `ip:port` target, a zone the device holds no key for, and a gateway
   that publishes no fingerprint keep the local pins.
 - **A stale address pin no longer costs the direct path on a device without a

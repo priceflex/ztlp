@@ -2912,6 +2912,34 @@ fn udp_wildcard_for(peer: SocketAddr) -> SocketAddr {
     }
 }
 
+/// TOFU pin scope for a QUIC dial that goes THROUGH a relay.
+///
+/// Every gateway behind a relay is dialed at the same `relay_ip:port` with
+/// the same TLS server name, and each one serves its own self-signed
+/// certificate. `ztlp connect` pinned such a dial on the relay address
+/// alone, so the first gateway an operator reached through a relay worked
+/// and every other gateway behind that relay failed with "QUIC certificate
+/// fingerprint ... does not match the pinned value" (a fleet of listeners
+/// that all forward a service called `ssh` hits this on the second host).
+///
+/// The scope names the PEER as well as the service: the NS-resolved NodeID
+/// when there is one (stable across renames and re-registrations), else the
+/// dialed target as typed. It is appended to the pin key by
+/// `pin_key_for_service`, which lowercases it, and the pin file name is
+/// sanitized by the verifier, so the target string cannot leave the pin
+/// directory.
+fn relay_pin_scope(
+    service: &str,
+    peer_node_id: Option<&ztlp_proto::identity::NodeId>,
+    target: &str,
+) -> String {
+    let peer = match peer_node_id {
+        Some(id) => id.to_string(),
+        None => target.trim().to_ascii_lowercase(),
+    };
+    format!("{}@{}", service.trim().to_ascii_lowercase(), peer)
+}
+
 /// Well-known ZTLP relay UDP port. The NS server and the relay are co-located
 /// in the standard ZTLP control-plane deployment (NS on 23096, relay on 23095),
 /// so a relay address can be derived from the NS-server host when the gateway's
@@ -4020,17 +4048,24 @@ Only enable for legacy NAT-traversal compatibility."
     // `--no-multi-candidate` skips this block entirely.
     let mut direct_conn: Option<ztlp_proto::quic_transport::tokio_endpoint::QuicConnection> = None;
     let mut multi_candidate_winner: Option<SocketAddr> = None;
+
+    // The relay this connect would be routed through (explicit --relay,
+    // else derived from the NS host). Known even under
+    // --no-relay-fallback so it is never dialed as a "direct" candidate:
+    // a relay only forwards QUIC after a CLIENT_ROUTE frame.
+    let known_relay = derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref());
+    // Pin identity of this peer when it is reached through that relay
+    // (see `relay_pin_scope`). `None` without a service: a relay cannot
+    // route a connect that names no service.
+    let relay_pin = service
+        .as_deref()
+        .map(|svc| relay_pin_scope(svc, peer_node_id.as_ref(), target));
     if multi_candidate && peer_node_id.is_some() {
         use ztlp_proto::multi_candidate_dial::{
             connect_direct_first, direct_dial_policy, query_peer_endpoints, rank_direct_candidates,
             CandidateTrust, DialRoute, QuicHandshakeDialer, DIRECT_PEER_ENDPOINTS_TIMEOUT,
         };
 
-        // The relay this connect would be routed through (explicit --relay,
-        // else derived from the NS host). Known even under
-        // --no-relay-fallback so it is never dialed as a "direct" candidate:
-        // a relay only forwards QUIC after a CLIENT_ROUTE frame.
-        let known_relay = derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref());
         let relay_fallback = if no_relay_fallback {
             None
         } else {
@@ -4087,20 +4122,28 @@ Only enable for legacy NAT-traversal compatibility."
         // address-scoped TOFU pin, so a QUIC gateway on some other network that
         // happens to own the same private address (10.x/192.168.x are free-for-
         // all) could win the race and the tunnel would carry traffic to the
-        // wrong gateway. `peer_addr` is what the name resolved to — normally the
-        // relay, whose pin for `--service` is exactly the certificate of the
-        // gateway behind it (ZT-04 pins are service-scoped).
+        // wrong gateway.
+        //
+        // What the device knows is the pin it wrote the last time it reached
+        // this peer through the relay: the relayed dial below pins the
+        // gateway's certificate under the relay address scoped to this peer
+        // (`relay_pin_scope`). Without a relay or a service there is no such
+        // pin, and the pin of the address the name resolved to is used.
         //
         // The NS's signed `quic_cert_sha256` would be the stronger source, but
         // `resolve_target` above does not verify the SVC record against an NS
         // trust anchor yet, and an unverified fingerprint is no trust at all —
         // so only the local pin is used here (ns_verified = false). Adding NS
         // verification to the connect path is tracked separately.
+        let (trust_addr, trust_scope) = match (known_relay, relay_pin.as_deref()) {
+            (Some(relay_addr), Some(scope)) => (relay_addr, Some(scope)),
+            _ => (peer_addr, service.as_deref()),
+        };
         let trust = QuicHandshakeDialer::resolve_candidate_trust(
             None,
             false,
-            peer_addr,
-            service.as_deref(),
+            trust_addr,
+            trust_scope,
             &ztlp_proto::quic_transport::default_pin_dir(),
         );
         // Same endpoint config and TLS server name as the dial below, so the
@@ -4333,11 +4376,20 @@ Only enable for legacy NAT-traversal compatibility."
             .await
             .map_err(|e| format!("persistent endpoint connect: {}", e))?
     } else {
-        QuicEndpoint::connect_with_socket(
+        // A dial to the relay is pinned per PEER, not on the relay address
+        // alone: every gateway behind the relay answers at this address with
+        // its own certificate (`relay_pin_scope`). A dial to anything else is
+        // a direct dial and keeps its address-only pin.
+        let relayed_scope = relay_pin
+            .as_deref()
+            .filter(|_| known_relay == Some(peer_addr));
+        QuicEndpoint::connect_with_socket_for_service(
             QuicEndpointConfig::default(),
             peer_addr,
             "localhost",
             std_socket,
+            relayed_scope,
+            ztlp_proto::quic_transport::CertExpectation::default(),
         )
         .await?
     };
@@ -17461,7 +17513,7 @@ mod tests {
     #[test]
     fn udp_wildcard_matches_the_peer_address_family() {
         use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-        let v4: SocketAddr = "34.218.240.106:23095".parse().unwrap();
+        let v4: SocketAddr = "203.0.113.10:23095".parse().unwrap();
         let v6: SocketAddr = SocketAddr::new(
             IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
             23095,
@@ -17469,6 +17521,51 @@ mod tests {
         assert_eq!(udp_wildcard_for(v4).to_string(), "0.0.0.0:0");
         assert_eq!(udp_wildcard_for(v6).to_string(), "[::]:0");
         assert!(udp_wildcard_for(v6).is_ipv6());
+    }
+
+    // ── relay_pin_scope: one pin per PEER behind a relay ──────────────
+    //
+    // Two listeners behind one relay that both forward a service called
+    // `ssh` used to share the pin `localhost@<relay>`: the second host an
+    // operator connected to failed the certificate check.
+    #[test]
+    fn relay_pin_scope_separates_two_peers_behind_one_relay() {
+        use ztlp_proto::identity::NodeId;
+        use ztlp_proto::quic_transport::tokio_endpoint::{pin_key_for, pin_key_for_service};
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        let a = NodeId([0xAA; 16]);
+        let b = NodeId([0xBB; 16]);
+
+        let scope_a = relay_pin_scope("ssh", Some(&a), "ssh.host-a.example.ztlp");
+        let scope_b = relay_pin_scope("ssh", Some(&b), "ssh.host-b.example.ztlp");
+        assert_eq!(scope_a, format!("ssh@{}", "aa".repeat(16)));
+        assert_ne!(scope_a, scope_b);
+
+        let key_a = pin_key_for_service(relay, "localhost", Some(&scope_a));
+        let key_b = pin_key_for_service(relay, "localhost", Some(&scope_b));
+        assert_ne!(key_a, key_b, "each peer behind the relay needs its own pin");
+        // Neither is the relay-wide pin older builds wrote.
+        assert_ne!(key_a, pin_key_for(relay, "localhost"));
+    }
+
+    #[test]
+    fn relay_pin_scope_is_stable_and_falls_back_to_the_target() {
+        use ztlp_proto::identity::NodeId;
+        let id = NodeId([0x01; 16]);
+        // Same peer, different spelling of the service or the name: one pin.
+        assert_eq!(
+            relay_pin_scope(" SSH ", Some(&id), "ssh.host.example.ztlp"),
+            relay_pin_scope("ssh", Some(&id), "SSH.HOST.example.ztlp"),
+        );
+        // No NodeID (target given as an address): the target names the peer.
+        assert_eq!(
+            relay_pin_scope("ssh", None, " SSH.Host.Example.ZTLP "),
+            "ssh@ssh.host.example.ztlp"
+        );
+        assert_ne!(
+            relay_pin_scope("ssh", None, "ssh.host-a.example.ztlp"),
+            relay_pin_scope("ssh", None, "ssh.host-b.example.ztlp"),
+        );
     }
 
     // ── v0.34.12: derive_relay_fallback_addr — relay-forwarding fallback ──

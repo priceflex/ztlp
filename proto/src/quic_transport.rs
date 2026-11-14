@@ -2492,7 +2492,7 @@ pub mod tokio_endpoint {
         fn ignores_a_missing_or_blank_pin_file() {
             let dir = tempfile_dir();
             std::fs::create_dir_all(&dir).unwrap();
-            let gw = addr("10.69.91.243:23095");
+            let gw = addr("10.20.30.40:23095");
             let verifier =
                 TofuCertVerifier::with_pin_dir_pub(&pin_key_for(gw, "localhost"), dir.clone());
             std::fs::write(verifier.pin_path(), "   \n").unwrap();

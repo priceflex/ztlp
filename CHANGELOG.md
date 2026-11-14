@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.37.1 — 2026-11-14
 
-Three fixes found in production with v0.37.0 (client, listener, NS and relay
-all on v0.37.0). Rust (`proto/`) only; no wire-format change.
+Four fixes found in production with v0.37.0 (client, listener, NS and relay
+all on v0.37.0). Rust (`proto/`) only; no wire-format change. Desktop 1.4.1
+carries the same `ztlp` binary, nothing else changes there.
 
 - **`ztlp connect <name>` picks a reachable direct path, and falls back to
   the relay quickly.** The multi-candidate step tested each candidate with a
@@ -17,13 +18,25 @@ all on v0.37.0). Rust (`proto/`) only; no wire-format change.
   in that race: it is the fallback when no direct handshake completes, after
   at most 600 ms for private/LAN candidates (1 s for public ones, 2.25 s as
   the outer bound on the whole race). A candidate whose certificate does not
-  match its pin is not selected, and when the device already trusts a certificate for this
-  peer (its TOFU pin for the address the name resolved to) a direct
-  candidate has to present that same certificate, so another gateway that
-  happens to own the same private address cannot be adopted. Loopback
+  match its pin is not selected, and when the device already trusts a
+  certificate for this peer (the pin it wrote when it last reached the peer
+  through the relay) a direct candidate has to present that same
+  certificate, so another gateway that happens to own the same private
+  address cannot be adopted. Loopback
   candidates are ignored. `--no-multi-candidate` and `--no-relay-fallback`
   behave as before. The advisory 200 ms pre-probe of
   the SVC candidates now only runs when the race does not pick a target.
+- **`ztlp connect` reaches every gateway behind a relay, not only the
+  first.** A relayed dial was pinned on the relay address alone, and every
+  gateway behind a relay answers there with its own certificate. The first
+  one an operator connected to worked; the next failed with "QUIC
+  certificate fingerprint ... does not match the pinned value" (a fleet of
+  listeners that all forward a service called `ssh` hit this on the second
+  host). The pin of a relayed dial is now scoped to the peer (service plus
+  NS-resolved NodeID, or the dialed target when there is no NodeID). Direct
+  dials keep their address-only pin. The relay-wide pin file older builds
+  wrote (`localhost_<relay>_<port>.pin`) is no longer read for relayed
+  connects; each peer is pinned again on its next relayed connect.
 - **An identity file written by `ztlp keygen` is no longer re-keyed.**
   `ztlp keygen` writes the Ed25519 seed as `ed25519_seed`, the loader only
   read `signing_key_seed`, treated the file as a legacy identity without a

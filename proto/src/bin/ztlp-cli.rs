@@ -1984,6 +1984,12 @@ fn format_msg_type(mt: MsgType) -> &'static str {
 ///
 /// Wire format must stay in sync with the NS module. New codes must be
 /// appended (never renumbered) to preserve compatibility.
+///
+/// Text for reason code 0x09 (`:rate_limited`). A constant because the NS
+/// heartbeat recognises this rejection by it ([`is_ns_rate_limited`]).
+const NS_REJECT_RATE_LIMITED: &str =
+    "rejected: rate-limited (too many registrations for this name; retry later)";
+
 fn decode_registration_error(resp: &[u8]) -> &'static str {
     // Old servers: bare <<0xFF>>
     if resp.len() < 2 {
@@ -2004,7 +2010,7 @@ fn decode_registration_error(resp: &[u8]) -> &'static str {
         0x06 => "rejected: name is owned by a different key (key-overwrite protection)",
         0x07 => "rejected: your key or NodeID has been revoked",
         0x08 => "rejected: this name has been revoked and cannot be re-registered",
-        0x09 => "rejected: rate-limited (too many registrations for this name; retry later)",
+        0x09 => NS_REJECT_RATE_LIMITED,
         0x0A => "rejected: invalid record data (CBOR decode failed or required field missing)",
         0x0B => "rejected: storage error on the NS server (retry may succeed)",
         other => {
@@ -2880,18 +2886,93 @@ fn cbor_extract_string_array(data: &[u8], target_key: &str) -> Vec<String> {
 #[allow(clippy::too_many_arguments)]
 /// v0.32.2 (A1): pick the address to dial in the QUIC path.
 ///
-/// Given the NS-resolved peer address (typically the relay) and an
-/// optional multi-candidate winning address (a LAN-direct host candidate
-/// from PUNCH_REPORT), prefer the multi-candidate winner. When the
-/// winner is `None` — multi-candidate disabled, no NodeID, NS query
-/// failed, or no candidate succeeded — fall back to the NS-resolved
-/// address unchanged. Extracted as a free fn so the override logic is
+/// Given the NS-resolved peer address and the optional target chosen by
+/// the direct-first race (a direct candidate that completed a QUIC
+/// handshake, or the relay when none did), prefer the race's choice. When
+/// it is `None` — multi-candidate disabled, no NodeID, or no direct path
+/// and no relay to fall back to — keep the NS-resolved address unchanged. Extracted as a free fn so the override logic is
 /// directly unit-testable without spinning up the full QUIC stack.
 fn pick_quic_dial_target(
     ns_resolved: SocketAddr,
     multi_candidate_winner: Option<SocketAddr>,
 ) -> SocketAddr {
     multi_candidate_winner.unwrap_or(ns_resolved)
+}
+
+/// Wildcard bind address whose family matches `peer`'s.
+///
+/// A UDP socket bound to `0.0.0.0:0` cannot be used for an IPv6 remote (quinn
+/// fails the connect with `InvalidRemoteAddress`), so the connect path binds
+/// `[::]:0` when the selected peer is IPv6.
+fn udp_wildcard_for(peer: SocketAddr) -> SocketAddr {
+    if peer.is_ipv6() {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+}
+
+/// TOFU pin scope for a QUIC dial that goes THROUGH a relay.
+///
+/// Every gateway behind a relay is dialed at the same `relay_ip:port` with
+/// the same TLS server name, and each one serves its own self-signed
+/// certificate. `ztlp connect` pinned such a dial on the relay address
+/// alone, so the first gateway an operator reached through a relay worked
+/// and every other gateway behind that relay failed with "QUIC certificate
+/// fingerprint ... does not match the pinned value" (a fleet of listeners
+/// that all forward a service called `ssh` hits this on the second host).
+///
+/// The scope names the PEER as well as the service: the NS-resolved NodeID
+/// when there is one (stable across renames and re-registrations), else the
+/// dialed target as typed. It is appended to the pin key by
+/// `pin_key_for_service`, which lowercases it, and the pin file name is
+/// sanitized by the verifier, so the target string cannot leave the pin
+/// directory.
+fn relay_pin_scope(
+    service: &str,
+    peer_node_id: Option<&ztlp_proto::identity::NodeId>,
+    target: &str,
+) -> String {
+    let peer = match peer_node_id {
+        Some(id) => id.to_string(),
+        None => target.trim().to_ascii_lowercase(),
+    };
+    format!("{}@{}", service.trim().to_ascii_lowercase(), peer)
+}
+
+/// The certificate `ztlp connect` already trusts for a peer, used to judge
+/// the direct candidates of the handshake race.
+///
+/// 1. The pin of the last relayed connect to this peer (relay address +
+///    `relay_pin_scope`).
+/// 2. Else the address-only pin of the address the name resolved to: that
+///    is the pin a direct dial writes. Skipped when that address is the
+///    relay itself, because the relay-wide pin older builds wrote there
+///    belongs to whichever gateway was reached first, not to this peer.
+/// 3. Else nothing is known and each candidate is pinned on first use.
+fn connect_candidate_trust(
+    known_relay: Option<SocketAddr>,
+    relay_pin: Option<&str>,
+    peer_addr: SocketAddr,
+    pin_dir: &std::path::Path,
+) -> ztlp_proto::multi_candidate_dial::CandidateTrust {
+    use ztlp_proto::multi_candidate_dial::{CandidateTrust, QuicHandshakeDialer};
+    if let (Some(relay_addr), Some(scope)) = (known_relay, relay_pin) {
+        let trust = QuicHandshakeDialer::resolve_candidate_trust(
+            None,
+            false,
+            relay_addr,
+            Some(scope),
+            pin_dir,
+        );
+        if trust != CandidateTrust::TofuPerAddress {
+            return trust;
+        }
+    }
+    if known_relay == Some(peer_addr) {
+        return CandidateTrust::TofuPerAddress;
+    }
+    QuicHandshakeDialer::resolve_candidate_trust(None, false, peer_addr, None, pin_dir)
 }
 
 /// Well-known ZTLP relay UDP port. The NS server and the relay are co-located
@@ -2951,28 +3032,6 @@ fn derive_relay_fallback_addr(ns_server: Option<&str>, relay: Option<&str>) -> O
     None
 }
 
-/// v0.35.2: choose the "relay backstop" address fed into the multi-candidate
-/// dial race (`try_multi_candidate_connect`'s `relay_addr` arg).
-///
-/// The race already tries the gateway's PEER_ENDPOINTS host candidates; the
-/// backstop is the resilient `CandidateClass::Relay` competitor that must be
-/// in the race from t0 so a NAT'd, relay-routed gateway is reachable even when
-/// every direct candidate is dead.
-///
-/// - `relay_fallback` — the derived/explicit relay (`derive_relay_fallback_addr`),
-///   or `None` when no relay could be derived OR the operator passed
-///   `--no-relay-fallback` (fail-closed: caller sets this to `None`).
-/// - `ns_resolved` — the NS-resolved peer address used pre-fix as the backstop.
-///   For a relay-routed gateway with no `--relay` flag this is the gateway's
-///   own (unroutable) LAN address — the very candidate the race already covers,
-///   so using it as the "relay" backstop is a no-op that leaves the real relay
-///   out of the race entirely (the KELLYMANCINO-PC bug).
-///
-/// Prefer the real relay; fall back to the NS-resolved addr only when no relay
-/// exists (legacy direct-listener mode / fail-closed), preserving prior behavior.
-fn pick_race_backstop(relay_fallback: Option<SocketAddr>, ns_resolved: SocketAddr) -> SocketAddr {
-    relay_fallback.unwrap_or(ns_resolved)
-}
 //
 // Wraps cmd_connect's dial-and-tunnel logic in a supervisor loop that detects
 // QUIC session loss via quinn::Connection::closed(), classifies the disconnect
@@ -3997,6 +4056,187 @@ Only enable for legacy NAT-traversal compatibility."
     };
     let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
 
+    let node_id = peer_node_id.unwrap_or(ztlp_proto::identity::NodeId([0; 16]));
+    let identity = load_or_generate_identity(key)?;
+
+    // ── Direct-first dial (v0.37.1) ──────────────────────────────────
+    //
+    // With `--multi-candidate` (the default when `--ns-server` is set) and
+    // an NS-resolved peer NodeID, find out which of the peer's DIRECT
+    // addresses this client can reach by racing a real QUIC handshake
+    // against each of them, and keep the winning connection.
+    //
+    // Candidates = the SVC record's addresses + the name server's
+    // PEER_ENDPOINTS answer, minus the relay. The relay is the backstop,
+    // not a candidate: when no direct handshake completes we route through
+    // it (CLIENT_ROUTE below), and that decision comes after at most
+    // LAN_CANDIDATE_TIMEOUT for LAN-only candidate sets.
+    //
+    // History: v0.32.2 raced a 9-byte UDP probe here and took any reply as
+    // "reachable". Neither the QUIC listener nor the relay answers that
+    // probe, so every candidate timed out (2 s), a reachable LAN gateway
+    // was never picked, and every connect-by-name went through the relay
+    // ~2.3 s late. See `multi_candidate_dial` for the details.
+    //
+    // Honors --no-relay-fallback: no relay is synthesized (v0.34.12), so a
+    // failed race leaves the NS-resolved address in place, as before.
+    // `--no-multi-candidate` skips this block entirely.
+    let mut direct_conn: Option<ztlp_proto::quic_transport::tokio_endpoint::QuicConnection> = None;
+    let mut multi_candidate_winner: Option<SocketAddr> = None;
+
+    // The relay this connect would be routed through (explicit --relay,
+    // else derived from the NS host). Known even under
+    // --no-relay-fallback so it is never dialed as a "direct" candidate:
+    // a relay only forwards QUIC after a CLIENT_ROUTE frame.
+    let known_relay = derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref());
+    // Pin identity of this peer when it is reached through that relay
+    // (see `relay_pin_scope`). `None` without a service: a relay cannot
+    // route a connect that names no service.
+    let relay_pin = service
+        .as_deref()
+        .map(|svc| relay_pin_scope(svc, peer_node_id.as_ref(), target));
+    if multi_candidate && peer_node_id.is_some() {
+        use ztlp_proto::multi_candidate_dial::{
+            connect_direct_first, direct_dial_policy, query_peer_endpoints, rank_direct_candidates,
+            CandidateTrust, DialRoute, QuicHandshakeDialer, DIRECT_PEER_ENDPOINTS_TIMEOUT,
+        };
+
+        let relay_fallback = if no_relay_fallback {
+            None
+        } else {
+            known_relay.filter(|r| *r != peer_addr)
+        };
+
+        eprintln!(
+            "{} multi-candidate dial enabled (direct-first, QUIC handshake)",
+            c_dim("[v0.37.1]")
+        );
+
+        // PEER_ENDPOINTS adds addresses the peer reported to the name server
+        // (LAN NICs, NAT mapping). Best effort: without it we still race the
+        // SVC record's candidates.
+        let mut peer_endpoints: Vec<SocketAddr> = Vec::new();
+        if let Some(ns_addr) = ns_server
+            .as_deref()
+            .and_then(|s| s.parse::<SocketAddr>().ok())
+        {
+            let bind_addr = if ns_addr.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            };
+            let queried = match tokio::net::UdpSocket::bind(bind_addr).await {
+                Ok(sock) => query_peer_endpoints(
+                    node_id,
+                    ns_addr,
+                    &sock,
+                    &identity,
+                    DIRECT_PEER_ENDPOINTS_TIMEOUT,
+                )
+                .await
+                .map_err(|e| format!("{:?}", e)),
+                Err(e) => Err(format!("bind {}: {}", bind_addr, e)),
+            };
+            match queried {
+                Ok(eps) => peer_endpoints = eps,
+                Err(e) => eprintln!(
+                    "{} PEER_ENDPOINTS unavailable ({}); racing the SVC candidates only",
+                    c_dim("·"),
+                    e
+                ),
+            }
+        }
+
+        let relays: Vec<SocketAddr> = known_relay.into_iter().collect();
+        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
+        let candidates =
+            rank_direct_candidates(&dial_candidates, &peer_endpoints, &relays, &local_subnets);
+
+        // Carry the trust this device ALREADY has for this peer onto the
+        // candidates. Without it every candidate is judged on its own
+        // address-scoped TOFU pin, so a QUIC gateway on some other network that
+        // happens to own the same private address (10.x/192.168.x are free-for-
+        // all) could win the race and the tunnel would carry traffic to the
+        // wrong gateway.
+        //
+        // What the device knows is the pin it wrote the last time it reached
+        // this peer through the relay: the relayed dial below pins the
+        // gateway's certificate under the relay address scoped to this peer
+        // (`relay_pin_scope`). Without a relay or a service there is no such
+        // pin, and the pin of the address the name resolved to is used.
+        //
+        // The NS's signed `quic_cert_sha256` would be the stronger source, but
+        // `resolve_target` above does not verify the SVC record against an NS
+        // trust anchor yet, and an unverified fingerprint is no trust at all —
+        // so only the local pin is used here (ns_verified = false). Adding NS
+        // verification to the connect path is tracked separately.
+        let trust = connect_candidate_trust(
+            known_relay,
+            relay_pin.as_deref(),
+            peer_addr,
+            &ztlp_proto::quic_transport::default_pin_dir(),
+        );
+        // Same endpoint config and TLS server name as the dial below, so the
+        // handed-over connection is the one that dial would have produced.
+        let dialer = std::sync::Arc::new(match trust {
+            CandidateTrust::KnownFingerprint(fp) => {
+                eprintln!(
+                    "{} direct candidates must present the trusted certificate {}",
+                    c_dim("[v0.37.1]"),
+                    &fp[..16.min(fp.len())]
+                );
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .trusting_fingerprint(&fp)
+            }
+            CandidateTrust::TofuPerAddress => {
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+            }
+        });
+        let race_started = Instant::now();
+        match connect_direct_first(candidates, relay_fallback, dialer, direct_dial_policy()).await {
+            DialRoute::Direct(direct) => {
+                eprintln!(
+                    "{} multi-candidate dial succeeded: {} ({:?}) in {} ms",
+                    c_green("✓"),
+                    direct.addr,
+                    direct.class,
+                    race_started.elapsed().as_millis()
+                );
+                multi_candidate_winner = Some(direct.addr);
+                direct_conn = Some(direct.conn);
+            }
+            DialRoute::Relay {
+                addr,
+                direct_failure,
+            } => {
+                eprintln!(
+                    "{} no direct path after {} ms ({:?}); using RELAY-forwarding via {}",
+                    c_dim("[v0.34.12]"),
+                    race_started.elapsed().as_millis(),
+                    direct_failure,
+                    addr
+                );
+                multi_candidate_winner = Some(addr);
+            }
+            DialRoute::Unresolved { direct_failure } => {
+                eprintln!(
+                    "{} no direct path after {} ms ({:?}); falling back to NS-resolved addr",
+                    c_dim("[v0.32.2]"),
+                    race_started.elapsed().as_millis(),
+                    direct_failure
+                );
+            }
+        }
+    }
+
+    // `--persistent-ep` owns its endpoint and connection (see below), so
+    // the race only chooses the address there; its connection is closed.
+    if persistent_ep {
+        if let Some(conn) = direct_conn.take() {
+            conn.close();
+        }
+    }
+
     // ── Stage 2 (v0.35.x): multi-candidate pre-selection ─────────────
     //
     // `dial_candidates` is the client-RANKED SVC candidate set (best-first):
@@ -4011,7 +4251,12 @@ Only enable for legacy NAT-traversal compatibility."
     // candidate it can actually reach. If none answer (or there's only one
     // candidate, the common case) we keep candidate[0] and let the existing
     // QUIC handshake + auto-reconnect supervisor handle it exactly as before.
-    let peer_addr = if dial_candidates.len() > 1 {
+    //
+    // v0.37.1: this advisory probe (it reports "reachable" for anything that
+    // does not send an ICMP error within 200 ms) only runs when the
+    // direct-first race above did not pick a target: `--no-multi-candidate`,
+    // no peer NodeID, or a failed race with no relay to fall back to.
+    let peer_addr = if multi_candidate_winner.is_none() && dial_candidates.len() > 1 {
         match select_reachable_candidate(&dial_candidates).await {
             Some(a) => {
                 if a != peer_addr {
@@ -4038,175 +4283,13 @@ Only enable for legacy NAT-traversal compatibility."
     } else {
         peer_addr
     };
-
-    let node_id = peer_node_id.unwrap_or_else(|| ztlp_proto::identity::NodeId([0; 16]));
-    let identity = load_or_generate_identity(key)?;
-
-    // ── v0.32.2 (A1): multi-candidate dial moved into the QUIC path ──
-    //
-    // When `--multi-candidate` is set AND we have an NS-resolved peer
-    // NodeID, race the host candidates from PUNCH_REPORT alongside the
-    // NS-resolved `peer_addr` (which is typically the relay backstop).
-    // The winning path's address overrides `peer_addr` for the rest of
-    // this function — both CLIENT_ROUTE and the subsequent QUIC handshake
-    // then target the LAN-direct winner. Failure (NS query timeout, no
-    // candidate succeeded, parse error, probe bind failure) falls back
-    // to the NS-resolved `peer_addr` unchanged — same outcome as if
-    // `--multi-candidate` weren't passed at all. This is the "safe
-    // default" the original M6 commit was designed around.
-    //
-    // Crucially this is decoupled from `punch_enabled`. The pre-fix M6
-    // block lived in the legacy-UDP branch and was gated on `punch`,
-    // which meant `--multi-candidate --ns-server NAME` silently fell
-    // back to the broken legacy parallel-session handshake. The QUIC
-    // path is the path that actually completes end-to-end against the
-    // v0.30 production relay, so multi-candidate logic belongs here.
-    //
-    // The probe uses a fresh ephemeral UDP socket — NOT `std_socket`,
-    // which Quinn takes ownership of below. Sharing a single fd with
-    // Quinn led to the v0.31 punch fd-aliasing trap; a separate probe
-    // socket sidesteps it entirely.
-    let multi_candidate_winner: Option<SocketAddr> = if multi_candidate && peer_node_id.is_some() {
-        // v0.34.12: relay-forwarding fallback. When every DIRECT candidate
-        // (LAN + srflx/NAT-punch) times out, the pre-fix code fell back to the
-        // NS-resolved LAN address — the candidate that just failed — so a NAT'd
-        // endpoint became unreachable the instant its NAT mapping rotated and
-        // the SVC record's srflx port went stale. The relay always knows the
-        // gateway's live mapping (re-registered ~every 10s), so we instead fall
-        // back to relay-forwarding (CLIENT_ROUTE to the relay, routed by the
-        // NS-resolved gateway NodeID). This makes reachability independent of
-        // SVC-record freshness. See derive_relay_fallback_addr for derivation.
-        //
-        // Honors --no-relay-fallback: if the operator explicitly opted out of
-        // relay routing (as the legacy/punch path already respects), we do NOT
-        // synthesize a relay candidate — the dial fails through to the
-        // NS-resolved addr exactly as pre-fix, and the operator gets the
-        // fail-closed behavior they asked for.
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(ns_server.as_deref(), relay.as_deref())
-                .filter(|r| *r != peer_addr)
-        };
-        match ns_server
-            .as_deref()
-            .and_then(|s| s.parse::<SocketAddr>().ok())
-        {
-            Some(ns_addr) => {
-                eprintln!(
-                    "{} multi-candidate dial enabled (v0.32.2)",
-                    c_dim("[v0.32.2]")
-                );
-                match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-                    Ok(probe_sock) => {
-                        let probe_sock = std::sync::Arc::new(probe_sock);
-                        let policy = ztlp_proto::dial_orchestrator::DialPolicy::default();
-                        let local_subnets = ztlp_proto::local_candidates::our_local_subnets();
-                        // v0.35.2: race the REAL relay as the backstop, not the
-                        // NS-resolved `peer_addr`.
-                        //
-                        // Pre-fix this passed `Some(peer_addr)`. When the target
-                        // is a relay-routed NAT'd gateway the operator typically
-                        // has no `--relay` flag, so `peer_addr` is the gateway's
-                        // own NS-resolved address (its private LAN IP) — exactly
-                        // the candidate the parallel race is already trying via
-                        // PEER_ENDPOINTS. Passing it AGAIN as the "relay backstop"
-                        // meant the genuinely reachable relay never entered the
-                        // race at all; the client only reached it AFTER the whole
-                        // race failed, via the post-race relay fallback below.
-                        // That made connect slow and fragile (KELLYMANCINO-PC,
-                        // 2026-06-15: race = [LAN, srflx, LAN], all dead).
-                        //
-                        // Prefer the derived relay (`relay_fallback`) so the relay
-                        // is a first-class CandidateClass::Relay competitor in the
-                        // bounded race from t0. Fall back to `peer_addr` only when
-                        // no relay could be derived (legacy direct-listener mode),
-                        // preserving prior behavior. Honors --no-relay-fallback:
-                        // `relay_fallback` is already None in that case, so we pass
-                        // `peer_addr` and never synthesize a relay candidate.
-                        let race_backstop = pick_race_backstop(relay_fallback, peer_addr);
-                        match ztlp_proto::multi_candidate_dial::try_multi_candidate_connect(
-                            peer_node_id.unwrap(),
-                            ns_addr,
-                            probe_sock,
-                            &identity,
-                            &local_subnets,
-                            Some(race_backstop),
-                            policy,
-                        )
-                        .await
-                        {
-                            Ok(outcome) => {
-                                eprintln!(
-                                    "{} multi-candidate dial succeeded: {} ({:?})",
-                                    c_green("✓"),
-                                    outcome.winning_addr,
-                                    outcome.class
-                                );
-                                Some(outcome.winning_addr)
-                            }
-                            Err(e) => {
-                                // Direct candidates all failed. Prefer the relay
-                                // (resilient) over the NS-resolved LAN addr (dead).
-                                match relay_fallback {
-                                    Some(r) => {
-                                        eprintln!(
-                                            "{} multi-candidate dial failed: {:?}; \
-                                             falling back to RELAY-forwarding via {}",
-                                            c_dim("[v0.34.12]"),
-                                            e,
-                                            r
-                                        );
-                                        Some(r)
-                                    }
-                                    None => {
-                                        eprintln!(
-                                            "{} multi-candidate dial failed: {:?}; \
-                                             falling back to NS-resolved addr",
-                                            c_dim("[v0.32.2]"),
-                                            e
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Probe socket bind failed — still prefer relay-forwarding
-                        // over the NS-resolved LAN addr when a relay is known.
-                        match relay_fallback {
-                            Some(r) => {
-                                eprintln!(
-                                    "{} multi-candidate probe socket bind failed: {}; \
-                                     falling back to RELAY-forwarding via {}",
-                                    c_dim("[v0.34.12]"),
-                                    e,
-                                    r
-                                );
-                                Some(r)
-                            }
-                            None => {
-                                eprintln!(
-                                    "{} multi-candidate probe socket bind failed: {}; falling back",
-                                    c_dim("[v0.32.2]"),
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    }
-                }
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
     let peer_addr = pick_quic_dial_target(peer_addr, multi_candidate_winner);
 
-    // Bind a UDP socket Quinn will reuse for the QUIC connection.
-    let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")
+    // Bind a UDP socket Quinn will reuse for the QUIC connection. The wildcard
+    // family has to match the peer's address family: quinn rejects an IPv6
+    // remote address from an IPv4-only socket (`InvalidRemoteAddress`), which
+    // would break an IPv6 candidate picked by the direct-first race below.
+    let std_socket = std::net::UdpSocket::bind(udp_wildcard_for(peer_addr))
         .expect("Failed to bind UDP socket for QUIC signaling");
 
     // ─── α-relay routing setup (FRAME_CLIENT_ROUTE) ──────────────────
@@ -4226,10 +4309,15 @@ Only enable for legacy NAT-traversal compatibility."
     // the right default, even when the caller doesn't know whether the
     // peer is a relay or a gateway.
     //
+    // v0.37.1: skipped when the direct-first race already holds an
+    // established connection to the gateway itself (`direct_conn`). The
+    // frame is a routing hint for a relay, and that connection has no relay
+    // in its path.
+    //
     // Replaces the rejected dummy-Noise-UDP-HELLO hack (see prior
     // session handoff Decisions #3); validated by the relay's
     // CLIENT_ROUTE unit tests in `relay/test/.../udp_listener_test.exs`.
-    if let Some(svc_name) = service.as_deref() {
+    if let Some(svc_name) = service.as_deref().filter(|_| direct_conn.is_none()) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -4294,7 +4382,12 @@ Only enable for legacy NAT-traversal compatibility."
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let client = if persistent_ep {
+    let client = if let Some(conn) = direct_conn {
+        // Direct-first race winner: the QUIC handshake to `peer_addr` is
+        // already done on the race's own socket.
+        drop(std_socket);
+        conn
+    } else if persistent_ep {
         // Opt-in persistent-endpoint path (feature/quic-churn-stability).
         // Uses QuicClientEndpoint (a long-lived quinn Endpoint reused across
         // connections) instead of the per-connection connect_with_socket.
@@ -4313,11 +4406,20 @@ Only enable for legacy NAT-traversal compatibility."
             .await
             .map_err(|e| format!("persistent endpoint connect: {}", e))?
     } else {
-        QuicEndpoint::connect_with_socket(
+        // A dial to the relay is pinned per PEER, not on the relay address
+        // alone: every gateway behind the relay answers at this address with
+        // its own certificate (`relay_pin_scope`). A dial to anything else is
+        // a direct dial and keeps its address-only pin.
+        let relayed_scope = relay_pin
+            .as_deref()
+            .filter(|_| known_relay == Some(peer_addr));
+        QuicEndpoint::connect_with_socket_for_service(
             QuicEndpointConfig::default(),
             peer_addr,
             "localhost",
             std_socket,
+            relayed_scope,
+            ztlp_proto::quic_transport::CertExpectation::default(),
         )
         .await?
     };
@@ -7442,6 +7544,91 @@ async fn ns_publish_self(
     Ok(())
 }
 
+/// How long the NS heartbeat waits before retrying a publish the name
+/// server rejected as rate-limited.
+///
+/// The name server allows one registration per 60 s per {name, record
+/// type}. 90 s clears that window with margin for clock and delivery skew.
+const NS_RATE_LIMIT_RETRY: Duration = Duration::from_secs(90);
+
+/// Upper bound of the random delay added to [`NS_RATE_LIMIT_RETRY`], so a
+/// fleet that was rate-limited together does not retry together.
+const NS_RATE_LIMIT_RETRY_JITTER: Duration = Duration::from_secs(30);
+
+/// Result of one heartbeat publish, as far as scheduling is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPublish {
+    /// The records were accepted.
+    Published,
+    /// The name server refused the registration as rate-limited: the name
+    /// was registered moments ago (by this process's own startup publish,
+    /// by a previous instance that just restarted, or out of band). The
+    /// record is therefore fresh; this is not a fault.
+    RateLimited,
+    /// Anything else (network error, timeout, authorization, ...).
+    Failed,
+}
+
+/// True when a publish error is the name server's rate-limit rejection
+/// (registration error code 0x09, see [`decode_registration_error`]).
+fn is_ns_rate_limited(error: &str) -> bool {
+    error.contains(NS_REJECT_RATE_LIMITED)
+}
+
+/// Classify the result of a heartbeat publish ([`ns_publish_self`], with
+/// its error rendered to text).
+fn classify_heartbeat_publish(result: &Result<(), String>) -> HeartbeatPublish {
+    match result {
+        Ok(()) => HeartbeatPublish::Published,
+        Err(e) if is_ns_rate_limited(e) => HeartbeatPublish::RateLimited,
+        Err(_) => HeartbeatPublish::Failed,
+    }
+}
+
+/// How long the heartbeat sleeps after a publish attempt (pure, tested).
+///
+/// - `Published` / `Failed`: one nominal `interval` plus `interval_jitter`,
+///   as before.
+/// - `RateLimited`: [`NS_RATE_LIMIT_RETRY`] plus `retry_jitter`, because
+///   the limit lifts within a minute and waiting a whole interval (8 h in
+///   production) would leave the record un-refreshed for no reason. Never
+///   longer than the normal delay, so a short `interval` is not stretched.
+///
+/// The jitter values are passed in (see [`heartbeat_jitter`]) to keep this
+/// function deterministic.
+fn ns_heartbeat_delay(
+    outcome: HeartbeatPublish,
+    interval: Duration,
+    interval_jitter: Duration,
+    retry_jitter: Duration,
+) -> Duration {
+    let normal = interval + interval_jitter;
+    match outcome {
+        HeartbeatPublish::Published | HeartbeatPublish::Failed => normal,
+        HeartbeatPublish::RateLimited => (NS_RATE_LIMIT_RETRY + retry_jitter).min(normal),
+    }
+}
+
+/// Uniform-ish random delay in `[0, max)` (zero when `max` is zero).
+///
+/// Smears load so a large fleet sharing one interval does not hit the name
+/// server at the same instant. Cheap LCG seeded from current-time nanos;
+/// cryptographic randomness is not required for load smearing.
+fn heartbeat_jitter(max: Duration) -> Duration {
+    if max.is_zero() {
+        return Duration::ZERO;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let r = nanos
+        .wrapping_mul(2862933555777941757)
+        .wrapping_add(3037000493);
+    let bound = (max.as_millis() as u64).max(1);
+    Duration::from_millis(r % bound)
+}
+
 /// Heartbeat loop that republishes this listener's NS records before the 24h
 /// TTL expires. Spawned by `cmd_listen` when NS settings are configured.
 ///
@@ -7449,8 +7636,16 @@ async fn ns_publish_self(
 /// `jitter_max` adds [0, jitter_max) random delay each cycle to smear load
 /// from a large fleet (10min in production).
 ///
-/// Failures are logged at WARN and retried on the next tick — the listener
-/// keeps serving traffic regardless of NS health.
+/// The caller has ALREADY published once (the synchronous, fail-fast publish
+/// in `cmd_listen`), so the first heartbeat publish happens one interval
+/// after the task starts, not immediately. Publishing again right away is
+/// what the name server's 60 s per-name rate limit rejects: every listener
+/// start used to log a `rate-limited` failure and then wait a full interval.
+///
+/// A rate-limited publish is retried after [`NS_RATE_LIMIT_RETRY`]; any
+/// other failure is logged at WARN and retried on the next tick. The
+/// listener keeps serving traffic regardless of NS health.
+#[allow(clippy::too_many_arguments)]
 async fn ns_heartbeat_task(
     name: String,
     zone: String,
@@ -7463,8 +7658,8 @@ async fn ns_heartbeat_task(
     interval: Duration,
     jitter_max: Duration,
 ) {
-    loop {
-        match ns_publish_self(
+    ns_heartbeat_loop(&name, &ns_server, interval, jitter_max, || async {
+        ns_publish_self(
             &name,
             &zone,
             &identity,
@@ -7473,8 +7668,48 @@ async fn ns_heartbeat_task(
             addresses.as_deref(),
         )
         .await
-        {
-            Ok(()) => {
+        .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// The heartbeat schedule, separated from the network publish so it can be
+/// driven by a scripted `publish` under a paused clock in tests.
+///
+/// Sleeps first, then publishes, forever: see [`ns_heartbeat_task`] for why
+/// the first publish is one interval out, and [`ns_heartbeat_delay`] for
+/// the delay after each outcome. `name` and `ns_server` are for log lines.
+async fn ns_heartbeat_loop<F, Fut>(
+    name: &str,
+    ns_server: &str,
+    interval: Duration,
+    jitter_max: Duration,
+    mut publish: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    // First tick: one interval after the caller's initial publish.
+    let mut delay = ns_heartbeat_delay(
+        HeartbeatPublish::Published,
+        interval,
+        heartbeat_jitter(jitter_max),
+        Duration::ZERO,
+    );
+    loop {
+        tokio::time::sleep(delay).await;
+
+        let result = publish().await;
+        let outcome = classify_heartbeat_publish(&result);
+        delay = ns_heartbeat_delay(
+            outcome,
+            interval,
+            heartbeat_jitter(jitter_max),
+            heartbeat_jitter(NS_RATE_LIMIT_RETRY_JITTER),
+        );
+
+        match (outcome, result) {
+            (HeartbeatPublish::Published, _) => {
                 eprintln!(
                     "{} [ns_heartbeat] published {} to {}",
                     c_dim("→"),
@@ -7482,36 +7717,25 @@ async fn ns_heartbeat_task(
                     ns_server
                 );
             }
-            Err(e) => {
+            (HeartbeatPublish::RateLimited, _) => {
+                eprintln!(
+                    "{} [ns_heartbeat] {} was registered less than a minute ago \
+                     (name server rate limit); refreshing again in {:?}",
+                    c_dim("→"),
+                    name,
+                    delay
+                );
+            }
+            (HeartbeatPublish::Failed, result) => {
                 eprintln!(
                     "{} [ns_heartbeat] publish failed ({}): {} — will retry in {:?}",
                     c_yellow("⚠"),
                     name,
-                    e,
-                    interval
+                    result.err().unwrap_or_default(),
+                    delay
                 );
             }
         }
-
-        // Sleep with jitter — uniform [0, jitter_max) added to the nominal
-        // interval. Avoids stampeding NS at the top of each cycle when 1000
-        // listeners share the same interval. Cheap LCG seeded from
-        // current-time nanos; cryptographic randomness is not required for
-        // load smearing.
-        let jitter = if jitter_max.is_zero() {
-            Duration::ZERO
-        } else {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(0);
-            let r = nanos
-                .wrapping_mul(2862933555777941757)
-                .wrapping_add(3037000493);
-            let bound = (jitter_max.as_millis() as u64).max(1);
-            Duration::from_millis(r % bound)
-        };
-        tokio::time::sleep(interval + jitter).await;
     }
 }
 
@@ -17069,20 +17293,231 @@ mod tests {
             std::time::Duration::from_millis(0), // no jitter for determinism
         ));
 
-        // Wait long enough for at least 3 heartbeats (initial + 2 ticks).
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        // Wait long enough for at least 2 heartbeats. Each cycle is the
+        // 150 ms interval plus ~100 ms inside ns_publish_self.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         handle.abort();
 
         let pkts = captured.lock().await;
         // Register opcode = 0x09.
         let registers: Vec<_> = pkts.iter().filter(|p| p.first() == Some(&0x09)).collect();
-        // 3 cycles × 2 registers per cycle (KEY+SVC) = ≥6 register packets.
-        // Be permissive: ≥4 confirms heartbeat is actually republishing.
+        // 2 register packets per cycle (KEY+SVC); ≥4 confirms the heartbeat
+        // keeps republishing.
         assert!(
             registers.len() >= 4,
             "expected ≥4 register packets across heartbeats, got {}",
             registers.len()
         );
+    }
+
+    /// The listener publishes once itself before spawning the heartbeat, so
+    /// the heartbeat must NOT publish again at startup: two registrations a
+    /// few seconds apart is what the name server's per-name rate limit
+    /// rejects (the `rate-limited ... will retry in 28800s` startup log).
+    #[tokio::test]
+    async fn ns_heartbeat_task_waits_one_interval_before_first_publish() {
+        let (ns_addr, captured) = spawn_capture_ns().await;
+        let identity = std::sync::Arc::new(ztlp_proto::identity::NodeIdentity::generate().unwrap());
+
+        let handle = tokio::spawn(ns_heartbeat_task(
+            "node.example.ztlp".to_string(),
+            "example.ztlp".to_string(),
+            identity,
+            ns_addr.to_string(),
+            Some("10.0.0.1:23095".to_string()),
+            None,
+            std::time::Duration::from_millis(800),
+            std::time::Duration::from_millis(0),
+        ));
+
+        // Well inside the first interval: nothing may have been sent.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            captured.lock().await.is_empty(),
+            "heartbeat published before its first interval elapsed"
+        );
+
+        // After the interval the first heartbeat publish goes out.
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        handle.abort();
+        let pkts = captured.lock().await;
+        assert!(
+            pkts.iter().any(|p| p.first() == Some(&0x09)),
+            "heartbeat never published after its first interval"
+        );
+    }
+
+    // ── NS heartbeat scheduling (pure) ──────────────────────────────
+
+    const HB_INTERVAL: Duration = Duration::from_secs(8 * 3600);
+
+    #[test]
+    fn heartbeat_delay_after_success_is_one_interval_plus_jitter() {
+        let jitter = Duration::from_secs(123);
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::Published,
+                HB_INTERVAL,
+                jitter,
+                Duration::from_secs(7)
+            ),
+            HB_INTERVAL + jitter,
+            "retry jitter must not leak into the normal schedule"
+        );
+    }
+
+    #[test]
+    fn heartbeat_delay_after_rate_limit_is_a_short_retry() {
+        // No jitter: exactly the base retry.
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::RateLimited,
+                HB_INTERVAL,
+                Duration::from_secs(300),
+                Duration::ZERO
+            ),
+            NS_RATE_LIMIT_RETRY
+        );
+        // With jitter: base + jitter, nowhere near the 8 h interval.
+        let d = ns_heartbeat_delay(
+            HeartbeatPublish::RateLimited,
+            HB_INTERVAL,
+            Duration::from_secs(300),
+            Duration::from_secs(20),
+        );
+        assert_eq!(d, Duration::from_secs(110));
+        // The retry must clear the name server's 60 s window.
+        assert!(NS_RATE_LIMIT_RETRY > Duration::from_secs(60));
+        assert!(NS_RATE_LIMIT_RETRY + NS_RATE_LIMIT_RETRY_JITTER < Duration::from_secs(300));
+    }
+
+    #[test]
+    fn heartbeat_delay_after_rate_limit_never_exceeds_the_interval() {
+        // A short interval (tests, aggressive configs) is not stretched.
+        let interval = Duration::from_secs(30);
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::RateLimited,
+                interval,
+                Duration::from_secs(2),
+                Duration::from_secs(10)
+            ),
+            Duration::from_secs(32)
+        );
+    }
+
+    #[test]
+    fn heartbeat_delay_after_other_failure_is_unchanged() {
+        assert_eq!(
+            ns_heartbeat_delay(
+                HeartbeatPublish::Failed,
+                HB_INTERVAL,
+                Duration::from_secs(5),
+                Duration::from_secs(20)
+            ),
+            HB_INTERVAL + Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn heartbeat_classifies_publish_results() {
+        assert_eq!(
+            classify_heartbeat_publish(&Ok(())),
+            HeartbeatPublish::Published
+        );
+
+        // The exact error ns_publish_self builds for reason code 0x09.
+        let rate_limited = Err(format!(
+            "KEY registration failed: {}",
+            decode_registration_error(&[0xFF, 0x09])
+        ));
+        assert_eq!(
+            classify_heartbeat_publish(&rate_limited),
+            HeartbeatPublish::RateLimited
+        );
+
+        // Every other rejection, and transport errors, are real failures.
+        for code in (0x00u8..=0x0B).filter(|c| *c != 0x09) {
+            let rejected = Err(format!(
+                "KEY registration failed: {}",
+                decode_registration_error(&[0xFF, code])
+            ));
+            assert_eq!(
+                classify_heartbeat_publish(&rejected),
+                HeartbeatPublish::Failed,
+                "code 0x{code:02X}"
+            );
+        }
+        let timeout = Err("timeout waiting for NS server response at 127.0.0.1:23096".to_string());
+        assert_eq!(
+            classify_heartbeat_publish(&timeout),
+            HeartbeatPublish::Failed
+        );
+    }
+
+    #[test]
+    fn heartbeat_jitter_stays_below_its_bound() {
+        assert_eq!(heartbeat_jitter(Duration::ZERO), Duration::ZERO);
+        for _ in 0..100 {
+            assert!(heartbeat_jitter(Duration::from_secs(30)) < Duration::from_secs(30));
+        }
+    }
+
+    /// The whole schedule under a paused clock, with a scripted publish
+    /// (no sockets, so virtual time is exact): nothing at startup, first
+    /// publish one interval in, a short retry after a rate-limit, and a
+    /// full interval after a success or an ordinary failure.
+    #[tokio::test(start_paused = true)]
+    async fn ns_heartbeat_loop_schedule() {
+        let started = tokio::time::Instant::now();
+        let script = vec![
+            Err(format!("KEY registration failed: {NS_REJECT_RATE_LIMITED}")),
+            Ok(()),
+            Err("timeout waiting for NS server response at 127.0.0.1:1".to_string()),
+            Ok(()),
+        ];
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Duration>::new()));
+        let recorded = calls.clone();
+        let mut script = script.into_iter();
+
+        let heartbeat = tokio::spawn(async move {
+            ns_heartbeat_loop(
+                "node.example.ztlp",
+                "127.0.0.1:1",
+                HB_INTERVAL,
+                Duration::ZERO, // no interval jitter: exact times below
+                move || {
+                    recorded.lock().unwrap().push(started.elapsed());
+                    let result = script.next().unwrap_or(Ok(()));
+                    async move { result }
+                },
+            )
+            .await
+        });
+
+        // Long enough for all four scripted publishes, short of a fifth.
+        tokio::time::sleep(HB_INTERVAL * 3 + Duration::from_secs(600)).await;
+        heartbeat.abort();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4, "publish times: {calls:?}");
+
+        // 1. No publish at startup; the first is exactly one interval in.
+        assert_eq!(calls[0], HB_INTERVAL);
+
+        // 2. Rate-limited -> retried after 90 s plus up to 30 s of jitter,
+        //    not after another 8 h.
+        let retry = calls[1] - calls[0];
+        assert!(
+            retry >= NS_RATE_LIMIT_RETRY
+                && retry < NS_RATE_LIMIT_RETRY + NS_RATE_LIMIT_RETRY_JITTER,
+            "rate-limit retry after {retry:?}"
+        );
+
+        // 3. Success -> next publish a full interval later.
+        assert_eq!(calls[2] - calls[1], HB_INTERVAL);
+
+        // 4. Ordinary failure -> also a full interval (unchanged).
+        assert_eq!(calls[3] - calls[2], HB_INTERVAL);
     }
 
     // ── v0.32.2 A1: pick_quic_dial_target — multi-candidate winner overrides
@@ -17101,6 +17536,137 @@ mod tests {
         use std::net::SocketAddr;
         let ns: SocketAddr = "34.218.240.106:23095".parse().unwrap();
         assert_eq!(pick_quic_dial_target(ns, None), ns);
+    }
+
+    /// The connect path binds its QUIC socket before dialing; binding the
+    /// wrong family makes quinn reject the peer outright.
+    #[test]
+    fn udp_wildcard_matches_the_peer_address_family() {
+        use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+        let v4: SocketAddr = "203.0.113.10:23095".parse().unwrap();
+        let v6: SocketAddr = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            23095,
+        );
+        assert_eq!(udp_wildcard_for(v4).to_string(), "0.0.0.0:0");
+        assert_eq!(udp_wildcard_for(v6).to_string(), "[::]:0");
+        assert!(udp_wildcard_for(v6).is_ipv6());
+    }
+
+    // ── relay_pin_scope: one pin per PEER behind a relay ──────────────
+    //
+    // Two listeners behind one relay that both forward a service called
+    // `ssh` used to share the pin `localhost@<relay>`: the second host an
+    // operator connected to failed the certificate check.
+    #[test]
+    fn relay_pin_scope_separates_two_peers_behind_one_relay() {
+        use ztlp_proto::identity::NodeId;
+        use ztlp_proto::quic_transport::tokio_endpoint::{pin_key_for, pin_key_for_service};
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        let a = NodeId([0xAA; 16]);
+        let b = NodeId([0xBB; 16]);
+
+        let scope_a = relay_pin_scope("ssh", Some(&a), "ssh.host-a.example.ztlp");
+        let scope_b = relay_pin_scope("ssh", Some(&b), "ssh.host-b.example.ztlp");
+        assert_eq!(scope_a, format!("ssh@{}", "aa".repeat(16)));
+        assert_ne!(scope_a, scope_b);
+
+        let key_a = pin_key_for_service(relay, "localhost", Some(&scope_a));
+        let key_b = pin_key_for_service(relay, "localhost", Some(&scope_b));
+        assert_ne!(key_a, key_b, "each peer behind the relay needs its own pin");
+        // Neither is the relay-wide pin older builds wrote.
+        assert_ne!(key_a, pin_key_for(relay, "localhost"));
+    }
+
+    #[test]
+    fn relay_pin_scope_is_stable_and_falls_back_to_the_target() {
+        use ztlp_proto::identity::NodeId;
+        let id = NodeId([0x01; 16]);
+        // Same peer, different spelling of the service or the name: one pin.
+        assert_eq!(
+            relay_pin_scope(" SSH ", Some(&id), "ssh.host.example.ztlp"),
+            relay_pin_scope("ssh", Some(&id), "SSH.HOST.example.ztlp"),
+        );
+        // No NodeID (target given as an address): the target names the peer.
+        assert_eq!(
+            relay_pin_scope("ssh", None, " SSH.Host.Example.ZTLP "),
+            "ssh@ssh.host.example.ztlp"
+        );
+        assert_ne!(
+            relay_pin_scope("ssh", None, "ssh.host-a.example.ztlp"),
+            relay_pin_scope("ssh", None, "ssh.host-b.example.ztlp"),
+        );
+    }
+
+    // ── connect_candidate_trust: which certificate the race insists on ──
+    fn write_test_pin(dir: &std::path::Path, addr: SocketAddr, scope: Option<&str>, fp: &str) {
+        // Mirror of the verifier's private pin_path: sanitized pin key + ".pin".
+        let key = ztlp_proto::quic_transport::tokio_endpoint::pin_key_for_service(
+            addr,
+            "localhost",
+            scope,
+        );
+        let safe: String = key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        std::fs::write(dir.join(format!("{safe}.pin")), fp).unwrap();
+    }
+
+    #[test]
+    fn connect_candidate_trust_order() {
+        use ztlp_proto::multi_candidate_dial::CandidateTrust;
+        let pins = tempfile::tempdir().unwrap();
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        let lan: SocketAddr = "10.20.30.40:23095".parse().unwrap();
+        let scope = "ssh@00112233445566778899aabbccddeeff";
+        let relay_fp = "ab".repeat(32);
+        let direct_fp = "cd".repeat(32);
+
+        // Nothing pinned: first use.
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::TofuPerAddress
+        );
+
+        // Only a direct (address-only) pin: it is the trust, with or without
+        // a relay and a service in play.
+        write_test_pin(pins.path(), lan, None, &direct_fp);
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(direct_fp.clone())
+        );
+        assert_eq!(
+            connect_candidate_trust(None, Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(direct_fp.clone())
+        );
+
+        // The per-peer relay pin wins over the address pin.
+        write_test_pin(pins.path(), relay, Some(scope), &relay_fp);
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some(scope), lan, pins.path()),
+            CandidateTrust::KnownFingerprint(relay_fp)
+        );
+    }
+
+    #[test]
+    fn connect_candidate_trust_ignores_the_relay_wide_pin() {
+        use ztlp_proto::multi_candidate_dial::CandidateTrust;
+        let pins = tempfile::tempdir().unwrap();
+        let relay: SocketAddr = "198.51.100.7:23095".parse().unwrap();
+        // The pin an older build wrote for "whatever gateway answered at the
+        // relay first". It says nothing about this peer.
+        write_test_pin(pins.path(), relay, None, &"ef".repeat(32));
+        assert_eq!(
+            connect_candidate_trust(Some(relay), Some("ssh@peer"), relay, pins.path()),
+            CandidateTrust::TofuPerAddress
+        );
     }
 
     // ── v0.34.12: derive_relay_fallback_addr — relay-forwarding fallback ──
@@ -17186,71 +17752,6 @@ mod tests {
             derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
         };
         assert_eq!(got, Some("44.230.7.100:23095".parse().unwrap()));
-    }
-
-    // ── v0.35.2: pick_race_backstop — the multi-candidate race must get the
-    // REAL relay as its backstop, not the NS-resolved peer address. ──
-    // Regression guard for KELLYMANCINO-PC (2026-06-15): a relay-routed NAT'd
-    // gateway connected-to with no --relay flag had `peer_addr` == its own
-    // unroutable LAN address fed in as the "relay backstop", so the genuinely
-    // reachable relay never entered the bounded parallel-dial race and connect
-    // only recovered via the slow post-race fallback.
-    #[test]
-    fn race_backstop_prefers_derived_relay_over_ns_resolved_lan() {
-        use std::net::SocketAddr;
-        // The bug shape: target is a NAT'd gateway, no --relay, so the
-        // NS-resolved peer addr is the gateway's private LAN address.
-        let ns_resolved_lan: SocketAddr = "10.210.1.164:23095".parse().unwrap();
-        let derived_relay: SocketAddr = "44.230.7.100:23095".parse().unwrap();
-        assert_eq!(
-            pick_race_backstop(Some(derived_relay), ns_resolved_lan),
-            derived_relay,
-            "the real relay must be the race backstop, not the dead LAN addr"
-        );
-    }
-
-    #[test]
-    fn race_backstop_falls_back_to_ns_resolved_when_no_relay() {
-        use std::net::SocketAddr;
-        // Legacy direct-listener mode / fail-closed (--no-relay-fallback sets
-        // relay_fallback to None upstream): preserve prior behavior and use the
-        // NS-resolved address as the backstop.
-        let ns_resolved: SocketAddr = "10.0.0.5:23095".parse().unwrap();
-        assert_eq!(pick_race_backstop(None, ns_resolved), ns_resolved);
-    }
-
-    #[test]
-    fn race_backstop_end_to_end_with_no_relay_fallback_gate() {
-        use std::net::SocketAddr;
-        // Mirror the cmd_connect call site: relay_fallback is gated behind
-        // --no-relay-fallback, then pick_race_backstop chooses. With the flag
-        // ON, no relay is synthesized and the race backstop is the NS addr
-        // (fail-closed — operator opted out of relay routing).
-        let ns_resolved: SocketAddr = "10.210.1.164:23095".parse().unwrap();
-
-        let no_relay_fallback = true;
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
-        };
-        assert_eq!(
-            pick_race_backstop(relay_fallback, ns_resolved),
-            ns_resolved,
-            "--no-relay-fallback must keep the relay out of the race"
-        );
-
-        // With the flag OFF, the derived relay becomes the backstop.
-        let no_relay_fallback = false;
-        let relay_fallback = if no_relay_fallback {
-            None
-        } else {
-            derive_relay_fallback_addr(Some("44.230.7.100:23096"), None)
-        };
-        assert_eq!(
-            pick_race_backstop(relay_fallback, ns_resolved),
-            "44.230.7.100:23095".parse::<SocketAddr>().unwrap()
-        );
     }
 
     // ── decode_registration_error ──────────────────────────────────

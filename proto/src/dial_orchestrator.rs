@@ -67,6 +67,19 @@ pub enum DialError {
 #[async_trait]
 pub trait Dialer: Send + Sync + 'static {
     async fn dial(&self, addr: SocketAddr) -> Result<DialSuccess, DialError>;
+
+    /// Timeout for the dial to `addr`, overriding
+    /// [`DialPolicy::per_candidate_timeout`] for that candidate.
+    ///
+    /// The default (`None`) keeps the policy-wide timeout. A dialer that
+    /// knows some candidates answer quickly or not at all (a LAN address
+    /// either completes a handshake in a few milliseconds or is on another
+    /// network) returns a shorter value for them, so an unreachable one is
+    /// given up on sooner and the next band, or the caller's fallback,
+    /// starts earlier.
+    fn timeout_for(&self, _addr: SocketAddr) -> Option<Duration> {
+        None
+    }
 }
 
 /// Knobs for [`dial_candidates`].
@@ -75,7 +88,8 @@ pub trait Dialer: Send + Sync + 'static {
 /// inter-band delay (host → srflx → relay), 8 s total dial budget.
 #[derive(Debug, Clone)]
 pub struct DialPolicy {
-    /// Per-candidate handshake timeout. Default 2 s.
+    /// Per-candidate handshake timeout. Default 2 s. A dialer can shorten
+    /// (or lengthen) it per address through [`Dialer::timeout_for`].
     pub per_candidate_timeout: Duration,
     /// Delay between firing successive priority bands. Default 250 ms.
     pub band_delay: Duration,
@@ -118,7 +132,9 @@ type DialOutcome = Result<DialSuccess, (SocketAddr, DialError)>;
 ///    bands in descending priority order.
 /// 3. For each band, spawn one task per candidate into a shared
 ///    [`JoinSet`]. Each task calls `dialer.dial(addr)` wrapped in
-///    `tokio::time::timeout(policy.per_candidate_timeout)`.
+///    `tokio::time::timeout(..)` of [`Dialer::timeout_for`] for that
+///    address, or `policy.per_candidate_timeout` when the dialer has no
+///    opinion.
 /// 4. After spawning a band, wait either `policy.band_delay` OR until a
 ///    successful result arrives on the mpsc, whichever comes first. If
 ///    a success arrives we abort the remaining tasks and return.
@@ -179,8 +195,10 @@ async fn run_orchestrator(
         for cand in band {
             let dialer = Arc::clone(&dialer);
             let tx = tx.clone();
-            let per_to = policy.per_candidate_timeout;
             let addr = cand.addr;
+            let per_to = dialer
+                .timeout_for(addr)
+                .unwrap_or(policy.per_candidate_timeout);
             total_spawned += 1;
             join_set.spawn(async move {
                 let res = match tokio::time::timeout(per_to, dialer.dial(addr)).await {
@@ -639,5 +657,97 @@ mod tests {
         .await
         .expect("concurrent band should resolve within 700ms");
         assert!([a1, a2, a3].contains(&res.addr));
+    }
+
+    // ── Per-candidate timeout override (Dialer::timeout_for) ──────────
+
+    /// Dialer whose dials never complete, with an optional per-address
+    /// timeout override. Models an unreachable candidate: the handshake
+    /// packets leave and nothing ever comes back.
+    struct HangingDialer {
+        overrides: HashMap<SocketAddr, Duration>,
+    }
+
+    #[async_trait]
+    impl Dialer for HangingDialer {
+        async fn dial(&self, _addr: SocketAddr) -> Result<DialSuccess, DialError> {
+            std::future::pending().await
+        }
+
+        fn timeout_for(&self, addr: SocketAddr) -> Option<Duration> {
+            self.overrides.get(&addr).copied()
+        }
+    }
+
+    /// A dialer-supplied timeout replaces the policy-wide one, so an
+    /// unreachable LAN candidate is given up on after the short LAN budget
+    /// instead of the full `per_candidate_timeout`.
+    #[tokio::test(start_paused = true)]
+    async fn dialer_timeout_override_gives_up_on_a_hung_candidate_early() {
+        let lan = addr("10.0.0.1:7000");
+        let dialer: Arc<dyn Dialer> = Arc::new(HangingDialer {
+            overrides: HashMap::from([(lan, Duration::from_millis(600))]),
+        });
+        let started = tokio::time::Instant::now();
+        let res = dial_candidates(
+            vec![rc("10.0.0.1:7000", 250)],
+            dialer,
+            DialPolicy::default(), // per_candidate_timeout = 2 s
+        )
+        .await;
+        assert_eq!(
+            res,
+            Err(OrchestratorError::AllFailed {
+                tried: vec![(lan, DialError::Timeout)]
+            })
+        );
+        assert_eq!(started.elapsed(), Duration::from_millis(600));
+    }
+
+    /// Without an override the policy-wide timeout still applies.
+    #[tokio::test(start_paused = true)]
+    async fn dialer_without_override_uses_policy_timeout() {
+        let dialer: Arc<dyn Dialer> = Arc::new(HangingDialer {
+            overrides: HashMap::new(),
+        });
+        let started = tokio::time::Instant::now();
+        let res = dial_candidates(
+            vec![rc("10.0.0.1:7000", 250)],
+            dialer,
+            DialPolicy::default(),
+        )
+        .await;
+        assert!(matches!(res, Err(OrchestratorError::AllFailed { .. })));
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+    }
+
+    /// The override is per address: in one race a LAN candidate times out
+    /// on its short budget while a public candidate keeps the longer one.
+    #[tokio::test(start_paused = true)]
+    async fn dialer_timeout_override_is_per_candidate() {
+        let lan = addr("10.0.0.1:7000");
+        let public = addr("203.0.113.5:7000");
+        let dialer: Arc<dyn Dialer> = Arc::new(HangingDialer {
+            overrides: HashMap::from([
+                (lan, Duration::from_millis(600)),
+                (public, Duration::from_millis(1000)),
+            ]),
+        });
+        let started = tokio::time::Instant::now();
+        let res = dial_candidates(
+            vec![rc("10.0.0.1:7000", 250), rc("203.0.113.5:7000", 100)],
+            dialer,
+            DialPolicy::default(), // band_delay = 250 ms
+        )
+        .await;
+        // LAN fires at t=0 and times out at 600 ms. The public band fires
+        // at t=250 ms (band delay) and times out at 1250 ms.
+        assert_eq!(
+            res,
+            Err(OrchestratorError::AllFailed {
+                tried: vec![(lan, DialError::Timeout), (public, DialError::Timeout)]
+            })
+        );
+        assert_eq!(started.elapsed(), Duration::from_millis(1250));
     }
 }

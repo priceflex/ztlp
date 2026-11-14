@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.37.1 — 2026-11-14
+
+Four fixes found in production with v0.37.0 (client, listener, NS and relay
+all on v0.37.0). Rust (`proto/`) only; no wire-format change. Desktop 1.4.1
+carries the same `ztlp` binary, nothing else changes there.
+
+- **`ztlp connect <name>` picks a reachable direct path, and falls back to
+  the relay quickly.** The multi-candidate step tested each candidate with a
+  9-byte UDP probe and took any reply as "reachable". Neither the QUIC
+  listener nor the relay answers that probe, so every candidate timed out
+  after 2 s: a gateway on the operator's own LAN was never chosen and every
+  connect-by-name went through the relay about 2.3 s late. The client now
+  races a real QUIC handshake against the peer's direct addresses (SVC record
+  plus PEER_ENDPOINTS) and keeps the winning connection, so a reachable LAN
+  gateway is selected in one round trip. The relay is no longer a candidate
+  in that race: it is the fallback when no direct handshake completes, after
+  at most 600 ms for private/LAN candidates (1 s for public ones, 2.25 s as
+  the outer bound on the whole race). A candidate whose certificate does not
+  match its pin is not selected, and when the device already trusts a
+  certificate for this peer (the pin it wrote when it last reached the peer
+  through the relay) a direct candidate has to present that same
+  certificate, so another gateway that happens to own the same private
+  address cannot be adopted. Loopback
+  candidates are ignored. `--no-multi-candidate` and `--no-relay-fallback`
+  behave as before. The advisory 200 ms pre-probe of
+  the SVC candidates now only runs when the race does not pick a target.
+- **`ztlp connect` reaches every gateway behind a relay, not only the
+  first.** A relayed dial was pinned on the relay address alone, and every
+  gateway behind a relay answers there with its own certificate. The first
+  one an operator connected to worked; the next failed with "QUIC
+  certificate fingerprint ... does not match the pinned value" (a fleet of
+  listeners that all forward a service called `ssh` hit this on the second
+  host). The pin of a relayed dial is now scoped to the peer (service plus
+  NS-resolved NodeID, or the dialed target when there is no NodeID). Direct
+  dials keep their address-only pin. The relay-wide pin file older builds
+  wrote (`localhost_<relay>_<port>.pin`) is no longer read for relayed
+  connects; each peer is pinned again on its next relayed connect.
+- **An identity file written by `ztlp keygen` is no longer re-keyed.**
+  `ztlp keygen` writes the Ed25519 seed as `ed25519_seed`, the loader only
+  read `signing_key_seed`, treated the file as a legacy identity without a
+  signing key, generated a random one and rewrote the file. A listener
+  started with such a file registered with a key nobody provisioned and the
+  name server answered `unauthorized`. Both field names are now accepted and
+  a file that has a seed is left untouched. A file with both fields set to
+  different seeds, or a seed that is not 32 bytes, is refused with an error
+  instead of being guessed at. The two admin readers of that file
+  (`admin/public/ztlp-admin-sign.py`, `rails zone:import_authority`) read
+  only `signing_key_seed` and now accept either spelling too, refusing a
+  file that carries two different seeds.
+- **`ztlp listen` no longer logs a name-server error on every start.** The
+  listener published its records and the heartbeat task published them again
+  a few seconds later; the name server allows one registration per name per
+  60 s, so the second one was rejected (`rate-limited ... will retry in
+  28800s`) and the next refresh was 8 h away. The heartbeat now makes its
+  first publish one interval after the startup publish, and a `rate-limited`
+  answer is retried after 90 to 120 s instead of being reported as a failure.
+
 ## v0.37.0 — 2026-10-29
 
 Windows: the agent runs as the signed-in user, no SYSTEM service. Plan:

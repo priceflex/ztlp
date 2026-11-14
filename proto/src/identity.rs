@@ -79,7 +79,11 @@ impl fmt::Display for NodeId {
 }
 
 /// Persisted node identity, stored as JSON.
+///
+/// Deserialization goes through [`NodeIdentityFile`] so that both on-disk
+/// spellings of the Ed25519 seed are accepted (see that type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "NodeIdentityFile")]
 pub struct NodeIdentity {
     /// Stable 128-bit node identifier.
     pub node_id: NodeId,
@@ -114,12 +118,92 @@ pub struct NodeIdentity {
     /// keep pre-existing identity.json files (written before this
     /// field existed) loading cleanly, lazily generating and
     /// persisting a signing key on first load.
+    ///
+    /// On load the seed is also accepted under the name `ed25519_seed`,
+    /// which is what `ztlp keygen` writes (see [`NodeIdentityFile`]). It is
+    /// always written back as `signing_key_seed`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "opt_hex_bytes"
     )]
     pub signing_key_seed: Option<Vec<u8>>,
+}
+
+/// Length of an Ed25519 seed in bytes.
+const ED25519_SEED_LEN: usize = 32;
+
+/// On-disk shape of an identity file, as read.
+///
+/// Two tools write this file and they name the Ed25519 seed differently:
+///
+/// - the daemon ([`NodeIdentity::save`]) writes `signing_key_seed`;
+/// - `ztlp keygen` writes `ed25519_seed` (plus `ed25519_public_key`, which
+///   is derivable from the seed and ignored here like any unknown field).
+///
+/// Before this type existed only `signing_key_seed` was read, so a
+/// keygen-format file looked like a pre-signing-key legacy file:
+/// [`NodeIdentity::load`] generated a RANDOM signing key and rewrote the
+/// file, silently replacing the provisioned key (the name server then
+/// rejected the node's registrations as `unauthorized`).
+///
+/// Both names are accepted. If both are present they must hold the same
+/// seed; a file with two different seeds is refused rather than guessing
+/// which key the operator meant.
+#[derive(Deserialize)]
+struct NodeIdentityFile {
+    node_id: NodeId,
+    #[serde(with = "hex_bytes")]
+    static_private_key: Vec<u8>,
+    #[serde(with = "hex_bytes")]
+    static_public_key: Vec<u8>,
+    #[serde(default)]
+    bound_user_sid: Option<String>,
+    #[serde(default, with = "opt_hex_bytes")]
+    signing_key_seed: Option<Vec<u8>>,
+    /// `ztlp keygen` spelling of `signing_key_seed`.
+    #[serde(default, with = "opt_hex_bytes")]
+    ed25519_seed: Option<Vec<u8>>,
+}
+
+impl TryFrom<NodeIdentityFile> for NodeIdentity {
+    type Error = String;
+
+    fn try_from(file: NodeIdentityFile) -> Result<Self, Self::Error> {
+        let signing_key_seed = match (file.signing_key_seed, file.ed25519_seed) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(
+                    "identity file has both `signing_key_seed` and `ed25519_seed` and they \
+                     differ; remove the one that is not this node's provisioned Ed25519 seed"
+                        .to_string(),
+                );
+            }
+            (Some(seed), _) | (None, Some(seed)) => Some(seed),
+            (None, None) => None,
+        };
+
+        // A seed of the wrong length cannot be used: `signing_key()` would
+        // fall back to a fresh random key on every call. Refuse it here so
+        // a truncated or mistyped file is reported instead of re-keying.
+        if let Some(seed) = &signing_key_seed {
+            if seed.len() != ED25519_SEED_LEN {
+                return Err(format!(
+                    "Ed25519 seed must be {} bytes ({} hex characters), got {} bytes",
+                    ED25519_SEED_LEN,
+                    ED25519_SEED_LEN * 2,
+                    seed.len()
+                ));
+            }
+        }
+
+        Ok(Self {
+            node_id: file.node_id,
+            static_private_key: file.static_private_key,
+            static_public_key: file.static_public_key,
+            bound_user_sid: file.bound_user_sid,
+            signing_key_seed,
+        })
+    }
 }
 
 impl NodeIdentity {
@@ -157,6 +241,10 @@ impl NodeIdentity {
     /// unable to authenticate PEER_ENDPOINTS/PUNCH_REPORT claims
     /// forever, lazily generate and persist a signing key the first
     /// time an old identity file is loaded.
+    ///
+    /// A file written by `ztlp keygen` carries its seed as `ed25519_seed`;
+    /// that is a provisioned key, not a legacy file, so it is loaded as-is
+    /// and the file is left untouched (see [`NodeIdentityFile`]).
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
         let data = std::fs::read_to_string(path)?;
         let mut identity: Self = serde_json::from_str(&data)?;
@@ -378,6 +466,209 @@ mod tests {
             mode
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── identity.json field names: `ztlp keygen` vs the daemon ──────────
+    //
+    // `ztlp keygen` writes the Ed25519 seed as `ed25519_seed`; the daemon
+    // writes `signing_key_seed`. Loading a keygen file used to re-key the
+    // node with a random signing key.
+
+    /// Fixed test vector: X25519 keys are arbitrary 32-byte values, the
+    /// Ed25519 public key is derived from `seed` by the test itself.
+    const TEST_NODE_ID: &str = "00112233445566778899aabbccddeeff";
+    const TEST_X25519_PRIV: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const TEST_X25519_PUB: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+
+    fn seed_hex(byte: u8) -> String {
+        hex::encode([byte; 32])
+    }
+
+    fn public_key_hex_for(seed_hex: &str) -> String {
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&hex::decode(seed_hex).unwrap());
+        hex::encode(SigningKey::from_bytes(&seed).verifying_key().to_bytes())
+    }
+
+    /// The exact field set `ztlp keygen --format json` emits.
+    fn keygen_json(seed_hex: &str) -> String {
+        serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+            "ed25519_seed": seed_hex,
+            "ed25519_public_key": public_key_hex_for(seed_hex),
+        })
+        .to_string()
+    }
+
+    fn write_temp_identity(tag: &str, json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "ztlp_identity_{}_{}_{}",
+            tag,
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("identity.json");
+        std::fs::write(&path, json).expect("write identity");
+        (dir, path)
+    }
+
+    #[test]
+    fn keygen_format_loads_with_the_provisioned_signing_key() {
+        let seed = seed_hex(0x42);
+        let json = keygen_json(&seed);
+        let (dir, path) = write_temp_identity("keygen", &json);
+
+        let ident = NodeIdentity::load(&path).expect("keygen-format identity must load");
+
+        assert_eq!(
+            ident.signing_public_key_hex(),
+            public_key_hex_for(&seed),
+            "the loaded signing key must be the one in the file's ed25519_public_key"
+        );
+        assert_eq!(ident.signing_key_seed, Some(vec![0x42; 32]));
+        assert_eq!(ident.node_id.to_string(), TEST_NODE_ID);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn keygen_format_is_not_rekeyed_or_rewritten_on_load() {
+        let seed = seed_hex(0x42);
+        let json = keygen_json(&seed);
+        let (dir, path) = write_temp_identity("keygen_stable", &json);
+
+        let first = NodeIdentity::load(&path).expect("first load");
+        let second = NodeIdentity::load(&path).expect("second load");
+
+        assert_eq!(first.signing_key_seed, second.signing_key_seed);
+        assert_eq!(first.signing_key_seed, Some(vec![0x42; 32]));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            json,
+            "a file that already has a seed must not be rewritten by load()"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn daemon_format_signing_key_seed_still_loads() {
+        let seed = seed_hex(0x07);
+        let json = serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+            "signing_key_seed": seed,
+        })
+        .to_string();
+        let (dir, path) = write_temp_identity("daemon", &json);
+
+        let ident = NodeIdentity::load(&path).expect("daemon-format identity must load");
+
+        assert_eq!(ident.signing_key_seed, Some(vec![0x07; 32]));
+        assert_eq!(ident.signing_public_key_hex(), public_key_hex_for(&seed));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), json);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn legacy_file_without_any_seed_gets_a_generated_key_persisted() {
+        let json = serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+        })
+        .to_string();
+        let (dir, path) = write_temp_identity("legacy", &json);
+
+        let first = NodeIdentity::load(&path).expect("legacy identity must load");
+        let seed = first.signing_key_seed.clone().expect("a key is generated");
+        assert_eq!(seed.len(), 32);
+
+        // The generated key is persisted (as `signing_key_seed`), so the
+        // next load returns the same key instead of generating another.
+        let second = NodeIdentity::load(&path).expect("reload");
+        assert_eq!(second.signing_key_seed, Some(seed));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(on_disk.get("signing_key_seed").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn both_seed_fields_with_the_same_value_load() {
+        let seed = seed_hex(0x42);
+        let json = serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+            "signing_key_seed": seed,
+            "ed25519_seed": seed,
+        })
+        .to_string();
+
+        let ident: NodeIdentity = serde_json::from_str(&json).expect("equal seeds must load");
+        assert_eq!(ident.signing_key_seed, Some(vec![0x42; 32]));
+    }
+
+    #[test]
+    fn both_seed_fields_with_different_values_are_rejected() {
+        let json = serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+            "signing_key_seed": seed_hex(0x01),
+            "ed25519_seed": seed_hex(0x02),
+        })
+        .to_string();
+        let (dir, path) = write_temp_identity("conflict", &json);
+
+        let Err(err) = NodeIdentity::load(&path) else {
+            panic!("conflicting seeds must be rejected");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("signing_key_seed") && msg.contains("ed25519_seed"),
+            "error must name both fields, got: {msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            json,
+            "a rejected file must be left untouched"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn seed_of_the_wrong_length_is_rejected() {
+        let json = serde_json::json!({
+            "node_id": TEST_NODE_ID,
+            "static_private_key": TEST_X25519_PRIV,
+            "static_public_key": TEST_X25519_PUB,
+            "ed25519_seed": "abcd",
+        })
+        .to_string();
+
+        let Err(err) = serde_json::from_str::<NodeIdentity>(&json) else {
+            panic!("a 2-byte seed must be rejected");
+        };
+        assert!(err.to_string().contains("32 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn saved_identity_roundtrips_through_load() {
+        let ident = NodeIdentity::generate().expect("generate");
+        let (dir, path) = write_temp_identity("roundtrip", "{}");
+        ident.save(&path).expect("save");
+
+        let loaded = NodeIdentity::load(&path).expect("load");
+        assert_eq!(loaded.node_id, ident.node_id);
+        assert_eq!(loaded.signing_key_seed, ident.signing_key_seed);
+        assert_eq!(loaded.static_private_key, ident.static_private_key);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

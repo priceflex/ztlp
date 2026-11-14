@@ -301,6 +301,9 @@ pub enum CertReject {
 /// Marker embedded in rejection messages so callers can recognise an
 /// NS fingerprint mismatch through quinn's error chain.
 pub const NS_MISMATCH_MARKER: &str = "[ztlp-ns-cert-mismatch]";
+/// Marker for a peer that did not present the certificate the device
+/// already trusts for it (v0.37.2, `connect_with_socket_trusting`).
+pub const TRUSTED_MISMATCH_MARKER: &str = "[ztlp-trusted-cert-mismatch]";
 /// Marker for a strict device refusing an unverified answer.
 pub const UNVERIFIED_MARKER: &str = "[ztlp-ns-unverified]";
 
@@ -573,6 +576,11 @@ pub mod tokio_endpoint {
         /// NS-anchored trust: what the name server said about this gateway.
         /// Default = legacy TOFU behavior.
         expect: super::CertExpectation,
+        /// The one certificate (lowercase hex SHA-256) the caller already
+        /// trusts for the peer behind this dial, from the device's own pin
+        /// store (v0.37.2, [`QuicEndpoint::connect_with_socket_trusting`]).
+        /// When set it decides alone: see `verify_or_pin`.
+        trusted_fp: Option<String>,
     }
 
     /// TOFU pin identity for a dial: the REMOTE ENDPOINT plus the SNI.
@@ -714,6 +722,7 @@ pub mod tokio_endpoint {
                 server_name: server_name.to_string(),
                 pin_dir: Self::default_pin_dir(),
                 expect: super::CertExpectation::default(),
+                trusted_fp: None,
             }
         }
 
@@ -729,6 +738,7 @@ pub mod tokio_endpoint {
                 server_name: server_name.to_string(),
                 pin_dir,
                 expect: super::CertExpectation::default(),
+                trusted_fp: None,
             }
         }
 
@@ -738,6 +748,7 @@ pub mod tokio_endpoint {
                 server_name: server_name.to_string(),
                 pin_dir,
                 expect: super::CertExpectation::default(),
+                trusted_fp: None,
             }
         }
 
@@ -751,6 +762,7 @@ pub mod tokio_endpoint {
                 server_name: server_name.to_string(),
                 pin_dir,
                 expect,
+                trusted_fp: None,
             }
         }
 
@@ -816,6 +828,33 @@ pub mod tokio_endpoint {
             let fingerprint = Self::fingerprint(cert);
             let path = self.pin_path();
             let pinned = std::fs::read_to_string(&path).ok();
+
+            // v0.37.2: the caller already trusts one certificate for this
+            // peer (its pin from an earlier connect to the same peer, e.g.
+            // through the relay). Only that certificate is accepted. The pin
+            // of THIS address is not consulted: it records what was last seen
+            // at the address, and after the gateway replaced its certificate
+            // it is the stale half. On success it is brought up to date, so
+            // the two pins agree again.
+            if let Some(trusted) = &self.trusted_fp {
+                if !trusted.trim().eq_ignore_ascii_case(&fingerprint) {
+                    return Err(format!(
+                        "{} '{}' presented QUIC certificate {} but this device trusts {} \
+                         for the peer being dialed",
+                        super::TRUSTED_MISMATCH_MARKER,
+                        self.server_name,
+                        fingerprint,
+                        trusted.trim().to_ascii_lowercase()
+                    ));
+                }
+                if pinned.as_deref().map(str::trim) != Some(fingerprint.as_str()) {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&path, &fingerprint);
+                }
+                return Ok(());
+            }
 
             match decide_cert(&self.expect, &fingerprint, pinned.as_deref()) {
                 CertDecision::Accept {
@@ -1313,11 +1352,50 @@ pub mod tokio_endpoint {
             expect: super::CertExpectation,
             pin_dir: Option<std::path::PathBuf>,
         ) -> Result<QuicConnection, QuicTransportError> {
-            ensure_crypto();
-            let mut verifier = TofuCertVerifier::with_expectation(
+            let verifier = TofuCertVerifier::with_expectation(
                 &pin_key_for_service(remote, server_name, relayed_service),
                 expect,
             );
+            Self::connect_with_verifier(cfg, remote, server_name, std_socket, verifier, pin_dir)
+                .await
+        }
+
+        /// A DIRECT dial to a peer whose certificate this device already
+        /// trusts (v0.37.2): `trusted_fp` is the lowercase hex SHA-256 from
+        /// the device's pin store for that peer, e.g. the pin written when it
+        /// was last reached through the relay.
+        ///
+        /// The peer must present exactly that certificate. The pin of
+        /// `remote` itself is not consulted, so a pin left over from the
+        /// gateway's previous certificate cannot fail the dial; on success
+        /// it is rewritten to the trusted certificate.
+        ///
+        /// A name-server-verified fingerprint does not go through here: pass
+        /// it as the [`CertExpectation`](super::CertExpectation) of
+        /// [`Self::connect_with_socket_in_pin_dir`].
+        pub async fn connect_with_socket_trusting(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+            std_socket: std::net::UdpSocket,
+            trusted_fp: &str,
+            pin_dir: Option<std::path::PathBuf>,
+        ) -> Result<QuicConnection, QuicTransportError> {
+            let mut verifier = TofuCertVerifier::new(&pin_key_for(remote, server_name));
+            verifier.trusted_fp = Some(trusted_fp.trim().to_ascii_lowercase());
+            Self::connect_with_verifier(cfg, remote, server_name, std_socket, verifier, pin_dir)
+                .await
+        }
+
+        async fn connect_with_verifier(
+            cfg: QuicEndpointConfig,
+            remote: SocketAddr,
+            server_name: &str,
+            std_socket: std::net::UdpSocket,
+            mut verifier: TofuCertVerifier,
+            pin_dir: Option<std::path::PathBuf>,
+        ) -> Result<QuicConnection, QuicTransportError> {
+            ensure_crypto();
             match pin_dir {
                 Some(dir) => verifier.pin_dir = dir,
                 // The legacy per-SNI pin only ever lived in the default dir.

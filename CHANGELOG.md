@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.37.2 — 2026-11-14
+
+Two fixes found while rolling v0.37.1 out to a fleet. Rust (`proto/`) only; no
+wire-format change. Desktop 1.4.2 carries the same `ztlp` binary, nothing else
+changes there.
+
+- **A restarted listener no longer crash-loops on the name server's rate
+  limit.** `ztlp listen` publishes its name before it starts serving and
+  treated every failure of that publish as a configuration error. The name
+  server allows one registration per minute per name, so a listener that is
+  restarted (service restart, upgrade, crash recovery) is answered
+  `rate-limited`: it exited, the service manager started it again, and that
+  start was rate-limited too. On Windows under NSSM this kept a host
+  unreachable for one and a half to four minutes per restart. A `rate-limited`
+  answer now starts the listener: the name is still registered from the
+  previous start, and the heartbeat refreshes it once the limit has cleared
+  (90 s plus up to 30 s of jitter) instead of a full interval later. Every
+  other failure of the initial publish (name outside the zone, key not allowed
+  to register it, name server unreachable) still refuses to start.
+- **`ztlp connect` trusts the certificate the name server vouches for.** Since
+  v0.36.0 a listener publishes its QUIC certificate fingerprint
+  (`quic_cert_sha256`) in its signed name-server record and enrollment gives
+  each device the name server's key (`ns_trust.toml`), but only the agent used
+  them; `ztlp connect` read the record unverified and fell back to local
+  trust-on-first-use pins. A device that holds a name-server key for the
+  target's zone now resolves the name through the same verifying resolver as
+  the agent, takes the addresses, the NodeID and the fingerprint from the
+  signed record, and requires exactly that certificate on the direct path and
+  through the relay. Local pins play no part for such a name, so a gateway
+  that replaced its certificate is reachable again as soon as it has
+  re-registered, with no pin file to clear on any client; a pin left over from
+  the old certificate is removed on the next connect. A record that does not
+  verify fails the connect; there is no fallback to an unverified answer, and
+  the unverified lookup is not run for such a name, so the resolver's cache of
+  signed records still answers when the name server is unreachable.
+  `--ns-server` may be a host name as before. A
+  raw `ip:port` target, a zone the device holds no key for, and a gateway
+  that publishes no fingerprint keep the local pins.
+- **A stale address pin no longer costs the direct path on a device without a
+  name-server key.** When the device already trusts a certificate for the peer
+  (the pin written when it last reached the peer through the relay), a direct
+  candidate has to present that certificate and the pin of the candidate's own
+  address is no longer consulted. That pin records what was last seen at the
+  address; after the gateway replaced its certificate it was the stale half
+  and failed every direct handshake, so each connect went through the relay
+  until the file was deleted by hand. The pin is now rewritten to the trusted
+  certificate. A candidate that presents any other certificate is refused
+  before anything is pinned for it.
+
+Not covered: `--persistent-ep` (off by default) still uses the address pin.
+
 ## v0.37.1 — 2026-11-14
 
 Four fixes found in production with v0.37.0 (client, listener, NS and relay

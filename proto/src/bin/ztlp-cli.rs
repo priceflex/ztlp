@@ -2940,6 +2940,59 @@ fn relay_pin_scope(
     format!("{}@{}", service.trim().to_ascii_lowercase(), peer)
 }
 
+/// The NS server a connect resolves through: `--ns-server`, else the
+/// configured one, else the local default. Same order as `resolve_target`.
+fn effective_ns_server(ns_server_opt: &Option<String>) -> String {
+    match ns_server_opt {
+        Some(s) => s.clone(),
+        None => load_config()
+            .ns_server
+            .unwrap_or_else(|| "127.0.0.1:23096".to_string()),
+    }
+}
+
+/// The name `ztlp connect` must resolve through the VERIFYING resolver
+/// (v0.37.2), or `None` when local pins apply.
+///
+/// `Some(name)` when the target is a name (not a raw `ip:port`) and this
+/// device trusts a name-server key for the name's zone (`ns_trust.toml`,
+/// written at enrollment). Such a device accepts no unverified answer for
+/// that zone, exactly like the agent.
+fn connect_trust_name(
+    target: &str,
+    store: &ztlp_proto::agent::ns_trust::NsTrustStore,
+) -> Option<String> {
+    if target.parse::<SocketAddr>().is_ok() {
+        return None;
+    }
+    let (name, _port) = parse_target_name_and_port(target);
+    store.strict_for(name).then(|| name.to_string())
+}
+
+/// Which certificate the direct candidates of a connect must present, and
+/// where that knowledge comes from (for the log line).
+///
+/// The fingerprint in a verified name-server record wins. Without one (no
+/// name-server key for the zone, or a gateway that publishes no fingerprint)
+/// the local pin applies (`connect_candidate_trust`).
+fn connect_trust_plan(
+    ns_expect: &ztlp_proto::quic_transport::CertExpectation,
+    pin_trust: ztlp_proto::multi_candidate_dial::CandidateTrust,
+) -> (
+    ztlp_proto::multi_candidate_dial::CandidateTrust,
+    &'static str,
+) {
+    use ztlp_proto::multi_candidate_dial::CandidateTrust;
+    use ztlp_proto::quic_transport::RecordState;
+    match &ns_expect.record {
+        RecordState::Verified { fp: Some(fp) } => (
+            CandidateTrust::KnownFingerprint(fp.trim().to_ascii_lowercase()),
+            "name-server record",
+        ),
+        _ => (pin_trust, "local pin"),
+    }
+}
+
 /// The certificate `ztlp connect` already trusts for a peer, used to judge
 /// the direct candidates of the handshake race.
 ///
@@ -4054,7 +4107,87 @@ Only enable for legacy NAT-traversal compatibility."
         tokio_endpoint::{QuicClientEndpoint, QuicEndpoint},
         QuicEndpointConfig,
     };
-    let (peer_addr, dial_candidates, peer_node_id) = resolve_target(target, ns_server).await?;
+    // ── NS-anchored gateway trust (v0.37.2) ──────────────────────────
+    //
+    // A device that enrolled with a name-server key (`ns_trust.toml`) for
+    // this name's zone resolves it through the verifying resolver the agent
+    // uses, and takes the addresses, the NodeID and the gateway's
+    // `quic_cert_sha256` from the record the name server signed. The
+    // gateway must then present exactly that certificate, on the direct
+    // path and through the relay, and local pins play no part: a gateway
+    // that replaced its certificate is trusted again as soon as it has
+    // re-registered, with no pin file to clear on any client.
+    //
+    // The unverified lookup (`resolve_target`) is not run at all for such a
+    // name: its answer would not be used, and its failure (name server
+    // down) must not pre-empt the verifying resolver, which can still answer
+    // from its cache of signed records.
+    //
+    // A device without a name-server key for the zone (a raw `ip:port`
+    // target, a zone it never enrolled in) keeps `resolve_target` and the
+    // local pins below.
+    let trust_store = ztlp_proto::agent::ns_trust::load_cached().map_err(|e| {
+        format!("cannot connect to '{target}': {e} (fix or re-enroll; refusing unverified answers)")
+    })?;
+    let (peer_addr, dial_candidates, peer_node_id, ns_expect) =
+        match connect_trust_name(target, &trust_store) {
+            Some(name) => {
+                eprintln!(
+                    "{} {} via ZTLP-NS (signed record)...",
+                    c_dim("Resolving"),
+                    c_bold(&name)
+                );
+                // `--ns-server` may be HOST:PORT; the verifying resolver
+                // takes a numeric address.
+                let ns_addr = resolve_ns_address(&effective_ns_server(ns_server))
+                    .await?
+                    .to_string();
+                eprintln!("  {} {}", c_dim("NS server:"), ns_addr);
+                let resolved = ztlp_proto::agent::proxy::ns_resolve(&name, &ns_addr)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "cannot resolve '{name}' with the name-server key this device \
+                             trusts for its zone: {e}"
+                        )
+                    })?;
+                eprintln!(
+                    "  {} name-server record verified{}",
+                    c_green("✓"),
+                    match &resolved.cert.record {
+                        ztlp_proto::quic_transport::RecordState::Verified { fp: Some(fp) } =>
+                            format!("; gateway certificate {}", &fp[..16.min(fp.len())]),
+                        _ => " (the gateway publishes no certificate fingerprint; \
+                              using its local pin)"
+                            .to_string(),
+                    }
+                );
+                if let Some(id) = &resolved.node_id {
+                    eprintln!("  {} NodeID: {}", c_cyan("ℹ"), id);
+                }
+                eprintln!(
+                    "  {} {}",
+                    c_dim("Resolved:"),
+                    c_green(&resolved.addr.to_string())
+                );
+                eprintln!();
+                (
+                    resolved.addr,
+                    resolved.candidates,
+                    resolved.node_id,
+                    resolved.cert,
+                )
+            }
+            None => {
+                let (addr, candidates, node_id) = resolve_target(target, ns_server).await?;
+                (
+                    addr,
+                    candidates,
+                    node_id,
+                    ztlp_proto::quic_transport::CertExpectation::default(),
+                )
+            }
+        };
 
     let node_id = peer_node_id.unwrap_or(ztlp_proto::identity::NodeId([0; 16]));
     let identity = load_or_generate_identity(key)?;
@@ -4165,32 +4298,33 @@ Only enable for legacy NAT-traversal compatibility."
         // (`relay_pin_scope`). Without a relay or a service there is no such
         // pin, and the pin of the address the name resolved to is used.
         //
-        // The NS's signed `quic_cert_sha256` would be the stronger source, but
-        // `resolve_target` above does not verify the SVC record against an NS
-        // trust anchor yet, and an unverified fingerprint is no trust at all —
-        // so only the local pin is used here (ns_verified = false). Adding NS
-        // verification to the connect path is tracked separately.
-        let trust = connect_candidate_trust(
+        // The name server's signed `quic_cert_sha256` (`ns_expect`, v0.37.2)
+        // is the stronger source and wins when this device verified the
+        // record; the local pin is the fallback for a device with no
+        // name-server key for the zone, and for a gateway that publishes no
+        // fingerprint.
+        let pin_trust = connect_candidate_trust(
             known_relay,
             relay_pin.as_deref(),
             peer_addr,
             &ztlp_proto::quic_transport::default_pin_dir(),
         );
+        let (trust, trust_source) = connect_trust_plan(&ns_expect, pin_trust);
         // Same endpoint config and TLS server name as the dial below, so the
         // handed-over connection is the one that dial would have produced.
+        let dialer = QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+            .with_expectation(ns_expect.clone());
         let dialer = std::sync::Arc::new(match trust {
             CandidateTrust::KnownFingerprint(fp) => {
                 eprintln!(
-                    "{} direct candidates must present the trusted certificate {}",
-                    c_dim("[v0.37.1]"),
-                    &fp[..16.min(fp.len())]
+                    "{} direct candidates must present the trusted certificate {} ({})",
+                    c_dim("[v0.37.2]"),
+                    &fp[..16.min(fp.len())],
+                    trust_source
                 );
-                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
-                    .trusting_fingerprint(&fp)
+                dialer.trusting_fingerprint(&fp)
             }
-            CandidateTrust::TofuPerAddress => {
-                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
-            }
+            CandidateTrust::TofuPerAddress => dialer,
         });
         let race_started = Instant::now();
         match connect_direct_first(candidates, relay_fallback, dialer, direct_dial_policy()).await {
@@ -4419,7 +4553,10 @@ Only enable for legacy NAT-traversal compatibility."
             "localhost",
             std_socket,
             relayed_scope,
-            ztlp_proto::quic_transport::CertExpectation::default(),
+            // v0.37.2: with a verified name-server record the gateway must
+            // present the certificate that record names; the pin scope above
+            // then only matters for a gateway that publishes no fingerprint.
+            ns_expect.clone(),
         )
         .await?
     };
@@ -5781,7 +5918,16 @@ async fn cmd_listen(
         let identity_arc = std::sync::Arc::new(identity.clone());
 
         // Initial synchronous publish — fail fast on misconfiguration.
-        ns_publish_self(
+        //
+        // v0.37.2: a `rate-limited` answer is NOT a misconfiguration. The
+        // name server allows one registration per minute per name, and a
+        // listener that is restarted (service restart, upgrade, crash
+        // recovery) registered less than a minute ago by definition. The
+        // name is still registered from the previous start, so the listener
+        // serves and the heartbeat refreshes the record after the limit
+        // clears. Exiting here made every restart a crash loop: each retry
+        // by the service manager was itself rate-limited, for minutes.
+        let initial_result = ns_publish_self(
             &name,
             &zone_s,
             &identity_arc,
@@ -5790,7 +5936,8 @@ async fn cmd_listen(
             advertise_addresses.as_deref(),
         )
         .await
-        .map_err(|e| {
+        .map_err(|e| e.to_string());
+        let initial_publish = initial_publish_outcome(&initial_result).map_err(|e| {
             format!(
                 "initial NS publish failed: {} — refusing to start listener with a \
                  broken NS heartbeat config. Check --ns-register-name '{}' lives \
@@ -5799,16 +5946,25 @@ async fn cmd_listen(
             )
         })?;
 
-        eprintln!(
-            "{} NS heartbeat enrolled: {}{} -> {}",
-            c_green("✓"),
-            name,
-            advertise_addr
-                .as_deref()
-                .map(|a| format!(" @ {}", a))
-                .unwrap_or_default(),
-            ns_s
-        );
+        match initial_publish {
+            HeartbeatPublish::RateLimited => eprintln!(
+                "{} NS heartbeat: {} was registered less than a minute ago (name server \
+                 rate limit) — keeping the existing registration, refreshing it shortly -> {}",
+                c_yellow("⚠"),
+                name,
+                ns_s
+            ),
+            _ => eprintln!(
+                "{} NS heartbeat enrolled: {}{} -> {}",
+                c_green("✓"),
+                name,
+                advertise_addr
+                    .as_deref()
+                    .map(|a| format!(" @ {}", a))
+                    .unwrap_or_default(),
+                ns_s
+            ),
+        }
         if let Some(list) = advertise_addresses.as_deref() {
             eprintln!(
                 "{} advertising {} SVC candidates: {}",
@@ -5830,6 +5986,7 @@ async fn cmd_listen(
             advertise_addresses,
             Duration::from_secs(8 * 3600), // 8h nominal
             Duration::from_secs(10 * 60),  // ±10min jitter
+            initial_publish,
         ));
     }
 
@@ -7585,6 +7742,20 @@ fn classify_heartbeat_publish(result: &Result<(), String>) -> HeartbeatPublish {
     }
 }
 
+/// Outcome of the listener's initial, synchronous publish.
+///
+/// `Ok` means the listener starts: the record was published, or the name
+/// server rate-limited the registration, which only happens to a name that
+/// was registered less than a minute ago and therefore still resolves. Every
+/// other failure (name outside the zone, key not allowed, NS unreachable) is
+/// a configuration problem and is returned as the error text.
+fn initial_publish_outcome(result: &Result<(), String>) -> Result<HeartbeatPublish, String> {
+    match classify_heartbeat_publish(result) {
+        HeartbeatPublish::Failed => Err(result.clone().err().unwrap_or_default()),
+        outcome => Ok(outcome),
+    }
+}
+
 /// How long the heartbeat sleeps after a publish attempt (pure, tested).
 ///
 /// - `Published` / `Failed`: one nominal `interval` plus `interval_jitter`,
@@ -7637,8 +7808,10 @@ fn heartbeat_jitter(max: Duration) -> Duration {
 /// from a large fleet (10min in production).
 ///
 /// The caller has ALREADY published once (the synchronous, fail-fast publish
-/// in `cmd_listen`), so the first heartbeat publish happens one interval
-/// after the task starts, not immediately. Publishing again right away is
+/// in `cmd_listen`, outcome in `initial`), so the first heartbeat publish
+/// happens one interval after the task starts, not immediately. When that
+/// initial publish was rate-limited (a restarted listener), the first
+/// heartbeat publish comes [`NS_RATE_LIMIT_RETRY`] later instead. Publishing again right away is
 /// what the name server's 60 s per-name rate limit rejects: every listener
 /// start used to log a `rate-limited` failure and then wait a full interval.
 ///
@@ -7657,8 +7830,11 @@ async fn ns_heartbeat_task(
     addresses: Option<String>,
     interval: Duration,
     jitter_max: Duration,
+    // Outcome of the caller's initial publish: `RateLimited` schedules the
+    // first heartbeat after the rate limit clears instead of a full interval.
+    initial: HeartbeatPublish,
 ) {
-    ns_heartbeat_loop(&name, &ns_server, interval, jitter_max, || async {
+    ns_heartbeat_loop(&name, &ns_server, interval, jitter_max, initial, || async {
         ns_publish_self(
             &name,
             &zone,
@@ -7684,17 +7860,19 @@ async fn ns_heartbeat_loop<F, Fut>(
     ns_server: &str,
     interval: Duration,
     jitter_max: Duration,
+    initial: HeartbeatPublish,
     mut publish: F,
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
-    // First tick: one interval after the caller's initial publish.
+    // First tick: one interval after the caller's initial publish, or once
+    // the rate limit has cleared when that publish was rate-limited.
     let mut delay = ns_heartbeat_delay(
-        HeartbeatPublish::Published,
+        initial,
         interval,
         heartbeat_jitter(jitter_max),
-        Duration::ZERO,
+        heartbeat_jitter(NS_RATE_LIMIT_RETRY_JITTER),
     );
     loop {
         tokio::time::sleep(delay).await;
@@ -17291,6 +17469,7 @@ mod tests {
             None,
             std::time::Duration::from_millis(150),
             std::time::Duration::from_millis(0), // no jitter for determinism
+            HeartbeatPublish::Published,
         ));
 
         // Wait long enough for at least 2 heartbeats. Each cycle is the
@@ -17328,6 +17507,7 @@ mod tests {
             None,
             std::time::Duration::from_millis(800),
             std::time::Duration::from_millis(0),
+            HeartbeatPublish::Published,
         ));
 
         // Well inside the first interval: nothing may have been sent.
@@ -17455,6 +17635,70 @@ mod tests {
         );
     }
 
+    /// A restarted listener is rate-limited on its initial publish (it
+    /// registered less than a minute ago). That must start the listener, not
+    /// exit: exiting made the service manager restart it straight into the
+    /// same rate limit, for minutes. Anything else stays fatal.
+    #[test]
+    fn initial_publish_rate_limit_is_not_fatal() {
+        assert_eq!(
+            initial_publish_outcome(&Ok(())),
+            Ok(HeartbeatPublish::Published)
+        );
+        assert_eq!(
+            initial_publish_outcome(&Err(format!(
+                "KEY registration failed: {NS_REJECT_RATE_LIMITED}"
+            ))),
+            Ok(HeartbeatPublish::RateLimited)
+        );
+        for fatal in [
+            "KEY registration failed: rejected: unauthorized (your key is not allowed to \
+             register this name in this zone)",
+            "timeout waiting for NS server response at 127.0.0.1:1",
+            "name 'a.other.ztlp' is not inside zone 'example.ztlp'",
+        ] {
+            assert_eq!(
+                initial_publish_outcome(&Err(fatal.to_string())),
+                Err(fatal.to_string())
+            );
+        }
+    }
+
+    /// After a rate-limited initial publish the heartbeat refreshes the
+    /// record once the limit has cleared (90 s plus jitter), not a whole
+    /// interval (8 h in production) later.
+    #[tokio::test(start_paused = true)]
+    async fn ns_heartbeat_loop_first_publish_after_rate_limited_start() {
+        let started = tokio::time::Instant::now();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Duration>::new()));
+        let recorded = calls.clone();
+        let heartbeat = tokio::spawn(async move {
+            ns_heartbeat_loop(
+                "node.example.ztlp",
+                "127.0.0.1:1",
+                HB_INTERVAL,
+                Duration::ZERO,
+                HeartbeatPublish::RateLimited,
+                move || {
+                    recorded.lock().unwrap().push(started.elapsed());
+                    async move { Ok(()) }
+                },
+            )
+            .await
+        });
+        tokio::time::sleep(HB_INTERVAL + Duration::from_secs(600)).await;
+        heartbeat.abort();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "publish times: {calls:?}");
+        assert!(
+            calls[0] >= NS_RATE_LIMIT_RETRY
+                && calls[0] < NS_RATE_LIMIT_RETRY + NS_RATE_LIMIT_RETRY_JITTER,
+            "first publish after {:?}",
+            calls[0]
+        );
+        assert_eq!(calls[1] - calls[0], HB_INTERVAL);
+    }
+
     #[test]
     fn heartbeat_jitter_stays_below_its_bound() {
         assert_eq!(heartbeat_jitter(Duration::ZERO), Duration::ZERO);
@@ -17486,6 +17730,7 @@ mod tests {
                 "127.0.0.1:1",
                 HB_INTERVAL,
                 Duration::ZERO, // no interval jitter: exact times below
+                HeartbeatPublish::Published,
                 move || {
                     recorded.lock().unwrap().push(started.elapsed());
                     let result = script.next().unwrap_or(Ok(()));
@@ -17617,6 +17862,78 @@ mod tests {
             })
             .collect();
         std::fs::write(dir.join(format!("{safe}.pin")), fp).unwrap();
+    }
+
+    /// v0.37.2: which connects resolve through the verifying resolver.
+    #[test]
+    fn connect_trust_name_follows_the_enrolled_zones() {
+        use ztlp_proto::agent::ns_trust::NsTrustStore;
+        let enrolled = NsTrustStore::from_toml(&format!(
+            "[[server]]\naddr = \"198.51.100.7:23096\"\nkey = \"{}\"\nzones = [\"trs.ztlp\"]\nhome = true\n",
+            "11".repeat(32)
+        ))
+        .unwrap();
+        let never_enrolled = NsTrustStore::default();
+
+        // A name in an enrolled zone, with or without a service-port hint.
+        assert_eq!(
+            connect_trust_name("ssh.host.tech-rockstars.trs.ztlp", &enrolled).as_deref(),
+            Some("ssh.host.tech-rockstars.trs.ztlp")
+        );
+        assert_eq!(
+            connect_trust_name("ssh.host.tech-rockstars.trs.ztlp:22", &enrolled).as_deref(),
+            Some("ssh.host.tech-rockstars.trs.ztlp")
+        );
+        // Local pins: a raw address, a zone this device holds no key for, and
+        // a device that never enrolled with a name-server key.
+        assert_eq!(connect_trust_name("10.20.30.40:23095", &enrolled), None);
+        assert_eq!(connect_trust_name("[fd00::1]:23095", &enrolled), None);
+        assert_eq!(connect_trust_name("ssh.host.other.ztlp", &enrolled), None);
+        assert_eq!(
+            connect_trust_name("ssh.host.tech-rockstars.trs.ztlp", &never_enrolled),
+            None
+        );
+    }
+
+    /// v0.37.2: the verified name-server fingerprint outranks any local pin;
+    /// without one the local pin (or first use) applies.
+    #[test]
+    fn connect_trust_plan_prefers_the_name_server_record() {
+        use ztlp_proto::multi_candidate_dial::CandidateTrust;
+        use ztlp_proto::quic_transport::{CertExpectation, RecordState};
+        let ns_fp = "AB".repeat(32);
+        let pin = CandidateTrust::KnownFingerprint("cd".repeat(32));
+        let verified = CertExpectation {
+            record: RecordState::Verified {
+                fp: Some(ns_fp.clone()),
+            },
+            strict: true,
+        };
+        assert_eq!(
+            connect_trust_plan(&verified, pin.clone()),
+            (
+                CandidateTrust::KnownFingerprint(ns_fp.to_ascii_lowercase()),
+                "name-server record"
+            )
+        );
+        assert_eq!(
+            connect_trust_plan(&verified, CandidateTrust::TofuPerAddress).1,
+            "name-server record"
+        );
+        // A verified record of a gateway that publishes no fingerprint, and
+        // a device with no name-server key: the local pin decides.
+        let no_fp = CertExpectation {
+            record: RecordState::Verified { fp: None },
+            strict: true,
+        };
+        assert_eq!(
+            connect_trust_plan(&no_fp, pin.clone()),
+            (pin.clone(), "local pin")
+        );
+        assert_eq!(
+            connect_trust_plan(&CertExpectation::default(), CandidateTrust::TofuPerAddress),
+            (CandidateTrust::TofuPerAddress, "local pin")
+        );
     }
 
     #[test]

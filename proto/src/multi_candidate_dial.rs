@@ -328,7 +328,7 @@ pub use quic_direct::{
 mod quic_direct {
     use super::*;
     use crate::quic_transport::tokio_endpoint::{pinned_cert_sha256, QuicConnection, QuicEndpoint};
-    use crate::quic_transport::{CertExpectation, QuicEndpointConfig};
+    use crate::quic_transport::{CertExpectation, QuicEndpointConfig, RecordState};
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
@@ -372,6 +372,7 @@ mod quic_direct {
         lan_timeout: Duration,
         public_timeout: Duration,
         trust: CandidateTrust,
+        expect: CertExpectation,
         established: Mutex<HashMap<SocketAddr, (QuicConnection, Option<String>)>>,
     }
 
@@ -387,8 +388,24 @@ mod quic_direct {
                 lan_timeout: LAN_CANDIDATE_TIMEOUT,
                 public_timeout: PUBLIC_CANDIDATE_TIMEOUT,
                 trust: CandidateTrust::TofuPerAddress,
+                expect: CertExpectation::default(),
                 established: Mutex::new(HashMap::new()),
             }
+        }
+
+        /// Judge every candidate against the peer's name-server record
+        /// (v0.37.2), exactly as the relayed dial and the agent do
+        /// ([`crate::quic_transport::decide_cert`]). With a verified record
+        /// that carries `quic_cert_sha256`, a candidate is accepted only if
+        /// it presents that certificate and local pins are neither read nor
+        /// written, so a pin left over from the gateway's previous
+        /// certificate cannot block the direct path.
+        pub fn with_expectation(mut self, expect: CertExpectation) -> Self {
+            if let RecordState::Verified { fp: Some(fp) } = &expect.record {
+                self.trust = CandidateTrust::KnownFingerprint(fp.trim().to_ascii_lowercase());
+            }
+            self.expect = expect;
+            self
         }
 
         /// Only select a candidate that presents `fingerprint` (lowercase hex
@@ -505,17 +522,63 @@ mod quic_direct {
                 .map_err(|e| DialError::Other(format!("bind {bind_addr}: {e}")))?;
 
             // Bounded by the orchestrator through `timeout_for`.
-            let conn = QuicEndpoint::connect_with_socket_in_pin_dir(
-                self.cfg.clone(),
-                addr,
-                &self.server_name,
-                socket,
-                None,
-                CertExpectation::default(),
-                self.pin_dir.clone(),
-            )
-            .await
-            .map_err(|e| DialError::Other(e.to_string()))?;
+            //
+            // Which check the candidate's certificate has to pass (v0.37.2):
+            // - a verified name-server fingerprint: exactly that certificate,
+            //   local pins play no part;
+            // - else a certificate this device already trusts for the peer
+            //   (`CandidateTrust::KnownFingerprint`, from its pin store):
+            //   exactly that certificate, whatever the pin of the candidate's
+            //   own address says. That pin records what was last seen at the
+            //   address; after the gateway replaced its certificate it is the
+            //   stale half, and it is brought up to date by this dial;
+            // - else the candidate's own address-scoped pin (first use pins).
+            let ns_fingerprint =
+                matches!(self.expect.record, RecordState::Verified { fp: Some(_) });
+            // A strict device (it holds a name-server key for this name's
+            // zone) with no verified record refuses the certificate whatever
+            // is pinned: that refusal lives in `decide_cert`, so such a dial
+            // must go through the expectation-checked arm.
+            let strict_unverified = self.expect.strict
+                && matches!(
+                    self.expect.record,
+                    RecordState::Unverified | RecordState::None
+                );
+            let conn = match &self.trust {
+                CandidateTrust::KnownFingerprint(trusted)
+                    if !ns_fingerprint && !strict_unverified =>
+                {
+                    QuicEndpoint::connect_with_socket_trusting(
+                        self.cfg.clone(),
+                        addr,
+                        &self.server_name,
+                        socket,
+                        trusted,
+                        self.pin_dir.clone(),
+                    )
+                    .await
+                }
+                _ => {
+                    QuicEndpoint::connect_with_socket_in_pin_dir(
+                        self.cfg.clone(),
+                        addr,
+                        &self.server_name,
+                        socket,
+                        None,
+                        self.expect.clone(),
+                        self.pin_dir.clone(),
+                    )
+                    .await
+                }
+            }
+            .map_err(|e| {
+                let text = e.to_string();
+                if text.contains(crate::quic_transport::TRUSTED_MISMATCH_MARKER) {
+                    DialError::Other(format!("{addr} is not the peer being dialed: {text}"))
+                } else {
+                    DialError::Other(text)
+                }
+            })?;
 
             // Gateway-scoped trust (v0.37.1): when the device already knows
             // which certificate this peer presents — its pin for the address
@@ -1665,6 +1728,183 @@ mod tests {
                 matches!(&route, DialRoute::Direct(d) if d.addr == peer),
                 "the trusted gateway must still win, got {route:?}"
             );
+        }
+
+        /// v0.37.2: a gateway replaced its certificate. The device knows the
+        /// new one (name-server record, or its per-peer pin), but still holds
+        /// the address pin of the old one. That stale pin must not cost the
+        /// direct path: a certificate the device trusts from its own pin
+        /// store brings the stale pin up to date, a name-server fingerprint
+        /// retires it.
+        #[tokio::test]
+        async fn a_stale_address_pin_does_not_block_the_trusted_certificate() {
+            use crate::quic_transport::{CertExpectation, RecordState};
+            let pins = tempfile::tempdir().unwrap();
+            let (peer, _pc) = spawn_quic_listener().await;
+            let relay = sa("203.0.113.9:23095");
+
+            // First dial pins the peer's certificate under its address.
+            let first =
+                connect_direct_first(ranked(&[peer]), None, dialer(&pins), direct_dial_policy())
+                    .await;
+            let peer_fp = match &first {
+                DialRoute::Direct(d) => d.conn.peer_cert_sha256().map(str::to_string),
+                other => panic!("expected a direct win, got {other:?}"),
+            }
+            .expect("the handshake must expose the peer certificate");
+
+            // The address pin goes stale (as after a certificate change).
+            let stale = "00".repeat(32);
+            let pin_files: Vec<_> = std::fs::read_dir(pins.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            assert_eq!(pin_files.len(), 1);
+            std::fs::write(&pin_files[0], &stale).unwrap();
+
+            // Known from the device's own pin store (no name-server key).
+            let by_pin = Arc::new(
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .with_pin_dir(pins.path().to_path_buf())
+                    .trusting_fingerprint(&peer_fp),
+            );
+            let route =
+                connect_direct_first(ranked(&[peer]), Some(relay), by_pin, direct_dial_policy())
+                    .await;
+            assert!(
+                matches!(&route, DialRoute::Direct(d) if d.addr == peer),
+                "the trusted certificate must win despite the stale pin, got {route:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&pin_files[0]).unwrap(),
+                peer_fp,
+                "the stale address pin is brought up to date"
+            );
+            // Stale again for the name-server case below.
+            std::fs::write(&pin_files[0], &stale).unwrap();
+
+            // Known from a verified name-server record.
+            let by_ns = Arc::new(
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .with_pin_dir(pins.path().to_path_buf())
+                    .with_expectation(CertExpectation {
+                        record: RecordState::Verified {
+                            fp: Some(peer_fp.to_ascii_uppercase()),
+                        },
+                        strict: true,
+                    }),
+            );
+            assert_eq!(
+                by_ns.trust(),
+                &CandidateTrust::KnownFingerprint(peer_fp.clone())
+            );
+            let route =
+                connect_direct_first(ranked(&[peer]), Some(relay), by_ns, direct_dial_policy())
+                    .await;
+            assert!(
+                matches!(&route, DialRoute::Direct(d) if d.addr == peer),
+                "the name-server certificate must win despite the stale pin, got {route:?}"
+            );
+
+            // The name server vouches for the certificate now: the pin is
+            // retired, not rewritten.
+            assert_eq!(std::fs::read_dir(pins.path()).unwrap().count(), 0);
+
+            // Control, last because the test listener stops accepting after a
+            // refused handshake: without knowing the certificate, a stale pin
+            // does fail the candidate.
+            std::fs::write(&pin_files[0], &stale).unwrap();
+            let blind = connect_direct_first(
+                ranked(&[peer]),
+                Some(relay),
+                dialer(&pins),
+                direct_dial_policy(),
+            )
+            .await;
+            assert!(matches!(blind, DialRoute::Relay { .. }), "got {blind:?}");
+        }
+
+        /// v0.37.2: with a verified name-server fingerprint, a candidate that
+        /// presents any other certificate is refused even on first contact
+        /// (no pin exists that could object), and nothing is pinned.
+        #[tokio::test]
+        async fn a_name_server_fingerprint_refuses_another_certificate_on_first_contact() {
+            use crate::quic_transport::{CertExpectation, RecordState};
+            let pins = tempfile::tempdir().unwrap();
+            let (impostor, _ic) = spawn_quic_listener().await;
+            let relay = sa("203.0.113.9:23095");
+            let by_ns = Arc::new(
+                QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                    .with_pin_dir(pins.path().to_path_buf())
+                    .with_expectation(CertExpectation {
+                        record: RecordState::Verified {
+                            fp: Some("ab".repeat(32)),
+                        },
+                        strict: true,
+                    }),
+            );
+            let route = connect_direct_first(
+                ranked(&[impostor]),
+                Some(relay),
+                by_ns,
+                direct_dial_policy(),
+            )
+            .await;
+            assert!(
+                matches!(&route, DialRoute::Relay { addr, .. } if *addr == relay),
+                "got {route:?}"
+            );
+            assert_eq!(
+                std::fs::read_dir(pins.path()).unwrap().count(),
+                0,
+                "a refused certificate must not be pinned"
+            );
+        }
+
+        /// v0.37.2: a strict device without a verified record refuses the
+        /// gateway even when the caller also names a trusted fingerprint and
+        /// the candidate presents exactly that certificate.
+        #[tokio::test]
+        async fn a_strict_device_without_a_verified_record_refuses_a_pinned_certificate() {
+            use crate::quic_transport::{CertExpectation, RecordState};
+            for record in [RecordState::Unverified, RecordState::None] {
+                let pins = tempfile::tempdir().unwrap();
+                let (peer, _pc) = spawn_quic_listener().await;
+                let first = connect_direct_first(
+                    ranked(&[peer]),
+                    None,
+                    dialer(&pins),
+                    direct_dial_policy(),
+                )
+                .await;
+                let peer_fp = match &first {
+                    DialRoute::Direct(d) => d.conn.peer_cert_sha256().map(str::to_string),
+                    other => panic!("expected a direct win, got {other:?}"),
+                }
+                .expect("the handshake must expose the peer certificate");
+
+                let relay = sa("203.0.113.9:23095");
+                let strict = Arc::new(
+                    QuicHandshakeDialer::new(QuicEndpointConfig::default(), "localhost")
+                        .with_pin_dir(pins.path().to_path_buf())
+                        .with_expectation(CertExpectation {
+                            record: record.clone(),
+                            strict: true,
+                        })
+                        .trusting_fingerprint(&peer_fp),
+                );
+                let route = connect_direct_first(
+                    ranked(&[peer]),
+                    Some(relay),
+                    strict,
+                    direct_dial_policy(),
+                )
+                .await;
+                assert!(
+                    matches!(&route, DialRoute::Relay { addr, .. } if *addr == relay),
+                    "{record:?}: a strict device must refuse, got {route:?}"
+                );
+            }
         }
 
         /// `resolve_candidate_trust` prefers a verified NS fingerprint, then the

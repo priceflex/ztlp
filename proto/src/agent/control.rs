@@ -1417,6 +1417,110 @@ fn tasklist_output_contains_pid(output: &str, pid: u32) -> bool {
     })
 }
 
+/// Extract the Image Name field (field 0) from a `tasklist /FO CSV` line.
+///
+/// `tasklist /NH /FO CSV` emits `"ztlp-desktop.exe","6404","Console","1","18,432 K"`.
+/// Field 0 is the image name, always quoted. Returns `None` for a blank line
+/// or one with no second comma (a header-less `/NH` table that somehow came
+/// back non-CSV, or an empty result). Pure — unit-testable without a
+/// Windows process.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn tasklist_row_image_name(line: &str) -> Option<&str> {
+    let field = line.split(',').next()?;
+    // The image name is field 0. A CSV line always has the field followed by
+    // a comma (there is at least a PID column after it).
+    if !line.contains(',') {
+        return None;
+    }
+    let trimmed = field.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// Is this Windows image name one of our own ZTLP agent binaries?
+///
+/// On Windows the agent ships as `ztlp.exe` (installed service/agent) or
+/// `ztlp-desktop.exe` (the desktop app's per-user agent, started by the UI).
+/// Any other image name means the PID in `agent.pid` was recycled by the OS
+/// to an unrelated process (the live bug observed on RommelPCAsusTUF, where
+/// the stale PID had been taken by `MsMpEng.exe`). Pure decision core.
+pub(crate) fn image_name_is_ztlp(image_name: &str) -> bool {
+    // Case-insensitive on Windows; trim a trailing ".exe" if present so both
+    // `ztlp` and `ztlp.exe` (and the desktop variant) are recognised.
+    let base = image_name.to_ascii_lowercase();
+    let base = base.trim_end_matches(".exe");
+    base == "ztlp" || base == "ztlp-desktop"
+}
+
+/// Look up the image name of a live PID on Windows via `tasklist`.
+///
+/// Returns `Some(image_name)` when the PID is present in `tasklist` output,
+/// `None` when the PID is not listed (process exited) or we are not on
+/// Windows (callers fall back to plain liveness). Uses the same
+/// `tasklist /FI "PID eq N"` invocation as [`is_process_running`].
+#[cfg(windows)]
+pub(crate) fn tasklist_image_name_for_pid(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| tasklist_row_image_name(line).map(|s| s.to_string()))
+}
+
+/// `None` on non-Windows so the pure core stays usable in unit tests, and
+/// the Windows binary-name check simply is not applied there.
+#[cfg(not(windows))]
+pub(crate) fn tasklist_image_name_for_pid(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Get the PID of the running agent, if any — with recycled-PID self-heal.
+///
+/// Reads the PID file and confirms the PID is alive (see
+/// [`is_process_running`]). On Windows it additionally verifies that the
+/// live process is actually a ZTLP binary (`ztlp` / `ztlp-desktop`): if the
+/// OS recycled the recorded PID to an unrelated program, the PID file is
+/// stale and is removed so the next start proceeds instead of permanently
+/// bailing out with "Agent already running (PID …)". This is the fix for the
+/// live wedge observed on RommelPCAsusTUF, where a stale `agent.pid` held a
+/// PID that had been reassigned to `MsMpEng.exe` (Windows Defender).
+///
+/// Non-Windows platforms have no `tasklist` identity check, so behaviour is
+/// identical to a plain liveness read (a recycled PID on Unix would be caught
+/// by the signal-0 probe only if the slot is genuinely free; the file is
+/// cleared in that case too, for consistency).
+pub fn get_agent_pid() -> Option<u32> {
+    let pid_path = default_pid_path();
+    let pid = read_pid_file(&pid_path)?;
+    if !is_process_running(pid) {
+        // Slot is free: clear the stale file and report no agent.
+        remove_pid_file(&pid_path);
+        return None;
+    }
+    // The PID is alive. On Windows, prove it is one of ours before trusting it.
+    if let Some(image) = tasklist_image_name_for_pid(pid) {
+        if image_name_is_ztlp(&image) {
+            return Some(pid);
+        }
+        // Alive but NOT a ZTLP binary → the PID was recycled. Clear the
+        // stale file so a fresh agent can start, and report no agent.
+        remove_pid_file(&pid_path);
+        return None;
+    }
+    // No identity signal (non-Windows, or `tasklist` unavailable): trust the
+    // liveness probe — the historical behaviour.
+    Some(pid)
+}
+
 /// Test-only helpers exposed for integration tests in `tests/`.
 ///
 /// These aren't gated on `#[cfg(test)]` because `cfg(test)` only fires
@@ -1695,6 +1799,52 @@ mod tests {
     #[test]
     fn test_tasklist_output_contains_pid_empty_output() {
         assert!(!tasklist_output_contains_pid("", 12345));
+    }
+
+    // ── Recycled-PID self-heal: pure cores ──────────────────────────────
+    //
+    // `tasklist_row_image_name` + `image_name_is_ztlp` are the OS-call-free
+    // decision cores of `get_agent_pid`'s identity check. They let the unit
+    // tests prove the self-heal decision without a live Windows process.
+
+    #[test]
+    fn tasklist_row_image_name_extracts_first_field() {
+        // Real `tasklist /NH /FO CSV` row shape.
+        assert_eq!(
+            tasklist_row_image_name("\"ztlp-desktop.exe\",\"6404\",\"Console\",\"1\",\"18,432 K\""),
+            Some("ztlp-desktop.exe")
+        );
+        assert_eq!(
+            tasklist_row_image_name("\"MsMpEng.exe\",\"6404\",\"Console\",\"1\",\"12,000 K\""),
+            Some("MsMpEng.exe")
+        );
+    }
+
+    #[test]
+    fn tasklist_row_image_name_rejects_non_csv_and_blank() {
+        // A bare word with no comma is not a usable CSV row.
+        assert_eq!(tasklist_row_image_name("INFO: No tasks are running"), None);
+        // Empty image-name field (no content before the comma) is unusable.
+        assert_eq!(tasklist_row_image_name(",6404,Console",), None);
+        assert_eq!(tasklist_row_image_name(""), None);
+    }
+
+    #[test]
+    fn image_name_is_ztlp_true_for_agent_binaries() {
+        assert!(image_name_is_ztlp("ztlp.exe"));
+        assert!(image_name_is_ztlp("ztlp-desktop.exe"));
+        assert!(image_name_is_ztlp("ztlp"));
+        assert!(image_name_is_ztlp("ZTLP-Desktop.EXE"), "case-insensitive");
+    }
+
+    #[test]
+    fn image_name_is_ztlp_false_for_unrelated_processes() {
+        // The exact binary that stole the recycled PID on RommelPCAsusTUF.
+        assert!(!image_name_is_ztlp("MsMpEng.exe"));
+        assert!(!image_name_is_ztlp("explorer.exe"));
+        assert!(!image_name_is_ztlp("svchost.exe"));
+        // Substring must not count: "ztlp-notours" is not "ztlp".
+        assert!(!image_name_is_ztlp("ztlp-notours.exe"));
     }
 
     // ── Task 6a: daemon-owned enroll (build_enroll_exec_plan) ────────────

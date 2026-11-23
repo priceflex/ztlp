@@ -130,11 +130,13 @@ pub async fn run_agent_lifecycle(
 
     // Another user's agent already owns the control socket (fast user
     // switching): say so plainly instead of half-starting. The desktop app
-    // shows "in use by another user" and retries.
+    // shows "in use by another user" and retries. A malformed `agent.toml`
+    // must stop startup loudly here (PR #138 review) — the load errors are
+    // descriptive (file + parse failure), so propagate them as-is.
     {
         let listen = match config_path {
-            Some(p) => AgentConfig::load_from_path(p).ipc.listen,
-            None => AgentConfig::load().ipc.listen,
+            Some(p) => AgentConfig::load_from_path(p)?.ipc.listen,
+            None => AgentConfig::load()?.ipc.listen,
         };
         if peruser::control_addr_owned_by_other(&listen) {
             return Err(format!(
@@ -154,7 +156,7 @@ pub async fn run_agent_lifecycle(
     // NS, relay secret, tls=true) are picked up by the very same process —
     // no restart.
     if config_path.is_none() {
-        let pre = AgentConfig::load();
+        let pre = AgentConfig::load()?;
         let identity_path = pre.identity_path();
         if daemon::should_enter_unenrolled_standby(&identity_path) {
             let proceed = daemon::run_unenrolled_standby(
@@ -173,7 +175,7 @@ pub async fn run_agent_lifecycle(
     }
 
     let config = if let Some(path) = config_path {
-        AgentConfig::load_from_path(path)
+        AgentConfig::load_from_path(path)?
     } else {
         // v0.36 fix: `agent start` used to read only `~/.ztlp/agent.toml`,
         // a file `ztlp setup` never writes. A freshly-enrolled device's
@@ -199,7 +201,7 @@ pub async fn run_agent_lifecycle(
         let state_dir = config::ztlp_state_dir();
         let agent_path = state_dir.join(".ztlp").join("agent.toml");
         let cli_path = state_dir.join(".ztlp").join("config.toml");
-        AgentConfig::load_merged(&agent_path, &cli_path)
+        AgentConfig::load_merged(&agent_path, &cli_path)?
     };
 
     daemon::run_daemon(&config, foreground)

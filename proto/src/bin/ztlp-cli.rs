@@ -10763,9 +10763,9 @@ fn enable_tls_in_agent_config(path: &std::path::Path) -> Result<bool, Box<dyn st
         return Ok(false);
     }
     let out = format!("{head}{new_section}{rest}");
-    // must still parse strictly (load_from_path silently falls back to
-    // defaults on a parse error, which would hide a botched edit) with tls
-    // on, else leave the file alone
+    // must still parse strictly (load_from_path is fail-closed: a
+    // malformed agent.toml is an error, which would hide a botched edit)
+    // with tls on, else leave the file alone
     let parsed: ztlp_proto::agent::config::AgentConfig = toml::from_str(&out)
         .map_err(|e| format!("agent.toml edit would not parse; file left unchanged: {e}"))?;
     if !parsed.tls.enabled {
@@ -13729,7 +13729,11 @@ async fn cmd_agent_stop() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::control;
 
-    let ipc_addr = AgentConfig::load().ipc.listen;
+    // Best-effort: the daemon's control socket address defaults if
+    // `agent.toml` is unparseable — `agent stop` must still reach a
+    // running daemon (which, by definition, started from a parseable
+    // config).
+    let ipc_addr = AgentConfig::load().unwrap_or_default().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "shutdown".to_string(),
         name: None,
@@ -13765,7 +13769,9 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("ZTLP Agent v{}", ZTLP_VERSION);
 
     // Try to query the running daemon first
-    let ipc_addr = AgentConfig::load().ipc.listen;
+    // Best-effort IPC address (see cmd_agent_stop): `agent.toml`
+    // unparseable -> default control socket, not a hard error.
+    let ipc_addr = AgentConfig::load().unwrap_or_default().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "status".to_string(),
         name: None,
@@ -13834,10 +13840,28 @@ async fn cmd_agent_status() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => {}
     }
 
-    // Daemon not running — show config
+    // Daemon not running — show config. Best-effort: an unparseable
+    // `agent.toml` is shown plainly (the daemon would have failed to
+    // start with the same file — that is exactly why no daemon is
+    // running), not a crash.
     eprintln!("  {} not running", c_red("●"));
 
-    let config = AgentConfig::load();
+    let config = match AgentConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "  {} cannot parse {}: {}",
+                c_red("✗"),
+                "~/.ztlp/agent.toml",
+                e
+            );
+            eprintln!(
+                "  {} fix the file, then run `ztlp agent start`.",
+                c_dim("→")
+            );
+            return Ok(());
+        }
+    };
     eprintln!();
     eprintln!("{}", c_dim("Configuration (~/.ztlp/agent.toml):"));
     eprintln!("  {} {}", c_cyan("Identity:"), config.identity.path);
@@ -13874,7 +13898,9 @@ async fn cmd_agent_dns() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::control;
 
-    let ipc_addr = AgentConfig::load().ipc.listen;
+    // Best-effort IPC address (see cmd_agent_stop): `agent.toml`
+    // unparseable -> default control socket, not a hard error.
+    let ipc_addr = AgentConfig::load().unwrap_or_default().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "dns_cache".to_string(),
         name: None,
@@ -13945,7 +13971,9 @@ async fn cmd_agent_flush_dns() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::control;
 
-    let ipc_addr = AgentConfig::load().ipc.listen;
+    // Best-effort IPC address (see cmd_agent_stop): `agent.toml`
+    // unparseable -> default control socket, not a hard error.
+    let ipc_addr = AgentConfig::load().unwrap_or_default().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "flush_dns".to_string(),
         name: None,
@@ -13982,7 +14010,9 @@ async fn cmd_agent_tunnels() -> Result<(), Box<dyn std::error::Error>> {
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::control;
 
-    let ipc_addr = AgentConfig::load().ipc.listen;
+    // Best-effort IPC address (see cmd_agent_stop): `agent.toml`
+    // unparseable -> default control socket, not a hard error.
+    let ipc_addr = AgentConfig::load().unwrap_or_default().ipc.listen;
     let cmd = control::ControlCommand {
         cmd: "tunnels".to_string(),
         name: None,
@@ -14059,7 +14089,10 @@ async fn cmd_agent_dns_setup(zones: &Option<String>) -> Result<(), Box<dyn std::
     use ztlp_proto::agent::config::AgentConfig;
     use ztlp_proto::agent::dns_setup;
 
-    let config = AgentConfig::load();
+    // `dns-setup` mutates system DNS from the config's zone list: with a
+    // malformed `agent.toml` we must not guess — fail loudly instead.
+    let config = AgentConfig::load()
+        .map_err(|e| format!("cannot read agent config (dns-setup needs it): {e}"))?;
 
     let mut zone_list: Vec<String> = config.dns.zones.clone();
     for domain in config.dns.domain_map.keys() {
@@ -14870,10 +14903,14 @@ async fn main() {
             );
 
             // Relay CLIENT_ROUTE signing (prod HMAC relays reject unsigned).
+            // Best-effort agent config: an unparseable `agent.toml` just
+            // means "no agent-config relay secret" here — CLI flags win
+            // anyway, and `ztlp connect` is a one-shot client, not the
+            // daemon startup path (which is fail-closed).
             let relay_route_secret = resolve_relay_secret(
                 relay_secret,
                 relay_secret_file,
-                &ztlp_proto::agent::config::AgentConfig::load(),
+                &ztlp_proto::agent::config::AgentConfig::load().unwrap_or_default(),
             );
             if relay_route_secret.is_none() {
                 eprintln!(
@@ -16223,7 +16260,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let cfg = AgentConfig::load_from_path(&path);
+        let cfg = AgentConfig::load_from_path(&path).unwrap();
         assert!(
             cfg.tls.enabled,
             "CA already initialised in this ~/.ztlp -> tls must be on"
@@ -16245,10 +16282,10 @@ mod tests {
             Some("aa"),
         )
         .unwrap();
-        assert!(!AgentConfig::load_from_path(&path).tls.enabled);
+        assert!(!AgentConfig::load_from_path(&path).unwrap().tls.enabled);
         let changed = enable_tls_in_agent_config(&path).unwrap();
         assert!(changed, "first call must report a change");
-        let cfg = AgentConfig::load_from_path(&path);
+        let cfg = AgentConfig::load_from_path(&path).unwrap();
         assert!(cfg.tls.enabled);
         // rest of the file survives the edit
         assert_eq!(cfg.ns.servers, vec!["1.2.3.4:23096"]);
@@ -16294,11 +16331,19 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(!AgentConfig::load_from_path(&agent_toml).tls.enabled);
+        assert!(
+            !AgentConfig::load_from_path(&agent_toml)
+                .unwrap()
+                .tls
+                .enabled
+        );
         cmd_admin_ca_init("z.ztlp", &Some(tmp.join("ca")), true).unwrap();
         assert!(tmp.join("ca").join("intermediate.pem").exists());
         assert!(
-            AgentConfig::load_from_path(&agent_toml).tls.enabled,
+            AgentConfig::load_from_path(&agent_toml)
+                .unwrap()
+                .tls
+                .enabled,
             "ca-init must enable tls in the agent.toml next to its ca dir"
         );
         let _ = fs::remove_dir_all(&tmp);
@@ -16379,7 +16424,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = AgentConfig::load_from_path(&path);
+        let cfg = AgentConfig::load_from_path(&path).unwrap();
         // the agent resolves it through the same decoder as the relay, so a
         // non-hex secret is used as its raw bytes
         assert_eq!(
@@ -16408,7 +16453,7 @@ mod tests {
         )
         .unwrap();
 
-        let cfg = AgentConfig::load_from_path(&path);
+        let cfg = AgentConfig::load_from_path(&path).unwrap();
         assert_eq!(cfg.ns.servers, vec!["44.240.16.59:23096"]);
         assert_eq!(
             cfg.tunnel.relays.0,
@@ -16439,7 +16484,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let cfg = AgentConfig::load_from_path(&path);
+        let cfg = AgentConfig::load_from_path(&path).unwrap();
         assert!(cfg.tunnel.relay_secret.is_none());
         assert!(cfg.tunnel.relays.0.is_empty());
         let content = fs::read_to_string(&path).unwrap();

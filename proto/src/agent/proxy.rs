@@ -788,7 +788,11 @@ pub async fn run_proxy(
     relay_addr: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Load config + identity ──────────────────────────────────────────
-    let config = AgentConfig::load();
+    // `run_proxy` is a manual/test helper (`ztlp proxy ...`), not the
+    // agent daemon's startup path; a malformed `agent.toml` there is
+    // reported plainly rather than blocking (the daemon path is
+    // fail-closed, see `agent::config::AgentConfig::load_from_path`).
+    let config = AgentConfig::load().unwrap_or_default();
 
     let identity_file = if let Some(p) = identity_path {
         std::path::PathBuf::from(p)

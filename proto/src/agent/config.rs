@@ -436,6 +436,42 @@ impl VipPortPolicy {
             .unwrap_or_else(|| local_tls::tls_mode_for_port(port))
     }
 
+    /// The VIP accept-loop routing decision (PR #138 review): which
+    /// handler a connection on `port` takes when a TLS acceptor is
+    /// present.
+    ///
+    /// `Some(mode)` = route to the TLS-terminating handler
+    /// (`handle_tcp_connection_with_tls`), which performs
+    /// `maybe_wrap_tls` with `mode` — `Always` terminates
+    /// unconditionally, `Detect` peeks the first bytes and terminates
+    /// only when they look like a TLS ClientHello. `None` = the plain
+    /// `proxy_dial_then_bridge` path (passthrough ports must NEVER peek
+    /// or wrap — their bytes go through the tunnel untouched).
+    ///
+    /// A configured `auto` (`Detect`) override must therefore NOT be
+    /// treated as `Never`: before the PR #138 fix, the accept loop's
+    /// `tls_mode == Always` predicate sent every Detect port — including
+    /// explicitly configured `auto` ports — down the plain path with no
+    /// TLS detection at all, defeating the operator's `auto` choice.
+    /// Legacy `Detect` ports the operator never configured (DB/RDP,
+    /// where the built-in table says Detect) are preserved: they stay
+    /// on the plain path with passthrough behavior exactly as before.
+    pub fn tls_routing(&self, port: u16) -> Option<TlsMode> {
+        if self.overrides.contains_key(&port) {
+            match self.tls_mode(port) {
+                TlsMode::Never => None,
+                m => Some(m),
+            }
+        } else {
+            match local_tls::tls_mode_for_port(port) {
+                TlsMode::Always => Some(TlsMode::Always),
+                // Built-in `Never` (SSH/HTTP) and `Detect` (DB/RDP):
+                // the plain path, exactly as before.
+                _ => None,
+            }
+        }
+    }
+
     /// Deadline-expiry strategy for `port` under this policy.
     pub fn stall_close_strategy(&self, port: u16) -> super::daemon::StallCloseStrategy {
         super::daemon::vip_stall_close_strategy(port, &self.overrides)
@@ -713,49 +749,50 @@ impl Default for LogConfig {
 // ── Loading ─────────────────────────────────────────────────────────────────
 
 impl AgentConfig {
-    /// Load agent config from `~/.ztlp/agent.toml`, falling back to defaults.
-    pub fn load() -> Self {
+    /// Load agent config from `~/.ztlp/agent.toml`.
+    ///
+    /// A missing file yields defaults (a fresh box writes no `agent.toml`
+    /// until `ztlp setup`); a file that exists but fails to parse is an
+    /// error (see [`Self::load_from_path`]).
+    pub fn load() -> Result<Self, String> {
         Self::load_from_default_path()
     }
 
     /// Load from the default path `~/.ztlp/agent.toml` (or
     /// `$ZTLP_HOME/.ztlp/agent.toml` when running as the Windows service —
     /// see [`ztlp_state_dir`]).
-    fn load_from_default_path() -> Self {
+    fn load_from_default_path() -> Result<Self, String> {
         let path = ztlp_state_dir().join(".ztlp").join("agent.toml");
         Self::load_from_path(&path)
     }
 
-    /// Load from a specific path, falling back to defaults on any error.
-    pub fn load_from_path(path: &Path) -> Self {
+    /// Load from a specific path.
+    ///
+    /// An ABSENT file is not an error: the agent runs on defaults (a
+    /// freshly-installed box writes no `agent.toml` until `ztlp setup`).
+    /// A file that EXISTS but cannot be read or parsed IS an error —
+    /// silently substituting `Self::default()` would discard the operator's
+    /// whole config (every `[tunnel] vip_ports` entry, the relay list,
+    /// everything else in the file) and start a daemon that does not match
+    /// what the operator wrote. Malformed `vip_ports` in particular must
+    /// stop startup (PR #138 review), not vanish into defaults.
+    pub fn load_from_path(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             tracing::debug!("no agent config at {}, using defaults", path.display());
-            return Self::default();
+            return Ok(Self::default());
         }
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str(&contents) {
-                Ok(cfg) => {
-                    tracing::debug!("loaded agent config from {}", path.display());
-                    cfg
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to parse agent config {}: {}, using defaults",
-                        path.display(),
-                        e
-                    );
-                    Self::default()
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "failed to read agent config {}: {}, using defaults",
-                    path.display(),
-                    e
-                );
-                Self::default()
-            }
-        }
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read agent config {}: {}", path.display(), e))?;
+        let cfg: Self = toml::from_str(&contents).map_err(|e| {
+            format!(
+                "failed to parse agent config {}: {} — fixing the file is required; \
+                 startup will not continue with defaults",
+                path.display(),
+                e
+            )
+        })?;
+        tracing::debug!("loaded agent config from {}", path.display());
+        Ok(cfg)
     }
 
     /// Resolve the identity file path, expanding `~` to home dir.
@@ -789,8 +826,8 @@ impl AgentConfig {
     /// operator to hand-author `agent.toml`: real `agent.toml` values are
     /// never overridden, only fields still at their bare struct default are
     /// backfilled from `config.toml`.
-    pub fn load_merged(agent_config_path: &Path, cli_config_path: &Path) -> Self {
-        let mut cfg = Self::load_from_path(agent_config_path);
+    pub fn load_merged(agent_config_path: &Path, cli_config_path: &Path) -> Result<Self, String> {
+        let mut cfg = Self::load_from_path(agent_config_path)?;
         let cli = CliConfigForMerge::load(cli_config_path);
 
         if cfg.ns.servers == NsConfig::default().servers {
@@ -809,7 +846,7 @@ impl AgentConfig {
             }
         }
 
-        cfg
+        Ok(cfg)
     }
 
     /// Validate `[tunnel] vip_ports`, returning a readable error that
@@ -928,9 +965,11 @@ struct CliConfigForMerge {
 
 impl CliConfigForMerge {
     /// Load from `path`, falling back to all-`None` on any error (missing
-    /// file, malformed TOML) — mirrors [`AgentConfig::load_from_path`]'s
-    /// fail-open behavior so a broken/missing CLI config never blocks the
-    /// agent from starting with defaults.
+    /// file, malformed TOML). This backfill source stays fail-open: the CLI
+    /// config only backfills fields the operator never set in `agent.toml`,
+    /// so a broken/missing `config.toml` must never block startup — the
+    /// operator's own `agent.toml` IS fail-closed (see
+    /// [`AgentConfig::load_from_path`]).
     fn load(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
@@ -1472,9 +1511,64 @@ node_id = "abcd"
 
     #[test]
     fn test_load_nonexistent_file() {
-        let cfg = AgentConfig::load_from_path(Path::new("/nonexistent/agent.toml"));
+        let cfg = AgentConfig::load_from_path(Path::new("/nonexistent/agent.toml")).unwrap();
         // Should return defaults without error
         assert_eq!(cfg.dns.listen, "127.0.0.53:5353");
+    }
+
+    // ── PR #138 review (CodeRabbit): a malformed vip_ports entry (e.g. an
+    // invalid `tls` value) must STOP startup with the parse error named, not
+    // be silently discarded in favor of AgentConfig::default() (which drops
+    // every other setting from agent.toml too). ────────────────────────────
+
+    #[test]
+    fn test_load_from_path_malformed_vip_tls_stops_startup_instead_of_silently_defaulting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.toml");
+        write_file(
+            &path,
+            r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 9000
+tls = "nope"
+"#,
+        );
+
+        // The file EXISTS, so the "absent -> defaults" rule does not apply:
+        // a parse failure must surface as a startup error naming the file and
+        // the offending value — never as a silent Self::default() that drops
+        // the operator's whole config.
+        let err = AgentConfig::load_from_path(&path)
+            .expect_err("malformed agent.toml must fail startup, not load defaults");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nope"),
+            "error must name the offending tls value, got: {msg}"
+        );
+        assert!(
+            msg.contains("agent.toml"),
+            "error must name the config file, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_path_valid_vip_ports_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.toml");
+        write_file(
+            &path,
+            r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 1514
+tls = "passthrough"
+"#,
+        );
+
+        let cfg = AgentConfig::load_from_path(&path).expect("valid vip_ports must load");
+        assert_eq!(cfg.tunnel.vip_ports.len(), 1);
+        assert_eq!(cfg.tunnel.vip_ports[0].port, 1514);
     }
 
     // ── D3.T2: parse_duration_str ───────────────────────────────────────
@@ -1565,7 +1659,7 @@ zone = "demo.spongebob.ztlp"
 "#,
         );
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         assert_eq!(cfg.ns_server(), "34.221.165.244:24096");
         assert_eq!(
@@ -1598,7 +1692,7 @@ relay = "34.221.165.244:24095"
 "#,
         );
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         // Explicit agent.toml value wins — never silently overridden.
         assert_eq!(cfg.ns_server(), "10.0.0.1:23096");
@@ -1615,7 +1709,7 @@ relay = "34.221.165.244:24095"
         let agent_path = dir.path().join("agent.toml");
         let cli_path = dir.path().join("config.toml");
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         assert_eq!(cfg.ns_server(), "127.0.0.1:23096");
         assert!(cfg.tunnel.relays.0.is_empty());
@@ -1628,7 +1722,7 @@ relay = "34.221.165.244:24095"
         let cli_path = dir.path().join("config.toml");
         write_file(&cli_path, "not valid toml {{{");
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         // Malformed CLI config must not panic and must not poison agent
         // defaults — falls back exactly as if the file were absent.
@@ -1661,6 +1755,62 @@ relay = "34.221.165.244:24095"
     // ── VipTlsMode ─────────────────────────────────────────────────────
 
     #[test]
+    // tls_routing: the VIP accept-loop handler choice (PR #138
+    // review, daemon.rs:1684)
+    #[test]
+    fn tls_routing_configured_auto_port_reaches_the_detecting_path() {
+        // The exact PR #138 bug: a configured `auto` override must route
+        // to the TLS-detecting handler (Some(Detect)), not the plain
+        // passthrough path (None) with no TLS detection at all.
+        let policy = cfg_with_ports(vec![vpc(9443, VipTlsMode::Auto)])
+            .tunnel
+            .vip_ports_policy();
+        assert_eq!(policy.tls_routing(9443), Some(TlsMode::Detect));
+    }
+
+    #[test]
+    fn tls_routing_configured_terminate_routes_to_always_terminating() {
+        let policy = cfg_with_ports(vec![vpc(9443, VipTlsMode::Terminate)])
+            .tunnel
+            .vip_ports_policy();
+        assert_eq!(policy.tls_routing(9443), Some(TlsMode::Always));
+    }
+
+    #[test]
+    fn tls_routing_configured_passthrough_stays_on_the_plain_path() {
+        // Passthrough ports (Wazuh 1514/1515 etc.) must NEVER enter the
+        // TLS-terminating handler: None, whatever the built-in table says.
+        let policy = cfg_with_ports(vec![
+            vpc(1514, VipTlsMode::Passthrough),
+            // A passthrough override even on a built-in Always port:
+            // the operator's explicit choice wins (443 passthrough =
+            // opaque byte pipe, no local TLS termination).
+            vpc(443, VipTlsMode::Passthrough),
+        ])
+        .tunnel
+        .vip_ports_policy();
+        assert_eq!(policy.tls_routing(1514), None);
+        assert_eq!(policy.tls_routing(443), None);
+    }
+
+    #[test]
+    fn tls_routing_legacy_unconfigured_ports_keep_their_existing_behavior() {
+        // No vip_ports configured at all: built-in Always ports
+        // terminate locally (as before), built-in Never and Detect
+        // ports stay on the plain path with passthrough behavior
+        // exactly as before (DB/RDP are NOT suddenly TLS-wrapped).
+        let policy = VipPortPolicy::default();
+        assert_eq!(policy.tls_routing(443), Some(TlsMode::Always));
+        assert_eq!(policy.tls_routing(8443), Some(TlsMode::Always));
+        assert_eq!(policy.tls_routing(22), None);
+        assert_eq!(policy.tls_routing(80), None);
+        assert_eq!(policy.tls_routing(8080), None);
+        // Legacy Detect (unconfigured DB/RDP): plain path, unchanged.
+        assert_eq!(policy.tls_routing(3306), None);
+        assert_eq!(policy.tls_routing(5432), None);
+        assert_eq!(policy.tls_routing(3389), None);
+    }
+
     fn vip_tls_mode_defaults_to_passthrough() {
         assert_eq!(VipTlsMode::default(), VipTlsMode::Passthrough);
     }

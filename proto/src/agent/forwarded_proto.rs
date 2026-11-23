@@ -99,6 +99,22 @@ impl ForwardedProtoStamper {
                         self.state = State::Passthrough;
                         return out;
                     }
+                    // `looks_like_http_start` is intentionally loose: it
+                    // accepts any uppercase token followed by a space, so a
+                    // client-first TEXT protocol on a `terminate` port
+                    // (`SEND hello\n`, `PING ...\n`) passes it. If the first
+                    // LINE is complete and is provably not an HTTP/1.x
+                    // request line (method not a verb, or no `HTTP/1.x`
+                    // version), release the whole buffer NOW instead of
+                    // holding it until the 64 KiB cap or EOF — none of which
+                    // a plain line-oriented protocol produces. (PR #138
+                    // review: this branch used to buffer such bytes for up
+                    // to 64 KiB.)
+                    if non_http_first_line(&self.buf).is_some() {
+                        out.append(&mut self.buf);
+                        self.state = State::Passthrough;
+                        return out;
+                    }
                     // The cap bounds the HEAD, not the whole buffer: a complete,
                     // small head followed by body or pipelined bytes in the same
                     // read must still be stamped (PR #119 review).
@@ -172,6 +188,72 @@ fn looks_like_http_start(buf: &[u8]) -> bool {
         }
     }
     true // still inside the method token
+}
+
+/// `Some(end)` when the first line of `buf` is COMPLETE and is provably NOT
+/// an HTTP/1.x request line — so the whole buffer can be released to
+/// passthrough immediately. Returns `None` when we cannot yet tell (the first
+/// line is incomplete, or it *is* a valid HTTP request line).
+///
+/// A line is provably non-HTTP when either:
+///   • its first token is not a valid HTTP verb (HTTP only allows the verbs
+///     below; a client-first text protocol sends words like `SEND`, `PING`),
+///   • it lacks a third `HTTP/1.x` token (an HTTP request line is
+///     `METHOD SP TARGET SP HTTP/1.x`).
+///
+/// This is conservative: it never fires on a real (complete) HTTP request
+/// line, so it only ever *releases* bytes that would otherwise be held for
+/// no reason.
+fn non_http_first_line(buf: &[u8]) -> Option<usize> {
+    let Some(end) = buf.iter().position(|b| *b == b'\n') else {
+        return None; // first line not complete yet
+    };
+    let line = &buf[..end];
+    let text = match std::str::from_utf8(line) {
+        Ok(t) => t,
+        Err(_) => return Some(end + 1), // non-UTF8 first line: not HTTP
+    };
+    let mut parts = text.splitn(3, ' ');
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    let version = parts.next().unwrap_or("");
+    let is_http = method.is_http_verb() && !target.is_empty() && version.starts_with("HTTP/1.");
+    if is_http {
+        None
+    } else {
+        Some(end + 1)
+    }
+}
+
+/// The HTTP/1.x request methods. A first-line token outside this set is not
+/// an HTTP request method, so the line is provably not HTTP. (RFC 9110 §9.1:
+/// the fixed set; the common verbs are what real clients send.)
+trait IsHttpVerb {
+    fn is_http_verb(&self) -> bool;
+}
+impl IsHttpVerb for str {
+    fn is_http_verb(&self) -> bool {
+        matches!(
+            self,
+            "GET"
+                | "HEAD"
+                | "POST"
+                | "PUT"
+                | "DELETE"
+                | "CONNECT"
+                | "OPTIONS"
+                | "TRACE"
+                | "PATCH"
+                | "PURGE"
+                | "PRUNE"
+                | "PROPFIND"
+                | "PROPPATCH"
+                | "MKCOL"
+                | "COPY"
+                | "MOVE"
+                | "SEARCH"
+        )
+    }
 }
 
 /// Rewrite one request head. Returns the stamped head and how its body is
@@ -415,6 +497,38 @@ mod tests {
             big.len(),
             "oversize non-HTTP head is flushed, not stalled"
         );
+    }
+
+    // CodeRabbit (PR #138 review): `looks_like_http_start` accepts ANY
+    // uppercase token followed by a space, so a client-first TEXT protocol
+    // on a `terminate` port (e.g. `SEND hello\n`, `PING ...\n`) makes the
+    // stamper think it is HTTP and HOLD the bytes in `self.buf` until a
+    // `\r\n\r\n` blank line arrives, or 64 KiB, or EOF — none of which a
+    // plain line-oriented protocol ever produces. The first line proving
+    // the bytes are not an HTTP/1.x request must release them immediately.
+    #[test]
+    fn uppercase_non_http_first_line_is_released_not_held_until_64k() {
+        // `SEND hello\n` — uppercase method token + space passes
+        // `looks_like_http_start`, but `SEND` is not an HTTP verb and there
+        // is no `HTTP/1.x` version. Must be released on the first line, not
+        // held.
+        let mut s = ForwardedProtoStamper::new();
+        let out = s.feed(b"SEND hello\n");
+        assert_eq!(
+            out, b"SEND hello\n",
+            "a non-HTTP first line must be released the moment it is proven \
+             non-HTTP, not buffered until the 64 KiB cap"
+        );
+
+        // The connection is now in Passthrough: everything after the first
+        // line flows through byte-for-byte, with no further buffering.
+        let more = s.feed(b"more bytes on the next line\n");
+        assert_eq!(more, b"more bytes on the next line\n");
+
+        // A method that IS a valid HTTP verb but with no HTTP/1.x version
+        // is still not an HTTP request line → released on its first line.
+        let mut s2 = ForwardedProtoStamper::new();
+        assert_eq!(s2.feed(b"GET stuff\n"), b"GET stuff\n");
     }
 
     #[test]

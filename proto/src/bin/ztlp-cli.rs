@@ -14432,7 +14432,8 @@ async fn cmd_agent_dns_setup_windows(
     let cli_path = ztlp_proto::agent::config::ztlp_state_dir()
         .join(".ztlp")
         .join("config.toml");
-    let config = AgentConfig::load_merged(&agent_path, &cli_path);
+    let config = AgentConfig::load_merged(&agent_path, &cli_path)
+        .map_err(|e| format!("cannot read agent config (dns-setup needs it): {e}"))?;
 
     let live_dns_listen = {
         let ipc_addr = config.ipc.listen.clone();

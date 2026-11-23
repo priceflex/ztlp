@@ -625,18 +625,27 @@ impl AsyncWrite for PeekStream {
     }
 }
 
-/// Attempt to wrap a TCP connection in TLS based on the port-level policy.
+/// Attempt to wrap a TCP connection in TLS based on the resolved mode.
+///
+/// The mode is RESOLVED by the caller (a configured `[[tunnel.vip_ports]]`
+/// override first, then the built-in port table — `tls_mode_for_port`),
+/// so the policy is the single source of truth and this function never
+/// re-derives it from the port number.
 ///
 /// - `TlsMode::Always` → perform TLS accept immediately
-/// - `TlsMode::Never` → return the stream unwrapped
+/// - `TlsMode::Never` → return the stream unwrapped (bytes forwarded
+///   untouched — the passthrough contract)
 /// - `TlsMode::Detect` → peek at first bytes; if they look like a TLS
 ///   ClientHello, perform TLS accept; otherwise pass through
+///
+/// `port` is used for logging only.
 pub async fn maybe_wrap_tls(
     stream: TcpStream,
+    mode: TlsMode,
     port: u16,
     acceptor: &TlsAcceptor,
 ) -> Result<MaybeWrapped, io::Error> {
-    match tls_mode_for_port(port) {
+    match mode {
         TlsMode::Always => {
             debug!("port {} → TLS (always)", port);
             match acceptor.accept(stream).await {

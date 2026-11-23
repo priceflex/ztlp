@@ -195,15 +195,18 @@ fn looks_like_http_start(buf: &[u8]) -> bool {
 /// passthrough immediately. Returns `None` when we cannot yet tell (the first
 /// line is incomplete, or it *is* a valid HTTP request line).
 ///
-/// A line is provably non-HTTP when either:
-///   • its first token is not a valid HTTP verb (HTTP only allows the verbs
-///     below; a client-first text protocol sends words like `SEND`, `PING`),
-///   • it lacks a third `HTTP/1.x` token (an HTTP request line is
-///     `METHOD SP TARGET SP HTTP/1.x`).
+/// The HTTP-ness test is the **`HTTP/1.x` version token**, NOT a method
+/// allowlist: HTTP permits the RFC 9110 fixed verbs plus registrable
+/// extension methods (`UNLOCK`, `REPORT`, `ACL`, …). A first line carrying
+/// an `HTTP/1.x` version token is treated as HTTP and handed to `stamp_head`
+/// — the only place the method is actually judged — exactly as before this
+/// change. A line lacking the token (`SEND hello\n`, `PING ...\n`) is
+/// provably not an HTTP request line and is released.
 ///
-/// This is conservative: it never fires on a real (complete) HTTP request
-/// line, so it only ever *releases* bytes that would otherwise be held for
-/// no reason.
+/// This is conservative: it never releases a real (complete) HTTP request
+/// head, so it only ever frees bytes that would otherwise be held for no
+/// reason. (PR #138 review: a fixed method list wrongly rejected `UNLOCK`
+/// and every extension method, so `stamp_head` no longer stamped them.)
 fn non_http_first_line(buf: &[u8]) -> Option<usize> {
     let Some(end) = buf.iter().position(|b| *b == b'\n') else {
         return None; // first line not complete yet
@@ -213,46 +216,14 @@ fn non_http_first_line(buf: &[u8]) -> Option<usize> {
         Ok(t) => t,
         Err(_) => return Some(end + 1), // non-UTF8 first line: not HTTP
     };
-    let mut parts = text.splitn(3, ' ');
-    let method = parts.next().unwrap_or("");
-    let target = parts.next().unwrap_or("");
-    let version = parts.next().unwrap_or("");
-    let is_http = method.is_http_verb() && !target.is_empty() && version.starts_with("HTTP/1.");
+    // An HTTP/1.x request line is `METHOD SP TARGET SP HTTP/1.x`. The
+    // version token is the discriminator that rules HTTP in or out; the
+    // method is deliberately NOT constrained here (extension methods exist).
+    let is_http = text.split(' ').any(|tok| tok.starts_with("HTTP/1."));
     if is_http {
         None
     } else {
         Some(end + 1)
-    }
-}
-
-/// The HTTP/1.x request methods. A first-line token outside this set is not
-/// an HTTP request method, so the line is provably not HTTP. (RFC 9110 §9.1:
-/// the fixed set; the common verbs are what real clients send.)
-trait IsHttpVerb {
-    fn is_http_verb(&self) -> bool;
-}
-impl IsHttpVerb for str {
-    fn is_http_verb(&self) -> bool {
-        matches!(
-            self,
-            "GET"
-                | "HEAD"
-                | "POST"
-                | "PUT"
-                | "DELETE"
-                | "CONNECT"
-                | "OPTIONS"
-                | "TRACE"
-                | "PATCH"
-                | "PURGE"
-                | "PRUNE"
-                | "PROPFIND"
-                | "PROPPATCH"
-                | "MKCOL"
-                | "COPY"
-                | "MOVE"
-                | "SEARCH"
-        )
     }
 }
 
@@ -529,6 +500,18 @@ mod tests {
         // is still not an HTTP request line → released on its first line.
         let mut s2 = ForwardedProtoStamper::new();
         assert_eq!(s2.feed(b"GET stuff\n"), b"GET stuff\n");
+
+        // REGRESSION (PR #138 review #10): `UNLOCK` is a standardized
+        // WebDAV method and HTTP allows extension methods, so a complete
+        // `UNLOCK … HTTP/1.1` request line MUST still be treated as HTTP and
+        // stamped — not released to passthrough by a fixed method allowlist.
+        let mut s3 = ForwardedProtoStamper::new();
+        let head = String::from_utf8(s3.feed(b"UNLOCK /file HTTP/1.1\r\nHost: a\r\n\r\n")).unwrap();
+        assert_eq!(
+            count(&head, "X-Forwarded-Proto: https\r\n"),
+            1,
+            "an extension-method request (UNLOCK) must be stamped, got: {head:?}"
+        );
     }
 
     #[test]

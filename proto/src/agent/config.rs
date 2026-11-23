@@ -777,12 +777,28 @@ impl AgentConfig {
     /// what the operator wrote. Malformed `vip_ports` in particular must
     /// stop startup (PR #138 review), not vanish into defaults.
     pub fn load_from_path(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            tracing::debug!("no agent config at {}, using defaults", path.display());
-            return Ok(Self::default());
-        }
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read agent config {}: {}", path.display(), e))?;
+        // Read the file DIRECTLY and key the absent-vs-broken decision on
+        // the read's error kind, not on `Path::exists()`: `exists()` returns
+        // `false` for a file the service account cannot reach (a parent
+        // directory the account lacks +x on), which would let a present
+        // `agent.toml` read as "absent" and silently fall back to defaults —
+        // defeating the fail-closed behaviour. Only a genuine `NotFound`
+        // means absent. (PR #138 review #3)
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("no agent config at {}, using defaults", path.display());
+                return Ok(Self::default());
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to read agent config {}: {} — startup will not continue \
+                     with defaults",
+                    path.display(),
+                    e
+                ))
+            }
+        };
         let cfg: Self = toml::from_str(&contents).map_err(|e| {
             format!(
                 "failed to parse agent config {}: {} — fixing the file is required; \
@@ -1571,6 +1587,34 @@ tls = "passthrough"
         assert_eq!(cfg.tunnel.vip_ports[0].port, 1514);
     }
 
+    // ── PR #138 review #3: a PRESENT-but-unreadable agent.toml must FAIL
+    // CLOSED, not read as "absent" (→ defaults). `Path::exists()` is `false`
+    // for a file the account cannot reach, so the loader must key on the
+    // read's error kind, not `exists()`: only `NotFound` means absent.
+    //
+    // This verifies the DECISION hermetically (no real permission drop
+    // needed): a file whose `read_to_string` returns a NON-`NotFound` error
+    // must produce a `load_from_path` error, and `exists()` must still report
+    // it as present (the old code's `exists()` guard would have skipped it).
+    #[test]
+    fn test_load_from_path_present_but_unreadable_fails_closed() {
+        // A directory: `read_to_string` fails with IsADirectory (NOT
+        // NotFound) and `exists()` is true — the exact shape of an
+        // "unreadable but present" file. The loader must fail closed.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path(); // exists, but reading it as a file errors
+        let res = AgentConfig::load_from_path(target);
+        assert!(res.is_err(), "a present-but-unreadable config must error");
+        assert!(
+            target.exists(),
+            "the path must still exist (only a genuine NotFound means absent)"
+        );
+        assert!(
+            res.unwrap_err().contains("failed to read"),
+            "the error must name the read failure, not fall back to defaults"
+        );
+    }
+
     // ── D3.T2: parse_duration_str ───────────────────────────────────────
 
     #[test]
@@ -1757,7 +1801,6 @@ relay = "34.221.165.244:24095"
     #[test]
     // tls_routing: the VIP accept-loop handler choice (PR #138
     // review, daemon.rs:1684)
-    #[test]
     fn tls_routing_configured_auto_port_reaches_the_detecting_path() {
         // The exact PR #138 bug: a configured `auto` override must route
         // to the TLS-detecting handler (Some(Detect)), not the plain
@@ -1811,6 +1854,7 @@ relay = "34.221.165.244:24095"
         assert_eq!(policy.tls_routing(3389), None);
     }
 
+    #[test]
     fn vip_tls_mode_defaults_to_passthrough() {
         assert_eq!(VipTlsMode::default(), VipTlsMode::Passthrough);
     }

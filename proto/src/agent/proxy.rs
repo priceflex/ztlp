@@ -792,7 +792,17 @@ pub async fn run_proxy(
     // agent daemon's startup path; a malformed `agent.toml` there is
     // reported plainly rather than blocking (the daemon path is
     // fail-closed, see `agent::config::AgentConfig::load_from_path`).
-    let config = AgentConfig::load().unwrap_or_default();
+    // Log the load error before falling back so the operator sees WHY the
+    // defaults (default identity path, default NS) are in effect — otherwise
+    // a later failure names the default path and suggests `ztlp setup` even
+    // though a custom `agent.toml` is the real cause. (PR #138 review #11)
+    let config = match AgentConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("  warning: could not load agent.toml ({e}); continuing with defaults");
+            AgentConfig::default()
+        }
+    };
 
     let identity_file = if let Some(p) = identity_path {
         std::path::PathBuf::from(p)

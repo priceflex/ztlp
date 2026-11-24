@@ -239,4 +239,65 @@ defmodule ZtlpNs.EndpointAuthTest do
       assert :ok = EndpointAuth.verify_and_bind(@node_id, ts, sig, pub)
     end
   end
+
+  describe "node_id revocation and record validation (issue #137 hardening)" do
+    test "a revoked node_id is rejected by lookup_by_node_id even when indexed" do
+      {pub, _priv} = Crypto.generate_keypair()
+      register_key(pub)
+
+      # The index now maps @node_id -> the registered name.
+      node_id_hex = Base.encode16(@node_id, case: :lower)
+      assert {:ok, :key, _} = Store.lookup_by_node_id(node_id_hex)
+
+      # Revoke the node_id directly. A REVOKE record lists node_ids in
+      # data["revoked_ids"]; Store.insert indexes them into the revocation
+      # table keyed by the raw (lowercase) ID.
+      {_rp, rpriv} = Crypto.generate_keypair()
+      revoke_rec =
+        %Record{
+          name: "revoke.ztlp",
+          type: :revoke,
+          data: %{revoked_ids: [node_id_hex]},
+          created_at: System.system_time(:second),
+          ttl: 3600,
+          serial: 1
+        }
+
+      signed_revoke = Record.sign(revoke_rec, rpriv)
+      assert :ok = Store.insert(signed_revoke)
+
+      # The revoked node_id must now be rejected, not served from the index.
+      assert {:error, :revoked} = Store.lookup_by_node_id(node_id_hex)
+    end
+
+    test "a KEY record whose node_id no longer matches the index is not served for that id" do
+      # Register node_id A under a name, then update the same name's KEY
+      # record to a DIFFERENT node_id B (higher serial). The index still
+      # maps A -> name (stale), but lookup_by_node_id(A) must NOT return
+      # B's record — it should be :not_found (or :not_registered upstream).
+      {pub_a, _priv_a} = Crypto.generate_keypair()
+      register_key(pub_a)
+      node_id_a = Base.encode16(@node_id, case: :lower)
+      assert {:ok, :key, _} = Store.lookup_by_node_id(node_id_a)
+
+      # Update the SAME name's KEY record to a different node_id B (serial 2).
+      node_id_b = :crypto.strong_rand_bytes(16)
+      {pub_b, _priv_b} = Crypto.generate_keypair()
+      {_signer_pub, signer_priv} = Crypto.generate_keypair()
+
+      updated =
+        Record.new_key("server.fullstack.ztlp", node_id_b, pub_b, serial: 2)
+        |> Record.sign(signer_priv)
+
+      assert :ok = Store.insert(updated)
+
+      # The index for node_id A is now stale (it still maps A -> name, but
+      # the record at name is now B's). lookup_by_node_id(A) must not serve
+      # B's record.
+      result = Store.lookup_by_node_id(node_id_a)
+      # It must NOT be {:ok, :key, record} where record.data.node_id == B.
+      refute match?({:ok, _t, %Record{data: %{node_id: ^node_id_b}}}, result),
+             "stale index entry served a different node_id's record"
+    end
+  end
 end

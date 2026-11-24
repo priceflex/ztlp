@@ -606,7 +606,7 @@ defmodule ZtlpNs.Server do
       ttl =
         if RegistrationAuth.enrolled_refresh?(pubkey, name, type, data),
           do: ZtlpNs.RecordDefaults.enrolled_device_ttl(),
-          else: default_ttl(type)
+          else: RegistrationAuth.refresh_ttl(name, type, default_ttl(type))
 
       record = %Record{
         name: name,

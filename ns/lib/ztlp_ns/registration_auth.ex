@@ -179,11 +179,86 @@ defmodule ZtlpNs.RegistrationAuth do
         :ok
 
       {:error, :not_zone_authority} ->
-        # Path 2: Self-registration — node updating its own KEY or SVC record
-        case check_self_registration(pubkey_hex, name, type, data) do
-          :ok -> :ok
-          {:error, _} -> {:error, :unauthorized}
+        # Closed registration: who may CREATE names (see Config.closed_registration?/0)
+        with :ok <- check_closed_registration(pubkey_hex, name, type, data) do
+          # Path 2: Self-registration — node updating its own KEY or SVC record
+          case check_self_registration(pubkey_hex, name, type, data) do
+            :ok -> :ok
+            {:error, _} -> {:error, :unauthorized}
+          end
         end
+    end
+  end
+
+  # Closed registration (opt-in). Owners refreshing their own records pass
+  # through to the normal self-registration checks; creating a name in a
+  # governed zone, or any delegation, needs an authority (path 1).
+  defp check_closed_registration(pubkey_hex, name, type, data) do
+    if ZtlpNs.Config.closed_registration?() do
+      existing =
+        case Store.lookup(name, type) do
+          {:ok, record} -> record
+          _ -> nil
+        end
+
+      cond do
+        delegation?(data) and not delegation_owner?(existing, pubkey_hex) ->
+          {:error, :unauthorized}
+
+        existing == nil and type in [:key, :device, :user] and governed?(name) ->
+          {:error, :unauthorized}
+
+        true ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp delegation?(data), do: (Map.get(data, "delegation") || Map.get(data, :delegation)) == true
+
+  # Refreshing an existing delegation record you already own; never creating one
+  # or promoting an ordinary record into one.
+  defp delegation_owner?(nil, _pubkey_hex), do: false
+
+  defp delegation_owner?(existing, pubkey_hex) do
+    delegation?(existing.data) and record_public_key(existing.data) == pubkey_hex
+  end
+
+  defp record_public_key(data), do: Map.get(data, "public_key") || Map.get(data, :public_key)
+
+  # A name is governed when it, or a zone above it, has a pinned authority or
+  # an anchor record.
+  defp governed?(name) do
+    pinned = ZtlpNs.Config.zone_authorities()
+
+    Enum.any?([name | zone_hierarchy(name)], fn zone ->
+      Map.has_key?(pinned, zone) or
+        case Store.lookup(zone, :key) do
+          {:ok, record} -> delegation?(record.data)
+          _ -> false
+        end
+    end)
+  end
+
+  @doc """
+  TTL for a registration of `{name, type}`: a refresh never shortens the
+  record's remaining life. Records the zone authority pre-registered with a
+  permanent (0) or long TTL keep it when their owner refreshes them, so a
+  gateway that was offline longer than the default TTL still owns its name.
+  """
+  @spec refresh_ttl(String.t(), atom(), non_neg_integer()) :: non_neg_integer()
+  def refresh_ttl(name, type, default) do
+    case Store.lookup(name, type) do
+      {:ok, %{ttl: 0}} ->
+        0
+
+      {:ok, %{created_at: created_at, ttl: ttl}} ->
+        max(default, created_at + ttl - System.system_time(:second))
+
+      _ ->
+        default
     end
   end
 
@@ -297,10 +372,18 @@ defmodule ZtlpNs.RegistrationAuth do
   # Check if pubkey_hex is a zone authority for the name's zone.
   # Walk up the zone hierarchy checking for delegation records.
   defp check_zone_authority(pubkey_hex, name) do
+    # Pinned authorities (ZTLP_NS_ZONE_AUTHORITY) own their zone and every name
+    # under it, with or without an anchor record.
+    pinned =
+      Enum.any?(ZtlpNs.Config.zone_authorities(), fn {zone, key} ->
+        key == pubkey_hex and (name == zone or String.ends_with?(name, "." <> zone))
+      end)
+
     # Try each zone level from the name's immediate zone up to root
     zone_names = zone_hierarchy(name)
 
     found =
+      pinned or
       Enum.any?(zone_names, fn zone_name ->
         case Store.lookup(zone_name, :key) do
           {:ok, record} ->

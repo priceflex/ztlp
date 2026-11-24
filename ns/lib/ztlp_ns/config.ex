@@ -298,6 +298,50 @@ defmodule ZtlpNs.Config do
   end
 
   @doc """
+  Closed registration: who may create names, not just who may update them.
+
+  Open self-registration (the default, for existing deployments) lets anyone
+  create a name nobody holds yet, including a zone anchor (a KEY record with
+  `delegation: true`), which makes them that zone's authority. With
+  `ZTLP_NS_CLOSED_REGISTRATION=true`, over the network:
+
+    * nobody can create a delegation record, or add `delegation` to a record
+      they own, unless they are an authority for a parent zone;
+    * in a governed zone (one with a pinned authority or an anchor record),
+      new KEY, DEVICE and USER names need the zone authority's signature.
+
+  Token enrollment and owners refreshing their own records are unaffected.
+  """
+  @spec closed_registration?() :: boolean()
+  def closed_registration? do
+    System.get_env("ZTLP_NS_CLOSED_REGISTRATION") in ["true", "1", "yes"]
+  end
+
+  @doc """
+  Zone authorities pinned by the operator: `ZTLP_NS_ZONE_AUTHORITY=zone=hex[,zone=hex]`.
+
+  A pinned key is the authority for its zone and every name under it, whether
+  or not its anchor record exists (or has expired), so nobody else can ever
+  anchor the zone. Returns `%{zone => pubkey_hex}`.
+  """
+  @spec zone_authorities() :: %{String.t() => String.t()}
+  def zone_authorities do
+    (System.get_env("ZTLP_NS_ZONE_AUTHORITY") || "")
+    |> String.split(",", trim: true)
+    |> Enum.flat_map(fn pair ->
+      case String.split(String.trim(pair), "=", parts: 2) do
+        [zone, hex] when byte_size(hex) == 64 ->
+          [{String.downcase(String.trim(zone)), String.downcase(String.trim(hex))}]
+
+        _ ->
+          []
+      end
+    end)
+    |> Map.new()
+  end
+
+
+  @doc """
   Whether PEER_ENDPOINTS (0x0A) and PUNCH_REPORT (0x0C) requests must
   carry a valid Ed25519 signature over the claimed node_id before their
   reported/learned endpoints are written to the EndpointStore.

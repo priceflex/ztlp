@@ -16,6 +16,8 @@
 #                                                                administrator's sign-in device
 #   sudo ./ztlp-bootstrap --admin-device <HEX>=<username>        same, by Noise key (manual)
 #   sudo ./ztlp-bootstrap --unlink <device-name|HEX>             stop a device signing in by itself
+#   sudo ./ztlp-bootstrap --allow-gateway <name>=<HEX>           reserve a name for a new gateway's
+#                                                                key (its identity.json ed25519_public_key)
 #   sudo ./ztlp-bootstrap --backup                               refresh the backup tarball
 #
 # Options
@@ -42,7 +44,7 @@ DB_IMAGE="mariadb:11.4.7"
 ZONE_DEFAULT="example.ztlp"
 
 ZONE=""; PUBLIC_IP=""; LOAD_FROM=""; ADMIN=""; ADMIN_USER=""; ADMIN_NAME=""; DEVICE_NAME=""; WAIT_MIN=60
-DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""; UNLINK=""
+DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""; UNLINK=""; ALLOW_GW=""
 NS_PORT=23096; RELAY_PORT=23095; GW_PORT=23097; PANEL_PORT=8081
 BACKUP_FILE=""; TOKEN=""
 
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --wait-minutes) WAIT_MIN="$2"; shift 2;;
     --link-admin) MODE=link-admin; shift;;
     --unlink) MODE=unlink; UNLINK="$2"; shift 2;;
+    --allow-gateway) MODE=allow-gateway; ALLOW_GW="$2"; shift 2;;
     --device-name) DEVICE_NAME="$2"; shift 2;;
     --dir) DIR="$2"; shift 2;;
     --image-tag) IMAGE_TAG="$2"; shift 2;;
@@ -189,6 +192,35 @@ gateway_compose() { # (re)write the admin gateway compose, including admin-devic
       while IFS= read -r a; do [[ -n "$a" ]] && { echo '      - "--admin-pubkey-email"'; echo "      - \"$a\""; }; done < "$GDIR/admin-devices.txt"
     fi
   } > "$GDIR/docker-compose.yml"
+}
+
+preregister_gateway() { # preregister_gateway <fq-name> <gateway-ed25519-hex>
+  # With closed registration a gateway cannot create its own name; the authority puts it there.
+  # TTL 0 = permanent, so a gateway that was offline for days still owns its name.
+  local T R; T="$(mktemp --suffix=.exs)"
+  cat > "$T" <<EOF
+alias ZtlpNs.{Record, Store}
+priv = Application.get_env(:ztlp_ns, :registration_private_key)
+name = "$1"
+pub = "$2"
+now = System.system_time(:second)
+case Store.lookup(name, :key) do
+  {:ok, r} ->
+    have = Map.get(r.data, "public_key") || Map.get(r.data, :public_key)
+    if have == pub, do: IO.puts("PREREG_OK"), else: IO.puts("PREREG_CONFLICT #{have}")
+  _ ->
+    data = %{"algorithm" => "Ed25519", "public_key" => pub, "registered_by" => "zone-authority"}
+    rec = Record.sign(%Record{name: name, type: :key, data: data, created_at: now, ttl: 0, serial: now, signature: nil, signer_public_key: nil}, priv)
+    :ok = Store.insert(rec)
+    IO.puts("PREREG_OK")
+end
+EOF
+  chmod 644 "$T"; R="$(ns_rpc_file "$T")"; rm -f "$T"
+  case "$R" in
+    *PREREG_OK*) ok "$1 reserved for gateway key ${2:0:12}...";;
+    *PREREG_CONFLICT*) die "$1 already belongs to a different key (${R#*PREREG_CONFLICT }); not touching it";;
+    *) echo "$R"; die "could not reserve $1 on the name server";;
+  esac
 }
 
 map_device() { # map_device <noise-hex> <username>: the gateway signs this device in as <username>
@@ -326,6 +358,12 @@ case "$MODE" in
     exit 0;;
   backup)
     load_state; backup_now; exit 0;;
+  allow-gateway)
+    load_state
+    gname="${ALLOW_GW%%=*}"; gkey="${ALLOW_GW#*=}"
+    [[ "$gkey" =~ ^[0-9a-f]{64}$ && -n "$gname" && "$gname" != "$ALLOW_GW" ]] || die "use --allow-gateway <name>=<64-hex ed25519_public_key>"
+    [[ "$gname" == *".${ZONE}" ]] || gname="${gname}.${ZONE}"
+    preregister_gateway "$gname" "$gkey"; exit 0;;
   unlink)
     load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
     key="$UNLINK"
@@ -405,6 +443,19 @@ envset "$ENVF" "ZTLP_HMAC_SECRET_${SLUG}" "$(alnum48)"  # this zone's gateways; 
 [[ "$(envget "$ENVF" ZTLP_ENROLLMENT_SECRET)" =~ ^[0-9a-f]{64}$ ]] \
   || die "$ENVF: ZTLP_ENROLLMENT_SECRET is not 64 hex (left from an older install?). Move $DIR away and re-run."
 chown -R 999:999 "$DIR/ns-data"   # the NS runs as uid 999; a root-owned dir crash-loops with :eacces
+# With the panel, the zone authority key is made now and pinned in the name server
+# (ZTLP_NS_ZONE_AUTHORITY), so from its first second nobody else can anchor the zone.
+NS_AUTHORITY_ENV=""
+if [[ "$ADMIN" == y ]]; then
+  mkdir -p "$ADIR/authority"; chmod 700 "$ADIR" "$ADIR/authority"
+  if [[ ! -s "$ADIR/authority/identity.json" ]]; then
+    docker run --rm --user 0:0 -v "$ADIR/authority:/out" "$GATEWAY_IMAGE" keygen --output /out/identity.json >/dev/null 2>&1
+    chmod 600 "$ADIR/authority/identity.json"
+  fi
+  AUTH_PUB="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ed25519_public_key",""))' "$ADIR/authority/identity.json")"
+  [[ "$AUTH_PUB" =~ ^[0-9a-f]{64}$ ]] || die "could not read the zone authority public key"
+  NS_AUTHORITY_ENV="      ZTLP_NS_ZONE_AUTHORITY: \"${ZONE}=${AUTH_PUB}\""
+fi
 cat > "$DIR/docker-compose.yml" <<EOF
 # ZTLP name server + relay for ${ZONE} (written by ztlp-bootstrap). Secrets live in .env.
 # The NS hostname is pinned: its database is bound to the node name.
@@ -420,6 +471,9 @@ services:
     environment:
       ZTLP_NS_PORT: "${NS_PORT}"
       ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "true"
+      # Only the zone authority (or a token enrollment) creates names; owners still refresh theirs.
+      ZTLP_NS_CLOSED_REGISTRATION: "true"
+${NS_AUTHORITY_ENV}
       ZTLP_NS_STORAGE_MODE: "disk"
       ZTLP_LOG_FORMAT: "json"
       ZTLP_ENROLLMENT_SECRET: "\${ZTLP_ENROLLMENT_SECRET}"
@@ -455,11 +509,6 @@ fi
 step "4/7 Zone authority"
 # The key that signs the zone's users, devices and groups. Made here; its private half never
 # leaves this box except inside your backup (the panel stores it encrypted).
-mkdir -p "$ADIR/authority"; chmod 700 "$ADIR" "$ADIR/authority"
-if [[ ! -s "$ADIR/authority/identity.json" ]]; then
-  docker run --rm --user 0:0 -v "$ADIR/authority:/out" "$GATEWAY_IMAGE" keygen --output /out/identity.json >/dev/null 2>&1
-  chmod 600 "$ADIR/authority/identity.json"
-fi
 AUTH_PUB="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ed25519_public_key",""))' "$ADIR/authority/identity.json")"
 [[ "$AUTH_PUB" =~ ^[0-9a-f]{64}$ ]] || die "could not read the zone authority public key"
 T="$(mktemp --suffix=.exs)"
@@ -600,6 +649,9 @@ allow = ["*"]
 EOF
 [[ -s "$GDIR/data/identity.json" ]] || docker run --rm --user 0:0 -v "$GDIR/data:/data" "$GATEWAY_IMAGE" keygen --output /data/identity.json >/dev/null 2>&1
 chown -R 1000:1000 "$GDIR/data"; chmod 600 "$GDIR/data/identity.json"
+GW_PUB="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ed25519_public_key",""))' "$GDIR/data/identity.json")"
+[[ "$GW_PUB" =~ ^[0-9a-f]{64}$ ]] || die "could not read the admin gateway's public key"
+preregister_gateway "admin.${ZONE}" "$GW_PUB"
 touch "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
 gateway_compose
 ( cd "$GDIR" && docker compose up -d ) 2>&1 | grep -vE "obsolete|discarded" || true

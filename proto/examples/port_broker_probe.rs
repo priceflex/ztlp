@@ -6,13 +6,23 @@
 //! The client receives the root-bound listener, then answers ONE HTTP
 //! request with "port-broker-ok" so `curl http://127.100.0.1:443/` proves a
 //! non-root process is accepting on the real privileged port.
+//!
+//! Unix-only: `agent::port_broker` (and `std::os::unix`) are cfg-gated to
+//! unix, so on Windows this example compiles to an empty `fn main` — it must
+//! not be part of a Windows `--all-targets` build. (surfaced by PR #132
+//! merge: the example imported the unix-only module without a cfg gate.)
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::net::Ipv4Addr;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use ztlp_proto::agent::port_broker::{
     bind_listener, request_listener, serve_one, validate, BindRequest,
 };
 
+#[cfg(unix)]
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
@@ -67,6 +77,12 @@ fn main() {
     }
 }
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("port_broker_probe is a macOS/unix dev tool; not applicable here");
+}
+
+#[cfg(unix)]
 fn unsafe_uid() -> String {
     std::process::Command::new("id")
         .arg("-u")

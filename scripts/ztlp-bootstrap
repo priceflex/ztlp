@@ -15,6 +15,7 @@
 #   sudo ./ztlp-bootstrap --link-admin --device-name NAME        make an enrolled device a panel
 #                                                                administrator's sign-in device
 #   sudo ./ztlp-bootstrap --admin-device <HEX>=<username>        same, by Noise key (manual)
+#   sudo ./ztlp-bootstrap --unlink <device-name|HEX>             stop a device signing in by itself
 #   sudo ./ztlp-bootstrap --backup                               refresh the backup tarball
 #
 # Options
@@ -41,7 +42,7 @@ DB_IMAGE="mariadb:11.4.7"
 ZONE_DEFAULT="example.ztlp"
 
 ZONE=""; PUBLIC_IP=""; LOAD_FROM=""; ADMIN=""; ADMIN_USER=""; ADMIN_NAME=""; DEVICE_NAME=""; WAIT_MIN=60
-DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""
+DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""; UNLINK=""
 NS_PORT=23096; RELAY_PORT=23095; GW_PORT=23097; PANEL_PORT=8081
 BACKUP_FILE=""; TOKEN=""
 
@@ -63,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --admin-name) ADMIN_NAME="$2"; shift 2;;
     --wait-minutes) WAIT_MIN="$2"; shift 2;;
     --link-admin) MODE=link-admin; shift;;
+    --unlink) MODE=unlink; UNLINK="$2"; shift 2;;
     --device-name) DEVICE_NAME="$2"; shift 2;;
     --dir) DIR="$2"; shift 2;;
     --image-tag) IMAGE_TAG="$2"; shift 2;;
@@ -198,31 +200,53 @@ map_device() { # map_device <noise-hex> <username>: the gateway signs this devic
   ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
 }
 
-device_keys() { # device_keys <since-epoch>: "<label> <noise-hex> <ed25519-hex>" per enrolled device
+device_keys() { # device_keys <since> [name]: "<label> <noise-hex> <ed25519-hex> token|record"
+  # token  = enrolled with a token since <since> (NS enrollment log): trusted
+  # record = only a KEY record for [name] exists: anyone can create one for an unused name,
+  #          so the operator has to confirm it (the log is in memory; an NS restart clears it)
   local T; T="$(mktemp --suffix=.exs)"
   cat > "$T" <<EOF
 zone = "${ZONE}"
-ZtlpNs.Store.list_by_type(:key)
-|> Enum.filter(fn {n, _, r} -> String.ends_with?(n, "." <> zone) and n != "admin." <> zone and r.created_at >= $1 end)
-|> Enum.each(fn {n, _, r} -> IO.puts("DEVKEY #{String.replace_suffix(n, "." <> zone, "")} #{r.data["public_key"]} #{r.data["signing_public_key"]}") end)
+want = "$2"
+fq = fn n -> if String.ends_with?(n, "." <> zone), do: n, else: n <> "." <> zone end
+label = fn n -> String.replace_suffix(n, "." <> zone, "") end
+key = fn n -> case ZtlpNs.Store.lookup(n, :key) do {:ok, r} -> r.data; _ -> nil end end
+emit = fn n, d, how -> IO.puts("DEVKEY #{label.(n)} #{d["public_key"]} #{d["signing_public_key"]} #{how}") end
+log = Enum.filter(ZtlpNs.Enrollment.enrollment_log(), fn e -> e.enrolled_at >= $1 and String.ends_with?(fq.(e.name), "." <> zone) end)
+for e <- log, n = fq.(e.name), d = key.(n), d != nil, d["public_key"] == e.pubkey, do: emit.(n, d, "token")
+if want != "" and not Enum.any?(log, fn e -> fq.(e.name) == fq.(want) end) do
+  case key.(fq.(want)) do nil -> :ok; d -> emit.(fq.(want), d, "record") end
+end
 EOF
-  chmod 644 "$T"; ns_rpc_file "$T" | grep -E '^DEVKEY [a-z0-9-]+ [0-9a-f]{64} [0-9a-f]{64}$' | cut -d' ' -f2- || true
+  chmod 644 "$T"
+  ns_rpc_file "$T" | grep -E '^DEVKEY [a-z0-9-]+ [0-9a-f]{64} [0-9a-f]{64} (token|record)$' | cut -d' ' -f2- | sort -u || true
   rm -f "$T"
 }
 
 link_admin() { # link_admin <device-name> [since-epoch]: wait for it to enroll, make it the admin's device
-  local dev="$1" since="${2:-0}" keys="" new noise sign deadline R
+  local dev="$1" since="${2:-0}" keys="" new tok rec noise sign deadline R
   deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
   log "waiting for ${dev}.${ZONE} to enroll (up to ${WAIT_MIN} min; Ctrl-C to stop, finish later with:"
   log "  sudo $0 --link-admin --device-name ${dev})"
   while :; do
-    new="$(device_keys "$since")"
-    keys="$(awk -v d="$dev" '$1 == d {print $2, $3}' <<<"$new")"; [[ -n "$keys" ]] && break
-    # Some clients (the macOS app) enroll under the computer's own name, not the one typed
-    # here. The token is single-use, so one new device since it was minted is that computer.
-    if (( since > 0 )) && [[ -n "$new" ]] && (( $(wc -l <<<"$new") == 1 )); then
-      warn "a device enrolled as '${new%% *}', not '${dev}'; linking '${new%% *}'"
-      dev="${new%% *}"; keys="${new#* }"; break
+    new="$(device_keys "$since" "$dev")"
+    keys="$(awk -v d="$dev" '$1 == d && $4 == "token" {print $2, $3}' <<<"$new")"; [[ -n "$keys" ]] && break
+    # The macOS app enrolls under the computer's own name, not the one typed here. Only
+    # token enrollments count: the token is single-use, so exactly one token enrollment since
+    # it was minted is that computer. Records anyone can self-create never qualify.
+    tok="$(awk '$4 == "token"' <<<"$new")"
+    if (( since > 0 )) && [[ -n "$tok" ]] && (( $(wc -l <<<"$tok") == 1 )); then
+      warn "a device enrolled as '${tok%% *}', not '${dev}'; linking '${tok%% *}'"
+      dev="${tok%% *}"; keys="$(cut -d' ' -f2,3 <<<"$tok")"; break
+    fi
+    # --link-admin later, with no enrollment on record for the name: confirm the key by eye.
+    rec="$(awk -v d="$dev" '$1 == d && $4 == "record" {print $2, $3}' <<<"$new")"
+    if [[ -n "$rec" ]] && (( since == 0 )); then
+      warn "${dev}.${ZONE} has no token enrollment on record (the name server restarted since it"
+      warn "enrolled, or someone else created that name). Its device key starts ${rec:0:12}."
+      warn "On ${dev}, the public key 'ztlp setup' printed must start with the same 12 characters."
+      if tty_ok && yes_no "Is ${rec:0:12} your computer's key?" n; then keys="$rec"; break; fi
+      die "not linked. Run interactively to confirm, or: sudo $0 --admin-device <full key>=${ADMIN_USER}"
     fi
     (( $(date +%s) < deadline )) || { warn "${dev}.${ZONE} did not enroll in time. Later: sudo $0 --link-admin --device-name ${dev}"; return 1; }
     sleep 5
@@ -302,6 +326,22 @@ case "$MODE" in
     exit 0;;
   backup)
     load_state; backup_now; exit 0;;
+  unlink)
+    load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
+    key="$UNLINK"
+    if [[ ! "$key" =~ ^[0-9a-f]{64}$ ]]; then
+      d="${UNLINK%".${ZONE}"}"
+      key="$(device_keys 0 "$d" | awk -v d="$d" '$1 == d {print $2; exit}')"
+      [[ -n "$key" ]] || die "no device '${UNLINK}' on the name server; pass its 64-character key instead"
+    fi
+    touch "$GDIR/admin-devices.txt"
+    grep "^${key}=" "$GDIR/admin-devices.txt" >/dev/null || die "${UNLINK} (${key:0:12}...) is not linked to an administrator"
+    grep -v "^${key}=" "$GDIR/admin-devices.txt" > "$GDIR/admin-devices.txt.new" || true
+    mv "$GDIR/admin-devices.txt.new" "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
+    gateway_compose; ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
+    ok "${UNLINK} (${key:0:12}...) no longer signs in to the panel by itself"
+    log "while it stays enrolled it can still reach the sign-in page; revoke it in the panel to remove it"
+    exit 0;;
   link-admin)
     load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
     ask DEVICE_NAME "Enrolled device name (as given to ztlp setup --name)" "${ADMIN_USER}-laptop"

@@ -38,7 +38,7 @@
 #
 set -euo pipefail
 
-IMAGE_TAG="${ZTLP_IMAGE_TAG:-2026.11.24}"
+IMAGE_TAG="${ZTLP_IMAGE_TAG:-2026.11.24-2}"
 GATEWAY_IMAGE="${ZTLP_GATEWAY_IMAGE:-ztlp-gateway:v0.37.2}"
 DB_IMAGE="mariadb:11.4.7"
 ZONE_DEFAULT="example.ztlp"

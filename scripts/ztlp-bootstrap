@@ -198,25 +198,32 @@ map_device() { # map_device <noise-hex> <username>: the gateway signs this devic
   ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
 }
 
-device_key_record() { # prints "<noise-hex> <ed25519-hex>" once <name>.<zone> is enrolled on the NS
-  local T out; T="$(mktemp --suffix=.exs)"
+device_keys() { # device_keys <since-epoch>: "<label> <noise-hex> <ed25519-hex>" per enrolled device
+  local T; T="$(mktemp --suffix=.exs)"
   cat > "$T" <<EOF
-case ZtlpNs.Store.lookup("$1.${ZONE}", :key) do
-  {:ok, r} -> IO.puts("DEVKEY #{r.data["public_key"]} #{r.data["signing_public_key"]}")
-  _ -> IO.puts("NODEVKEY")
-end
+zone = "${ZONE}"
+ZtlpNs.Store.list_by_type(:key)
+|> Enum.filter(fn {n, _, r} -> String.ends_with?(n, "." <> zone) and n != "admin." <> zone and r.created_at >= $1 end)
+|> Enum.each(fn {n, _, r} -> IO.puts("DEVKEY #{String.replace_suffix(n, "." <> zone, "")} #{r.data["public_key"]} #{r.data["signing_public_key"]}") end)
 EOF
-  chmod 644 "$T"; out="$(ns_rpc_file "$T")"; rm -f "$T"
-  [[ "$out" =~ DEVKEY\ ([0-9a-f]{64})\ ([0-9a-f]{64}) ]] && echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" || true
+  chmod 644 "$T"; ns_rpc_file "$T" | grep -E '^DEVKEY [a-z0-9-]+ [0-9a-f]{64} [0-9a-f]{64}$' | cut -d' ' -f2- || true
+  rm -f "$T"
 }
 
-link_admin() { # link_admin <device-name>: wait for it to enroll, make it the admin's device
-  local dev="$1" keys="" noise sign deadline R
+link_admin() { # link_admin <device-name> [since-epoch]: wait for it to enroll, make it the admin's device
+  local dev="$1" since="${2:-0}" keys="" new noise sign deadline R
   deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
   log "waiting for ${dev}.${ZONE} to enroll (up to ${WAIT_MIN} min; Ctrl-C to stop, finish later with:"
   log "  sudo $0 --link-admin --device-name ${dev})"
   while :; do
-    keys="$(device_key_record "$dev")"; [[ -n "$keys" ]] && break
+    new="$(device_keys "$since")"
+    keys="$(awk -v d="$dev" '$1 == d {print $2, $3}' <<<"$new")"; [[ -n "$keys" ]] && break
+    # Some clients (the macOS app) enroll under the computer's own name, not the one typed
+    # here. The token is single-use, so one new device since it was minted is that computer.
+    if (( since > 0 )) && [[ -n "$new" ]] && (( $(wc -l <<<"$new") == 1 )); then
+      warn "a device enrolled as '${new%% *}', not '${dev}'; linking '${new%% *}'"
+      dev="${new%% *}"; keys="${new#* }"; break
+    fi
     (( $(date +%s) < deadline )) || { warn "${dev}.${ZONE} did not enroll in time. Later: sudo $0 --link-admin --device-name ${dev}"; return 1; }
     sleep 5
   done
@@ -254,6 +261,7 @@ RUBY
   else warn "device not listed in the panel (${R#*LINK_DEVICE_NOT_LISTED }); sign-in still works"; fi
   map_device "$noise" "$ADMIN_USER"
   ok "${dev} now signs in to http://admin.${ZONE} as ${ADMIN_USER}, no password"
+  LINKED_DEVICE="$dev"
 }
 
 backup_now() {
@@ -561,6 +569,7 @@ else warn "admin.${ZONE} not yet accepted by the name server: check  docker logs
 
 step "7/7 Your computer"
 backup_now
+TOKEN_SINCE=$(( $(date +%s) - 5 ))
 mint_token "$DEVICE_NAME"
 cat <<EOF
 $(printf '\033[1mOn %s now\033[0m' "$DEVICE_NAME") (full steps: docs/BOOTSTRAP-NS-AND-ADMIN.md, Part 2):
@@ -570,9 +579,9 @@ $(printf '\033[1mOn %s now\033[0m' "$DEVICE_NAME") (full steps: docs/BOOTSTRAP-N
   4. Open http://admin.${ZONE} once this window says you are linked
 
 EOF
-if (( WAIT_MIN > 0 )) && link_admin "$DEVICE_NAME"; then
+if (( WAIT_MIN > 0 )) && link_admin "$DEVICE_NAME" "$TOKEN_SINCE"; then
   backup_now
-  printf '\n\033[1mDone.\033[0m Open http://admin.%s on %s: you are signed in as %s.\n' "$ZONE" "$DEVICE_NAME" "$ADMIN_USER"
+  printf '\n\033[1mDone.\033[0m Open http://admin.%s on %s: you are signed in as %s.\n' "$ZONE" "${LINKED_DEVICE:-$DEVICE_NAME}" "$ADMIN_USER"
 fi
 cat <<EOF
 

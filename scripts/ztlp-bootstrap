@@ -12,8 +12,9 @@
 # Modes
 #   sudo ./ztlp-bootstrap --load-from ztlp-server-images.tar     full install (prompts)
 #   sudo ./ztlp-bootstrap --mint-token [--device-name NAME]      new one-time enrollment token
-#   sudo ./ztlp-bootstrap --admin-device <HEX>=<username>        let a device sign in to the
-#                                                                panel through ZTLP (no password)
+#   sudo ./ztlp-bootstrap --link-admin --device-name NAME        make an enrolled device a panel
+#                                                                administrator's sign-in device
+#   sudo ./ztlp-bootstrap --admin-device <HEX>=<username>        same, by Noise key (manual)
 #   sudo ./ztlp-bootstrap --backup                               refresh the backup tarball
 #
 # Options
@@ -21,7 +22,9 @@
 #   --public-ip IP          address devices use to reach this box (auto-detected)
 #   --load-from TAR         docker-load the server image bundle first
 #   --admin | --no-admin    install the admin panel (asked when omitted)
-#   --admin-user NAME       panel username you will claim (default: admin)
+#   --admin-user NAME       panel username for you (default: admin)
+#   --admin-name "NAME"     your full name as the panel shows it
+#   --wait-minutes N        how long to wait for your computer to enroll (default 60, 0 = don't)
 #   --device-name NAME      name of the computer the enrollment token is for
 #   --dir DIR               install dir (default /opt/ztlp)
 #   --image-tag TAG         tag of the ztlp-ns / ztlp-relay / ztlp-admin images
@@ -37,7 +40,7 @@ GATEWAY_IMAGE="${ZTLP_GATEWAY_IMAGE:-ztlp-gateway:v0.37.2}"
 DB_IMAGE="mariadb:11.4.7"
 ZONE_DEFAULT="example.ztlp"
 
-ZONE=""; PUBLIC_IP=""; LOAD_FROM=""; ADMIN=""; ADMIN_USER=""; DEVICE_NAME=""
+ZONE=""; PUBLIC_IP=""; LOAD_FROM=""; ADMIN=""; ADMIN_USER=""; ADMIN_NAME=""; DEVICE_NAME=""; WAIT_MIN=60
 DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""
 NS_PORT=23096; RELAY_PORT=23095; GW_PORT=23097; PANEL_PORT=8081
 BACKUP_FILE=""; TOKEN=""
@@ -57,6 +60,9 @@ while [[ $# -gt 0 ]]; do
     --admin) ADMIN=y; shift;;
     --no-admin) ADMIN=n; shift;;
     --admin-user) ADMIN_USER="$2"; shift 2;;
+    --admin-name) ADMIN_NAME="$2"; shift 2;;
+    --wait-minutes) WAIT_MIN="$2"; shift 2;;
+    --link-admin) MODE=link-admin; shift;;
     --device-name) DEVICE_NAME="$2"; shift 2;;
     --dir) DIR="$2"; shift 2;;
     --image-tag) IMAGE_TAG="$2"; shift 2;;
@@ -66,7 +72,7 @@ while [[ $# -gt 0 ]]; do
     --mint-token) MODE=mint; shift;;
     --admin-device) MODE=admin-device; ADMIN_DEVICE="$2"; shift 2;;
     --backup) MODE=backup; shift;;
-    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) die "unknown option: $1 (see --help)";;
   esac
 done
@@ -183,6 +189,73 @@ gateway_compose() { # (re)write the admin gateway compose, including admin-devic
   } > "$GDIR/docker-compose.yml"
 }
 
+map_device() { # map_device <noise-hex> <username>: the gateway signs this device in as <username>
+  local key="$1" user="$2"
+  touch "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
+  grep -v "^${key}=" "$GDIR/admin-devices.txt" > "$GDIR/admin-devices.txt.new" || true
+  echo "${key}=${user}" >> "$GDIR/admin-devices.txt.new"; mv "$GDIR/admin-devices.txt.new" "$GDIR/admin-devices.txt"
+  gateway_compose
+  ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
+}
+
+device_key_record() { # prints "<noise-hex> <ed25519-hex>" once <name>.<zone> is enrolled on the NS
+  local T out; T="$(mktemp --suffix=.exs)"
+  cat > "$T" <<EOF
+case ZtlpNs.Store.lookup("$1.${ZONE}", :key) do
+  {:ok, r} -> IO.puts("DEVKEY #{r.data["public_key"]} #{r.data["signing_public_key"]}")
+  _ -> IO.puts("NODEVKEY")
+end
+EOF
+  chmod 644 "$T"; out="$(ns_rpc_file "$T")"; rm -f "$T"
+  [[ "$out" =~ DEVKEY\ ([0-9a-f]{64})\ ([0-9a-f]{64}) ]] && echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" || true
+}
+
+link_admin() { # link_admin <device-name>: wait for it to enroll, make it the admin's device
+  local dev="$1" keys="" noise sign deadline R
+  deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
+  log "waiting for ${dev}.${ZONE} to enroll (up to ${WAIT_MIN} min; Ctrl-C to stop, finish later with:"
+  log "  sudo $0 --link-admin --device-name ${dev})"
+  while :; do
+    keys="$(device_key_record "$dev")"; [[ -n "$keys" ]] && break
+    (( $(date +%s) < deadline )) || { warn "${dev}.${ZONE} did not enroll in time. Later: sudo $0 --link-admin --device-name ${dev}"; return 1; }
+    sleep 5
+  done
+  noise="${keys%% *}"; sign="${keys##* }"
+  ok "${dev}.${ZONE} enrolled (device key ${noise:0:12}..., signing key ${sign:0:12}...)"
+  # The keys come from the NS record the one-time token created, so the panel trusts them
+  # exactly as it trusts the device: claim (or reuse) the administrator, list the device.
+  cat > "$ADIR/data/link-admin.rb" <<'RUBY'
+zone = Zone.default
+u = ENV.fetch("ADMIN_USER")
+admin = Admin.find_by(username: u)
+if admin.nil?
+  abort "LINK_FAIL another administrator already claimed this panel; use that username" if Admin.exists_any?
+  admin = Claim.perform!({ claim_code: Claim.issue!, username: u, display_name: ENV.fetch("ADMIN_NAME"),
+                           email: "", pubkey_hex: ENV.fetch("SIGN_PUB") }, ip: "ztlp-bootstrap")
+  puts "LINK_CLAIMED"
+end
+user = admin.user || zone.users.find_by(username: u)
+begin
+  device = Ztlp::DevicePickup.adopt!(zone, user, ENV.fetch("DEVICE"), admin: admin)
+  Ztlp::Publisher.publish_device!(device, admin: admin)
+  puts "LINK_DEVICE_LISTED"
+rescue StandardError => e
+  puts "LINK_DEVICE_NOT_LISTED #{e.class}: #{e.message}"
+end
+puts "LINK_OK"
+RUBY
+  chown 1000:1000 "$ADIR/data/link-admin.rb"
+  R="$(docker exec -e ADMIN_USER="$ADMIN_USER" -e ADMIN_NAME="${ADMIN_NAME:-$ADMIN_USER}" -e SIGN_PUB="$sign" -e DEVICE="$dev" \
+       ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails runner /data/link-admin.rb 2>&1 | grep -E "LINK_|Error|error" | tail -5 || true)"
+  rm -f "$ADIR/data/link-admin.rb"
+  [[ "$R" == *LINK_OK* ]] || die "linking failed: $R"
+  [[ "$R" == *LINK_CLAIMED* ]] && ok "panel claimed: ${ADMIN_USER} is the first administrator (super admin)"
+  if [[ "$R" == *LINK_DEVICE_LISTED* ]]; then ok "${dev} listed in the panel as ${ADMIN_USER}'s device"
+  else warn "device not listed in the panel (${R#*LINK_DEVICE_NOT_LISTED }); sign-in still works"; fi
+  map_device "$noise" "$ADMIN_USER"
+  ok "${dev} now signs in to http://admin.${ZONE} as ${ADMIN_USER}, no password"
+}
+
 backup_now() {
   local ts out rootpw; ts="$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "${DIR}-backups"; chmod 700 "${DIR}-backups"
@@ -215,16 +288,18 @@ case "$MODE" in
     load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
     [[ "$ADMIN_DEVICE" =~ ^[0-9a-fA-F]{64}=[a-z0-9][a-z0-9._-]*$ ]] || die "expected <64-hex static_public_key>=<panel username>"
     key="$(printf '%s' "${ADMIN_DEVICE%%=*}" | tr 'A-F' 'a-f')"; ADMIN_DEVICE="${key}=${ADMIN_DEVICE#*=}"
-    touch "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
-    grep -v "^${key}=" "$GDIR/admin-devices.txt" > "$GDIR/admin-devices.txt.new" || true
-    echo "$ADMIN_DEVICE" >> "$GDIR/admin-devices.txt.new"; mv "$GDIR/admin-devices.txt.new" "$GDIR/admin-devices.txt"
-    gateway_compose
-    ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
+    map_device "$key" "${ADMIN_DEVICE#*=}"
     ok "device ${key:0:12}... now signs in as '${ADMIN_DEVICE#*=}' at http://admin.${ZONE}"
     log "the gateway restarted with the same identity and certificate; reconnect ZTLP on that device"
     exit 0;;
   backup)
     load_state; backup_now; exit 0;;
+  link-admin)
+    load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
+    ask DEVICE_NAME "Enrolled device name (as given to ztlp setup --name)" "${ADMIN_USER}-laptop"
+    ask ADMIN_USER "Panel username" "${ADMIN_USER:-admin}"
+    ask ADMIN_NAME "Full name (used only if the panel is not claimed yet)" "$ADMIN_USER"
+    link_admin "$DEVICE_NAME"; exit 0;;
 esac
 
 # ─── full install ────────────────────────────────────────────────────────────
@@ -238,9 +313,11 @@ DETECTED="$(curl -fsS -m 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:
 ask PUBLIC_IP "Public IP or DNS name devices use to reach this box" "$DETECTED"
 if [[ -z "$ADMIN" ]]; then if yes_no "Also install the admin panel (admin.$ZONE)?" y; then ADMIN=y; else ADMIN=n; fi; fi
 if [[ "$ADMIN" == y ]]; then
-  ask ADMIN_USER "Panel username you will claim" "admin"
+  ask ADMIN_USER "Your panel username" "admin"
   [[ "$ADMIN_USER" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "username: lowercase letters, digits, . _ - only"
-  ask DEVICE_NAME "Name of the computer you will manage it from" "${ADMIN_USER}-laptop"
+  ask ADMIN_NAME "Your full name" "$ADMIN_USER"
+  ask DEVICE_NAME "Name for the computer you will manage it from (lowercase, no spaces)" "${ADMIN_USER}-laptop"
+  [[ "$DEVICE_NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "computer name: lowercase letters, digits and - only"
 fi
 SLUG="$(zone_slug "$ZONE")"
 log "zone=$ZONE  public=$PUBLIC_IP  admin panel=$ADMIN  install dir=$DIR"
@@ -482,22 +559,23 @@ for _ in $(seq 1 30); do logs_have ztlp-ns "admin\.${ZONE}.*accepted|accepted.*a
 if logs_have ztlp-ns "admin\.${ZONE}.*accepted|accepted.*admin\.${ZONE}"; then ok "admin.${ZONE} registered on the name server"
 else warn "admin.${ZONE} not yet accepted by the name server: check  docker logs ztlp-admin-gateway"; fi
 
-step "7/7 Backup + your first device"
+step "7/7 Your computer"
 backup_now
 mint_token "$DEVICE_NAME"
-CLAIM=""
-for _ in $(seq 1 10); do CLAIM="$(docker logs ztlp-admin-web 2>&1 | grep -oE 'Claim code: [A-Z0-9-]+' | tail -1 | awk '{print $3}' || true)"; [[ -n "$CLAIM" ]] && break; sleep 1; done
 cat <<EOF
-$(printf '\033[1mPanel claim code\033[0m') (valid 24 h; whoever uses it first becomes the administrator):
+$(printf '\033[1mOn %s now\033[0m' "$DEVICE_NAME") (full steps: docs/BOOTSTRAP-NS-AND-ADMIN.md, Part 2):
+  1. Install the ztlp v0.37.2 client
+  2. ztlp setup --token '<the token above>' --name ${DEVICE_NAME} --yes
+  3. Start the ZTLP agent
+  4. Open http://admin.${ZONE} once this window says you are linked
 
-  ${CLAIM:-<not printed yet; run: sudo docker logs ztlp-admin-web | grep "Claim code">}
+EOF
+if (( WAIT_MIN > 0 )) && link_admin "$DEVICE_NAME"; then
+  backup_now
+  printf '\n\033[1mDone.\033[0m Open http://admin.%s on %s: you are signed in as %s.\n' "$ZONE" "$DEVICE_NAME" "$ADMIN_USER"
+fi
+cat <<EOF
 
-$(printf '\033[1mNow on your own computer\033[0m') (every step: docs/BOOTSTRAP-NS-AND-ADMIN.md):
-  1. Install the ztlp v0.37.2 client, then enroll with the token above (name: ${DEVICE_NAME})
-  2. Start the ZTLP agent and open  http://admin.${ZONE}
-  3. Claim the panel as '${ADMIN_USER}' with the claim code above
-  4. Optional, sign in without prompts:  sudo $0 --admin-device <your static_public_key>=${ADMIN_USER}
-
-Copy the backup off this box now (it holds the zone authority and every secret):
+Copy the backup off this box (it holds the zone authority and every secret):
   scp ${SUDO_USER:-root}@${PUBLIC_IP}:${BACKUP_FILE} .
 EOF

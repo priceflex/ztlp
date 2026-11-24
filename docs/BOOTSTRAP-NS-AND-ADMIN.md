@@ -64,9 +64,10 @@ It asks a few questions. Press Enter to accept the value in brackets:
 | Zone name this server is the authority for | your zone, for example `example.ztlp` |
 | Public IP or DNS name devices use to reach this box | detected for you; check it is the public IP |
 | Also install the admin panel? | `Y` |
+| Your panel username | the username you want, for example `alice` |
+| Your full name | as the panel should show it |
+| Name for the computer you will manage it from | a name for your Mac, for example `alice-mac` |
 | Docker is not installed. Install it now? | `Y` (only asked on a fresh server) |
-| Panel username you will claim | the username you want, for example `alice` |
-| Name of the computer you will manage it from | a name for your Mac, for example `alice-mac` |
 
 It then runs seven steps and prints `[ ok ]` for each:
 
@@ -77,25 +78,33 @@ It then runs seven steps and prints `[ ok ]` for each:
    anchors your zone to it on the name server.
 5. **Admin panel**: starts the panel and connects it to the name server and relay.
 6. **Admin gateway**: publishes `admin.example.ztlp` so enrolled devices can reach the panel.
-7. **Backup + your first device**: writes a backup, then prints two things you need next.
+7. **Your computer**: writes a backup, prints a one-time **enrollment token** for your Mac,
+   then waits (up to an hour) for your Mac to enroll.
 
-### 1.4 Save these from the output
+Leave the installer running and do Part 2 on your Mac. As soon as your Mac enrolls, the
+installer makes you the panel's administrator, lists the Mac as your device, and lets it
+sign in without a password:
 
-At the end the installer prints:
+```
+[ ok ] alice-mac.example.ztlp enrolled
+[ ok ] panel claimed: alice is the first administrator (super admin)
+[ ok ] alice-mac listed in the panel as alice's device
+[ ok ] alice-mac now signs in to http://admin.example.ztlp as alice, no password
+Done. Open http://admin.example.ztlp on alice-mac: you are signed in as alice.
+```
 
-- **An enrollment token** (`ztlp://enroll/...`). It works once, for 24 hours. It is how your
-  Mac joins the zone. Treat it like a password.
-- **A panel claim code** (`XXXX-XXXX-...`). It is valid for 24 hours, and whoever uses it
-  first becomes the panel's administrator.
-- **The backup file** (`~/ztlp-backup-<time>.tar.gz`). Copy it off the server now:
+### 1.4 Copy the backup off the server
 
-  ```bash
-  scp ubuntu@203.0.113.10:~/ztlp-backup-*.tar.gz .
-  ```
+The installer ends with an `scp` line for its backup (`~/ztlp-backup-<time>.tar.gz`). Run
+it from your computer:
 
-  It holds the zone authority key and every secret. Without it, a lost server means
-  re-enrolling every device. Keep it somewhere safe, such as a password manager or an
-  encrypted drive.
+```bash
+scp ubuntu@203.0.113.10:~/ztlp-backup-*.tar.gz .
+```
+
+It holds the zone authority key and every secret. Without it, a lost server means
+re-enrolling every device. Keep it somewhere safe, such as a password manager or an
+encrypted drive.
 
 ---
 
@@ -116,32 +125,26 @@ sudo install -m 755 "ztlp-v0.37.2-$T/ztlp" /usr/local/bin/ztlp
 ztlp --version                        # should print: ztlp 0.37.2
 ```
 
-### 2.2 Check for an existing ZTLP setup
+### 2.2 Start from a clean ZTLP folder
 
-The ZTLP agent on a Mac keeps its identity in `/Library/Application Support/ZTLP/.ztlp/`.
-Check whether this Mac already has one:
+Your identity and settings live in `~/.ztlp`. If this Mac was ever enrolled anywhere else,
+old files there (identity, `ns_trust.toml`, `quic_pins/`) stop the new zone from working.
+Move them aside first:
 
 ```bash
-sudo ls "/Library/Application Support/ZTLP/.ztlp/" 2>/dev/null
-sudo launchctl print system/org.ztlp.agent 2>/dev/null | head -3
+[ -d ~/.ztlp ] && mv ~/.ztlp ~/.ztlp.old-$(date +%Y%m%d)
 ```
 
-- **Nothing printed:** this Mac is new to ZTLP. Continue with 2.3.
-- **Files or a running agent:** this Mac is already enrolled in some zone. Enrolling it in
-  your new zone **replaces** that identity, and the old zone stops working on this Mac.
-  If you still need the old zone, stop here and use another Mac or user account.
-  Otherwise add `--force` to the `ztlp setup` command in 2.3; it moves the old files to
-  `*.bak`.
+Moving it aside means this Mac leaves whatever zone it was in. If you still need that zone,
+use another Mac or another macOS user account.
 
 ### 2.3 Join your zone
 
-Use the enrollment token from step 1.4. Run `setup` with the agent's home folder, so the
-background agent finds the identity:
+Paste the enrollment token the installer printed. Use exactly the computer name you gave
+the installer:
 
 ```bash
-sudo mkdir -p "/Library/Application Support/ZTLP"
-sudo HOME="/Library/Application Support/ZTLP" ztlp setup \
-  --token 'ztlp://enroll/PASTE-THE-TOKEN-HERE' --name alice-mac --yes
+ztlp setup --token 'ztlp://enroll/PASTE-THE-TOKEN-HERE' --name alice-mac --yes
 ```
 
 Look for these lines:
@@ -152,65 +155,15 @@ Look for these lines:
 ✓ relay secret taken from the enrollment token
 ```
 
-`setup` ends with a "Paste this public key on your zone's claim page" message. **Ignore it.**
-The claim helper in step 2.5 handles keys for you.
+`setup` ends with a "Paste this public key on your zone's claim page" message. Ignore it:
+the installer already did that for you. Within a few seconds the installer window on the
+server says `Done`.
 
-### 2.4 Start the agent
+### 2.4 Start the agent and open the panel
 
-```bash
-sudo ztlp agent install
-sudo launchctl bootstrap system /Library/LaunchDaemons/org.ztlp.agent.plist
-sudo HOME="/Library/Application Support/ZTLP" ztlp agent dns-setup
-```
-
-Check that the panel answers through ZTLP:
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" http://admin.example.ztlp/up     # expect 200
-```
-
-### 2.5 Claim the panel
-
-Download the claim helper from your own panel, then claim with the code from step 1.4:
-
-```bash
-curl -sO http://admin.example.ztlp/ztlp-admin-sign.py
-sudo python3 ztlp-admin-sign.py \
-  --identity "/Library/Application Support/ZTLP/.ztlp/identity.json" \
-  claim-submit --url http://admin.example.ztlp \
-  --code 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX' \
-  --username alice --display-name "Alice Example" --email alice@example.com
-```
-
-It prints: `Claimed: alice is now the first administrator.`
-
-If macOS asks to install the command line developer tools when you run `python3`, click
-Install and run the command again.
-
-### 2.6 Sign in without prompts (recommended)
-
-Make the panel recognise this Mac as you, so opening `http://admin.example.ztlp` signs you
-in automatically. Print this Mac's device key:
-
-```bash
-sudo python3 ztlp-admin-sign.py \
-  --identity "/Library/Application Support/ZTLP/.ztlp/identity.json" device-key
-```
-
-On the server, with that key and your panel username:
-
-```bash
-sudo ./ztlp-bootstrap --admin-device <the 64-character key>=alice
-```
-
-Back on the Mac, restart the agent so it reconnects:
-
-```bash
-sudo launchctl kickstart -k system/org.ztlp.agent
-```
-
-Open **http://admin.example.ztlp** in your browser. The top of the page shows
-`alice · Super admin · via ZTLP alice-mac.example.ztlp`.
+Start the ZTLP agent (the ZTLP app, or `ztlp agent start`), then open
+**http://admin.example.ztlp** in your browser. The top of the page shows
+`alice · Super admin · via ZTLP alice-mac.example.ztlp`. No password, no code.
 
 ---
 
@@ -219,7 +172,7 @@ Open **http://admin.example.ztlp** in your browser. The top of the page shows
 | Task | Command (on the server) |
 |---|---|
 | Token for another device | `sudo ./ztlp-bootstrap --mint-token --device-name bob-laptop` |
-| Another device signs in to the panel as you | `sudo ./ztlp-bootstrap --admin-device <key>=alice` |
+| Another of your computers signs in as you | `sudo ./ztlp-bootstrap --mint-token --device-name alice-laptop`, enroll it, then `sudo ./ztlp-bootstrap --link-admin --device-name alice-laptop` |
 | Fresh backup | `sudo ./ztlp-bootstrap --backup` |
 | Re-run the installer (keeps everything) | `sudo ./ztlp-bootstrap` |
 
@@ -246,9 +199,14 @@ attempts and why any were refused.
 The request reached the panel without going through the ZTLP gateway. Use
 `http://admin.example.ztlp`, not the server's IP address.
 
-**The claim code expired.**
-On the server: `sudo docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails admin:reset_claim`,
-then `sudo docker logs ztlp-admin-web | grep "Claim code"`.
+**The installer stopped waiting before the Mac enrolled** (or you pressed Ctrl-C).
+Enroll the Mac (2.3), then on the server:
+`sudo ./ztlp-bootstrap --link-admin --device-name alice-mac`.
+
+**The panel asks you to request a challenge and paste a signature.**
+This device is not linked to an administrator. On the server:
+`sudo ./ztlp-bootstrap --link-admin --device-name <the device's name>`, then reconnect
+ZTLP on that device.
 
 **The enrollment token expired or was used.**
 Mint a new one: `sudo ./ztlp-bootstrap --mint-token --device-name alice-mac`.

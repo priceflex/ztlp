@@ -166,6 +166,38 @@ built by `~/ztlp-mac-build.sh`. The script must run `cargo build --release --lib
 Separately, `macos/ZTLP/Libraries/ztlp.h` has drifted from `proto/include/ztlp.h` (734 diff
 lines). It compiles today. Sync only if a new FFI call is needed.
 
+## Field findings 2026-11-10 (per-user build 1.3.0 / ztlp 0.37.0 on a MacBook)
+
+Three bugs, all fixed on `feat/macos-per-user-0.37`:
+
+1. **Some sites reset instantly (`tls handshake eof`, `Failed to read peer address`).**
+   The port broker closed its copy of a listening socket right after sending the fd. macOS
+   damages a socket that is still in flight when the sender closes it: the agent got a
+   listener with a receive buffer of 0, and every connection accepted on it was reset. On
+   the MacBook 5 of 8 VIPs had dead 22/80/443 listeners. Reproduced on MACLLM4 with a
+   20-line Python script: 200 of 200 sockets broken when the receiver is 20 ms late, 20 of
+   200 when it is not, 0 of 200 once the sender waits for an acknowledgement.
+   Fix: the broker keeps its copy until the agent sends one ACK byte (or closes); the agent
+   checks the receive buffer of what it got and asks again when it is 0. The second half
+   matters after an app update, because the old broker keeps running until the next reboot.
+2. **Every name moved to a new 127.100.0.x address after 5 minutes.** The VIP entry expired,
+   the next lookup took the next free address, and the old listeners stayed bound. More
+   listeners, lo0 aliases and broker requests each time, and (with bug 1) a working site
+   could land on a broken address. Fix: a name gets the address it had before; an address is
+   not given to another name while any other is free.
+3. **The enrollment of the old root agent was not taken over.** It lives in
+   `/Library/Application Support/ZTLP/.ztlp`, root-only. The per-user agent started on old
+   files in `~/.ztlp` instead (a config from March: dead name server, DNS on a port nothing
+   asks). Fix: at start the agent asks the machine service for the old enrollment
+   (`MIGRATE` on the broker socket) and writes it into `~/.ztlp`, keeping the previous files
+   as `*.pre-migrate.bak`. Root only reads its own directory and sends the bytes; it never
+   writes into the user's home. Handed out once, to an administrator account, only when the
+   old enrollment is complete, self-contained and newer than the user's own. Code and the
+   full rule list: `proto/src/agent/legacy_migrate.rs`.
+
+Not covered by 3: a standard (non-admin) account, and a Mac whose `~/.ztlp/config.toml` is
+newer than the root one. Both keep the manual move.
+
 ## Open questions for Steven
 
 1. Version scheme: `1.2.4` to match the Windows desktop app, or its own Mac number?

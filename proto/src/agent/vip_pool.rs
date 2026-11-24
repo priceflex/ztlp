@@ -69,6 +69,19 @@ pub struct VipPool {
     name_to_vip: HashMap<String, VipEntry>,
     /// Map of IP → ZTLP name (reverse lookup).
     ip_to_name: HashMap<Ipv4Addr, String>,
+    /// Addresses of released/expired names, kept reserved for the same name.
+    ///
+    /// The TCP proxy never closes a VIP's listeners, and each listener
+    /// serves the name it was started for. So a name must come back on the
+    /// address it had: a fresh address every 5-minute TTL meant new
+    /// listeners, new lo0 aliases and new privileged-port requests each
+    /// time, with the old ones left behind (live on a MacBook: four names
+    /// moved from .1-.4 to .5-.8 ten minutes after start). And an address
+    /// must not go to a different name while the old name's listeners are
+    /// still bound to it.
+    retired: HashMap<String, Ipv4Addr>,
+    /// Reverse of `retired`.
+    retired_ips: HashMap<Ipv4Addr, String>,
 }
 
 impl VipPool {
@@ -101,6 +114,8 @@ impl VipPool {
             next_offset: 0,
             name_to_vip: HashMap::new(),
             ip_to_name: HashMap::new(),
+            retired: HashMap::new(),
+            retired_ips: HashMap::new(),
         })
     }
 
@@ -113,38 +128,80 @@ impl VipPool {
         if let Some(entry) = self.name_to_vip.get(ztlp_name) {
             return Some(entry.ip);
         }
+        let name = ztlp_name.to_lowercase();
 
-        // Find a free IP (scan up to pool_size attempts)
-        for _ in 0..self.pool_size {
-            let offset = self.next_offset;
-            self.next_offset = (self.next_offset + 1) % self.pool_size;
-
-            // +1 to skip .0 (network address)
-            let ip_u32 = self.base + offset + 1;
-            let ip = Ipv4Addr::from(ip_u32);
-
+        // A name that had an address before gets the same one back.
+        if let Some(ip) = self.retired.get(&name).copied() {
             if !self.ip_to_name.contains_key(&ip) {
-                let name = ztlp_name.to_lowercase();
-                let now = Instant::now();
+                self.forget_retired(&name);
+                self.insert_entry(&name, ip, ttl);
+                return Some(ip);
+            }
+        }
 
-                let entry = VipEntry {
-                    ip,
-                    ztlp_name: name.clone(),
-                    peer_addr: None,
-                    peer_node_id: None,
-                    peer_candidates: Vec::new(),
-                    created_at: now,
-                    expires_at: ttl.map(|d| now + d),
-                    active_connections: 0,
-                };
+        // Find a free IP (scan up to pool_size attempts). First pass: only
+        // addresses no other name has used. Second pass (pool nearly
+        // exhausted): take over a retired address.
+        for take_retired in [false, true] {
+            for _ in 0..self.pool_size {
+                let offset = self.next_offset;
+                self.next_offset = (self.next_offset + 1) % self.pool_size;
 
-                self.name_to_vip.insert(name.clone(), entry);
-                self.ip_to_name.insert(ip, name);
+                // +1 to skip .0 (network address)
+                let ip_u32 = self.base + offset + 1;
+                let ip = Ipv4Addr::from(ip_u32);
+
+                if self.ip_to_name.contains_key(&ip) {
+                    continue;
+                }
+                if let Some(owner) = self.retired_ips.get(&ip).cloned() {
+                    if !take_retired {
+                        continue;
+                    }
+                    self.forget_retired(&owner);
+                }
+                self.forget_retired(&name);
+                self.insert_entry(&name, ip, ttl);
                 return Some(ip);
             }
         }
 
         None // Pool exhausted
+    }
+
+    fn insert_entry(&mut self, name: &str, ip: Ipv4Addr, ttl: Option<Duration>) {
+        let now = Instant::now();
+        let entry = VipEntry {
+            ip,
+            ztlp_name: name.to_string(),
+            peer_addr: None,
+            peer_node_id: None,
+            peer_candidates: Vec::new(),
+            created_at: now,
+            expires_at: ttl.map(|d| now + d),
+            active_connections: 0,
+        };
+        self.name_to_vip.insert(name.to_string(), entry);
+        self.ip_to_name.insert(ip, name.to_string());
+    }
+
+    /// Remember `ip` as `name`'s address for its next allocation.
+    fn retire(&mut self, name: &str, ip: Ipv4Addr) {
+        self.forget_retired(name);
+        if let Some(prev) = self.retired_ips.insert(ip, name.to_string()) {
+            if prev != name {
+                self.retired.remove(&prev);
+            }
+        }
+        self.retired.insert(name.to_string(), ip);
+    }
+
+    fn forget_retired(&mut self, name: &str) {
+        if let Some(ip) = self.retired.remove(name) {
+            if self.retired_ips.get(&ip).is_some_and(|n| n == name) {
+                self.retired_ips.remove(&ip);
+            }
+        }
     }
 
     /// Look up the ZTLP name for a virtual IP.
@@ -173,6 +230,7 @@ impl VipPool {
         let name = ztlp_name.to_lowercase();
         if let Some(entry) = self.name_to_vip.remove(&name) {
             self.ip_to_name.remove(&entry.ip);
+            self.retire(&name, entry.ip);
             true
         } else {
             false
@@ -197,6 +255,7 @@ impl VipPool {
         for name in expired {
             if let Some(entry) = self.name_to_vip.remove(&name) {
                 self.ip_to_name.remove(&entry.ip);
+                self.retire(&name, entry.ip);
             }
             // The process-wide ranked-candidate cache must not outlive the
             // VIP entry it belongs to (stale list / unbounded growth).
@@ -575,6 +634,49 @@ mod tests {
         // Now we can allocate again (gets the freed IP)
         let ip3 = pool.allocate("c.ztlp", None).unwrap();
         assert_eq!(ip3, ip1); // reused the released IP
+    }
+
+    /// Live on a MacBook: every name moved to a new address when its
+    /// 5-minute TTL ran out, leaving the old listeners behind. A name must
+    /// come back on the address it had.
+    #[test]
+    fn expired_name_gets_its_old_address_back() {
+        let mut pool = VipPool::new("127.100.0.0/24").unwrap();
+        let blitz = pool
+            .allocate("blitz.trs.ztlp", Some(Duration::from_millis(0)))
+            .unwrap();
+        let whoami = pool
+            .allocate("whoami.trs.ztlp", Some(Duration::from_millis(0)))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(pool.gc_expired(), 2);
+        assert_eq!(pool.allocated_count(), 0);
+        // Asked for in the other order, and with a new name in between.
+        let other = pool.allocate("admin.trs.ztlp", None).unwrap();
+        assert_eq!(pool.allocate("whoami.trs.ztlp", None), Some(whoami));
+        assert_eq!(pool.allocate("blitz.trs.ztlp", None), Some(blitz));
+        assert!(other != blitz && other != whoami);
+        // Same after an explicit release.
+        assert!(pool.release("blitz.trs.ztlp"));
+        assert_eq!(pool.allocate("blitz.trs.ztlp", None), Some(blitz));
+    }
+
+    /// The old name's listeners stay bound to its address, so a different
+    /// name must not get that address while any other one is free...
+    #[test]
+    fn retired_address_is_not_given_to_another_name_while_others_are_free() {
+        let mut pool = VipPool::new("127.100.0.0/29").unwrap(); // 6 usable
+        let a = pool.allocate("a.ztlp", None).unwrap();
+        pool.release("a.ztlp");
+        for n in ["b.ztlp", "c.ztlp", "d.ztlp", "e.ztlp", "f.ztlp"] {
+            assert_ne!(pool.allocate(n, None), Some(a), "{n} took a's address");
+        }
+        // ...but a full pool takes it over instead of failing, and the old
+        // name then simply gets a fresh address later.
+        assert_eq!(pool.allocate("g.ztlp", None), Some(a));
+        pool.release("b.ztlp");
+        let a2 = pool.allocate("a.ztlp", None).unwrap();
+        assert_ne!(a2, a);
     }
 
     // ── persistence across agent restarts ──────────────────────────────

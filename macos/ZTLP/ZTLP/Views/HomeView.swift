@@ -2,8 +2,9 @@
 // ZTLP macOS
 //
 // Task 8 (HANDOFF-2026-09-20): the single page. A READINESS CHECKLIST, not
-// a connect screen. Three rows, each with a state badge and at most one
-// action, then one line of guidance. No Connect button, no traffic bar, no
+// a connect screen. Four rows (Agent / Identity / DNS / HTTPS), each with a
+// state badge and at most one action, then one line of guidance. No Connect
+// button, no traffic bar, no
 // duration timer — there is no "session". ZTLP is an identity network: the
 // daemon connects on demand when DNS sees a zone hostname.
 

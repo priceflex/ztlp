@@ -119,10 +119,29 @@ pub fn write_ca_chain(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // The intermediate key signs LEAF certs. On the per-user model the
+        // data-plane agent runs as the logged-in user (a `staff` member),
+        // not root, so it must be able to READ this key to mint on demand.
+        // `0640` + `chgrp staff` makes it group-readable to every local
+        // account (matching the agent-token 0640-staff trust model). The
+        // ROOT key (written below) stays 0600 root-only: the agent never
+        // needs the root key — only the intermediate mints leaves.
         std::fs::set_permissions(
             dir.join("intermediate.key"),
-            std::fs::Permissions::from_mode(0o600),
+            std::fs::Permissions::from_mode(0o640),
         )?;
+        // Best-effort `chgrp staff` so the group bit is meaningful. If
+        // `chgrp` is unavailable (shouldn't be on macOS) the mode bits
+        // alone still leave the key owner-readable to root, which is the
+        // minimum; the per-user agent's mint load will log clearly if it
+        // still can't read it.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("chgrp")
+                .arg("staff")
+                .arg(dir.join("intermediate.key"))
+                .status();
+        }
     }
     let meta = serde_json::json!({
         "scope": "machine",
@@ -199,6 +218,32 @@ pub fn setup_plan(s: &MachineState) -> Vec<MachineAction> {
         plan.push(MachineAction::SetupNrpt);
     }
     plan
+}
+
+/// macOS: the loopback addresses the MACHINE daemon (root) must alias on
+/// lo0 at every boot. lo0 aliases don't survive a reboot, and the per-user
+/// agent is not root so it cannot add them itself — without these the agent
+/// can't bind its DNS stub (127.0.0.55), its control socket (127.100.255.1)
+/// or the HTTPS health responder (peruser::HEALTH_VIP, 127.100.255.2).
+pub fn macos_machine_loopback_aliases() -> Vec<std::net::Ipv4Addr> {
+    vec![
+        NRPT_DNS_SERVER
+            .parse()
+            .expect("NRPT_DNS_SERVER is an IPv4 literal"),
+        std::net::Ipv4Addr::new(127, 100, 255, 1),
+        crate::agent::peruser::HEALTH_VIP,
+    ]
+}
+
+/// macOS boot plan = the shared plan minus `TrustCa`. The boot daemon runs
+/// as root with no GUI session, and macOS refuses a trust-settings write
+/// without user interaction ("no user interaction was possible") — so it
+/// failed on EVERY boot and the daemon exited 1 in a KeepAlive loop. Trust
+/// is a per-user keychain fact set by the app's "Trust HTTPS" button.
+pub fn macos_boot_plan(plan: Vec<MachineAction>) -> Vec<MachineAction> {
+    plan.into_iter()
+        .filter(|a| *a != MachineAction::TrustCa)
+        .collect()
 }
 
 /// `machine-teardown` (uninstaller): remove everything `machine-setup`
@@ -282,6 +327,24 @@ pub fn ca_dir() -> PathBuf {
     crate::agent::peruser::machine_ca_dir()
         .unwrap_or_else(|| PathBuf::from(crate::agent::peruser::WINDOWS_MACHINE_CA_DIR))
 }
+
+/// macOS: the machine CA directory. Honors `ZTLP_MACHINE_CA_DIR` (same
+/// contract as [`ca_dir`], so tests can redirect it to a temp path); when
+/// unset, the machine CA lives in the existing system ZTLP tree
+/// (`/Library/Application Support/ZTLP/ca`), NOT the Windows ProgramData
+/// path. The constant is platform-neutral so the executor compiles on every
+/// OS; only the runtime default is macOS's.
+pub fn macos_machine_ca_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("ZTLP_MACHINE_CA_DIR") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    PathBuf::from(MACOS_MACHINE_CA_DIR)
+}
+
+/// The macOS machine CA directory default (see [`macos_machine_ca_dir`]).
+pub const MACOS_MACHINE_CA_DIR: &str = "/Library/Application Support/ZTLP/ca";
 
 // ── Windows executor ──────────────────────────────────────────────────
 
@@ -392,6 +455,152 @@ pub fn execute(action: &MachineAction) -> Result<String, String> {
                     .map_err(|e| format!("removing {} failed: {e}", dir.display()))?;
             }
             // Remove C:\ProgramData\ZTLP too when nothing else is left in it.
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+            Ok(format!("removed {}", dir.display()))
+        }
+    }
+}
+
+// ── macOS executor ─────────────────────────────────────────────────────
+
+/// macOS machine CA dir (see [`macos_machine_ca_dir`]).
+#[cfg(target_os = "macos")]
+fn macos_ca_dir() -> PathBuf {
+    macos_machine_ca_dir()
+}
+
+/// Probe the real macOS machine state (read-only; safe unelevated).
+///
+/// Field mapping (Windows → macOS):
+/// - `legacy_service_installed` → the old root `org.ztlp.agent` LaunchDaemon
+///   plist is present (its removal drops the whole legacy data plane).
+/// - `ca_present` → the machine CA can mint (intermediate cert + key present).
+/// - `ca_trusted` → the machine root is trusted in the System keychain.
+/// - `nrpt_present` → the `/etc/resolver/ztlp` umbrella file exists (macOS has
+///   no NRPT; the per-domain resolver file is the equivalent DNS anchor).
+#[cfg(target_os = "macos")]
+pub fn probe_state() -> MachineState {
+    let dir = macos_ca_dir();
+    let ca_present = crate::agent::peruser::ca_dir_can_mint(&dir);
+    // `is_ca_installed` probes the System keychain (macOS branch uses
+    // `security verify-cert`), gated on the default CA path's presence.
+    let ca_trusted =
+        ca_present && crate::agent::ca_trust::is_ca_installed_at(&dir.join("root.pem"));
+    let nrpt_present = Path::new(crate::agent::dns_setup::MACOS_RESOLVER_DIR_PUB)
+        .join("ztlp")
+        .exists();
+    MachineState {
+        legacy_service_installed: Path::new(
+            crate::agent::macos_daemon::MACOS_LAUNCHDAEMON_PLIST_PATH,
+        )
+        .exists(),
+        ca_present,
+        ca_trusted,
+        nrpt_present,
+    }
+}
+
+/// Run one action (macOS). Returns a one-line description or the error.
+///
+/// Every step is idempotent. The CA dir and resolver file already exist
+/// (reused from the current root agent's `macos_daemon` startup hooks);
+/// `machine-setup` re-derives them from the shared plan so a fresh machine
+/// and a Fix both converge to the same state.
+#[cfg(target_os = "macos")]
+pub fn execute(action: &MachineAction) -> Result<String, String> {
+    let dir = macos_ca_dir();
+    match action {
+        MachineAction::RemoveLegacyService => {
+            crate::agent::macos_daemon::macos_daemon_uninstall().map_err(|e| {
+                format!("could not remove the old org.ztlp.agent LaunchDaemon: {e}")
+            })?;
+            Ok("removed the old org.ztlp.agent LaunchDaemon".into())
+        }
+        MachineAction::CreateCa => {
+            let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN)
+                .map_err(|e| format!("CA generation failed: {e}"))?;
+            write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN)
+                .map_err(|e| format!("writing the CA failed: {e}"))?;
+            Ok(format!("created the machine CA in {}", dir.display()))
+        }
+        MachineAction::LockDownCaAcl => {
+            // macOS has no icacls/ACLs: the "lockdown" is the Unix mode bits.
+            // root.key stays 0600 root-only (the agent never needs the root
+            // key). intermediate.key is 0640 + `chgrp staff`: the per-user
+            // data-plane agent (a `staff` member) must READ it to mint leaf
+            // certs on demand, so it cannot be root-only. `write_ca_chain`
+            // already sets both; re-assert here so a hand-loosened mode is
+            // repaired idempotently.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if dir.join("root.key").exists() {
+                    std::fs::set_permissions(
+                        dir.join("root.key"),
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .map_err(|e| format!("setting root.key 0600 failed: {e}"))?;
+                }
+                if dir.join("intermediate.key").exists() {
+                    std::fs::set_permissions(
+                        dir.join("intermediate.key"),
+                        std::fs::Permissions::from_mode(0o640),
+                    )
+                    .map_err(|e| format!("setting intermediate.key 0640 failed: {e}"))?;
+                    // `chgrp staff` so the group bit grants read to the
+                    // per-user agent's account (best-effort; log on failure
+                    // rather than hard-fail the setup).
+                    let out = std::process::Command::new("chgrp")
+                        .arg("staff")
+                        .arg(dir.join("intermediate.key"))
+                        .output();
+                    if let Err(e) = out {
+                        eprintln!("chgrp staff on intermediate.key failed (non-fatal): {e}");
+                    }
+                }
+            }
+            Ok("machine CA permissions set (root key: root only; intermediate key: staff-readable for the per-user agent to mint)".into())
+        }
+        MachineAction::TrustCa => {
+            crate::agent::ca_trust::install_ca_cert_with_scope(
+                &dir.join("root.pem"),
+                crate::agent::ca_trust::CertStoreScope::Machine,
+            )
+            .map_err(|e| format!("trusting the machine CA failed: {e}"))?;
+            Ok("machine CA trusted in the System keychain".into())
+        }
+        MachineAction::SetupNrpt => {
+            // macOS: the "NRPT umbrella" is the /etc/resolver/ztlp per-domain
+            // resolver file (umbrella, no per-zone files). Reuse the existing
+            // resolver writer; the umbrella zone set is `.ztlp` -> the DNS
+            // stub on 127.0.0.55.
+            let listen = format!("{NRPT_DNS_SERVER}:15353");
+            crate::agent::dns_setup::setup_dns(&listen, &["ztlp".to_string()])
+                .map_err(|e| format!("resolver setup failed: {e}"))?;
+            Ok(format!("DNS resolver .ztlp -> {NRPT_DNS_SERVER} added"))
+        }
+        MachineAction::RemoveNrpt => {
+            let removed = crate::agent::dns_setup::teardown_dns()
+                .map_err(|e| format!("resolver removal failed: {e}"))?;
+            Ok(format!("removed DNS resolver files: {:?}", removed.len()))
+        }
+        MachineAction::UntrustCa => {
+            let root = dir.join("root.pem");
+            if root.exists() {
+                crate::agent::ca_trust::remove_ca_cert(&root)
+                    .map_err(|e| format!("removing the machine CA from trust failed: {e}"))?;
+            }
+            Ok("machine CA removed from the System keychain".into())
+        }
+        MachineAction::RemoveCaDir => {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| format!("removing {} failed: {e}", dir.display()))?;
+            }
+            // Remove the parent Application Support/ZTLP dir too when it's
+            // now empty (the daemon state may still live under .ztlp/).
             if let Some(parent) = dir.parent() {
                 let _ = std::fs::remove_dir(parent);
             }
@@ -537,6 +746,40 @@ mod tests {
         assert!(!nrpt_has_umbrella(&[]));
     }
 
+    /// The macOS machine daemon must alias the DNS stub, control VIP and
+    /// health VIP — the per-user agent is not root and can't add them, and
+    /// lo0 aliases don't survive a reboot.
+    #[test]
+    fn macos_machine_aliases_cover_dns_control_and_health() {
+        let a = macos_machine_loopback_aliases();
+        assert!(a.contains(&std::net::Ipv4Addr::new(127, 0, 0, 55)));
+        assert!(a.contains(&std::net::Ipv4Addr::new(127, 100, 255, 1)));
+        assert!(a.contains(&crate::agent::peruser::HEALTH_VIP));
+        assert_eq!(a.len(), 3);
+    }
+
+    /// The root boot daemon can never set trust (no GUI session) — keeping
+    /// TrustCa in its plan made it exit 1 on every boot.
+    #[test]
+    fn macos_boot_plan_drops_trust_but_keeps_everything_else() {
+        let fresh = MachineState {
+            legacy_service_installed: false,
+            ca_present: false,
+            ca_trusted: false,
+            nrpt_present: false,
+        };
+        let boot = macos_boot_plan(setup_plan(&fresh));
+        assert!(!boot.contains(&MachineAction::TrustCa), "{boot:?}");
+        assert_eq!(
+            boot,
+            vec![
+                MachineAction::CreateCa,
+                MachineAction::LockDownCaAcl,
+                MachineAction::SetupNrpt
+            ]
+        );
+    }
+
     #[test]
     fn generated_chain_is_written_and_mintable() {
         let dir = std::env::temp_dir().join(format!("ztlp-machine-ca-{}", std::process::id()));
@@ -549,6 +792,49 @@ mod tests {
         assert!(!leaf.leaf_pem.is_empty());
         // never overwrite an existing root
         assert!(write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The per-user data-plane agent (running as the logged-in `staff`
+    /// account, NOT root) must be able to READ the intermediate key to mint
+    /// leaf certs on demand. So the machine-setup must NOT lock it to
+    /// root-only (0600) — it must be group-readable (0640, `chgrp staff`).
+    /// The ROOT key stays 0600 root-only (the agent never needs the root
+    /// key). This is the bug that made the macOS HTTPS row stay red: the
+    /// agent got "Permission denied" loading a root-only intermediate key.
+    #[cfg(unix)]
+    #[test]
+    fn ca_key_permissions_match_the_per_user_model() {
+        let dir =
+            std::env::temp_dir().join(format!("ztlp-machine-ca-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chain = generate_ca_chain(MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        write_ca_chain(&dir, &chain, MACHINE_ROOT_CN, MACHINE_INTERMEDIATE_CN).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        // `mode()` includes file-type bits (e.g. 0o100640 = regular file + 640);
+        // mask to the permission bits only.
+        let int_mode = std::fs::metadata(dir.join("intermediate.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        // Group-readable (0640): the per-user agent's account is in `staff`,
+        // so the group bit grants it read access to mint.
+        assert_eq!(
+            int_mode,
+            0o640,
+            "intermediate.key must be group-readable (0640) so the per-user agent can mint; got {int_mode:o}"
+        );
+        // The ROOT key is the top secret — root only (0600).
+        let root_mode = std::fs::metadata(dir.join("root.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            root_mode, 0o600,
+            "root.key must be root-only (0600); got {root_mode:o}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -566,5 +852,129 @@ mod tests {
         assert!(dir.join("root.key").exists());
         crate::agent::cert_mint::IntermediateCa::load_from_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── macOS machine-setup (Task 1) ───────────────────────────────────────
+    // The plans (setup_plan/teardown_plan/stop_after_failure/ca_acl_commands)
+    // are already pure and cross-platform (verified: no cfg gate). These pin
+    // the macOS-specific pieces the executor consumes: the machine CA dir and
+    // the plan shape macOS runs through it.
+
+    #[test]
+    fn macos_machine_ca_dir_is_under_application_support_ztlp() {
+        // Env override must win (same contract as Windows/`machine_ca_dir`),
+        // so a test can point the dir at a temp path without touching the
+        // system location.
+        let tmp = std::env::temp_dir().join(format!("ztlp-macos-ca-{}", std::process::id()));
+        let _ = std::env::set_var("ZTLP_MACHINE_CA_DIR", &tmp);
+        let d = macos_machine_ca_dir();
+        let _ = std::env::remove_var("ZTLP_MACHINE_CA_DIR");
+        assert_eq!(d, tmp, "ZTLP_MACHINE_CA_DIR must win on macOS too: {d:?}");
+    }
+
+    #[test]
+    fn macos_machine_ca_dir_defaults_to_library_application_support() {
+        // When the override is unset, the macOS default is the existing
+        // system ZTLP tree, NOT the Windows ProgramData path.
+        let _ = std::env::remove_var("ZTLP_MACHINE_CA_DIR");
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                macos_machine_ca_dir(),
+                PathBuf::from("/Library/Application Support/ZTLP/ca")
+            );
+        } else {
+            // On non-macOS builds the constant still resolves and is a
+            // macOS-style path (so the executor is compilable anywhere);
+            // only the runtime default is platform-selected.
+            assert!(macos_machine_ca_dir()
+                .to_string_lossy()
+                .contains("Application Support/ZTLP"));
+        }
+    }
+
+    #[test]
+    fn macos_setup_plan_from_fresh_state_covers_ca_and_resolver() {
+        // A brand-new macOS machine: no legacy daemon, no CA, no resolver.
+        // The shared plan must produce exactly the machine bits the macOS
+        // executor implements — CA create + lockdown + trust + resolver.
+        // `nrpt_present` maps to the /etc/resolver/ztlp umbrella on macOS.
+        let s = MachineState {
+            legacy_service_installed: false,
+            ca_present: false,
+            ca_trusted: false,
+            nrpt_present: false,
+        };
+        let plan = setup_plan(&s);
+        // CA is created before it is trusted (the invariant the ACL step
+        // protects — a root must exist + be locked down before it's trusted).
+        let create = plan
+            .iter()
+            .position(|a| *a == MachineAction::CreateCa)
+            .unwrap_or_else(|| panic!("fresh machine must create the CA: {plan:?}"));
+        let lock = plan
+            .iter()
+            .position(|a| *a == MachineAction::LockDownCaAcl)
+            .unwrap_or_else(|| panic!("CA must be locked down: {plan:?}"));
+        let trust = plan
+            .iter()
+            .position(|a| *a == MachineAction::TrustCa)
+            .unwrap_or_else(|| panic!("CA must be trusted: {plan:?}"));
+        let resolver = plan
+            .iter()
+            .position(|a| *a == MachineAction::SetupNrpt)
+            .unwrap_or_else(|| panic!("macOS must add the resolver umbrella: {plan:?}"));
+        assert!(
+            create < lock && lock < trust,
+            "create < lock < trust: {plan:?}"
+        );
+        assert!(trust < resolver, "resolver after trust: {plan:?}");
+        // No legacy-service step on a fresh macOS machine.
+        assert!(!plan.contains(&MachineAction::RemoveLegacyService));
+    }
+
+    #[test]
+    fn macos_ready_state_reapplies_lockdown_only() {
+        // A healthy macOS machine (CA present+trusted, resolver umbrella in
+        // place): only the idempotent lockdown step runs.
+        let s = MachineState {
+            legacy_service_installed: false,
+            ca_present: true,
+            ca_trusted: true,
+            nrpt_present: true,
+        };
+        assert!(s.ready());
+        assert_eq!(setup_plan(&s), vec![MachineAction::LockDownCaAcl]);
+    }
+
+    #[test]
+    fn macos_teardown_removes_resolver_ca_and_daemon() {
+        // Teardown reverses setup: resolver first, then CA untrust + removal,
+        // and the legacy root daemon if it's still registered (upgrade path).
+        let s = MachineState {
+            legacy_service_installed: true,
+            ca_present: true,
+            ca_trusted: true,
+            nrpt_present: true,
+        };
+        let plan = teardown_plan(&s);
+        assert_eq!(
+            plan[0],
+            MachineAction::RemoveNrpt,
+            "resolver comes off first: {plan:?}"
+        );
+        let untrust = plan
+            .iter()
+            .position(|a| *a == MachineAction::UntrustCa)
+            .unwrap_or_else(|| panic!("CA must be untrusted: {plan:?}"));
+        let remove = plan
+            .iter()
+            .position(|a| *a == MachineAction::RemoveCaDir)
+            .unwrap_or_else(|| panic!("CA dir must be removed: {plan:?}"));
+        let legacy = plan
+            .iter()
+            .position(|a| *a == MachineAction::RemoveLegacyService)
+            .unwrap_or_else(|| panic!("legacy daemon must be removed: {plan:?}"));
+        assert!(untrust < remove);
+        assert!(remove < legacy);
     }
 }

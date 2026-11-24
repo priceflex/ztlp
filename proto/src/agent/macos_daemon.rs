@@ -19,7 +19,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ─── Locations ──────────────────────────────────────────────────────────────
 
@@ -35,6 +35,94 @@ pub const MACOS_LAUNCHDAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp
 
 /// launchd label.
 pub const MACOS_LAUNCHDAEMON_LABEL: &str = "org.ztlp.agent";
+
+/// The slim "machine daemon" label (Task 3): owns only the machine bits
+/// (CA + resolver + lo0 aliases) at boot, then stays up as the port broker
+/// (agent::port_broker). It is NOT the data
+/// plane — that's the per-user agent. Distinct from [`MACOS_LAUNCHDAEMON_LABEL`]
+/// (the legacy full root agent) so the two never collide and an upgrade
+/// removes the old one while keeping this one.
+pub const MACHINE_DAEMON_LABEL: &str = "org.ztlp.machine";
+
+/// The slim machine daemon's plist path.
+pub const MACHINE_DAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/org.ztlp.machine.plist";
+
+/// The argument the machine daemon runs: `agent machine-setup --boot`.
+/// `--boot` means "run the idempotent machine-setup plan, then serve the
+/// port broker" — no data plane, no enrollment, no tunnels. Kept as a constant so
+/// the plist generator and the CLI dispatch agree on the exact argv.
+pub const MACHINE_DAEMON_BOOT_ARGS: &[&str] = &["agent", "machine-setup", "--boot"];
+
+/// Generate the LaunchDaemon plist for the slim machine daemon. Root,
+/// RunAtLoad, KeepAlive so the machine bits are always re-asserted and the
+/// port broker is always up; it carries no traffic (it only binds sockets
+/// and hands the fds to the per-user agent).
+pub fn generate_machine_daemon_plist(ztlp_binary: &str) -> String {
+    let args: Vec<String> = std::iter::once(ztlp_binary.to_string())
+        .chain(MACHINE_DAEMON_BOOT_ARGS.iter().map(|s| s.to_string()))
+        .collect();
+    let args_xml = args
+        .iter()
+        .map(|a| format!("        <string>{}</string>", xml_escape(a)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args}
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
+    <key>UserName</key>
+    <string>root</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{logs}/machine.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{logs}/machine.stderr.log</string>
+</dict>
+</plist>
+"#,
+        label = MACHINE_DAEMON_LABEL,
+        args = args_xml,
+        home = xml_escape(MACOS_SYSTEM_CONFIG_DIR),
+        logs = MACOS_LOG_DIR,
+    )
+}
+
+/// Stop and remove the slim machine daemon (counterpart of the legacy
+/// [`macos_daemon_uninstall`], for the machine bits daemon). Root-only,
+/// idempotent.
+pub fn machine_daemon_uninstall() -> Result<(), String> {
+    let plist = std::path::Path::new(MACHINE_DAEMON_PLIST_PATH);
+    let out = std::process::Command::new("launchctl")
+        .args(["bootout", "system", MACHINE_DAEMON_LABEL])
+        .output()
+        .map_err(|e| format!("launchctl bootout: {e}"))?;
+    if !out.status.success() {
+        debug!(
+            "launchctl bootout {} (may not be loaded): {}",
+            MACHINE_DAEMON_LABEL,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if plist.exists() {
+        std::fs::remove_file(plist).map_err(|e| format!("removing {}: {e}", plist.display()))?;
+    }
+    Ok(())
+}
 
 const MACOS_LOG_DIR: &str = "/Library/Logs/ZTLP";
 
@@ -103,6 +191,52 @@ pub fn generate_launchdaemon_plist(ztlp_binary: &str) -> String {
 }
 
 // ─── Startup plan (pure) ────────────────────────────────────────────────────
+
+/// Stop and remove the legacy root `org.ztlp.agent` LaunchDaemon (the whole
+/// old root data plane). Root-only. Idempotent: booting out an unregistered
+/// label is a no-op, and removing an absent plist is a no-op.
+///
+/// This is the macOS counterpart of Windows' `windows_service_uninstall`
+/// (used by `machine-setup`'s `RemoveLegacyService` step). After it, the
+/// machine runs only the per-user agent + the tiny machine daemon.
+/// pkill/pgrep pattern for the legacy root data-plane agent. Anchored at
+/// the end: the legacy LaunchDaemon's argv ENDS with `--foreground`, while
+/// every per-user agent continues with `--parent-pid N` and must survive.
+pub const LEGACY_AGENT_KILL_PATTERN: &str = "ztlp agent start --foreground$";
+
+pub fn macos_daemon_uninstall() -> Result<(), String> {
+    let plist = std::path::Path::new(MACOS_LAUNCHDAEMON_PLIST_PATH);
+    // Boot out the running daemon (system domain). Tolerate "not loaded":
+    // an unregistered label returns nonzero but that's a success here.
+    let out = std::process::Command::new("launchctl")
+        .args(["bootout", "system", MACOS_LAUNCHDAEMON_LABEL])
+        .output()
+        .map_err(|e| format!("launchctl bootout: {e}"))?;
+    if !out.status.success() {
+        // bootout of an already-unloaded target is fine; only a hard spawn
+        // failure is a real error (checked by `.output()` above).
+        debug!(
+            "launchctl bootout {} (may not have been loaded): {}",
+            MACOS_LAUNCHDAEMON_LABEL,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    // Remove the plist. Absent file is fine.
+    if plist.exists() {
+        std::fs::remove_file(plist).map_err(|e| format!("removing {}: {e}", plist.display()))?;
+    }
+    // Kill any lingering foreground agent process the daemon started, so a
+    // reboot-less Fix doesn't leave the old root data plane still bound.
+    if let Err(e) = std::process::Command::new("pkill")
+        .args(["-f", LEGACY_AGENT_KILL_PATTERN])
+        .output()
+        .map_err(|e| format!("pkill: {e}"))
+    {
+        // pkill returns 1 when nothing matched — not a failure.
+        debug!("pkill lingering agent: {e}");
+    }
+    Ok(())
+}
 
 /// Everything the planner needs; gathered by `daemon.rs` at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +313,12 @@ pub fn macos_startup_plan(i: &MacosStartupInputs) -> Vec<MacosAction> {
     }
     let mut plan = Vec::new();
     let mut aliased: Vec<Ipv4Addr> = Vec::new();
+    // The DNS stub IP, the control VIP, AND the health VIP (127.100.255.2)
+    // must all be aliased on lo0 before the agent binds them. The health
+    // VIP hosts the per-user agent's TLS health responder
+    // (HEALTH_VIP:8443) that the desktop app's HTTPS row probes to prove
+    // DNS + machine-CA trust end to end — it is needed on macOS too, not
+    // just Windows.
     for listen in [&i.dns_listen, &i.control_listen] {
         if let Some(ip) = loopback_ip_of(listen) {
             if !aliased.contains(&ip) {
@@ -186,6 +326,11 @@ pub fn macos_startup_plan(i: &MacosStartupInputs) -> Vec<MacosAction> {
                 plan.push(MacosAction::LoopbackAlias(ip));
             }
         }
+    }
+    let health_vip = crate::agent::peruser::HEALTH_VIP;
+    if !aliased.contains(&health_vip) {
+        aliased.push(health_vip);
+        plan.push(MacosAction::LoopbackAlias(health_vip));
     }
     plan.push(MacosAction::WriteResolver {
         listen: i.dns_listen.clone(),
@@ -506,6 +651,65 @@ mod tests {
         );
     }
 
+    // ── Slim machine daemon plist (Task 3) ─────────────────────────────
+
+    #[test]
+    fn machine_daemon_plist_runs_machine_setup_boot_as_root() {
+        let plist = generate_machine_daemon_plist("/Applications/ZTLP.app/Contents/MacOS/ztlp");
+        assert!(plist.contains("<key>Label</key>\n    <string>org.ztlp.machine</string>"));
+        // The daemon runs `agent machine-setup --boot` — NOT `agent start
+        // --foreground` (that's the legacy data-plane daemon).
+        assert!(plist.contains(
+            "<string>/Applications/ZTLP.app/Contents/MacOS/ztlp</string>\n        \
+             <string>agent</string>\n        \
+             <string>machine-setup</string>\n        \
+             <string>--boot</string>"
+        ));
+        // ...and critically it must NOT run the foreground data plane.
+        assert!(!plist.contains("<string>start</string>"));
+        assert!(!plist.contains("--foreground"));
+        assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
+        assert!(plist.contains("<key>KeepAlive</key>\n    <true/>"));
+        assert!(plist.contains("<key>UserName</key>\n    <string>root</string>"));
+    }
+
+    #[test]
+    fn machine_daemon_plist_points_home_at_system_config_dir() {
+        let plist = generate_machine_daemon_plist("/usr/local/bin/ztlp");
+        assert!(plist.contains(&format!(
+            "<key>HOME</key>\n        <string>{}</string>",
+            MACOS_SYSTEM_CONFIG_DIR
+        )));
+    }
+
+    #[test]
+    fn machine_daemon_plist_logs_to_machine_logs() {
+        let plist = generate_machine_daemon_plist("/usr/local/bin/ztlp");
+        assert!(plist.contains("<string>/Library/Logs/ZTLP/machine.stdout.log</string>"));
+        assert!(plist.contains("<string>/Library/Logs/ZTLP/machine.stderr.log</string>"));
+        // Its own logs, not the legacy agent's (so the two daemons don't
+        // overwrite each other's logs during the upgrade window).
+        assert!(!plist.contains("agent.stdout.log"));
+    }
+
+    #[test]
+    fn machine_daemon_label_and_plist_distinct_from_legacy() {
+        // An upgrade removes the legacy full agent while keeping this slim
+        // daemon. The labels/paths MUST differ or the two collide.
+        assert_ne!(MACHINE_DAEMON_LABEL, MACOS_LAUNCHDAEMON_LABEL);
+        assert_ne!(MACHINE_DAEMON_PLIST_PATH, MACOS_LAUNCHDAEMON_PLIST_PATH);
+        assert_eq!(MACHINE_DAEMON_LABEL, "org.ztlp.machine");
+        assert_eq!(
+            MACHINE_DAEMON_PLIST_PATH,
+            "/Library/LaunchDaemons/org.ztlp.machine.plist"
+        );
+        // The boot argv is a shared constant (plist + CLI must agree).
+        assert_eq!(
+            MACHINE_DAEMON_BOOT_ARGS,
+            &["agent", "machine-setup", "--boot"]
+        );
+    }
+
     // ── Startup plan ──────────────────────────────────────────────────
 
     fn inputs() -> MacosStartupInputs {
@@ -541,16 +745,73 @@ mod tests {
         );
     }
 
+    /// The health VIP (127.100.255.2) must be aliased on lo0 too: the
+    /// per-user agent's TLS health responder binds HEALTH_VIP:8443, and the
+    /// desktop app's HTTPS row probes `https://ztlp-health.ztlp:8443/` (which
+    /// resolves to that VIP). Without the alias, the bind fails and the
+    /// HTTPS row can never go green on macOS.
+    #[test]
+    fn plan_aliases_the_health_vip_so_the_https_probe_can_bind() {
+        let plan = macos_startup_plan(&inputs());
+        assert!(
+            plan
+                .iter()
+                .any(|a| matches!(a, MacosAction::LoopbackAlias(ip) if *ip == Ipv4Addr::new(127, 100, 255, 2))),
+            "the health VIP (127.100.255.2) must be aliased on lo0 so the TLS health responder can bind HEALTH_VIP:8443: {plan:?}"
+        );
+    }
+
+    /// The health VIP alias must not duplicate if the control VIP somehow
+    /// equals it (dedup guard), and must come after the DNS + control aliases.
+    #[test]
+    fn plan_health_vip_alias_is_deduped_and_ordered() {
+        let plan = macos_startup_plan(&inputs());
+        // All three loopback aliases present exactly once each.
+        let aliases: Vec<_> = plan
+            .iter()
+            .filter(|a| matches!(a, MacosAction::LoopbackAlias(_)))
+            .collect();
+        assert_eq!(
+            aliases.len(),
+            3,
+            "expected exactly 3 loopback aliases (DNS stub, control VIP, health VIP): {plan:?}"
+        );
+    }
+
     #[test]
     fn plan_skips_alias_for_127_0_0_1_and_dedupes() {
+        // 127.0.0.1 is the default lo0 address — it never gets an explicit
+        // alias. But the health VIP (127.100.255.2) is ALWAYS aliased (the
+        // per-user agent's health responder needs it), so even with both
+        // listen IPs on 127.0.0.1 the plan carries exactly 1 loopback
+        // alias: the health VIP.
         let mut i = inputs();
         i.dns_listen = "127.0.0.1:15353".to_string();
         i.control_listen = "127.0.0.1:4433".to_string();
         let plan = macos_startup_plan(&i);
-        assert!(!plan
+        let aliases: Vec<_> = plan
             .iter()
-            .any(|a| matches!(a, MacosAction::LoopbackAlias(_))));
+            .filter_map(|a| {
+                if let MacosAction::LoopbackAlias(ip) = a {
+                    Some(*ip)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            aliases.len(),
+            1,
+            "127.0.0.1 listen IPs get no alias; only the always-present health VIP (127.100.255.2) should: {plan:?}"
+        );
+        assert_eq!(
+            aliases[0],
+            Ipv4Addr::new(127, 100, 255, 2),
+            "the sole alias must be the health VIP, not a 127.0.0.1 listen IP: {plan:?}"
+        );
 
+        // A non-127.0.0.1 control listen IP (127.0.0.55) DOES get an alias,
+        // in addition to the health VIP → 2 aliases total.
         let mut i = inputs();
         i.control_listen = "127.0.0.55:4433".to_string();
         let plan = macos_startup_plan(&i);
@@ -558,7 +819,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, MacosAction::LoopbackAlias(_)))
             .count();
-        assert_eq!(aliases, 1);
+        assert_eq!(
+            aliases, 2,
+            "control listen IP (127.0.0.55) + the health VIP = 2 loopback aliases: {plan:?}"
+        );
     }
 
     #[test]
@@ -611,8 +875,11 @@ mod tests {
     fn plan_splits_into_pre_bind_aliases_and_post_bind_rest() {
         // daemon.rs must alias lo0 BEFORE binding the DNS socket (os error 49
         // otherwise) but write /etc/resolver AFTER, with the effective port.
+        // The pre-bind phase carries 3 loopback aliases: the DNS stub IP,
+        // the control VIP, and the health VIP (127.100.255.2 — needed by the
+        // per-user agent's TLS health responder).
         let (pre, post) = macos_startup_phases(&inputs());
-        assert_eq!(pre.len(), 2);
+        assert_eq!(pre.len(), 3);
         assert!(pre
             .iter()
             .all(|a| matches!(a, MacosAction::LoopbackAlias(_))));
@@ -762,5 +1029,58 @@ mod tests {
         assert_eq!(i.control_listen, "127.100.255.9:4433");
         assert_eq!(i.zones, vec!["a.ztlp".to_string(), "b.ztlp".to_string()]);
         assert!(i.is_root);
+    }
+
+    /// CodeRabbit #132: the legacy-cleanup pkill used the substring
+    /// "ztlp agent start --foreground", which also matches every user's
+    /// per-user agent ("... --foreground --parent-pid N"). Checked with the
+    /// real pgrep (same matcher as pkill) against real processes.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_agent_kill_pattern_spares_per_user_agents() {
+        use std::process::{Command, Stdio};
+        let tag = format!("zz{}", std::process::id());
+        // argv after `sh -c 'sleep 30; :'` shows up verbatim in the cmdline
+        // (two commands: macOS sh would otherwise exec sleep and drop argv).
+        let spawn = |tail: &[&str]| {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 30; :", "x"])
+                .args(tail)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            c.spawn().unwrap()
+        };
+        let legacy_bin = format!("/opt/{tag}/ztlp");
+        let mut legacy = spawn(&[legacy_bin.as_str(), "agent", "start", "--foreground"]);
+        let peruser_bin = format!("/opt/{tag}/ztlp");
+        let mut peruser = spawn(&[
+            peruser_bin.as_str(),
+            "agent",
+            "start",
+            "--foreground",
+            "--parent-pid",
+            "1",
+        ]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pids = |pat: &str| -> Vec<u32> {
+            let out = Command::new("pgrep").args(["-f", pat]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        };
+        let hits = pids(LEGACY_AGENT_KILL_PATTERN);
+        let _ = legacy.kill();
+        let _ = peruser.kill();
+        let _ = legacy.wait();
+        let _ = peruser.wait();
+        assert!(
+            hits.contains(&legacy.id()),
+            "must still match the legacy root agent: {hits:?}"
+        );
+        assert!(
+            !hits.contains(&peruser.id()),
+            "must NOT match a per-user agent: {hits:?}"
+        );
     }
 }

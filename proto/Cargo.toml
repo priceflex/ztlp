@@ -208,6 +208,8 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "
 # proto/src/bin/ztlp-winsvc.rs.
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+# os_trust: read the Windows Root store directly (SSL_CERT_FILE-proof).
+schannel = "0.1"
 
 [profile.release]
 # Default: optimize for speed on desktop/server platforms.

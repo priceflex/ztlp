@@ -132,7 +132,15 @@ pub const HEALTH_NAME: &str = "ztlp-health.ztlp";
 pub const HEALTH_VIP: Ipv4Addr = Ipv4Addr::new(127, 100, 255, 2);
 
 /// Port of the TLS health responder.
-pub const HEALTH_PORT: u16 = 443;
+///
+/// 8443 (NOT 443): the per-user data-plane agent runs as the logged-in
+/// user (non-root), and on macOS only root can bind privileged ports
+/// (<1024). 8443 is unprivileged, so the per-user agent can bind it. The
+/// port is arbitrary for the health probe — it only needs a TLS endpoint
+/// the desktop app can reach to prove `.ztlp` DNS + machine-CA trust end
+/// to end. Windows keeps working (per-user processes there can bind 443,
+/// but 8443 is equally fine and keeps the two platforms identical).
+pub const HEALTH_PORT: u16 = 8443;
 
 /// Body the health responder sends after a successful handshake.
 pub const HEALTH_BODY: &str = "ztlp-health-ok";
@@ -211,8 +219,9 @@ pub fn next_checkin_delay(interval: std::time::Duration, failed: bool) -> std::t
 pub const WINDOWS_MACHINE_CA_DIR: &str = r"C:\ProgramData\ZTLP\ca";
 
 /// The machine CA directory for this platform: `ZTLP_MACHINE_CA_DIR` if
-/// set (tests, unusual installs), else the Windows ProgramData path.
-/// `None` on macOS/Linux (they keep their per-device CA flow).
+/// set (tests, unusual installs), else the platform default — Windows
+/// ProgramData, macOS `/Library/Application Support/ZTLP/ca`. `None` on
+/// Linux (which keeps its per-device CA flow).
 pub fn machine_ca_dir() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ZTLP_MACHINE_CA_DIR") {
         if !p.is_empty() {
@@ -221,6 +230,14 @@ pub fn machine_ca_dir() -> Option<PathBuf> {
     }
     if cfg!(target_os = "windows") {
         Some(PathBuf::from(WINDOWS_MACHINE_CA_DIR))
+    } else if cfg!(target_os = "macos") {
+        // The installer-made, System-keychain-trusted machine CA (Task 1).
+        // Returning it here is what lets the per-user agent auto-mint leaf
+        // certs from a machine-wide-trusted root without the user running
+        // `ca-init` — the "set it up once" goal.
+        Some(PathBuf::from(
+            crate::agent::machine_setup::MACOS_MACHINE_CA_DIR,
+        ))
     } else {
         None
     }
@@ -414,7 +431,7 @@ mod tests {
     #[test]
     fn health_vip_is_reserved_next_to_control_socket() {
         assert_eq!(HEALTH_VIP.to_string(), "127.100.255.2");
-        assert_eq!(HEALTH_PORT, 443);
+        assert_eq!(HEALTH_PORT, 8443);
     }
 
     #[test]
@@ -500,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_ca_dir_is_windows_only_without_override() {
+    fn machine_ca_dir_is_platform_default_without_override() {
         // The env override is exercised implicitly by other tests via the
         // pure helpers; here only the platform default is pinned.
         if std::env::var("ZTLP_MACHINE_CA_DIR").is_err() {
@@ -509,9 +526,42 @@ mod tests {
                     machine_ca_dir(),
                     Some(PathBuf::from(WINDOWS_MACHINE_CA_DIR))
                 );
+            } else if cfg!(target_os = "macos") {
+                // macOS: the per-user agent mints from the installer-made,
+                // System-keychain-trusted machine CA (Task 1). Not None —
+                // that was the Windows-only behavior.
+                assert_eq!(
+                    machine_ca_dir(),
+                    Some(PathBuf::from("/Library/Application Support/ZTLP/ca"))
+                );
             } else {
                 assert_eq!(machine_ca_dir(), None);
             }
+        }
+    }
+
+    #[test]
+    fn machine_ca_dir_macos_default_is_application_support_ztlp_ca() {
+        // Explicitly pin the macOS default (not env-override, not Windows).
+        // This is what makes the per-user agent auto-mint from the machine CA
+        // without the user ever running `ca-init` — the "set it up once" goal.
+        let _ = std::env::remove_var("ZTLP_MACHINE_CA_DIR");
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                machine_ca_dir(),
+                Some(PathBuf::from("/Library/Application Support/ZTLP/ca"))
+            );
+            // ...and when that dir CAN mint (intermediate cert + key present),
+            // effective_ca_dir picks it over the user CA. Use a temp dir we
+            // actually populate (the real default won't have certs on a dev box).
+            let tmp = std::env::temp_dir().join(format!("ztlp-t2-mac-ca-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            std::fs::write(tmp.join("intermediate.pem"), "x").unwrap();
+            std::fs::write(tmp.join("intermediate.key"), "x").unwrap();
+            let user = Path::new("/nonexistent/user/ca");
+            let chosen = effective_ca_dir(user, Some(tmp.as_path()));
+            assert_eq!(chosen, tmp, "a usable machine CA must win over the user CA");
+            let _ = std::fs::remove_dir_all(&tmp);
         }
     }
 

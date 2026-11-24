@@ -1,0 +1,503 @@
+#!/usr/bin/env bash
+#
+# ztlp-bootstrap: stand up your own ZTLP name server (NS) + relay, and optionally the
+# ZTLP admin panel (admin.<zone>) behind its own ZTLP gateway, on one fresh Linux box.
+#
+# Interactive by default: every prompt shows a default (press Enter to accept), and every
+# prompt has a flag for unattended runs. Safe to re-run: existing secrets, NS data, panel
+# data and identities are kept; missing pieces are created.
+#
+# Full walkthrough (server + your laptop): docs/BOOTSTRAP-NS-AND-ADMIN.md
+#
+# Modes
+#   sudo ./ztlp-bootstrap --load-from ztlp-server-images.tar     full install (prompts)
+#   sudo ./ztlp-bootstrap --mint-token [--device-name NAME]      new one-time enrollment token
+#   sudo ./ztlp-bootstrap --admin-device <HEX>=<username>        let a device sign in to the
+#                                                                panel through ZTLP (no password)
+#   sudo ./ztlp-bootstrap --backup                               refresh the backup tarball
+#
+# Options
+#   --zone ZONE             zone to serve (e.g. example.ztlp)
+#   --public-ip IP          address devices use to reach this box (auto-detected)
+#   --load-from TAR         docker-load the server image bundle first
+#   --admin | --no-admin    install the admin panel (asked when omitted)
+#   --admin-user NAME       panel username you will claim (default: admin)
+#   --device-name NAME      name of the computer the enrollment token is for
+#   --dir DIR               install dir (default /opt/ztlp)
+#   --image-tag TAG         tag of the ztlp-ns / ztlp-relay / ztlp-admin images
+#   --gateway-image IMG     gateway image
+#   --no-interactive        never prompt (use flags/defaults)
+#   --no-install-docker     fail instead of installing Docker
+#   -h, --help
+#
+set -euo pipefail
+
+IMAGE_TAG="${ZTLP_IMAGE_TAG:-2026.11.24}"
+GATEWAY_IMAGE="${ZTLP_GATEWAY_IMAGE:-ztlp-gateway:v0.37.2}"
+DB_IMAGE="mariadb:11.4.7"
+ZONE_DEFAULT="example.ztlp"
+
+ZONE=""; PUBLIC_IP=""; LOAD_FROM=""; ADMIN=""; ADMIN_USER=""; DEVICE_NAME=""
+DIR="/opt/ztlp"; INTERACTIVE=1; INSTALL_DOCKER=1; MODE="install"; ADMIN_DEVICE=""
+NS_PORT=23096; RELAY_PORT=23095; GW_PORT=23097; PANEL_PORT=8081
+BACKUP_FILE=""; TOKEN=""
+
+log()  { printf '\033[1;34m[ztlp]\033[0m %s\n' "$*"; }
+ok()   { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
+step() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+
+ORIG_ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --zone) ZONE="$2"; shift 2;;
+    --public-ip) PUBLIC_IP="$2"; shift 2;;
+    --load-from) LOAD_FROM="$(readlink -f "$2")"; shift 2;;
+    --admin) ADMIN=y; shift;;
+    --no-admin) ADMIN=n; shift;;
+    --admin-user) ADMIN_USER="$2"; shift 2;;
+    --device-name) DEVICE_NAME="$2"; shift 2;;
+    --dir) DIR="$2"; shift 2;;
+    --image-tag) IMAGE_TAG="$2"; shift 2;;
+    --gateway-image) GATEWAY_IMAGE="$2"; shift 2;;
+    --no-interactive) INTERACTIVE=0; shift;;
+    --no-install-docker) INSTALL_DOCKER=0; shift;;
+    --mint-token) MODE=mint; shift;;
+    --admin-device) MODE=admin-device; ADMIN_DEVICE="$2"; shift 2;;
+    --backup) MODE=backup; shift;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    *) die "unknown option: $1 (see --help)";;
+  esac
+done
+
+# Everything below needs root (Docker, /opt). Re-run under sudo, keeping the arguments.
+if [[ $EUID -ne 0 ]]; then
+  log "re-running with sudo (installs to $DIR and manages Docker)"
+  exec sudo bash "$0" "${ORIG_ARGS[@]}"
+fi
+
+NS_IMAGE="ztlp-ns:${IMAGE_TAG}"; RELAY_IMAGE="ztlp-relay:${IMAGE_TAG}"; ADMIN_IMAGE="ztlp-admin:${IMAGE_TAG}"
+ENVF="$DIR/.env"; ADIR="$DIR/admin"; GDIR="$DIR/admin-gateway"; STATE="$DIR/install.conf"
+
+tty_ok() { [[ "$INTERACTIVE" == 1 && -t 0 ]]; }
+ask() { # ask VAR "question" "default"
+  local __v="$1" q="$2" def="$3" a
+  if [[ -n "${!__v}" ]]; then log "$q: ${!__v}"; return; fi
+  if tty_ok; then
+    read -r -p "$(printf '\033[1;34m[ztlp]\033[0m %s [%s]: ' "$q" "$def")" a
+    printf -v "$__v" '%s' "${a:-$def}"
+  else printf -v "$__v" '%s' "$def"; log "$q: $def (default)"; fi
+}
+yes_no() { # yes_no "question" y|n  -> 0 = yes
+  local q="$1" def="$2" a
+  if ! tty_ok; then [[ "$def" == y ]]; return; fi
+  read -r -p "$(printf '\033[1;34m[ztlp]\033[0m %s [%s]: ' "$q" "$([[ $def == y ]] && echo Y/n || echo y/N)")" a
+  a="${a:-$def}"; [[ "$a" =~ ^[Yy] ]]
+}
+hex64()   { openssl rand -hex 32; }
+alnum48() { local s; while :; do s="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 48)"; [[ "$s" =~ [g-zG-Z] ]] && { echo "$s"; return; }; done; }
+envget()  { [[ -f "$1" ]] && grep -E "^$2=" "$1" | head -1 | cut -d= -f2- || true; }
+envset()  { local f="$1" k="$2" v="$3"; touch "$f"; chmod 600 "$f"; grep -qE "^$k=" "$f" || echo "$k=$v" >> "$f"; }
+zone_slug() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g'; }
+save_state() {
+  cat > "$STATE" <<EOF
+ZONE=$ZONE
+PUBLIC_IP=$PUBLIC_IP
+ADMIN=$ADMIN
+ADMIN_USER=$ADMIN_USER
+IMAGE_TAG=$IMAGE_TAG
+GATEWAY_IMAGE=$GATEWAY_IMAGE
+EOF
+  chmod 600 "$STATE"
+}
+load_state() {
+  [[ -f "$STATE" ]] || die "no install found in $DIR (run the installer first)"
+  ZONE="${ZONE:-$(envget "$STATE" ZONE)}"; PUBLIC_IP="${PUBLIC_IP:-$(envget "$STATE" PUBLIC_IP)}"
+  ADMIN="${ADMIN:-$(envget "$STATE" ADMIN)}"; ADMIN_USER="${ADMIN_USER:-$(envget "$STATE" ADMIN_USER)}"
+  IMAGE_TAG="$(envget "$STATE" IMAGE_TAG)"; GATEWAY_IMAGE="$(envget "$STATE" GATEWAY_IMAGE)"
+  NS_IMAGE="ztlp-ns:${IMAGE_TAG}"; RELAY_IMAGE="ztlp-relay:${IMAGE_TAG}"; ADMIN_IMAGE="ztlp-admin:${IMAGE_TAG}"
+}
+
+# ─── pieces shared by several modes ──────────────────────────────────────────
+logs_have() { docker logs "$1" 2>&1 | grep -E "$2" >/dev/null; }   # no -q: see pipefail note
+ns_pubkey() { docker logs ztlp-ns 2>&1 | grep -o 'NS registration public key: [0-9a-f]\{64\}' | tail -1 | awk '{print $NF}' || true; }
+
+ns_rpc_file() { # run an Elixir script inside the running name server; prints its output
+  docker cp "$1" ztlp-ns:/tmp/ztlp-bootstrap.exs >/dev/null
+  docker exec ztlp-ns /app/bin/ztlp_ns rpc 'Code.eval_file("/tmp/ztlp-bootstrap.exs")' 2>&1 || true
+  docker exec -u 0 ztlp-ns rm -f /tmp/ztlp-bootstrap.exs >/dev/null 2>&1 || true
+}
+
+panel_task() { # a panel rake task, through the image entrypoint so the encryption keys are loaded
+  docker exec -i -e ZONE="$ZONE" ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails "$@"
+}
+
+mint_token() { # mint_token <device-name>  -> prints a one-use enrollment token
+  local name="$1" t nspub
+  nspub="$(ns_pubkey)"; [[ "$nspub" =~ ^[0-9a-f]{64}$ ]] || die "could not read the NS public key (docker logs ztlp-ns)"
+  t="$(mktemp -d)"; chmod 700 "$t"
+  envget "$ENVF" ZTLP_ENROLLMENT_SECRET    > "$t/zone.key"
+  envget "$ENVF" RELAY_REGISTRATION_SECRET > "$t/relay.secret"
+  if ! docker run --rm --user 0:0 -v "$t:/s:ro" "$GATEWAY_IMAGE" admin enroll \
+        --zone "$ZONE" --secret /s/zone.key --ns-server "$PUBLIC_IP:$NS_PORT" --relay "$PUBLIC_IP:$RELAY_PORT" \
+        --relay-secret-file /s/relay.secret --ns-key "$nspub" --expires 24h --max-uses 1 > "$t/out" 2>&1; then
+    cat "$t/out"; shred -u "$t"/*; rmdir "$t"; die "token mint failed"
+  fi
+  TOKEN="$(grep -oE 'ztlp://enroll/[A-Za-z0-9_=-]+' "$t/out" | head -1 || true)"
+  [[ -n "$TOKEN" ]] || TOKEN="$(grep -oE '[A-Za-z0-9_-]{60,}' "$t/out" | head -1 || true)"
+  shred -u "$t"/*; rmdir "$t"
+  [[ -n "$TOKEN" ]] || die "the token mint printed no token"
+  printf '\n\033[1mEnrollment token for "%s"\033[0m (one use, expires in 24 h, treat it like a password):\n\n%s\n\n' "$name" "$TOKEN"
+}
+
+gateway_compose() { # (re)write the admin gateway compose, including admin-devices.txt mappings
+  local slug a iface; slug="$(zone_slug "$ZONE")"
+  iface="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"; iface="${iface:-eth0}"
+  {
+    echo "# ZTLP gateway for admin.${ZONE} (written by ztlp-bootstrap). Secrets live in .env."
+    echo "services:"
+    echo "  gateway:"
+    echo "    image: ${GATEWAY_IMAGE}"
+    echo "    container_name: ztlp-admin-gateway"
+    echo "    restart: unless-stopped"
+    echo "    network_mode: host"
+    echo "    user: \"1000:1000\""
+    echo "    environment:"
+    echo "      ZTLP_QUIC_CERT_DIR: /data/quic-cert"
+    echo "      ZTLP_HMAC_SECRET_${slug}: \"\${ZTLP_HMAC_SECRET_${slug}}\""
+    echo "      RUST_LOG: info"
+    echo "    volumes:"
+    echo "      - ./data:/data"
+    echo "    command:"
+    for a in listen --gateway --bind "0.0.0.0:${GW_PORT}" --key /data/identity.json \
+             --forward "admin:127.0.0.1:${PANEL_PORT}" --ns-server "127.0.0.1:${NS_PORT}" --relay "${PUBLIC_IP}:${RELAY_PORT}" \
+             --service-name admin --zone "$ZONE" --ns-register-name "admin.${ZONE}" --max-sessions 100 \
+             --policy /data/policy.toml --no-punch --no-advertise-interface "$iface" \
+             --http-inject-headers --header-hmac-secret '${GATEWAY_HEADER_SECRET}'; do
+      echo "      - \"$a\""
+    done
+    if [[ -s "$GDIR/admin-devices.txt" ]]; then
+      while IFS= read -r a; do [[ -n "$a" ]] && { echo '      - "--admin-pubkey-email"'; echo "      - \"$a\""; }; done < "$GDIR/admin-devices.txt"
+    fi
+  } > "$GDIR/docker-compose.yml"
+}
+
+backup_now() {
+  local ts out rootpw; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "${DIR}-backups"; chmod 700 "${DIR}-backups"
+  out="${DIR}-backups/ztlp-backup-${ts}.tar.gz"
+  if docker ps --format '{{.Names}}' | grep -x ztlp-admin-db >/dev/null; then
+    rootpw="$(envget "$ADIR/.env" DB_ROOT_PASSWORD)"
+    if docker exec -e MYSQL_PWD="$rootpw" ztlp-admin-db mariadb-dump -uroot --single-transaction ztlp_admin > "$ADIR/db-dump.sql" 2>/dev/null; then
+      chmod 600 "$ADIR/db-dump.sql"
+    else warn "panel database dump failed (backup continues without it)"; fi
+  fi
+  tar -czf "$out" --exclude="$(basename "$DIR")/admin/db" -C "$(dirname "$DIR")" "$(basename "$DIR")"
+  chmod 600 "$out"; rm -f "$ADIR/db-dump.sql"
+  BACKUP_FILE="$out"
+  if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]]; then
+    local home; home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [[ -d "$home" ]]; then
+      install -m 600 -o "$SUDO_USER" -g "$(id -gn "$SUDO_USER")" "$out" "$home/$(basename "$out")"
+      BACKUP_FILE="$home/$(basename "$out")"
+    fi
+  fi
+  ok "backup: $BACKUP_FILE ($(du -h "$out" | cut -f1)): NS keys, zone authority, all secrets, panel DB + keys"
+}
+
+# ─── follow-up modes ─────────────────────────────────────────────────────────
+case "$MODE" in
+  mint)
+    load_state; ask DEVICE_NAME "Device name for this token" "laptop"
+    mint_token "$DEVICE_NAME"; exit 0;;
+  admin-device)
+    load_state; [[ "$ADMIN" == y ]] || die "the admin panel is not installed here"
+    [[ "$ADMIN_DEVICE" =~ ^[0-9a-fA-F]{64}=[a-z0-9][a-z0-9._-]*$ ]] || die "expected <64-hex static_public_key>=<panel username>"
+    key="$(printf '%s' "${ADMIN_DEVICE%%=*}" | tr 'A-F' 'a-f')"; ADMIN_DEVICE="${key}=${ADMIN_DEVICE#*=}"
+    touch "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
+    grep -v "^${key}=" "$GDIR/admin-devices.txt" > "$GDIR/admin-devices.txt.new" || true
+    echo "$ADMIN_DEVICE" >> "$GDIR/admin-devices.txt.new"; mv "$GDIR/admin-devices.txt.new" "$GDIR/admin-devices.txt"
+    gateway_compose
+    ( cd "$GDIR" && docker compose up -d --force-recreate ) >/dev/null 2>&1
+    ok "device ${key:0:12}... now signs in as '${ADMIN_DEVICE#*=}' at http://admin.${ZONE}"
+    log "the gateway restarted with the same identity and certificate; reconnect ZTLP on that device"
+    exit 0;;
+  backup)
+    load_state; backup_now; exit 0;;
+esac
+
+# ─── full install ────────────────────────────────────────────────────────────
+step "ZTLP server installer"
+if [[ -f "$STATE" ]]; then log "existing install in $DIR: reusing its settings and secrets"; load_state; fi
+ask ZONE "Zone name this server is the authority for" "$ZONE_DEFAULT"
+ZONE="$(printf '%s' "$ZONE" | tr 'A-Z' 'a-z')"
+[[ "$ZONE" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || die "zone '$ZONE' must be a dotted lowercase name like example.ztlp"
+DETECTED="$(curl -fsS -m 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]' || true)"
+[[ -n "$DETECTED" ]] || DETECTED="$(hostname -I | awk '{print $1}')"
+ask PUBLIC_IP "Public IP or DNS name devices use to reach this box" "$DETECTED"
+if [[ -z "$ADMIN" ]]; then if yes_no "Also install the admin panel (admin.$ZONE)?" y; then ADMIN=y; else ADMIN=n; fi; fi
+if [[ "$ADMIN" == y ]]; then
+  ask ADMIN_USER "Panel username you will claim" "admin"
+  [[ "$ADMIN_USER" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "username: lowercase letters, digits, . _ - only"
+  ask DEVICE_NAME "Name of the computer you will manage it from" "${ADMIN_USER}-laptop"
+fi
+SLUG="$(zone_slug "$ZONE")"
+log "zone=$ZONE  public=$PUBLIC_IP  admin panel=$ADMIN  install dir=$DIR"
+log "reminder: the box's cloud firewall must allow UDP ${RELAY_PORT}-${NS_PORT} from the internet"
+
+step "1/7 Docker"
+if ! command -v docker >/dev/null || ! docker info >/dev/null 2>&1; then
+  [[ "$INSTALL_DOCKER" == 1 ]] || die "Docker is not installed (and --no-install-docker was given)"
+  yes_no "Docker is not installed. Install it now (apt: docker.io + compose v2)?" y || die "Docker is required"
+  log "installing Docker (1-3 minutes)..."
+  { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io docker-compose-v2 && systemctl enable --now docker; } \
+    >/var/log/ztlp-docker-install.log 2>&1 || die "Docker install failed: see /var/log/ztlp-docker-install.log"
+  for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+fi
+docker info >/dev/null 2>&1 || die "the Docker daemon is not answering"
+docker compose version >/dev/null 2>&1 || die "docker compose v2 is missing"
+ok "Docker $(docker version --format '{{.Server.Version}}')"
+
+step "2/7 Images"
+if [[ -n "$LOAD_FROM" ]]; then
+  [[ -f "$LOAD_FROM" ]] || die "not found: $LOAD_FROM"
+  log "loading $LOAD_FROM (about a minute)"; docker load -q < "$LOAD_FROM" >/dev/null
+fi
+need=("$NS_IMAGE" "$RELAY_IMAGE"); [[ "$ADMIN" == y ]] && need+=("$ADMIN_IMAGE" "$GATEWAY_IMAGE" "$DB_IMAGE")
+for img in "${need[@]}"; do
+  docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img" >/dev/null 2>&1 \
+    || die "image $img is missing: re-run with --load-from <server images tar>"
+done
+ok "images ready: ${need[*]}"
+
+step "3/7 Name server + relay"
+mkdir -p "$DIR/ns-data"; chmod 755 "$DIR"
+envset "$ENVF" ZTLP_ENROLLMENT_SECRET "$(hex64)"        # NS and CLI both require exactly 64 hex
+envset "$ENVF" ZTLP_NS_ADMIN_API_SECRET "$(hex64)"      # NS requires 64 hex (or 32 raw)
+envset "$ENVF" RELAY_REGISTRATION_SECRET "$(alnum48)"   # devices sign their relay traffic with this
+envset "$ENVF" "ZTLP_HMAC_SECRET_${SLUG}" "$(alnum48)"  # this zone's gateways; must NOT be hex
+[[ "$(envget "$ENVF" ZTLP_ENROLLMENT_SECRET)" =~ ^[0-9a-f]{64}$ ]] \
+  || die "$ENVF: ZTLP_ENROLLMENT_SECRET is not 64 hex (left from an older install?). Move $DIR away and re-run."
+chown -R 999:999 "$DIR/ns-data"   # the NS runs as uid 999; a root-owned dir crash-loops with :eacces
+cat > "$DIR/docker-compose.yml" <<EOF
+# ZTLP name server + relay for ${ZONE} (written by ztlp-bootstrap). Secrets live in .env.
+# The NS hostname is pinned: its database is bound to the node name.
+services:
+  ns:
+    image: ${NS_IMAGE}
+    container_name: ztlp-ns
+    hostname: ztlp-ns
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./ns-data:/app/data
+    environment:
+      ZTLP_NS_PORT: "${NS_PORT}"
+      ZTLP_NS_REQUIRE_REGISTRATION_AUTH: "true"
+      ZTLP_NS_STORAGE_MODE: "disk"
+      ZTLP_LOG_FORMAT: "json"
+      ZTLP_ENROLLMENT_SECRET: "\${ZTLP_ENROLLMENT_SECRET}"
+      ZTLP_NS_ADMIN_API_SECRET: "\${ZTLP_NS_ADMIN_API_SECRET}"
+  relay:
+    image: ${RELAY_IMAGE}
+    container_name: ztlp-relay
+    hostname: ztlp-relay
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      ZTLP_RELAY_PORT: "${RELAY_PORT}"
+      ZTLP_RELAY_HMAC_MODE: "prod"
+      ZTLP_RELAY_REGISTRATION_SECRET: "\${RELAY_REGISTRATION_SECRET}"
+      ZTLP_HMAC_SECRET_${SLUG}: "\${ZTLP_HMAC_SECRET_${SLUG}}"
+EOF
+( cd "$DIR" && docker compose up -d ) 2>&1 | grep -vE "obsolete|discarded" || true
+NS_PUB=""
+for _ in $(seq 1 40); do NS_PUB="$(ns_pubkey)"; [[ -n "$NS_PUB" ]] && break; sleep 1; done
+[[ "$NS_PUB" =~ ^[0-9a-f]{64}$ ]] || { docker logs --tail 30 ztlp-ns; die "the name server did not start (logs above)"; }
+ok "name server up on UDP ${NS_PORT}, public key ${NS_PUB:0:16}..."
+for _ in $(seq 1 20); do logs_have ztlp-relay "listening on" && break; sleep 1; done
+logs_have ztlp-relay "listening on" && ok "relay up on UDP ${RELAY_PORT}" || warn "relay start line not seen yet (docker logs ztlp-relay)"
+save_state
+
+if [[ "$ADMIN" != y ]]; then
+  step "Backup"; backup_now
+  printf '\nDone: name server %s:%s and relay %s:%s serve %s.\nMint a device token any time:  sudo %s --mint-token --device-name <name>\n' \
+    "$PUBLIC_IP" "$NS_PORT" "$PUBLIC_IP" "$RELAY_PORT" "$ZONE" "$0"
+  exit 0
+fi
+
+step "4/7 Zone authority"
+# The key that signs the zone's users, devices and groups. Made here; its private half never
+# leaves this box except inside your backup (the panel stores it encrypted).
+mkdir -p "$ADIR/authority"; chmod 700 "$ADIR" "$ADIR/authority"
+if [[ ! -s "$ADIR/authority/identity.json" ]]; then
+  docker run --rm --user 0:0 -v "$ADIR/authority:/out" "$GATEWAY_IMAGE" keygen --output /out/identity.json >/dev/null 2>&1
+  chmod 600 "$ADIR/authority/identity.json"
+fi
+AUTH_PUB="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ed25519_public_key",""))' "$ADIR/authority/identity.json")"
+[[ "$AUTH_PUB" =~ ^[0-9a-f]{64}$ ]] || die "could not read the zone authority public key"
+T="$(mktemp --suffix=.exs)"
+cat > "$T" <<EOF
+alias ZtlpNs.{Record, Store}
+priv = Application.get_env(:ztlp_ns, :registration_private_key)
+name = "${ZONE}"
+pub = "${AUTH_PUB}"
+now = System.system_time(:second)
+case Store.lookup(name, :key) do
+  {:ok, r} ->
+    have = Map.get(r.data, "public_key") || Map.get(r.data, :public_key)
+    IO.puts(if have == pub, do: "ANCHOR_OK", else: "ANCHOR_CONFLICT #{have}")
+  _ ->
+    data = %{"algorithm" => "Ed25519", "public_key" => pub, "delegation" => true, "role" => "admin"}
+    rec = Record.sign(%Record{name: name, type: :key, data: data, created_at: now, ttl: 315_360_000, serial: now, signature: nil, signer_public_key: nil}, priv)
+    :ok = Store.insert(rec)
+    {:ok, r} = Store.lookup(name, :key)
+    IO.puts("ANCHOR_CREATED verified=#{Record.verify(r)}")
+end
+EOF
+chmod 644 "$T"; R="$(ns_rpc_file "$T")"; rm -f "$T"
+case "$R" in
+  *"ANCHOR_CREATED verified=true"*) ok "zone $ZONE anchored on the name server to authority ${AUTH_PUB:0:16}...";;
+  *ANCHOR_OK*) ok "zone $ZONE already anchored to authority ${AUTH_PUB:0:16}...";;
+  *ANCHOR_CONFLICT*) die "the name server anchors $ZONE to a DIFFERENT key (${R#*ANCHOR_CONFLICT }); not touching it";;
+  *) echo "$R"; die "could not anchor the zone on the name server";;
+esac
+
+step "5/7 Admin panel"
+mkdir -p "$ADIR/data" "$ADIR/db"; chown 1000:1000 "$ADIR/data"; chmod 700 "$ADIR/data"
+envset "$ADIR/.env" DB_PASSWORD "$(alnum48)"
+envset "$ADIR/.env" DB_ROOT_PASSWORD "$(alnum48)"
+envset "$ADIR/.env" GATEWAY_HEADER_SECRET "$(alnum48)"
+envset "$ADIR/.env" ADMIN_IMAGE "$ADMIN_IMAGE"
+cat > "$ADIR/docker-compose.yml" <<EOF
+# ZTLP admin panel for ${ZONE} (written by ztlp-bootstrap). Secrets live in .env.
+# web/jobs use host networking to reach the name server's local admin API. The web server
+# listens on 127.0.0.1:${PANEL_PORT} only; people reach it through the admin gateway.
+services:
+  db:
+    image: ${DB_IMAGE}
+    container_name: ztlp-admin-db
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: ztlp_admin
+      MARIADB_USER: ztlp_admin
+      MARIADB_PASSWORD: \${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: \${DB_ROOT_PASSWORD}
+    volumes: [ "./db:/var/lib/mysql" ]
+    ports: [ "127.0.0.1:33062:3306" ]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  web:
+    image: \${ADMIN_IMAGE}
+    container_name: ztlp-admin-web
+    restart: unless-stopped
+    network_mode: host
+    depends_on: { db: { condition: service_healthy } }
+    command: ["./bin/rails", "server", "-b", "127.0.0.1", "-p", "${PANEL_PORT}"]
+    environment: &env
+      DATABASE_URL: mysql2://ztlp_admin:\${DB_PASSWORD}@127.0.0.1:33062/ztlp_admin
+      RAILS_ENV: production
+      RAILS_LOG_TO_STDOUT: "1"
+      FORCE_SSL: "false"
+      ADMIN_ALLOWED_HOSTS: "admin.${ZONE},127.0.0.1"
+      ZTLP_ZONE: "${ZONE}"
+      ZTLP_NS_ADDR: "${PUBLIC_IP}:${NS_PORT}"
+      ZTLP_NS_PUBLISH_ADDR: "127.0.0.1:${NS_PORT}"
+      ZTLP_NS_ADMIN_BASE_URL: "http://127.0.0.1:9103"
+      ZTLP_REQUIRE_GATEWAY: "1"
+      ZTLP_GATEWAY_HEADER_SECRET: \${GATEWAY_HEADER_SECRET}
+      ZTLP_GATEWAY_AUDIENCE: admin
+    volumes: [ "./data:/data" ]
+  jobs:
+    image: \${ADMIN_IMAGE}
+    container_name: ztlp-admin-jobs
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [ web ]
+    command: ["bin/jobs"]
+    environment: *env
+    volumes: [ "./data:/data" ]
+EOF
+( cd "$ADIR" && docker compose up -d ) 2>&1 | grep -vE "obsolete|discarded" || true
+log "waiting for the panel's first start (creates its database, ~1 minute)..."
+c=000
+for _ in $(seq 1 90); do
+  c="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: 127.0.0.1' "http://127.0.0.1:${PANEL_PORT}/up" || true)"
+  [[ "$c" == 200 ]] && break; sleep 2
+done
+[[ "$c" == 200 ]] || { docker logs --tail 40 ztlp-admin-web; die "the panel did not come up (logs above)"; }
+ok "panel answering on 127.0.0.1:${PANEL_PORT}"
+
+log "connecting the panel to the name server and relay"
+cat > "$ADIR/data/zone-setup.rb" <<'RUBY'
+z = Zone.primary
+z.update!(ns_pubkey_hex: ENV.fetch("NS_PUB"), relay_addrs: [ENV.fetch("RELAY_ADDR")])
+puts "zone #{z.name}: name server #{z.ns_addr}, relay #{z.relay_addrs.join(',')}"
+RUBY
+chown 1000:1000 "$ADIR/data/zone-setup.rb"
+R="$(docker exec -e NS_PUB="$NS_PUB" -e RELAY_ADDR="$PUBLIC_IP:$RELAY_PORT" ztlp-admin-web \
+  /rails/bin/docker-entrypoint ./bin/rails runner /data/zone-setup.rb 2>&1 | tail -1)"
+rm -f "$ADIR/data/zone-setup.rb"
+[[ "$R" == zone* ]] && ok "$R" || die "zone setup in the panel failed: $R"
+for pair in "enrollment:ZTLP_ENROLLMENT_SECRET" "ns_admin_api:ZTLP_NS_ADMIN_API_SECRET" \
+            "relay:ZTLP_HMAC_SECRET_${SLUG}" "device_relay:RELAY_REGISTRATION_SECRET"; do
+  R="$(envget "$ENVF" "${pair#*:}" | panel_task "zone:set_secret[${pair%%:*}]" 2>&1 | tail -1)"
+  [[ "$R" == *"secret set"* ]] && ok "$R" || die "setting the ${pair%%:*} secret failed: $R"
+done
+# zone:import_authority reads `signing_key_seed`; keygen writes `ed25519_seed`. Hand it a one-field copy.
+python3 - "$ADIR/authority/identity.json" "$ADIR/data/za.json" <<'PY'
+import json, os, sys
+d = json.load(open(sys.argv[1])); s = d.get("signing_key_seed") or d.get("ed25519_seed")
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.write(fd, json.dumps({"signing_key_seed": s}).encode()); os.close(fd)
+PY
+chown 1000:1000 "$ADIR/data/za.json"
+R="$(panel_task "zone:import_authority[/data/za.json]" 2>&1 | tail -1)"; shred -u "$ADIR/data/za.json"
+[[ "$R" == *"authority imported"* ]] && ok "$R" || die "authority import failed: $R"
+
+step "6/7 Admin gateway (admin.$ZONE)"
+mkdir -p "$GDIR/data"; chmod 700 "$GDIR"
+envset "$GDIR/.env" "ZTLP_HMAC_SECRET_${SLUG}" "$(envget "$ENVF" "ZTLP_HMAC_SECRET_${SLUG}")"
+envset "$GDIR/.env" GATEWAY_HEADER_SECRET "$(envget "$ADIR/.env" GATEWAY_HEADER_SECRET)"
+cat > "$GDIR/data/policy.toml" <<'EOF'
+# Who may open the admin panel through this gateway. "*" = any device enrolled in the zone;
+# the panel itself still requires an administrator to sign in.
+default = "deny"
+
+[[services]]
+name = "admin"
+allow = ["*"]
+EOF
+[[ -s "$GDIR/data/identity.json" ]] || docker run --rm --user 0:0 -v "$GDIR/data:/data" "$GATEWAY_IMAGE" keygen --output /data/identity.json >/dev/null 2>&1
+chown -R 1000:1000 "$GDIR/data"; chmod 600 "$GDIR/data/identity.json"
+touch "$GDIR/admin-devices.txt"; chmod 600 "$GDIR/admin-devices.txt"
+gateway_compose
+( cd "$GDIR" && docker compose up -d ) 2>&1 | grep -vE "obsolete|discarded" || true
+for _ in $(seq 1 30); do logs_have ztlp-ns "admin\.${ZONE}.*accepted|accepted.*admin\.${ZONE}" && break; sleep 1; done
+if logs_have ztlp-ns "admin\.${ZONE}.*accepted|accepted.*admin\.${ZONE}"; then ok "admin.${ZONE} registered on the name server"
+else warn "admin.${ZONE} not yet accepted by the name server: check  docker logs ztlp-admin-gateway"; fi
+
+step "7/7 Backup + your first device"
+backup_now
+mint_token "$DEVICE_NAME"
+CLAIM=""
+for _ in $(seq 1 10); do CLAIM="$(docker logs ztlp-admin-web 2>&1 | grep -oE 'Claim code: [A-Z0-9-]+' | tail -1 | awk '{print $3}' || true)"; [[ -n "$CLAIM" ]] && break; sleep 1; done
+cat <<EOF
+$(printf '\033[1mPanel claim code\033[0m') (valid 24 h; whoever uses it first becomes the administrator):
+
+  ${CLAIM:-<not printed yet; run: sudo docker logs ztlp-admin-web | grep "Claim code">}
+
+$(printf '\033[1mNow on your own computer\033[0m') (every step: docs/BOOTSTRAP-NS-AND-ADMIN.md):
+  1. Install the ztlp v0.37.2 client, then enroll with the token above (name: ${DEVICE_NAME})
+  2. Start the ZTLP agent and open  http://admin.${ZONE}
+  3. Claim the panel as '${ADMIN_USER}' with the claim code above
+  4. Optional, sign in without prompts:  sudo $0 --admin-device <your static_public_key>=${ADMIN_USER}
+
+Copy the backup off this box now (it holds the zone authority and every secret):
+  scp ${SUDO_USER:-root}@${PUBLIC_IP}:${BACKUP_FILE} .
+EOF

@@ -82,25 +82,70 @@ def load_seed(path):
 def canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
+def claim_submit(url, body, sig):
+    """GET /claim for the session cookie + CSRF token, then POST the signed claim.
+    The panel only answers through its ZTLP gateway, so run this with the ZTLP agent up."""
+    import http.cookiejar, re, urllib.error, urllib.parse, urllib.request
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    url = url.rstrip("/")
+    try:
+        page = opener.open(url + "/claim", timeout=30).read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            sys.exit("403 from the panel: the request did not come through ZTLP (is the agent running?)")
+        sys.exit("GET %s/claim failed: HTTP %s" % (url, e.code))
+    except Exception as e:
+        sys.exit("cannot reach %s/claim: %s (is the ZTLP agent running?)" % (url, e))
+    m = re.search(r'name="authenticity_token" value="([^"]+)"', page)
+    if not m:
+        sys.exit("no claim form at %s/claim (already claimed? open %s in a browser)" % (url, url))
+    form = {"authenticity_token": m.group(1), "claim[signature]": sig}
+    form.update({"claim[%s]" % k: str(v) for k, v in body.items()})
+    req = urllib.request.Request(url + "/claim", data=urllib.parse.urlencode(form).encode(), method="POST")
+    try:
+        resp = opener.open(req, timeout=30)
+        text = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", "replace")
+        alert = re.search(r'class="[^"]*(?:alert|flash)[^"]*"[^>]*>\s*([^<]+)', text)
+        sys.exit("claim refused (HTTP %s): %s" % (e.code, alert.group(1).strip() if alert else "open the panel to see why"))
+    if "Welcome" in text or not resp.geturl().rstrip("/").endswith("/claim"):
+        print("Claimed: %s is now the first administrator. Open %s in your browser." % (body["username"], url))
+    else:
+        sys.exit("the claim did not complete; open %s/claim in a browser to see why" % url)
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--identity", default="~/.ztlp/identity.json")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("pubkey")
+    sub.add_parser("device-key", help="print static_public_key (for ztlp-bootstrap --admin-device)")
     c = sub.add_parser("claim"); c.add_argument("--code", required=True); c.add_argument("--username", required=True)
     c.add_argument("--display-name", required=True); c.add_argument("--email", default="")
+    cs = sub.add_parser("claim-submit", help="sign AND submit the claim to the panel (needs the ZTLP agent)")
+    cs.add_argument("--url", required=True, help="e.g. http://admin.example.ztlp")
+    cs.add_argument("--code", required=True); cs.add_argument("--username", required=True)
+    cs.add_argument("--display-name", required=True); cs.add_argument("--email", default="")
     lg = sub.add_parser("login"); lg.add_argument("--host", required=True); lg.add_argument("--nonce", required=True)
     a = ap.parse_args()
+    if a.cmd == "device-key":
+        with open(os.path.expanduser(a.identity)) as f:
+            k = json.load(f).get("static_public_key")
+        if not k:
+            sys.exit("identity.json has no static_public_key")
+        print(k if isinstance(k, str) else bytes(k).hex()); return
     pub, sign = _backend()
     seed = load_seed(a.identity)
     pk = pub(seed).hex()
     if a.cmd == "pubkey":
         print(pk); return
-    if a.cmd == "claim":
+    if a.cmd in ("claim", "claim-submit"):
         ts = int(time.time())
         body = {"claim_code": a.code, "username": a.username, "display_name": a.display_name,
                 "email": a.email, "pubkey_hex": pk, "timestamp": ts}
         sig = sign(seed, hashlib.sha256(canonical(body)).digest()).hex()
+        if a.cmd == "claim-submit":
+            claim_submit(a.url, body, sig); return
         print(f"pubkey_hex: {pk}\ntimestamp:  {ts}\nsignature:  {sig}"); return
     if a.cmd == "login":
         msg = f"ztlp-admin-login\n{a.host}\n{a.nonce}".encode()

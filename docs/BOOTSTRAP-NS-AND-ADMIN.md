@@ -22,10 +22,15 @@ public IP.
 
 - A Linux server with a public IP. Ubuntu 24.04 is tested. 2 vCPU and 4 GB of RAM are enough.
 - SSH access with `sudo`.
-- The two files from a release:
+- The two files that go on the server:
   - `ztlp-bootstrap` (this repo: `scripts/ztlp-bootstrap`)
-  - `ztlp-server-images-<version>.tar` (the server images: name server, relay, admin panel,
-    gateway, database)
+  - `ztlp-server-images-<tag>.tar`: the server images (name server, relay, admin panel,
+    gateway, database). Build it from this repo on any x86_64 Linux machine with Docker:
+
+    ```bash
+    git clone https://github.com/priceflex/ztlp && cd ztlp
+    scripts/build-server-images.sh
+    ```
 
 ### 1.2 Open the firewall
 

@@ -77,6 +77,46 @@ Additional documentation:
 - **[Relay VIP](#relay-vip)** — iOS-first relay-side VIP architecture for memory-constrained clients
 - **[Ops Runbook](#ops-runbook)** — Production operations guide
 
+## Run your own ZTLP name server
+
+One script sets up a complete ZTLP zone on a Linux server: name server, relay, and
+(optionally) the admin panel, reachable only through ZTLP at `http://admin.<your zone>`.
+Answer a few questions, enroll your computer with the token it prints, and open the panel.
+You are signed in as its administrator, with no password.
+
+**1. Build the server images** (on any x86_64 Linux machine with Docker, from this repo):
+
+```bash
+git clone https://github.com/priceflex/ztlp && cd ztlp
+scripts/build-server-images.sh            # writes ztlp-server-images-<tag>.tar
+```
+
+**2. Install on your server** (Ubuntu 24.04 with a public IP; open UDP 23095 and 23096):
+
+```bash
+scp ztlp-server-images-*.tar scripts/ztlp-bootstrap ubuntu@<server-ip>:~
+ssh ubuntu@<server-ip>
+./ztlp-bootstrap --load-from ztlp-server-images-*.tar
+```
+
+It installs Docker if needed and asks for your zone (for example `example.ztlp`), your
+panel username and the name of your computer. Then it prints a one-time enrollment token
+and waits for your computer to enroll.
+
+**3. Enroll your computer** with the [ztlp v0.37.2 client](https://github.com/priceflex/ztlp/releases/tag/v0.37.2):
+
+```bash
+ztlp setup --token 'ztlp://enroll/...' --name <your computer> --yes
+```
+
+When the server window says `Done`, start the ZTLP agent and open
+`http://admin.example.ztlp`.
+
+The full walkthrough is in **[docs/BOOTSTRAP-NS-AND-ADMIN.md](docs/BOOTSTRAP-NS-AND-ADMIN.md)**.
+It covers the firewall, the macOS client, backups, adding more devices, and
+troubleshooting. Afterwards: `./ztlp-bootstrap --mint-token` adds devices,
+`--link-admin` makes another computer yours, and `--backup` takes a backup.
+
 ## Table of Contents
 
 | # | Section |

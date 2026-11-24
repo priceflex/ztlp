@@ -2698,24 +2698,24 @@ async fn handle_tcp_connection(
     .await
 }
 /// Check if the agent daemon is currently running.
+///
+/// Delegates to [`control::get_agent_pid`], which does the recycled-PID
+/// self-heal: if the PID file's process is alive but is NOT one of our ZTLP
+/// binaries (Windows recycled the PID to an unrelated program), the stale
+/// file is cleared and `false` is returned — so the guard does not keep
+/// reporting "running" forever for a PID that no longer belongs to the agent.
 pub fn is_agent_running() -> bool {
-    let pid_path = control::default_pid_path();
-    if let Some(pid) = control::read_pid_file(&pid_path) {
-        control::is_process_running(pid)
-    } else {
-        false
-    }
+    control::get_agent_pid().is_some()
 }
 
 /// Get the PID of the running agent, if any.
+///
+/// Delegates to [`control::get_agent_pid`], which does the recycled-PID check
+/// and self-heals the stale `agent.pid` on Windows. See that function for the
+/// full rationale (the permanent "Agent already running (PID …)" wedge found
+/// live on RommelPCAsusTUF).
 pub fn get_agent_pid() -> Option<u32> {
-    let pid_path = control::default_pid_path();
-    let pid = control::read_pid_file(&pid_path)?;
-    if control::is_process_running(pid) {
-        Some(pid)
-    } else {
-        None
-    }
+    control::get_agent_pid()
 }
 
 #[cfg(test)]

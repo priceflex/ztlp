@@ -36,6 +36,7 @@ defmodule ZtlpNs.Store do
   @pubkey_index_table :ztlp_ns_pubkey_index
   @device_index_table :ztlp_ns_device_index
   @group_index_table :ztlp_ns_group_index
+  @node_id_index_table :ztlp_ns_node_id_index
 
   # Mnesia `wait_for_tables` timeout used during cold restart with
   # disc_copies storage. The previous 10s value crash-looped the NS on
@@ -109,6 +110,10 @@ defmodule ZtlpNs.Store do
 
             # Maintain group membership index for GROUP records
             index_group_members(record)
+
+            # Maintain node_id index for KEY/DEVICE records (O(1) endpoint
+            # auth ownership check; see lookup_by_node_id/1)
+            index_node_id(record)
 
             # Trigger eager replication unless this record came from a peer
             unless opts[:replicated] do
@@ -314,6 +319,50 @@ defmodule ZtlpNs.Store do
   end
 
   @doc """
+  Look up the record that a node_id is registered under.
+
+  Uses the node_id index table for an O(1) lookup instead of scanning the
+  whole record table. The index maps the 32-char lowercase hex node_id to
+  the record name, and the record is then read by (name, type).
+
+  Returns `{:ok, type, record}` where type is `:key` or `:device`,
+  `:not_found`, or `{:error, :revoked}`.
+  """
+  @spec lookup_by_node_id(String.t()) ::
+          {:ok, Record.record_type(), Record.t()} | :not_found | {:error, :revoked}
+  def lookup_by_node_id(node_id_hex) when is_binary(node_id_hex) do
+    node_id_lower = String.downcase(node_id_hex)
+
+    try do
+      case :mnesia.dirty_read(@node_id_index_table, node_id_lower) do
+        [{@node_id_index_table, _node_id, name}] ->
+          # A name can hold both a KEY and a DEVICE record; a node_id binds
+          # to at most one of them (registration enforces this), so probe
+          # :key first and fall back to :device.
+          probe = lookup(name, :key)
+
+          case probe do
+            {:ok, record} -> {:ok, :key, record}
+            {:error, :revoked} -> {:error, :revoked}
+            :not_found ->
+              case lookup(name, :device) do
+                {:ok, record} -> {:ok, :device, record}
+                other -> other
+              end
+          end
+
+        [] ->
+          :not_found
+      end
+    rescue
+      # Table may not exist yet if Store hasn't fully initialized
+      ArgumentError -> :not_found
+    catch
+      :exit, {:aborted, {:no_exists, _}} -> :not_found
+    end
+  end
+
+  @doc """
   Look up all devices owned by a user.
 
   Returns a list of device names linked to the given user name.
@@ -436,6 +485,12 @@ defmodule ZtlpNs.Store do
     rescue
       _ -> :ok
     end
+    # Clear node_id index if it exists
+    try do
+      {:atomic, :ok} = :mnesia.clear_table(@node_id_index_table)
+    rescue
+      _ -> :ok
+    end
     :ok
   end
 
@@ -484,6 +539,13 @@ defmodule ZtlpNs.Store do
       [{:attributes, [:user, :group_name]}, {:type, :bag}, {storage_mode, [node()]}]
     )
 
+    # node_id index: maps node_id_hex (lowercase) → name for O(1) endpoint-auth
+    # ownership lookups (replaces the full record-table scan in EndpointAuth)
+    create_table(
+      @node_id_index_table,
+      [{:attributes, [:node_id_hex, :name]}, {:type, :set}, {storage_mode, [node()]}]
+    )
+
     # Wait for tables to be loaded (important on restart with disc_copies)
     # Timeout sourced from @mnesia_wait_timeout_ms (60s, see module head).
     # Hard-floored at 60s after the v0.30.4 deploy crash-loop where the
@@ -496,7 +558,8 @@ defmodule ZtlpNs.Store do
           @revoked_table,
           @pubkey_index_table,
           @device_index_table,
-          @group_index_table
+          @group_index_table,
+          @node_id_index_table
         ],
         @mnesia_wait_timeout_ms
       )
@@ -541,6 +604,39 @@ defmodule ZtlpNs.Store do
   end
 
   defp index_pubkey(_), do: :ok
+
+  # Maintain node_id index on insert of KEY/DEVICE records.
+  # Maps node_id_hex (lowercase) → name for O(1) endpoint-auth ownership
+  # lookups. Both KEY and DEVICE records carry a node_id; a given node_id is
+  # registered under at most one name, so a plain :set overwrite is correct.
+  # Defensive: if the index table doesn't exist yet (e.g., in tests that
+  # bypass full app startup), silently skip indexing — lookup_by_node_id/1
+  # falls back to :not_found in that case, which routes to the TOFU path.
+  defp index_node_id(%Record{type: :key, name: name, data: data}) do
+    index_node_id_entry(name, data)
+  end
+
+  defp index_node_id(%Record{type: :device, name: name, data: data}) do
+    index_node_id_entry(name, data)
+  end
+
+  defp index_node_id(_), do: :ok
+
+  defp index_node_id_entry(name, data) do
+    node_id = Map.get(data, :node_id) || Map.get(data, "node_id")
+
+    if is_binary(node_id) and node_id != "" do
+      node_id_lower = String.downcase(node_id)
+
+      try do
+        :mnesia.dirty_write({@node_id_index_table, node_id_lower, name})
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
 
   # When a ZTLP_REVOKE record is inserted, extract all revoked IDs
   # and add them to the revocation table for O(1) lookup.

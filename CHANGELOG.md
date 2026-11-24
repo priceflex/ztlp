@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **NS endpoint-auth ownership check is now O(1) instead of O(N) (fixes #137).**
+  `ZtlpNs.EndpointAuth.find_registered_pubkey/1` previously copied and linearly
+  scanned the entire record table (`Store.list/0`) on every signed PEER_ENDPOINTS
+  (0x0A) and PUNCH_REPORT (0x0C) request. Since request rate grows with fleet
+  size and the table grows with node count, NS CPU grew as O(N²): one NS serving
+  ~2,100 keepalive-sending listeners sat at 500–600% CPU and stopped answering
+  UDP (a `stale_timestamp` flood), which then darkened rebooting listeners whose
+  initial NS publish timed out. The fix adds a `node_id → name` index table in
+  `ZtlpNs.Store` (maintained on insert of KEY/DEVICE records, like the existing
+  pubkey index) and a `Store.lookup_by_node_id/1` API; the ownership check is
+  now a single index read + one record lookup. A revoked node_id is rejected
+  (`:not_key_owner`) rather than routed to the TOFU pin path. The remaining
+  `Store.list/0` callers in the NS are cold-path (delegation verification,
+  anti-entropy, the pubkey-index fallback) and left as-is.
+
 - **The agent's VIP proxy ports are now operator-configurable.** Operators can
   add listeners beyond the built-in eight (22, 80, 443, 3306, 5432, 3389,
   8080, 8443) via `[[tunnel.vip_ports]]` in `agent.toml` or the

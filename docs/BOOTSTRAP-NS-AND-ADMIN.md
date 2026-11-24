@@ -179,6 +179,8 @@ Start the ZTLP agent (the ZTLP app, or `ztlp agent start`), then open
 | Token for another device | `sudo ./ztlp-bootstrap --mint-token --device-name bob-laptop` |
 | Another of your computers signs in as you | `sudo ./ztlp-bootstrap --mint-token --device-name alice-laptop`, enroll it, then `sudo ./ztlp-bootstrap --link-admin --device-name alice-laptop` |
 | Fresh backup | `sudo ./ztlp-bootstrap --backup` |
+| Stop a device signing in by itself | `sudo ./ztlp-bootstrap --unlink alice-laptop` |
+| Reserve a name for a new gateway | `sudo ./ztlp-bootstrap --allow-gateway files=<its ed25519_public_key>` |
 | Re-run the installer (keeps everything) | `sudo ./ztlp-bootstrap` |
 
 Where things live on the server:
@@ -217,6 +219,16 @@ ZTLP on that device.
 Mint a new one: `sudo ./ztlp-bootstrap --mint-token --device-name alice-mac`.
 
 ## How the pieces fit (for the curious)
+
+- **Who can create names.** The installer runs the name server in closed-registration
+  mode with your zone's authority key pinned (`ZTLP_NS_CLOSED_REGISTRATION=true`,
+  `ZTLP_NS_ZONE_AUTHORITY`). Only that authority (the admin panel) or a device using a
+  one-time enrollment token can create a name in your zone, and nobody can claim the
+  zone itself. Devices and gateways can still refresh their own names. A gateway you add
+  later needs its name reserved first, with `--allow-gateway`; its key is
+  `ed25519_public_key` in the gateway's `identity.json`.
+- **Linking your computer.** The installer links only a device that enrolled with your
+  token, as recorded by the name server. A name that merely exists proves nothing.
 
 - The name server signs every answer with its own key. The enrollment token carries that
   key, so your Mac trusts only answers from your name server.

@@ -158,6 +158,11 @@ defmodule ZtlpNs.EndpointAuth do
 
       :not_registered ->
         check_or_set_pin(node_id, pubkey)
+
+      # A revoked node_id must never be routed to the TOFU pin path — that
+      # would let a revoked node keep claiming endpoint ownership. Reject.
+      {:error, :revoked} ->
+        {:error, :not_key_owner}
     end
   end
 
@@ -182,35 +187,31 @@ defmodule ZtlpNs.EndpointAuth do
     end
   end
 
-  # Scan KEY/DEVICE records for one whose data.node_id matches. Mirrors
-  # the existing fallback_pubkey_scan pattern in ZtlpNs.Server -- O(n)
-  # over the record store, acceptable here because this only runs on
-  # the (rarer) pre-registration TOFU path once a node has no pin yet;
-  # once pinned, subsequent requests hit the O(1) ETS pin table instead.
+  # O(1) ownership check: the Store maintains a node_id → name index (see
+  # Store.lookup_by_node_id/1), maintained on insert of KEY/DEVICE records.
+  # This replaces the previous full record-table scan, which copied every
+  # record on each signed 0x0A/0x0C request — O(N²) CPU at fleet scale
+  # (issue #137). A single index read + one record lookup is the hot path
+  # now; the index is defensive and falls back to :not_found (→ TOFU) if it
+  # is unavailable, which is the safe direction.
   defp find_registered_pubkey(node_id) do
     node_id_hex = Base.encode16(node_id, case: :lower)
 
-    result =
-      Store.list()
-      |> Enum.find(fn {_name, type, record} ->
-        type in [:key, :device] and record_node_id_hex(record) == node_id_hex
-      end)
-
-    case result do
-      {_name, _type, record} ->
+    case Store.lookup_by_node_id(node_id_hex) do
+      {:ok, _type, record} ->
         case record_pubkey_hex(record) do
           nil -> :not_registered
           pubkey_hex -> {:ok, decode_pubkey_hex(pubkey_hex)}
         end
 
-      nil ->
+      :not_found ->
         :not_registered
-    end
-  end
 
-  defp record_node_id_hex(%Record{data: data}) do
-    value = Map.get(data, "node_id") || Map.get(data, :node_id)
-    if is_binary(value), do: String.downcase(value), else: nil
+      # A revoked node_id should not be treated as "unregistered" (which
+      # would open the TOFU pin path); reject the claim instead.
+      {:error, :revoked} ->
+        {:error, :revoked}
+    end
   end
 
   defp record_pubkey_hex(%Record{data: data}) do

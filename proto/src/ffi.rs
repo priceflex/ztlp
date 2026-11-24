@@ -3637,8 +3637,10 @@ pub extern "C" fn ztlp_verify_gateway_pin(key_hex: *const c_char) -> i32 {
             return ZtlpResult::InvalidArgument as i32;
         }
 
-        // Load pinned keys from agent config
-        let agent_config = crate::agent::config::AgentConfig::load();
+        // Load pinned keys from agent config. Best-effort: a malformed
+        // `agent.toml` here means "no pins configured" (fail-open for this
+        // FFI helper, not for the daemon's startup path).
+        let agent_config = crate::agent::config::AgentConfig::load().unwrap_or_default();
         let pinned_keys = &agent_config.gateway.pinned_keys;
 
         if pinned_keys.is_empty() {

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **The agent's VIP proxy ports are now operator-configurable.** Operators can
+  add listeners beyond the built-in eight (22, 80, 443, 3306, 5432, 3389,
+  8080, 8443) via `[[tunnel.vip_ports]]` in `agent.toml` or the
+  `ZTLP_AGENT_VIP_PORTS` env var (`port[:tls]` items, env wins over TOML). Each
+  entry carries a per-port TLS mode: `passthrough` (default — bytes are
+  forwarded untouched, the safe default for end-to-end-TLS protocols like
+  Wazuh enrollment), `terminate` (always terminate locally, like built-in
+  443/8443), or `auto` (sniff the first bytes, the built-in default for
+  unknown ports). An entry for a built-in port overrides that port's TLS mode
+  only — it never adds a second listener. Bad configs fail at STARTUP with the
+  offending entry named: duplicate port, port 0, more than 32 entries, an
+  unknown TLS mode, or a collision with the agent's own `[dns]`/`[ipc]`
+  loopback listener (only when that listener's IP falls inside the VIP range).
+  A port the operator added is never treated as HTTP by the deadline-expiry
+  path: it always gets a bare close, never a 504 page. A built-in HTTP-ish
+  port overridden to `passthrough` also loses the 504 class, since the agent
+  no longer terminates TLS there. A no-config agent behaves exactly as before.
+
 ## v0.37.2 — 2026-11-14
 
 Two fixes found while rolling v0.37.1 out to a fleet. Rust (`proto/`) only; no

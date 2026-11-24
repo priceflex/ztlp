@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::local_tls::TlsConfig;
+use super::local_tls::{self, TlsConfig, TlsMode};
+#[allow(unused_imports)]
 use crate::identity::NodeId;
 
 /// IPC configuration.
@@ -253,9 +254,292 @@ pub struct TunnelConfig {
     /// `relay_secret`; the file contents are trimmed). `relay_secret` wins
     /// when both are set.
     pub relay_secret_file: Option<String>,
+
+    /// Extra VIP proxy ports to listen on, in addition to the built-in
+    /// eight (22, 80, 443, 3306, 5432, 3389, 8080, 8443).
+    ///
+    /// Every VIP the pool hands out gets a listener on each of these ports
+    /// (listeners = VIPs × ports), so the list is capped at
+    /// [`VIP_PORTS_MAX`] entries. An entry for a built-in port does NOT add
+    /// a second listener — it overrides that port's TLS mode only.
+    ///
+    /// ```toml
+    /// [[tunnel.vip_ports]]
+    /// port = 1514
+    /// tls  = "passthrough"   # default; bytes are forwarded untouched
+    /// ```
+    ///
+    /// `tls` is one of `passthrough` (default — never terminate TLS),
+    /// `terminate` (always terminate locally, like built-in 443/8443) or
+    /// `auto` (sniff the first bytes, the built-in default for unknown
+    /// ports).
+    #[serde(default, deserialize_with = "deserialize_vip_ports")]
+    pub vip_ports: Vec<VipPortConfig>,
+}
+
+/// Maximum number of `[tunnel] vip_ports` entries. Every VIP the pool hands
+/// out gets a listener on every configured port (listeners = VIPs × ports),
+/// so an unbounded list would let one config key spawn thousands of sockets.
+pub const VIP_PORTS_MAX: usize = 32;
+
+/// The eight ports the VIP proxy has always listened on. `vip_ports` is
+/// strictly additive on top of this set (an entry for a built-in port
+/// overrides that port's TLS mode; it never removes the listener).
+pub const VIP_BUILTIN_PORTS: [u16; 8] = [22, 80, 443, 3306, 5432, 3389, 8080, 8443];
+
+/// TLS handling for one configured VIP port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VipTlsMode {
+    /// Forward bytes untouched; the agent never terminates TLS on this port.
+    /// The default for operator-added ports — required for end-to-end TLS
+    /// protocols (e.g. Wazuh enrollment on 1515) that the peer must see
+    /// encrypted to its own certificate.
+    #[default]
+    Passthrough,
+    /// Terminate the TLS handshake locally (the built-in 443/8443
+    /// behaviour): the client sees a real TLS connection, the tunnel carries
+    /// decrypted bytes.
+    Terminate,
+    /// Sniff the first bytes and terminate only when they look like a TLS
+    /// ClientHello (the built-in behaviour for unknown ports).
+    Auto,
+}
+
+/// One `[[tunnel.vip_ports]]` entry.
+///
+/// `tls` is optional and defaults to [`VipTlsMode::Passthrough`] when the
+/// key is absent (the passthrough contract is the safe default for an
+/// operator-added port: bytes cross the tunnel untouched).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct VipPortConfig {
+    /// Port to listen on, in `1..=65535` (validated at load).
+    pub port: u16,
+    /// TLS handling for this port.
+    #[serde(default, deserialize_with = "deserialize_vip_tls_mode")]
+    pub tls: VipTlsMode,
+}
+
+/// The `tls` field of a `[[tunnel.vip_ports]]` entry accepts the plain
+/// string form (`tls = "auto"`), case-insensitive. An unknown string is a
+/// parse error that names the value (fail at load, not at bind).
+fn deserialize_vip_tls_mode<'de, D>(deserializer: D) -> Result<VipTlsMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    VipTlsMode::parse(&s).ok_or_else(|| {
+        serde::de::Error::custom(format!(
+            "unknown vip_ports TLS mode '{s}' (want passthrough, terminate or auto)"
+        ))
+    })
+}
+
+impl Default for VipPortConfig {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            tls: VipTlsMode::Passthrough,
+        }
+    }
+}
+
+impl VipPortConfig {
+    /// Parse a single `ZTLP_AGENT_VIP_PORTS` item (`port` or `port:tls`;
+    /// `tls` defaults to `passthrough`).
+    pub(crate) fn parse_item(item: &str) -> Result<Self, String> {
+        let (port_s, tls_s) = match item.split_once(':') {
+            Some((p, t)) => (p, t),
+            None => (item, "passthrough"),
+        };
+        let port: u16 = port_s
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid VIP port '{port_s}' (want 1..=65535)"))?;
+        if port == 0 {
+            return Err(format!(
+                "invalid VIP port '{port_s}': port 0 is not allowed"
+            ));
+        }
+        Ok(VipPortConfig {
+            port,
+            tls: VipTlsMode::parse(tls_s.trim())
+                .ok_or_else(|| format!("invalid TLS mode '{tls_s}' for port {port} (want passthrough, terminate or auto)"))?,
+        })
+    }
+}
+
+impl VipTlsMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "passthrough" => Some(VipTlsMode::Passthrough),
+            "terminate" => Some(VipTlsMode::Terminate),
+            "auto" => Some(VipTlsMode::Auto),
+            _ => None,
+        }
+    }
+
+    /// Map onto the local TLS engine's mode. `Passthrough` is `Never` —
+    /// `Never` returns the stream unwrapped and never peeks, so the bytes
+    /// (e.g. an end-to-end TLS ClientHello) cross the tunnel untouched.
+    pub fn as_tls_mode(self) -> TlsMode {
+        match self {
+            VipTlsMode::Passthrough => TlsMode::Never,
+            VipTlsMode::Terminate => TlsMode::Always,
+            VipTlsMode::Auto => TlsMode::Detect,
+        }
+    }
+}
+
+/// The resolved per-port VIP proxy policy: the effective listener list
+/// (built-in eight ∪ configured ports, deduped and sorted) plus the
+/// per-port TLS overrides. Built ONCE at daemon startup; the TCP proxy
+/// passes it to every handler so there is a single source of truth for
+/// both the TLS decision and the stall/504 decision.
+///
+/// A port is in the 504-class only when it is one of the four
+/// built-in-HTTP-ish ports (80, 8080, 443, 8443) AND the agent terminates
+/// TLS on it — only then can the deadline-expiry write half speak plain
+/// HTTP to the client. A configured port, or a built-in port overridden
+/// to `Passthrough`, must get the bare-close strategy: a 504 page through
+/// an opaque byte pipe is nonsense (the 504-class decision must never
+/// treat an unknown configured port as HTTP).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VipPortPolicy {
+    effective: Vec<u16>,
+    overrides: std::collections::HashMap<u16, TlsMode>,
+}
+
+impl Default for VipPortPolicy {
+    /// The no-configuration policy: the built-in eight, no overrides.
+    fn default() -> Self {
+        let mut effective: Vec<u16> = VIP_BUILTIN_PORTS.to_vec();
+        effective.sort_unstable();
+        Self {
+            effective,
+            overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl VipPortPolicy {
+    /// The ports the TCP proxy listens on for every VIP.
+    pub fn effective_ports(&self) -> &[u16] {
+        &self.effective
+    }
+
+    /// The resolved TLS mode for `port`: a configured override wins,
+    /// otherwise the built-in port table.
+    pub fn tls_mode(&self, port: u16) -> TlsMode {
+        self.overrides
+            .get(&port)
+            .copied()
+            .unwrap_or_else(|| local_tls::tls_mode_for_port(port))
+    }
+
+    /// The VIP accept-loop routing decision (PR #138 review): which
+    /// handler a connection on `port` takes when a TLS acceptor is
+    /// present.
+    ///
+    /// `Some(mode)` = route to the TLS-terminating handler
+    /// (`handle_tcp_connection_with_tls`), which performs
+    /// `maybe_wrap_tls` with `mode` — `Always` terminates
+    /// unconditionally, `Detect` peeks the first bytes and terminates
+    /// only when they look like a TLS ClientHello. `None` = the plain
+    /// `proxy_dial_then_bridge` path (passthrough ports must NEVER peek
+    /// or wrap — their bytes go through the tunnel untouched).
+    ///
+    /// A configured `auto` (`Detect`) override must therefore NOT be
+    /// treated as `Never`: before the PR #138 fix, the accept loop's
+    /// `tls_mode == Always` predicate sent every Detect port — including
+    /// explicitly configured `auto` ports — down the plain path with no
+    /// TLS detection at all, defeating the operator's `auto` choice.
+    /// Legacy `Detect` ports the operator never configured (DB/RDP,
+    /// where the built-in table says Detect) are preserved: they stay
+    /// on the plain path with passthrough behavior exactly as before.
+    pub fn tls_routing(&self, port: u16) -> Option<TlsMode> {
+        if self.overrides.contains_key(&port) {
+            match self.tls_mode(port) {
+                TlsMode::Never => None,
+                m => Some(m),
+            }
+        } else {
+            match local_tls::tls_mode_for_port(port) {
+                TlsMode::Always => Some(TlsMode::Always),
+                // Built-in `Never` (SSH/HTTP) and `Detect` (DB/RDP):
+                // the plain path, exactly as before.
+                _ => None,
+            }
+        }
+    }
+
+    /// Deadline-expiry strategy for `port` under this policy.
+    pub fn stall_close_strategy(&self, port: u16) -> super::daemon::StallCloseStrategy {
+        super::daemon::vip_stall_close_strategy(port, &self.overrides)
+    }
+}
+
+/// Deserialize `[[tunnel.vip_ports]]` as an array of tables, defaulting to
+/// the empty list when the key is absent entirely.
+fn deserialize_vip_ports<'de, D>(deserializer: D) -> Result<Vec<VipPortConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Vec<VipPortConfig> as serde::Deserialize>::deserialize(deserializer)
+}
+
+/// Parse the `ZTLP_AGENT_VIP_PORTS` environment override:
+/// `port[:tls]` items, comma-separated, `tls` defaulting to
+/// `passthrough` (e.g. `"1514:passthrough,1515"`).
+///
+/// Returns `Ok(None)` when the variable is unset or empty. Returns `Err`
+/// (naming the offending item) when it is set but malformed — the daemon
+/// treats that as a fatal config error at startup.
+pub fn parse_vip_ports_env(value: &str) -> Result<Option<Vec<VipPortConfig>>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for item in trimmed.split(',') {
+        if item.trim().is_empty() {
+            continue; // tolerate stray separators ("1514,,1515")
+        }
+        out.push(VipPortConfig::parse_item(item)?);
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 impl TunnelConfig {
+    /// Build the resolved per-port policy over the built-in eight plus the
+    /// configured `vip_ports`.
+    ///
+    /// The built-in ports always keep binding exactly as before; a
+    /// `vip_ports` entry for a built-in port overrides that port's TLS mode
+    /// only (no second listener, no duplicate in the effective list).
+    /// Entries for new ports are added to the listener list.
+    pub fn vip_ports_policy(&self) -> VipPortPolicy {
+        let mut effective: Vec<u16> = VIP_BUILTIN_PORTS.to_vec();
+        for entry in &self.vip_ports {
+            if !effective.contains(&entry.port) {
+                effective.push(entry.port);
+            }
+        }
+        effective.sort_unstable();
+        let mut overrides: std::collections::HashMap<u16, local_tls::TlsMode> =
+            std::collections::HashMap::new();
+        for entry in &self.vip_ports {
+            overrides.insert(entry.port, entry.tls.as_tls_mode());
+        }
+        VipPortPolicy {
+            effective,
+            overrides,
+        }
+    }
+
     /// Resolved relay HMAC secret bytes, or `None` when unconfigured.
     pub fn relay_secret_bytes(&self) -> Option<Vec<u8>> {
         if let Some(s) = self.relay_secret.as_deref() {
@@ -435,6 +719,7 @@ impl Default for TunnelConfig {
             first_byte_timeout: "15s".to_string(),
             relay_secret: None,
             relay_secret_file: None,
+            vip_ports: Vec::new(),
         }
     }
 }
@@ -464,49 +749,66 @@ impl Default for LogConfig {
 // ── Loading ─────────────────────────────────────────────────────────────────
 
 impl AgentConfig {
-    /// Load agent config from `~/.ztlp/agent.toml`, falling back to defaults.
-    pub fn load() -> Self {
+    /// Load agent config from `~/.ztlp/agent.toml`.
+    ///
+    /// A missing file yields defaults (a fresh box writes no `agent.toml`
+    /// until `ztlp setup`); a file that exists but fails to parse is an
+    /// error (see [`Self::load_from_path`]).
+    pub fn load() -> Result<Self, String> {
         Self::load_from_default_path()
     }
 
     /// Load from the default path `~/.ztlp/agent.toml` (or
     /// `$ZTLP_HOME/.ztlp/agent.toml` when running as the Windows service —
     /// see [`ztlp_state_dir`]).
-    fn load_from_default_path() -> Self {
+    fn load_from_default_path() -> Result<Self, String> {
         let path = ztlp_state_dir().join(".ztlp").join("agent.toml");
         Self::load_from_path(&path)
     }
 
-    /// Load from a specific path, falling back to defaults on any error.
-    pub fn load_from_path(path: &Path) -> Self {
-        if !path.exists() {
-            tracing::debug!("no agent config at {}, using defaults", path.display());
-            return Self::default();
-        }
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str(&contents) {
-                Ok(cfg) => {
-                    tracing::debug!("loaded agent config from {}", path.display());
-                    cfg
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to parse agent config {}: {}, using defaults",
-                        path.display(),
-                        e
-                    );
-                    Self::default()
-                }
-            },
+    /// Load from a specific path.
+    ///
+    /// An ABSENT file is not an error: the agent runs on defaults (a
+    /// freshly-installed box writes no `agent.toml` until `ztlp setup`).
+    /// A file that EXISTS but cannot be read or parsed IS an error —
+    /// silently substituting `Self::default()` would discard the operator's
+    /// whole config (every `[tunnel] vip_ports` entry, the relay list,
+    /// everything else in the file) and start a daemon that does not match
+    /// what the operator wrote. Malformed `vip_ports` in particular must
+    /// stop startup (PR #138 review), not vanish into defaults.
+    pub fn load_from_path(path: &Path) -> Result<Self, String> {
+        // Read the file DIRECTLY and key the absent-vs-broken decision on
+        // the read's error kind, not on `Path::exists()`: `exists()` returns
+        // `false` for a file the service account cannot reach (a parent
+        // directory the account lacks +x on), which would let a present
+        // `agent.toml` read as "absent" and silently fall back to defaults —
+        // defeating the fail-closed behaviour. Only a genuine `NotFound`
+        // means absent. (PR #138 review #3)
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!("no agent config at {}, using defaults", path.display());
+                return Ok(Self::default());
+            }
             Err(e) => {
-                tracing::warn!(
-                    "failed to read agent config {}: {}, using defaults",
+                return Err(format!(
+                    "failed to read agent config {}: {} — startup will not continue \
+                     with defaults",
                     path.display(),
                     e
-                );
-                Self::default()
+                ))
             }
-        }
+        };
+        let cfg: Self = toml::from_str(&contents).map_err(|e| {
+            format!(
+                "failed to parse agent config {}: {} — fixing the file is required; \
+                 startup will not continue with defaults",
+                path.display(),
+                e
+            )
+        })?;
+        tracing::debug!("loaded agent config from {}", path.display());
+        Ok(cfg)
     }
 
     /// Resolve the identity file path, expanding `~` to home dir.
@@ -540,8 +842,8 @@ impl AgentConfig {
     /// operator to hand-author `agent.toml`: real `agent.toml` values are
     /// never overridden, only fields still at their bare struct default are
     /// backfilled from `config.toml`.
-    pub fn load_merged(agent_config_path: &Path, cli_config_path: &Path) -> Self {
-        let mut cfg = Self::load_from_path(agent_config_path);
+    pub fn load_merged(agent_config_path: &Path, cli_config_path: &Path) -> Result<Self, String> {
+        let mut cfg = Self::load_from_path(agent_config_path)?;
         let cli = CliConfigForMerge::load(cli_config_path);
 
         if cfg.ns.servers == NsConfig::default().servers {
@@ -560,8 +862,106 @@ impl AgentConfig {
             }
         }
 
-        cfg
+        Ok(cfg)
     }
+
+    /// Validate `[tunnel] vip_ports`, returning a readable error that
+    /// NAMES the offending entry.
+    ///
+    /// Checked (in order, first failure wins):
+    /// - duplicate `port` entries (an override and a duplicate are the
+    ///   same shape — one entry per port, never two);
+    /// - `port = 0` (a real socket port is 1..=65535; the `u16` type
+    ///   already rules out >65535);
+    /// - more than [`VIP_PORTS_MAX`] entries (every VIP binds every port,
+    ///   so listeners = VIPs × ports);
+    /// - collision with the agent's OWN loopback listeners: a `vip_port`
+    ///   equal to the `[dns] listen` or `[ipc] listen` port when that
+    ///   listener's IP is inside the configured `[dns] vip_range` (the
+    ///   VIP pool would hand out an address the agent itself binds).
+    pub fn validate_vip_ports(&self) -> Result<(), String> {
+        let ports = &self.tunnel.vip_ports;
+
+        // Cap first: the listener combinator (VIPs × ports) grows with
+        // this, and an oversized list is the most operator-visible error.
+        if ports.len() > VIP_PORTS_MAX {
+            return Err(format!(
+                "[tunnel] vip_ports: at most {VIP_PORTS_MAX} entries are allowed (got {}); \
+                 every VIP binds every listed port",
+                ports.len()
+            ));
+        }
+
+        // Duplicates and port 0 (named).
+        let mut seen = std::collections::HashSet::new();
+        for entry in ports {
+            if entry.port == 0 {
+                return Err("[tunnel] vip_ports: port 0 is not a valid socket port".to_string());
+            }
+            if !seen.insert(entry.port) {
+                return Err(format!(
+                    "[tunnel] vip_ports: duplicate port {} (one entry per port)",
+                    entry.port
+                ));
+            }
+        }
+
+        // Collisions with the agent's own loopback listeners, but only
+        // when that listener's IP actually falls in the VIP range — a
+        // DNS listener on 127.0.0.53:5353 never collides with a 127.100.x.x
+        // VIP.
+        let vip_base: u32 = match parse_vip_range_base(&self.dns.vip_range) {
+            Some(b) => b,
+            None => {
+                // Unparseable vip_range is reported by the daemon when it
+                // builds the pool; the collision check can't apply.
+                return Ok(());
+            }
+        };
+        let vip_prefix: Option<u8> = self
+            .dns
+            .vip_range
+            .rsplit_once('/')
+            .and_then(|(_, p)| p.parse().ok());
+        let in_vip_range = |ip: &str| {
+            let Ok(ip_num) = ip.parse::<std::net::Ipv4Addr>() else {
+                return false;
+            };
+            let mask = match vip_prefix {
+                Some(n) => u32::MAX << (32 - n.min(32)),
+                None => u32::MAX,
+            };
+            (u32::from(ip_num) & mask) == (vip_base & mask)
+        };
+
+        for entry in ports {
+            let port = entry.port;
+            for (label, listen) in [("dns", &self.dns.listen), ("ipc", &self.ipc.listen)] {
+                if let Some((ip, p)) = listen.rsplit_once(':') {
+                    if let Ok(p) = p.parse::<u16>() {
+                        if p == port && in_vip_range(ip) {
+                            return Err(format!(
+                                "[tunnel] vip_ports: port {port} collides with the agent's own \
+                                 [{label}] listener {listen} (its IP {ip} is inside the VIP \
+                                 range {})",
+                                self.dns.vip_range
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Parse the base address of a CIDR string (e.g. "127.100.0.0/16" → the
+/// numeric base), or `None` when it is not a valid `a.b.c.d/len`.
+fn parse_vip_range_base(cidr: &str) -> Option<u32> {
+    let (ip_s, prefix_s) = cidr.rsplit_once('/')?;
+    prefix_s.parse::<u8>().ok()?;
+    ip_s.parse::<std::net::Ipv4Addr>().ok().map(u32::from)
 }
 
 /// Minimal shape of the CLI's `~/.ztlp/config.toml`, used only to backfill
@@ -581,9 +981,11 @@ struct CliConfigForMerge {
 
 impl CliConfigForMerge {
     /// Load from `path`, falling back to all-`None` on any error (missing
-    /// file, malformed TOML) — mirrors [`AgentConfig::load_from_path`]'s
-    /// fail-open behavior so a broken/missing CLI config never blocks the
-    /// agent from starting with defaults.
+    /// file, malformed TOML). This backfill source stays fail-open: the CLI
+    /// config only backfills fields the operator never set in `agent.toml`,
+    /// so a broken/missing `config.toml` must never block startup — the
+    /// operator's own `agent.toml` IS fail-closed (see
+    /// [`AgentConfig::load_from_path`]).
     fn load(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
@@ -1125,9 +1527,92 @@ node_id = "abcd"
 
     #[test]
     fn test_load_nonexistent_file() {
-        let cfg = AgentConfig::load_from_path(Path::new("/nonexistent/agent.toml"));
+        let cfg = AgentConfig::load_from_path(Path::new("/nonexistent/agent.toml")).unwrap();
         // Should return defaults without error
         assert_eq!(cfg.dns.listen, "127.0.0.53:5353");
+    }
+
+    // ── PR #138 review (CodeRabbit): a malformed vip_ports entry (e.g. an
+    // invalid `tls` value) must STOP startup with the parse error named, not
+    // be silently discarded in favor of AgentConfig::default() (which drops
+    // every other setting from agent.toml too). ────────────────────────────
+
+    #[test]
+    fn test_load_from_path_malformed_vip_tls_stops_startup_instead_of_silently_defaulting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.toml");
+        write_file(
+            &path,
+            r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 9000
+tls = "nope"
+"#,
+        );
+
+        // The file EXISTS, so the "absent -> defaults" rule does not apply:
+        // a parse failure must surface as a startup error naming the file and
+        // the offending value — never as a silent Self::default() that drops
+        // the operator's whole config.
+        let err = AgentConfig::load_from_path(&path)
+            .expect_err("malformed agent.toml must fail startup, not load defaults");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nope"),
+            "error must name the offending tls value, got: {msg}"
+        );
+        assert!(
+            msg.contains("agent.toml"),
+            "error must name the config file, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_path_valid_vip_ports_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.toml");
+        write_file(
+            &path,
+            r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 1514
+tls = "passthrough"
+"#,
+        );
+
+        let cfg = AgentConfig::load_from_path(&path).expect("valid vip_ports must load");
+        assert_eq!(cfg.tunnel.vip_ports.len(), 1);
+        assert_eq!(cfg.tunnel.vip_ports[0].port, 1514);
+    }
+
+    // ── PR #138 review #3: a PRESENT-but-unreadable agent.toml must FAIL
+    // CLOSED, not read as "absent" (→ defaults). `Path::exists()` is `false`
+    // for a file the account cannot reach, so the loader must key on the
+    // read's error kind, not `exists()`: only `NotFound` means absent.
+    //
+    // This verifies the DECISION hermetically (no real permission drop
+    // needed): a file whose `read_to_string` returns a NON-`NotFound` error
+    // must produce a `load_from_path` error, and `exists()` must still report
+    // it as present (the old code's `exists()` guard would have skipped it).
+    #[test]
+    fn test_load_from_path_present_but_unreadable_fails_closed() {
+        // A directory: `read_to_string` fails with IsADirectory (NOT
+        // NotFound) and `exists()` is true — the exact shape of an
+        // "unreadable but present" file. The loader must fail closed.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path(); // exists, but reading it as a file errors
+        let res = AgentConfig::load_from_path(target);
+        assert!(res.is_err(), "a present-but-unreadable config must error");
+        assert!(
+            target.exists(),
+            "the path must still exist (only a genuine NotFound means absent)"
+        );
+        assert!(
+            res.unwrap_err().contains("failed to read"),
+            "the error must name the read failure, not fall back to defaults"
+        );
     }
 
     // ── D3.T2: parse_duration_str ───────────────────────────────────────
@@ -1218,7 +1703,7 @@ zone = "demo.spongebob.ztlp"
 "#,
         );
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         assert_eq!(cfg.ns_server(), "34.221.165.244:24096");
         assert_eq!(
@@ -1251,7 +1736,7 @@ relay = "34.221.165.244:24095"
 "#,
         );
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         // Explicit agent.toml value wins — never silently overridden.
         assert_eq!(cfg.ns_server(), "10.0.0.1:23096");
@@ -1268,7 +1753,7 @@ relay = "34.221.165.244:24095"
         let agent_path = dir.path().join("agent.toml");
         let cli_path = dir.path().join("config.toml");
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         assert_eq!(cfg.ns_server(), "127.0.0.1:23096");
         assert!(cfg.tunnel.relays.0.is_empty());
@@ -1281,10 +1766,480 @@ relay = "34.221.165.244:24095"
         let cli_path = dir.path().join("config.toml");
         write_file(&cli_path, "not valid toml {{{");
 
-        let cfg = AgentConfig::load_merged(&agent_path, &cli_path);
+        let cfg = AgentConfig::load_merged(&agent_path, &cli_path).unwrap();
 
         // Malformed CLI config must not panic and must not poison agent
         // defaults — falls back exactly as if the file were absent.
         assert_eq!(cfg.ns_server(), "127.0.0.1:23096");
+    }
+
+    // ── [tunnel] vip_ports: operator-configurable VIP proxy ports ──────
+    // The design: `[[tunnel.vip_ports]]` (or `ZTLP_AGENT_VIP_PORTS`) adds
+    // listeners beyond the built-in eight, with a per-port TLS mode
+    // (passthrough / terminate / auto). Passthrough must NEVER terminate
+    // TLS and must NEVER emit a 504 page (bare close only). Bad configs
+    // fail at STARTUP with the offending entry named.
+    use super::{
+        parse_vip_ports_env, VipPortConfig, VipPortPolicy, VipTlsMode, VIP_BUILTIN_PORTS,
+        VIP_PORTS_MAX,
+    };
+    use crate::agent::daemon::{vip_stall_close_strategy, StallCloseStrategy};
+    use crate::agent::local_tls::TlsMode;
+
+    fn vpc(port: u16, tls: VipTlsMode) -> VipPortConfig {
+        VipPortConfig { port, tls }
+    }
+
+    fn cfg_with_ports(ports: Vec<VipPortConfig>) -> AgentConfig {
+        let mut cfg = AgentConfig::default();
+        cfg.tunnel.vip_ports = ports;
+        cfg
+    }
+
+    // ── VipTlsMode ─────────────────────────────────────────────────────
+
+    #[test]
+    // tls_routing: the VIP accept-loop handler choice (PR #138
+    // review, daemon.rs:1684)
+    fn tls_routing_configured_auto_port_reaches_the_detecting_path() {
+        // The exact PR #138 bug: a configured `auto` override must route
+        // to the TLS-detecting handler (Some(Detect)), not the plain
+        // passthrough path (None) with no TLS detection at all.
+        let policy = cfg_with_ports(vec![vpc(9443, VipTlsMode::Auto)])
+            .tunnel
+            .vip_ports_policy();
+        assert_eq!(policy.tls_routing(9443), Some(TlsMode::Detect));
+    }
+
+    #[test]
+    fn tls_routing_configured_terminate_routes_to_always_terminating() {
+        let policy = cfg_with_ports(vec![vpc(9443, VipTlsMode::Terminate)])
+            .tunnel
+            .vip_ports_policy();
+        assert_eq!(policy.tls_routing(9443), Some(TlsMode::Always));
+    }
+
+    #[test]
+    fn tls_routing_configured_passthrough_stays_on_the_plain_path() {
+        // Passthrough ports (Wazuh 1514/1515 etc.) must NEVER enter the
+        // TLS-terminating handler: None, whatever the built-in table says.
+        let policy = cfg_with_ports(vec![
+            vpc(1514, VipTlsMode::Passthrough),
+            // A passthrough override even on a built-in Always port:
+            // the operator's explicit choice wins (443 passthrough =
+            // opaque byte pipe, no local TLS termination).
+            vpc(443, VipTlsMode::Passthrough),
+        ])
+        .tunnel
+        .vip_ports_policy();
+        assert_eq!(policy.tls_routing(1514), None);
+        assert_eq!(policy.tls_routing(443), None);
+    }
+
+    #[test]
+    fn tls_routing_legacy_unconfigured_ports_keep_their_existing_behavior() {
+        // No vip_ports configured at all: built-in Always ports
+        // terminate locally (as before), built-in Never and Detect
+        // ports stay on the plain path with passthrough behavior
+        // exactly as before (DB/RDP are NOT suddenly TLS-wrapped).
+        let policy = VipPortPolicy::default();
+        assert_eq!(policy.tls_routing(443), Some(TlsMode::Always));
+        assert_eq!(policy.tls_routing(8443), Some(TlsMode::Always));
+        assert_eq!(policy.tls_routing(22), None);
+        assert_eq!(policy.tls_routing(80), None);
+        assert_eq!(policy.tls_routing(8080), None);
+        // Legacy Detect (unconfigured DB/RDP): plain path, unchanged.
+        assert_eq!(policy.tls_routing(3306), None);
+        assert_eq!(policy.tls_routing(5432), None);
+        assert_eq!(policy.tls_routing(3389), None);
+    }
+
+    #[test]
+    fn vip_tls_mode_defaults_to_passthrough() {
+        assert_eq!(VipTlsMode::default(), VipTlsMode::Passthrough);
+    }
+
+    #[test]
+    fn vip_tls_mode_maps_onto_the_local_tls_engine() {
+        // Passthrough is `Never`: the engine returns the stream unwrapped
+        // and never peeks, so bytes (an end-to-end TLS ClientHello) cross
+        // the tunnel untouched.
+        assert_eq!(VipTlsMode::Passthrough.as_tls_mode(), TlsMode::Never);
+        assert_eq!(VipTlsMode::Terminate.as_tls_mode(), TlsMode::Always);
+        assert_eq!(VipTlsMode::Auto.as_tls_mode(), TlsMode::Detect);
+    }
+
+    // ── ZTLP_AGENT_VIP_PORTS env parsing ───────────────────────────────
+
+    #[test]
+    fn vip_ports_env_parses_port_and_tls_items() {
+        let got = parse_vip_ports_env("1514:passthrough,1515")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                vpc(1514, VipTlsMode::Passthrough),
+                vpc(1515, VipTlsMode::Passthrough)
+            ]
+        );
+    }
+
+    #[test]
+    fn vip_ports_env_accepts_all_three_modes_case_insensitively() {
+        let got = parse_vip_ports_env("100:terminate,101:AUTO,102:Terminate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got[0].tls, VipTlsMode::Terminate);
+        assert_eq!(got[1].tls, VipTlsMode::Auto);
+        assert_eq!(got[2].tls, VipTlsMode::Terminate);
+    }
+
+    #[test]
+    fn vip_ports_env_defaults_to_passthrough_when_mode_omitted() {
+        let got = parse_vip_ports_env("1515").unwrap().unwrap();
+        assert_eq!(got, vec![vpc(1515, VipTlsMode::Passthrough)]);
+    }
+
+    #[test]
+    fn vip_ports_env_returns_none_when_unset_or_empty() {
+        assert_eq!(parse_vip_ports_env("").unwrap(), None);
+        assert_eq!(parse_vip_ports_env("   \t ").unwrap(), None);
+        assert_eq!(parse_vip_ports_env(",,").unwrap(), None);
+    }
+
+    #[test]
+    fn vip_ports_env_tolerates_stray_separators() {
+        let got = parse_vip_ports_env("1514,,1515").unwrap().unwrap();
+        assert_eq!(
+            got,
+            vec![
+                vpc(1514, VipTlsMode::Passthrough),
+                vpc(1515, VipTlsMode::Passthrough)
+            ]
+        );
+    }
+
+    #[test]
+    fn vip_ports_env_rejects_port_zero_and_names_it() {
+        let err = parse_vip_ports_env("0:passthrough").unwrap_err();
+        assert!(
+            err.contains("0"),
+            "error must name the offending item: {err}"
+        );
+    }
+
+    #[test]
+    fn vip_ports_env_rejects_non_numeric_port_and_names_it() {
+        let err = parse_vip_ports_env("abc").unwrap_err();
+        assert!(
+            err.contains("abc"),
+            "error must name the offending item: {err}"
+        );
+    }
+
+    #[test]
+    fn vip_ports_env_rejects_out_of_range_port_and_names_it() {
+        // 65536 does not fit a u16, so the parse fails — the error must
+        // still name the item, not panic.
+        let err = parse_vip_ports_env("65536").unwrap_err();
+        assert!(
+            err.contains("65536"),
+            "error must name the offending item: {err}"
+        );
+    }
+
+    #[test]
+    fn vip_ports_env_rejects_unknown_tls_mode_and_names_it() {
+        let err = parse_vip_ports_env("1514:whysoserious").unwrap_err();
+        assert!(
+            err.contains("whysoserious"),
+            "error must name the offending item: {err}"
+        );
+        assert!(
+            err.contains("1514"),
+            "error should name the port too: {err}"
+        );
+    }
+
+    // ── TOML round-trip ────────────────────────────────────────────────
+
+    #[test]
+    fn vip_ports_toml_parses_entries_and_defaults_tls_to_passthrough() {
+        let toml_str = r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 1514
+[[tunnel.vip_ports]]
+port = 443
+tls  = "passthrough"
+"#;
+        let cfg: AgentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.tunnel.vip_ports.len(), 2);
+        assert_eq!(cfg.tunnel.vip_ports[0], vpc(1514, VipTlsMode::Passthrough));
+        assert_eq!(cfg.tunnel.vip_ports[1], vpc(443, VipTlsMode::Passthrough));
+    }
+
+    #[test]
+    fn vip_ports_toml_parses_terminate_and_auto_modes() {
+        let toml_str = r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 9000
+tls  = "terminate"
+[[tunnel.vip_ports]]
+port = 9001
+tls  = "auto"
+"#;
+        let cfg: AgentConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.tunnel.vip_ports[0].tls, VipTlsMode::Terminate);
+        assert_eq!(cfg.tunnel.vip_ports[1].tls, VipTlsMode::Auto);
+    }
+
+    #[test]
+    fn vip_ports_toml_empty_when_key_absent() {
+        let cfg: AgentConfig = toml::from_str("[tunnel]").unwrap();
+        assert!(cfg.tunnel.vip_ports.is_empty());
+    }
+
+    #[test]
+    fn vip_ports_toml_unknown_mode_fails_at_load_naming_the_value() {
+        let toml_str = r#"
+[tunnel]
+[[tunnel.vip_ports]]
+port = 9000
+tls  = "nope"
+"#;
+        let err = toml::from_str::<AgentConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nope"),
+            "load error must name the offending value: {msg}"
+        );
+    }
+
+    // ── validate_vip_ports ─────────────────────────────────────────────
+
+    #[test]
+    fn validate_vip_ports_accepts_empty_and_valid() {
+        assert!(cfg_with_ports(vec![]).validate_vip_ports().is_ok());
+        assert!(cfg_with_ports(vec![
+            vpc(1514, VipTlsMode::Passthrough),
+            vpc(1515, VipTlsMode::Auto)
+        ])
+        .validate_vip_ports()
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_vip_ports_rejects_duplicate_port_naming_it() {
+        let err = cfg_with_ports(vec![
+            vpc(1514, VipTlsMode::Passthrough),
+            vpc(1514, VipTlsMode::Terminate),
+        ])
+        .validate_vip_ports()
+        .unwrap_err();
+        assert!(err.contains("1514"), "error must name the duplicate: {err}");
+    }
+
+    #[test]
+    fn validate_vip_ports_rejects_port_zero() {
+        let err = cfg_with_ports(vec![vpc(0, VipTlsMode::Passthrough)])
+            .validate_vip_ports()
+            .unwrap_err();
+        assert!(err.contains("0"), "error must name port 0: {err}");
+    }
+
+    #[test]
+    fn validate_vip_ports_rejects_over_cap_list() {
+        // VIP_PORTS_MAX+1 distinct ports.
+        let ports: Vec<VipPortConfig> = (20000..20000 + VIP_PORTS_MAX as u16 + 1)
+            .map(|p| vpc(p, VipTlsMode::Passthrough))
+            .collect();
+        assert_eq!(ports.len(), VIP_PORTS_MAX + 1);
+        let err = cfg_with_ports(ports).validate_vip_ports().unwrap_err();
+        assert!(
+            err.contains(&VIP_PORTS_MAX.to_string()),
+            "error must state the cap: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_vip_ports_accepts_exactly_the_cap() {
+        let ports: Vec<VipPortConfig> = (20000..20000 + VIP_PORTS_MAX as u16)
+            .map(|p| vpc(p, VipTlsMode::Passthrough))
+            .collect();
+        assert!(cfg_with_ports(ports).validate_vip_ports().is_ok());
+    }
+
+    #[test]
+    fn validate_vip_ports_flags_listener_collision_inside_vip_range() {
+        // The agent's own [dns] listener sits at 127.100.0.53:5353, which
+        // is INSIDE the default VIP range 127.100.0.0/16. A vip_port of
+        // 5353 would make the pool hand out an address the agent binds.
+        let mut cfg = cfg_with_ports(vec![vpc(5353, VipTlsMode::Passthrough)]);
+        cfg.dns.listen = "127.100.0.53:5353".to_string();
+        let err = cfg.validate_vip_ports().unwrap_err();
+        assert!(
+            err.contains("5353"),
+            "error must name the colliding port: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_vip_ports_allows_same_port_when_listener_outside_vip_range() {
+        // Default [dns] listen 127.0.0.53:5353 is OUTSIDE 127.100.0.0/16,
+        // so vip_port 5353 is fine (the default config already passes).
+        let cfg = cfg_with_ports(vec![vpc(5353, VipTlsMode::Passthrough)]);
+        assert_eq!(cfg.dns.listen, "127.0.0.53:5353");
+        assert!(cfg.validate_vip_ports().is_ok());
+    }
+
+    // ── vip_ports_policy (the resolved policy) ─────────────────────────
+
+    #[test]
+    fn vip_ports_policy_is_built_in_eight_when_unconfigured() {
+        let cfg = AgentConfig::default();
+        let policy = cfg.tunnel.vip_ports_policy();
+        let ports: Vec<u16> = policy.effective_ports().to_vec();
+        assert_eq!(ports.len(), VIP_BUILTIN_PORTS.len());
+        // Same set as the built-in eight (sorted, so compare as sets).
+        let mut expected: Vec<u16> = VIP_BUILTIN_PORTS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(ports, expected);
+        // No overrides: every port resolves to the built-in table answer.
+        assert_eq!(
+            policy.tls_mode(443),
+            crate::agent::local_tls::tls_mode_for_port(443)
+        );
+    }
+
+    #[test]
+    fn vip_ports_policy_adds_new_ports_sorted() {
+        let cfg = cfg_with_ports(vec![
+            vpc(9000, VipTlsMode::Passthrough),
+            vpc(3000, VipTlsMode::Auto),
+        ]);
+        let policy = cfg.tunnel.vip_ports_policy();
+        let ports: Vec<u16> = policy.effective_ports().to_vec();
+        assert!(ports.contains(&9000));
+        assert!(ports.contains(&3000));
+        assert_eq!(ports.len(), VIP_BUILTIN_PORTS.len() + 2);
+        // Sorted.
+        let mut sorted = ports.clone();
+        sorted.sort_unstable();
+        assert_eq!(ports, sorted);
+    }
+
+    #[test]
+    fn vip_ports_policy_overrides_builtin_port_mode_without_adding_listener() {
+        // 443 is built-in; a passthrough override flips its TLS mode but
+        // must NOT add a second listener (no duplicate 443).
+        let cfg = cfg_with_ports(vec![vpc(443, VipTlsMode::Passthrough)]);
+        let policy = cfg.tunnel.vip_ports_policy();
+        let ports: Vec<u16> = policy.effective_ports().to_vec();
+        assert_eq!(ports.iter().filter(|&&p| p == 443).count(), 1);
+        assert_eq!(policy.tls_mode(443), TlsMode::Never);
+    }
+
+    #[test]
+    fn vip_ports_policy_override_wins_over_builtin_table() {
+        let cfg = cfg_with_ports(vec![vpc(1514, VipTlsMode::Terminate)]);
+        let policy = cfg.tunnel.vip_ports_policy();
+        assert_eq!(policy.tls_mode(1514), TlsMode::Always);
+    }
+
+    #[test]
+    fn vip_ports_policy_default_is_built_in_eight_no_overrides() {
+        let policy = VipPortPolicy::default();
+        let ports: Vec<u16> = policy.effective_ports().to_vec();
+        assert_eq!(ports.len(), VIP_BUILTIN_PORTS.len());
+        let mut expected: Vec<u16> = VIP_BUILTIN_PORTS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(ports, expected);
+        assert_eq!(
+            policy.tls_mode(22),
+            crate::agent::local_tls::tls_mode_for_port(22)
+        );
+    }
+
+    // ── 504-class (stall close strategy) under the policy ──────────────
+
+    #[test]
+    fn vip_policy_504_class_kept_for_untouched_builtin_http_ports() {
+        let policy = VipPortPolicy::default();
+        for port in [80, 8080, 443, 8443u16] {
+            assert_eq!(
+                policy.stall_close_strategy(port),
+                StallCloseStrategy::Deliver504,
+                "port {port} must stay 504-class by default"
+            );
+        }
+    }
+
+    #[test]
+    fn vip_policy_504_class_dropped_when_builtin_http_port_is_passthrough() {
+        // 443 overridden to passthrough → the agent no longer terminates
+        // TLS there; a 504 page through the opaque pipe is garbage.
+        let cfg = cfg_with_ports(vec![vpc(443, VipTlsMode::Passthrough)]);
+        let policy = cfg.tunnel.vip_ports_policy();
+        assert_eq!(
+            policy.stall_close_strategy(443),
+            StallCloseStrategy::BareClose
+        );
+        // The other built-in HTTP ports are unaffected.
+        assert_eq!(
+            policy.stall_close_strategy(8080),
+            StallCloseStrategy::Deliver504
+        );
+    }
+
+    #[test]
+    fn vip_policy_configured_unknown_port_is_never_504_class() {
+        // A Wazuh-style operator-added port: bare close, whatever TLS
+        // mode it carries — the agent never speaks HTTP on it.
+        let cfg = cfg_with_ports(vec![
+            vpc(1514, VipTlsMode::Passthrough),
+            vpc(1515, VipTlsMode::Terminate),
+            vpc(1516, VipTlsMode::Auto),
+        ]);
+        let policy = cfg.tunnel.vip_ports_policy();
+        for port in [1514, 1515, 1516u16] {
+            assert_eq!(
+                policy.stall_close_strategy(port),
+                StallCloseStrategy::BareClose,
+                "configured port {port} must be bare-close"
+            );
+        }
+    }
+
+    #[test]
+    fn vip_policy_non_http_builtin_ports_stay_bare_close() {
+        let policy = VipPortPolicy::default();
+        for port in [22, 3306, 5432, 3389u16] {
+            assert_eq!(
+                policy.stall_close_strategy(port),
+                StallCloseStrategy::BareClose,
+                "port {port} must be bare-close by default"
+            );
+        }
+    }
+
+    #[test]
+    fn vip_stall_close_strategy_direct_override_never_is_bare_close() {
+        // The low-level helper agrees with the policy wrapper: a `Never`
+        // override on a built-in HTTP port removes the 504 class.
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(443, TlsMode::Never);
+        assert_eq!(
+            vip_stall_close_strategy(443, &overrides),
+            StallCloseStrategy::BareClose
+        );
+        // ...and an `Always`/`Detect` override keeps it.
+        overrides.insert(443, TlsMode::Always);
+        assert_eq!(
+            vip_stall_close_strategy(443, &overrides),
+            StallCloseStrategy::Deliver504
+        );
     }
 }

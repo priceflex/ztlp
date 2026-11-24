@@ -653,7 +653,16 @@ async fn cmd_status(state: &AgentState) -> ControlResponse {
     };
     drop(dns);
     let mut status = status;
-    status.relay = first_relay(&crate::agent::config::AgentConfig::load());
+    // Best-effort: the status reply must never fail to be delivered because
+    // of a config parse issue — a malformed `agent.toml` just leaves the
+    // relay field empty here.
+    status.relay = match crate::agent::config::AgentConfig::load() {
+        Ok(cfg) => first_relay(&cfg),
+        Err(e) => {
+            tracing::warn!("agent.toml unparseable for status relay: {e}");
+            String::new()
+        }
+    };
 
     ControlResponse::ok(serde_json::to_value(status).unwrap_or_default())
 }
@@ -935,21 +944,27 @@ async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
             // CA exists and must be trusted + NRPT re-pointed here, in
             // this same LocalSystem process. No-op off Windows, and no-op
             // for a non-service `ztlp.exe agent start` (is_windows_service
-            // false) — mirrors the daemon-post-bind guard exactly.
+            // false — mirrors the daemon-post-bind guard exactly.
+            // Best-effort: a malformed `agent.toml` must not wedge the
+            // whole enroll reply — the daemon's own startup path is
+            // fail-closed; here we just skip the Windows CA/NRPT plan.
             #[cfg(target_os = "windows")]
             if crate::agent::windows_daemon::is_windows_service() {
-                let cfg = crate::agent::config::AgentConfig::load();
-                let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
-                    is_service: true,
-                    dns_listen: cfg.dns.listen.clone(),
-                    ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
-                    ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
-                    ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
-                    token_path: crate::agent::config::default_token_path(),
-                    zones: cfg.dns.zones.clone(),
-                };
-                for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
-                    action.execute();
+                if let Ok(cfg) = crate::agent::config::AgentConfig::load() {
+                    let inputs = crate::agent::windows_daemon::WindowsStartupInputs {
+                        is_service: true,
+                        dns_listen: cfg.dns.listen.clone(),
+                        ca_root_pem: crate::agent::ca_trust::default_ca_cert_path(),
+                        ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
+                        ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
+                        token_path: crate::agent::config::default_token_path(),
+                        zones: cfg.dns.zones.clone(),
+                    };
+                    for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
+                        action.execute();
+                    }
+                } else {
+                    tracing::warn!("agent.toml unparseable; skipping Windows CA/NRPT plan");
                 }
             }
             ControlResponse::ok(data)

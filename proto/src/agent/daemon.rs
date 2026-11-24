@@ -33,7 +33,7 @@ use crate::packet::{HandshakeHeader, MsgType, SessionId, HANDSHAKE_HEADER_SIZE};
 use crate::transport::TransportNode;
 use crate::tunnel;
 
-use super::config::{self, AgentConfig};
+use super::config::{self, AgentConfig, VIP_BUILTIN_PORTS};
 use super::control::{self, AgentState};
 use super::dns::{self, DnsResolverState};
 use super::domain_map::DomainMapper;
@@ -394,6 +394,46 @@ pub fn stall_close_strategy(port: u16) -> StallCloseStrategy {
     }
 }
 
+/// Classify a port's deadline-expiry handling UNDER A VIP POLICY (pure,
+/// unit-tested).
+///
+/// The 504-class decision must account for configured ports: a 504 page
+/// is only meaningful when the agent has terminated TLS on the connection
+/// (the write half then speaks plain HTTP inside the encrypted channel) or
+/// when the port is a built-in plain-HTTP port (80/8080 — the page goes
+/// out raw). Two rules:
+///
+/// - A port the operator ADDED via `[[tunnel.vip_ports]]` is never
+///   504-class. It is an unknown protocol to the agent (a Wazuh agent
+///   speaking TLS end-to-end, a raw TCP service, ...); a fake HTTP status
+///   line through that pipe is nonsense bytes, and `stall_close_strategy`
+///   (the built-in table) already puts it in the bare-close class.
+/// - A built-in HTTP-ish port overridden to `Passthrough` (e.g.
+///   `[[tunnel.vip_ports]] port = 443, tls = "passthrough"`) loses the
+///   504 class: the agent no longer terminates TLS there, so the write
+///   half carries opaque bytes and a 504 page would be garbage.
+///
+/// Everything else keeps the built-in table's answer, so a config with no
+/// `vip_ports` behaves exactly like before.
+pub fn vip_stall_close_strategy(
+    port: u16,
+    overrides: &std::collections::HashMap<u16, local_tls::TlsMode>,
+) -> StallCloseStrategy {
+    // Unknown configured ports: bare close, whatever they are.
+    if !VIP_BUILTIN_PORTS.contains(&port) {
+        return StallCloseStrategy::BareClose;
+    }
+    match overrides.get(&port).copied() {
+        // Override to passthrough: no local TLS termination, no plain-HTTP
+        // channel — a 504 page is nonsense bytes. Bare close.
+        Some(local_tls::TlsMode::Never) => StallCloseStrategy::BareClose,
+        // Override to terminate/auto, or no override: the built-in table.
+        Some(local_tls::TlsMode::Always) | Some(local_tls::TlsMode::Detect) | None => {
+            stall_close_strategy(port)
+        }
+    }
+}
+
 /// B4 (HANDOFF-2026-09-20): should a daemon with no identity file wait in
 /// UNENROLLED STANDBY instead of exiting 1?
 ///
@@ -608,8 +648,48 @@ pub async fn run_daemon(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start_time = Instant::now();
 
+    // ── [tunnel] vip_ports: env override + startup validation ─────────
+    // `ZTLP_AGENT_VIP_PORTS` ("1514:passthrough,1515") beats the TOML
+    // key when set (Chef/installers can set ports without templating
+    // agent.toml); a malformed value is a fatal config error naming the
+    // offending item. `validate_vip_ports` then rejects duplicates,
+    // port 0, an over-cap list, and collisions with the agent's own
+    // loopback listeners (bad configs fail at STARTUP, not at bind).
+    let mut cfg_owned: Option<AgentConfig> = None;
+    if let Some(value) = std::env::var("ZTLP_AGENT_VIP_PORTS").ok() {
+        match config::parse_vip_ports_env(&value) {
+            Ok(Some(ports)) => {
+                if !config.tunnel.vip_ports.is_empty() {
+                    info!(
+                        "ZTLP_AGENT_VIP_PORTS overrides the [[tunnel] vip_ports] config \
+                         ({} env port(s) win)",
+                        ports.len()
+                    );
+                } else {
+                    info!("ZTLP_AGENT_VIP_PORTS: extra VIP ports from env");
+                }
+                let mut cfg = config.clone();
+                cfg.tunnel.vip_ports = ports;
+                cfg_owned = Some(cfg);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!("ZTLP_AGENT_VIP_PORTS is malformed: {e}").into());
+            }
+        }
+    }
+    let cfg = match &cfg_owned {
+        Some(c) => c,
+        None => config,
+    };
+    cfg.validate_vip_ports()?;
+    let vip_policy = cfg.tunnel.vip_ports_policy();
+    if cfg.tunnel.vip_ports.is_empty() {
+        debug!("VIP proxy: no [[tunnel] vip_ports] configured (built-in eight only)");
+    }
+
     // Load identity
-    let identity_path = config.identity_path();
+    let identity_path = cfg.identity_path();
     // B4 note: the unenrolled-standby wait happens in the CLI's
     // `cmd_agent_start` BEFORE the config is loaded (see
     // `ztlp-cli.rs`), so by the time we get here on a fresh Mac the
@@ -618,7 +698,7 @@ pub async fn run_daemon(
     // still checked here for callers that bypass the CLI.
     if should_enter_unenrolled_standby(&identity_path) {
         let proceed = run_unenrolled_standby(
-            &config.ipc.listen,
+            &cfg.ipc.listen,
             &identity_path,
             &config::default_token_path(),
             Duration::from_secs(1),
@@ -720,16 +800,16 @@ pub async fn run_daemon(
     }
 
     // Initialize VIP pool
-    let vip_pool = VipPool::new(&config.dns.vip_range)
-        .map_err(|e| format!("invalid VIP range '{}': {}", config.dns.vip_range, e))?;
+    let vip_pool = VipPool::new(&cfg.dns.vip_range)
+        .map_err(|e| format!("invalid VIP range '{}': {}", cfg.dns.vip_range, e))?;
     info!(
         "VIP pool: {} ({} addresses)",
-        config.dns.vip_range,
+        cfg.dns.vip_range,
         vip_pool.capacity()
     );
 
     // Initialize domain mapper
-    let domain_mapper = DomainMapper::new(&config.dns.domain_map);
+    let domain_mapper = DomainMapper::new(&cfg.dns.domain_map);
     if !domain_mapper.is_empty() {
         info!("domain mappings: {} configured", domain_mapper.len());
     }
@@ -738,8 +818,8 @@ pub async fn run_daemon(
     let mut dns_resolver_state = DnsResolverState {
         vip_pool,
         domain_mapper,
-        ns_server: config.ns_server().to_string(),
-        upstream_dns: config.dns.upstream.clone(),
+        ns_server: cfg.ns_server().to_string(),
+        upstream_dns: cfg.dns.upstream.clone(),
         vip_state_path: Some(config::vip_state_path()),
     };
     // Re-bind VIP listeners from the previous run before any DNS query:
@@ -755,38 +835,38 @@ pub async fn run_daemon(
     let dns_state = Arc::new(Mutex::new(dns_resolver_state));
 
     // Initialize tunnel pool
-    // D3.T2: honor config.tunnel.idle_timeout / keepalive_interval. On parse
+    // D3.T2: honor cfg.tunnel.idle_timeout / keepalive_interval. On parse
     // failure we keep the daemon up using the built-in defaults and log a
     // warning that names the bad value, so operators see the problem in the
     // log instead of having a daemon that refuses to start.
-    let idle_timeout = match config::parse_duration_str(&config.tunnel.idle_timeout) {
+    let idle_timeout = match config::parse_duration_str(&cfg.tunnel.idle_timeout) {
         Ok(d) => d,
         Err(e) => {
             warn!(
                 "invalid tunnel.idle_timeout '{}': {} — falling back to default {:?}",
-                config.tunnel.idle_timeout, e, DEFAULT_IDLE_TIMEOUT
+                cfg.tunnel.idle_timeout, e, DEFAULT_IDLE_TIMEOUT
             );
             DEFAULT_IDLE_TIMEOUT
         }
     };
-    let keepalive_interval = match config::parse_duration_str(&config.tunnel.keepalive_interval) {
+    let keepalive_interval = match config::parse_duration_str(&cfg.tunnel.keepalive_interval) {
         Ok(d) => d,
         Err(e) => {
             warn!(
                 "invalid tunnel.keepalive_interval '{}': {} — falling back to default {:?}",
-                config.tunnel.keepalive_interval, e, DEFAULT_KEEPALIVE_INTERVAL
+                cfg.tunnel.keepalive_interval, e, DEFAULT_KEEPALIVE_INTERVAL
             );
             DEFAULT_KEEPALIVE_INTERVAL
         }
     };
     let tunnel_pool = Arc::new(Mutex::new(TunnelPool::with_timeouts(
-        config.tunnel.max_tunnels,
+        cfg.tunnel.max_tunnels,
         idle_timeout,
         keepalive_interval,
     )));
     info!(
         "tunnel pool: max {} tunnels, idle_timeout={:?}, keepalive={:?}",
-        config.tunnel.max_tunnels, idle_timeout, keepalive_interval
+        cfg.tunnel.max_tunnels, idle_timeout, keepalive_interval
     );
 
     // Shutdown channel
@@ -831,7 +911,7 @@ pub async fn run_daemon(
         let i = crate::agent::macos_daemon::MacosStartupInputs::from_config(
             config,
             crate::agent::macos_daemon::is_root(),
-            &config.dns.listen,
+            &cfg.dns.listen,
         );
         crate::agent::macos_daemon::run_startup_pre_bind(&i);
         Some(i)
@@ -839,13 +919,13 @@ pub async fn run_daemon(
         None
     };
 
-    let dns_socket_and_addr = if config.dns.enabled {
-        match dns::bind_dns_socket_with_fallback(&config.dns.listen).await {
+    let dns_socket_and_addr = if cfg.dns.enabled {
+        match dns::bind_dns_socket_with_fallback(&cfg.dns.listen).await {
             Ok((socket, addr)) => Some((socket, addr)),
             Err(e) => {
                 return Err(format!(
                     "failed to bind DNS resolver on {} or any fallback port: {}",
-                    config.dns.listen, e
+                    cfg.dns.listen, e
                 )
                 .into());
             }
@@ -875,14 +955,13 @@ pub async fn run_daemon(
             // closure's early `return Err` would otherwise infer the whole
             // plan expression as a Result — E0308).
             let listen_plan =
-                match crate::agent::dns_setup_windows::plan_windows_nrpt_listen(&config.dns.listen)
-                {
+                match crate::agent::dns_setup_windows::plan_windows_nrpt_listen(&cfg.dns.listen) {
                     Ok(p) => p,
                     Err(e) => {
                         return Err(format!(
                             "Windows NRPT requires a loopback dns.listen on port 53 (got {}): {e} \
-                         — set dns.listen to 127.0.0.53:53 in config.toml",
-                            config.dns.listen
+                         — set dns.listen to 127.0.0.53:53 in cfg.toml",
+                            cfg.dns.listen
                         )
                         .into());
                     }
@@ -929,7 +1008,7 @@ pub async fn run_daemon(
     let effective_dns_listen = dns_socket_and_addr
         .as_ref()
         .map(|(_, addr)| addr.to_string())
-        .unwrap_or_else(|| config.dns.listen.clone());
+        .unwrap_or_else(|| cfg.dns.listen.clone());
 
     // ── macOS root startup, phase 2 (resolver files, CA trust, token) ─────
     // Needs the EFFECTIVE bound DNS port, hence after the bind.
@@ -959,7 +1038,7 @@ pub async fn run_daemon(
                 ca_root_pem_exists: crate::agent::ca_trust::default_ca_cert_path().exists(),
                 ca_already_trusted: crate::agent::ca_trust::is_ca_installed(),
                 token_path: config::default_token_path(),
-                zones: config.dns.zones.clone(),
+                zones: cfg.dns.zones.clone(),
             };
             for action in crate::agent::windows_daemon::windows_startup_plan(&inputs) {
                 action.execute();
@@ -999,7 +1078,7 @@ pub async fn run_daemon(
     };
 
     // ── Spawn control socket ────────────────────────────────────────────
-    let ipc_addr = config.ipc.listen.clone();
+    let ipc_addr = cfg.ipc.listen.clone();
     let ctrl_state = agent_state.clone();
     let ctrl_path = ipc_addr.clone();
     let ctrl_handle = tokio::spawn(async move {
@@ -1011,8 +1090,8 @@ pub async fn run_daemon(
     // ── Initialize local TLS ──────────────────────────────────────────
     let machine_ca = super::peruser::machine_ca_dir();
     let tls_acceptor =
-        if super::peruser::effective_tls_enabled(config.tls.enabled, machine_ca.as_deref()) {
-            let cert_dir = config.tls.cert_dir_path();
+        if super::peruser::effective_tls_enabled(cfg.tls.enabled, machine_ca.as_deref()) {
+            let cert_dir = cfg.tls.cert_dir_path();
             if let Err(e) = std::fs::create_dir_all(&cert_dir) {
                 warn!("failed to create cert dir {}: {}", cert_dir.display(), e);
             }
@@ -1127,18 +1206,19 @@ pub async fn run_daemon(
     // it establishes a ZTLP tunnel to the peer and bridges traffic.
     let proxy_dns_state = dns_state.clone();
     let proxy_identity = identity.clone();
-    let proxy_bind = config.tunnel.bind.clone();
-    let proxy_ns_server = config.ns_server().to_string();
+    let proxy_bind = cfg.tunnel.bind.clone();
+    let proxy_ns_server = cfg.ns_server().to_string();
     let proxy_tls_acceptor = tls_acceptor.clone();
-    let proxy_relay = config.tunnel.relays.0.first().cloned();
-    let proxy_first_byte_timeout = config.tunnel.first_byte_timeout.clone();
+    let proxy_relay = cfg.tunnel.relays.0.first().cloned();
+    let proxy_first_byte_timeout = cfg.tunnel.first_byte_timeout.clone();
+    let proxy_vip_policy = vip_policy.clone();
     if let Some(ref r) = proxy_relay {
         info!("relay configured: {}", r);
         // Direct-first dial order (docs/DIRECT-FIRST-DIAL-PLAN.md step B):
         // published gateway endpoints are tried before the relay unless the
         // operator sets `[tunnel] prefer_relay = true`.
-        set_prefer_relay(config.tunnel.prefer_relay);
-        if config.tunnel.prefer_relay {
+        set_prefer_relay(cfg.tunnel.prefer_relay);
+        if cfg.tunnel.prefer_relay {
             info!("dial order: relay first, direct endpoints as fallback (prefer_relay = true)");
         } else {
             info!("dial order: direct endpoints first, relay as fallback");
@@ -1148,7 +1228,7 @@ pub async fn run_daemon(
     }
     // Relay CLIENT_ROUTE signing: required when the relay runs
     // ZTLP_RELAY_HMAC_MODE=prod (unsigned frames are rejected there).
-    match config.tunnel.relay_secret_bytes() {
+    match cfg.tunnel.relay_secret_bytes() {
         Some(secret) => {
             info!(
                 "relay CLIENT_ROUTE signing enabled ({}-byte secret)",
@@ -1175,6 +1255,7 @@ pub async fn run_daemon(
             proxy_tls_acceptor,
             proxy_relay,
             proxy_first_byte_timeout,
+            proxy_vip_policy,
         )
         .await;
     });
@@ -1376,6 +1457,7 @@ pub async fn run_daemon(
 /// that don't have active TCP listeners. For each new VIP, it spawns a
 /// TCP listener on that address. When a client connects to a VIP, the
 /// proxy establishes a ZTLP tunnel to the peer and bridges traffic.
+#[allow(clippy::too_many_arguments)]
 async fn run_tcp_proxy(
     dns_state: Arc<Mutex<DnsResolverState>>,
     identity: NodeIdentity,
@@ -1384,7 +1466,34 @@ async fn run_tcp_proxy(
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     relay_addr: Option<String>,
     first_byte_timeout: String,
+    vip_policy: super::config::VipPortPolicy,
 ) {
+    // The resolved listener list (built-in eight ∪ configured `vip_ports`,
+    // deduped and sorted) plus the per-port TLS overrides, built ONCE at
+    // startup. Every VIP gets one listener per port in this list.
+    let effective_ports: Vec<u16> = vip_policy.effective_ports().to_vec();
+
+    // Log the effective port set once at startup (the operators' first
+    // look at a new `vip_ports` key).
+    let log_parts: Vec<String> = effective_ports
+        .iter()
+        .map(|p| {
+            let mode = vip_policy.tls_mode(*p);
+            if VIP_BUILTIN_PORTS.contains(p) {
+                p.to_string()
+            } else {
+                format!(
+                    "{p}({})",
+                    match mode {
+                        local_tls::TlsMode::Never => "passthrough",
+                        local_tls::TlsMode::Always => "terminate",
+                        local_tls::TlsMode::Detect => "auto",
+                    }
+                )
+            }
+        })
+        .collect();
+    info!("VIP proxy ports: {}", log_parts.join(","));
     // Track which VIPs we're already listening on
     let active_listeners: Arc<Mutex<std::collections::HashSet<Ipv4Addr>>> =
         Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -1446,9 +1555,8 @@ async fn run_tcp_proxy(
             // the VIP and the app connects to the VIP:port directly.
 
             // For each VIP, we'll try to listen on the full range of ports that matter.
-            // Start with the most common ones.
-            let common_ports = [22, 80, 443, 3306, 5432, 3389, 8080, 8443];
-
+            // The list is the startup-resolved `effective_ports` (built-in
+            // eight ∪ `[tunnel] vip_ports`, deduped) — see `run_tcp_proxy`.
             {
                 let mut listeners = active_listeners.lock().await;
                 listeners.insert(vip);
@@ -1462,7 +1570,7 @@ async fn run_tcp_proxy(
                 crate::agent::macos_daemon::ensure_vip_alias(vip);
             }
 
-            for &port in &common_ports {
+            for &port in &effective_ports {
                 let addr = SocketAddr::new(vip.into(), port);
                 let identity = identity.clone();
                 let ns = ns_server.clone();
@@ -1474,6 +1582,7 @@ async fn run_tcp_proxy(
                 let tls = tls_acceptor.clone();
                 let relay = relay_addr.clone();
                 let fbt = first_byte_timeout.clone();
+                let policy = vip_policy.clone();
 
                 tokio::spawn(async move {
                     match TcpListener::bind(addr).await {
@@ -1530,6 +1639,9 @@ async fn run_tcp_proxy(
                                         let tls = tls.clone();
                                         let relay = relay.clone();
                                         let fbt = fbt.clone();
+                                        let tls_mode = policy.tls_mode(port);
+                                        let stall_strategy = policy.stall_close_strategy(port);
+                                        let policy = policy.clone();
 
                                         tokio::spawn(async move {
                                             // ── Accept-to-first-byte deadline (PR 1 / Option A) ─
@@ -1558,61 +1670,84 @@ async fn run_tcp_proxy(
                                             let relay_for_err = relay.clone();
 
                                             // ── Local TLS termination fast-path ──────────────
-                                            // For TLS ports (443/8443) with a TLS acceptor
-                                            // present, terminate the TLS handshake LOCALLY
-                                            // (client sees a real TLS connection) and bridge
-                                            // the DECRYPTED stream through the tunnel. The
-                                            // generic `handle_tcp_connection_bridged<S>` does
-                                            // this via `maybe_wrap_tls` + `tokio::io::split`.
-                                            // This is the "HTTPS by default" path: the
-                                            // browser gets a padlock, the tunnel is the
-                                            // transport, the backend gets plain HTTP.
-                                            //
-                                            // We use the deadline-covered `proxy_dial_then_bridge`
-                                            // for non-TLS ports (it has the 504-page-on-timeout
-                                            // logic); TLS ports use the generic path which does
-                                            // the TLS wrap before dialing.
-                                            let is_tls_port =
-                                                crate::agent::local_tls::tls_mode_for_port(port)
-                                                    == crate::agent::local_tls::TlsMode::Always;
-
-                                            let result = if is_tls_port && tls.is_some() {
-                                                match tls {
-                                                    Some(acceptor) => {
-                                                        handle_tcp_connection_with_tls(
-                                                            tcp_stream,
-                                                            &name,
-                                                            port,
-                                                            peer,
-                                                            peer_node_id,
-                                                            &identity,
-                                                            &bind,
-                                                            &ns,
-                                                            &acceptor,
-                                                            relay.as_deref(),
-                                                        )
-                                                        .await
+                                            // Routing by the policy's RESOLVED decision
+                                            // (`VipPortPolicy::tls_routing` — a configured
+                                            // `[[tunnel.vip_ports]]` override first, then the
+                                            // built-in table): `Some(Always)` terminates the
+                                            // TLS handshake LOCALLY (client sees a real TLS
+                                            // connection) and bridges the DECRYPTED stream
+                                            // through the tunnel; `Some(Detect)` peeks the
+                                            // first bytes and terminates only when they look
+                                            // like a TLS ClientHello (an explicitly configured
+                                            // `auto` port — PR #138 review: these used to be
+                                            // sent to the plain path with no detection);
+                                            // `None` (e.g. `passthrough` ports such as Wazuh
+                                            // 1514/1515) must NEVER enter the TLS-terminating
+                                            // branch — their bytes go through the tunnel
+                                            // untouched, still encrypted end to end.
+                                            let result =
+                                                if let Some(tls_mode) = policy.tls_routing(port) {
+                                                    match tls {
+                                                        Some(acceptor) => {
+                                                            handle_tcp_connection_with_tls(
+                                                                tcp_stream,
+                                                                &name,
+                                                                port,
+                                                                peer,
+                                                                peer_node_id,
+                                                                &identity,
+                                                                &bind,
+                                                                &ns,
+                                                                &acceptor,
+                                                                relay.as_deref(),
+                                                                tls_mode,
+                                                                &policy,
+                                                                deadline,
+                                                            )
+                                                            .await
+                                                        }
+                                                        // No TLS acceptor (tls disabled): the
+                                                        // Detect path has nothing to wrap with —
+                                                        // fall through to the plain path so the
+                                                        // connection is still tunneled (plain),
+                                                        // exactly as when TLS is unconfigured.
+                                                        None => {
+                                                            proxy_dial_then_bridge(
+                                                                tcp_stream,
+                                                                &name,
+                                                                port,
+                                                                peer,
+                                                                peer_node_id,
+                                                                &identity,
+                                                                &bind,
+                                                                &ns,
+                                                                relay.as_deref(),
+                                                                tls.as_deref(),
+                                                                deadline,
+                                                                tls_mode,
+                                                                stall_strategy,
+                                                            )
+                                                            .await
+                                                        }
                                                     }
-                                                    None => unreachable!(
-                                                        "is_tls_port checked tls.is_some()"
-                                                    ),
-                                                }
-                                            } else {
-                                                proxy_dial_then_bridge(
-                                                    tcp_stream,
-                                                    &name,
-                                                    port,
-                                                    peer,
-                                                    peer_node_id,
-                                                    &identity,
-                                                    &bind,
-                                                    &ns,
-                                                    relay.as_deref(),
-                                                    tls.as_deref(),
-                                                    deadline,
-                                                )
-                                                .await
-                                            };
+                                                } else {
+                                                    proxy_dial_then_bridge(
+                                                        tcp_stream,
+                                                        &name,
+                                                        port,
+                                                        peer,
+                                                        peer_node_id,
+                                                        &identity,
+                                                        &bind,
+                                                        &ns,
+                                                        relay.as_deref(),
+                                                        tls.as_deref(),
+                                                        deadline,
+                                                        tls_mode,
+                                                        stall_strategy,
+                                                    )
+                                                    .await
+                                                };
 
                                             if let Err(e) = result {
                                                 warn!(
@@ -1654,12 +1789,21 @@ async fn run_tcp_proxy(
 
 /// Handle a TCP connection with TLS termination, then establish a ZTLP tunnel.
 ///
-/// The TLS mode is determined by port number:
-/// - Port 443, 8443 → always TLS
-/// - Port 80, 8080, 22 → never TLS
-/// - Other ports → detect by peeking at first bytes
+/// The TLS mode is RESOLVED by the caller (`VipPortPolicy::tls_mode` — a
+/// configured `[[tunnel.vip_ports]]` override first, then the built-in
+/// port table) and passed in; this function no longer re-derives it from
+/// the port number, so the policy is the single source of truth:
+/// - `Always` → always TLS
+/// - `Never` → never TLS (passthrough ports: bytes forwarded untouched)
+/// - `Detect` → detect by peeking at first bytes
 ///
 /// After TLS (if applicable), the decrypted stream is bridged through a ZTLP tunnel.
+///
+/// `deadline` is the accept-to-first-byte deadline set at accept; it is
+/// propagated to `handle_tcp_connection_gated` so the dial phase (and the
+/// relay/last dial attempt inside it) is bounded even when the caller does
+/// not wrap it in its own `select!` (PR #138 review: the TLS path previously
+/// bypassed the deadline entirely). Steady-state bridging stays exempt.
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_with_tls(
     tcp_stream: tokio::net::TcpStream,
@@ -1672,8 +1816,11 @@ async fn handle_tcp_connection_with_tls(
     ns_server: &str,
     tls_acceptor: &tokio_rustls::TlsAcceptor,
     relay_addr: Option<&str>,
+    tls_mode: local_tls::TlsMode,
+    policy: &super::config::VipPortPolicy,
+    deadline: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match local_tls::maybe_wrap_tls(tcp_stream, port, tls_acceptor).await {
+    match local_tls::maybe_wrap_tls(tcp_stream, tls_mode, port, tls_acceptor).await {
         Ok(local_tls::MaybeWrapped::Tls(tls_stream)) => {
             info!("TLS handshake OK for {} (port {})", ztlp_name, port);
             handle_tcp_connection_gated(
@@ -1687,6 +1834,8 @@ async fn handle_tcp_connection_with_tls(
                 ns_server,
                 relay_addr,
                 true,
+                policy,
+                deadline,
             )
             .await
         }
@@ -1702,6 +1851,8 @@ async fn handle_tcp_connection_with_tls(
                 ns_server,
                 relay_addr,
                 false,
+                policy,
+                deadline,
             )
             .await
         }
@@ -1717,6 +1868,8 @@ async fn handle_tcp_connection_with_tls(
                 ns_server,
                 relay_addr,
                 false,
+                policy,
+                deadline,
             )
             .await
         }
@@ -1790,13 +1943,16 @@ async fn proxy_dial_phase(
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
+    // The accept-time first-byte deadline (bounds the relay/last dial
+    // attempt — see `connect_tunnel`).
+    deadline: Option<Duration>,
 ) -> Result<DialOutcome, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncReadExt;
 
     // ── Connect (direct-first plan, then relay) ─────────────────────────
     // See `connect_tunnel`: ranked direct candidates each get a short
-    // timeout; the relay attempt is bounded only by the caller's
-    // first-byte deadline (unchanged behaviour for the relay path).
+    // timeout; the relay/last attempt is bounded by the accept-time
+    // first-byte deadline.
     let connected = connect_tunnel(
         ztlp_name,
         port,
@@ -1806,6 +1962,7 @@ async fn proxy_dial_phase(
         bind_addr,
         ns_server,
         relay_addr,
+        deadline,
     )
     .await?;
     let quic_conn = connected.conn;
@@ -1990,6 +2147,13 @@ async fn proxy_bridge_streams(
 /// This is the plain-TCP path. The TLS variant (443/8443) terminates TLS
 /// FIRST (client-driven, fast), then runs the same split-socket dial over
 /// the TLS stream — the 504 goes out encrypted.
+///
+/// `tls_mode` is the RESOLVED local-TLS mode for this port (`Never` for
+/// passthrough ports — the bytes crossing `client` are opaque and must
+/// never be snuck a peek into here; `Detect`/`Always` for the built-in
+/// table's behaviour). `stall_strategy` is the RESOLVED deadline-expiry
+/// outcome for this port under the same policy — the 504-class decision
+/// must never treat an unknown configured port as HTTP.
 #[allow(clippy::too_many_arguments)]
 pub async fn proxy_dial_then_bridge(
     client: tokio::net::TcpStream,
@@ -2003,6 +2167,8 @@ pub async fn proxy_dial_then_bridge(
     relay_addr: Option<&str>,
     _tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
     deadline: Option<Duration>,
+    _tls_mode: local_tls::TlsMode,
+    stall_strategy: StallCloseStrategy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::AsyncWriteExt;
 
@@ -2040,6 +2206,7 @@ pub async fn proxy_dial_then_bridge(
             &bind_owned,
             &ns_owned,
             relay_owned.as_deref(),
+            deadline,
         )
         .await;
         let _ = done_tx.send(());
@@ -2072,7 +2239,7 @@ pub async fn proxy_dial_then_bridge(
                 );
                 dial_task.abort();
 
-                if stall_close_strategy(port) == StallCloseStrategy::Deliver504 {
+                if stall_strategy == StallCloseStrategy::Deliver504 {
                     if let Some(page) =
                         stall_response_for_port(port, &name_for_log, Some(d))
                     {
@@ -2176,10 +2343,11 @@ async fn dial_tunnel(
     bind_addr: String,
     ns_server: String,
     relay_addr: Option<String>,
+    deadline: Option<Duration>,
 ) -> Result<DialedTunnel, Box<dyn std::error::Error + Send + Sync>> {
     // Direct-first plan, then relay (see `connect_tunnel`): ranked direct
     // candidates each get a short timeout; the relay attempt is bounded
-    // only by the caller's first-byte deadline.
+    // by the caller's first-byte deadline.
     let connected = connect_tunnel(
         &ztlp_name,
         port,
@@ -2189,6 +2357,7 @@ async fn dial_tunnel(
         &bind_addr,
         &ns_server,
         relay_addr.as_deref(),
+        deadline,
     )
     .await?;
     let quic_conn = connected.conn;
@@ -2215,6 +2384,35 @@ async fn dial_tunnel(
 /// connections are forwarded byte-for-byte as before.
 fn request_stamper(tls_terminated: bool) -> Option<super::forwarded_proto::ForwardedProtoStamper> {
     tls_terminated.then(super::forwarded_proto::ForwardedProtoStamper::new)
+}
+
+/// Write the first-byte-deadline 504 page through `stream`, then shut it
+/// down (FIN, not RST — the browser renders the page cleanly). Shared by
+/// the plain path (`proxy_dial_then_bridge`) and the gated TLS path
+/// (`handle_tcp_connection_gated`): both own the client stream at deadline
+/// expiry and must deliver the SAME outcome the port class deserves
+/// (PR #138 review — the TLS path bypassed the splash gate and had no
+/// deadline at all, so a slow/unresponsive backend held the client
+/// open indefinitely).
+async fn deliver_deadline_504<S>(
+    stream: &mut S,
+    port: u16,
+    ztlp_name: &str,
+    deadline: Option<Duration>,
+) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    if let Some(page) = stall_response_for_port(port, ztlp_name, deadline) {
+        if stream.write_all(&page).await.is_err() {
+            warn!(
+                "failed to write 504 page to {} (port {}): client gone?",
+                ztlp_name, port
+            );
+        }
+    }
+    stream.shutdown().await
 }
 
 /// Bridge a local stream to a dialed tunnel until either side closes.
@@ -2327,6 +2525,13 @@ where
 }
 
 /// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
+///
+/// `deadline` is the caller's accept-to-first-byte deadline, propagated
+/// into `dial_tunnel` so the relay/last dial attempt is bounded even when
+/// the caller does not wrap the whole dial in its own `select!`
+/// (PR #138 review — `handle_tcp_connection_gated` previously dropped it).
+/// Steady-state bridging stays EXEMPT: long-lived idle flows (websockets,
+/// SSE, RDP) must survive arbitrary idle.
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_bridged<S>(
     stream: S,
@@ -2339,6 +2544,7 @@ async fn handle_tcp_connection_bridged<S>(
     ns_server: &str,
     relay_addr: Option<&str>,
     tls_terminated: bool,
+    deadline: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2352,6 +2558,7 @@ where
         bind_addr.to_string(),
         ns_server.to_string(),
         relay_addr.map(|r| r.to_string()),
+        deadline,
     )
     .await?;
     bridge_tunnel(stream, tunnel, &[], ztlp_name, tls_terminated).await
@@ -2360,6 +2567,12 @@ where
 /// Like `handle_tcp_connection_bridged`, but for HTTP-ish ports it first reads
 /// the request head so a browser page load on a slow dial can be shown the
 /// splash page (see `splash_gate`). Other ports take the plain path.
+///
+/// The 504-class (splash-eligible) decision is taken from `policy` — a
+/// `[[tunnel.vip_ports]]` override (e.g. 443 → passthrough) or a
+/// configured custom port removes the port from the class, so a splash
+/// page can only be shown when the agent terminated TLS on a built-in
+/// HTTP-ish port.
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection_gated<S>(
     mut stream: S,
@@ -2372,13 +2585,20 @@ async fn handle_tcp_connection_gated<S>(
     ns_server: &str,
     relay_addr: Option<&str>,
     tls_terminated: bool,
+    policy: &super::config::VipPortPolicy,
+    deadline: Option<Duration>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use super::splash_gate::{global_tracker, run_gated, tracker_key, GateConfig, GateOutcome};
 
-    if stall_close_strategy(port) != StallCloseStrategy::Deliver504 {
+    if policy.stall_close_strategy(port) != StallCloseStrategy::Deliver504 {
+        // Non-504-class ports (custom ports, passthrough overrides) take
+        // the plain path — with the deadline propagated into the dial, so
+        // a slow/unresponsive backend cannot hold this connection open
+        // indefinitely (PR #138 review: this branch previously had no
+        // deadline at all).
         return handle_tcp_connection_bridged(
             stream,
             ztlp_name,
@@ -2390,6 +2610,7 @@ where
             ns_server,
             relay_addr,
             tls_terminated,
+            deadline,
         )
         .await;
     }
@@ -2417,6 +2638,7 @@ where
                 bind,
                 ns,
                 relay,
+                deadline,
             )
         },
     )
@@ -2471,6 +2693,7 @@ async fn handle_tcp_connection(
         ns_server,
         relay_addr,
         false,
+        None, // legacy helper: no accept-time deadline available
     )
     .await
 }
@@ -2726,6 +2949,69 @@ mod tests {
             // band so a "let's be generous" edit gets flagged.
             assert!(DIRECT_ATTEMPT_TIMEOUT >= std::time::Duration::from_millis(250));
             assert!(DIRECT_ATTEMPT_TIMEOUT <= std::time::Duration::from_millis(1500));
+        }
+
+        // ── PR #138 review, finding 3: the accept-to-first-byte deadline
+        //    must BOUND the attempts `attempt_timeout` leaves open ────────
+        //
+        // `attempt_timeout` gives a SHORT budget only to a direct attempt
+        // that has a fallback after it. Two slots are left with `None`:
+        //   • the RELAY attempt, and
+        //   • the LAST attempt of any plan (the final direct candidate when
+        //     there is no relay).
+        // Before this fix those slots ran with NO timeout at all — a dead
+        // relay or a single unresponsive direct candidate held the client
+        // connection open indefinitely. `walk_dial_plan` now wraps those
+        // `None`-budget attempts in `tokio::time::timeout(caller's
+        // first-byte deadline, …)`, so the dial can no longer outlive the
+        // accept-to-first-byte budget.
+        //
+        // A real tunnel can't be stood up hermetically (it needs a live
+        // QUIC+Noise peer), so — exactly like
+        // `slow_but_alive_backend_survives_deadline` — this pins the
+        // DECISION: the plan-shape that produces the unbounded slots, and
+        // the fact that the deadline is the bound that must cover them.
+        #[test]
+        fn relay_and_last_attempt_are_the_unbounded_slots_the_deadline_must_bound() {
+            use super::super::attempt_timeout;
+
+            let deadline = std::time::Duration::from_secs(15);
+
+            // Case A — direct-first with a relay (the default ladder):
+            // [direct, direct, relay]. The relay is the LAST attempt and
+            // the only Relay slot — BOTH `attempt_timeout`-unbounded, and
+            // the relay is where a dead relay would hang the client.
+            let plan = dial_plan(
+                &[sa("10.0.0.5:23097"), sa("10.0.0.6:23097")],
+                Some(sa("1.2.3.4:23095")),
+                false, // direct-first
+            );
+            assert_eq!(plan.len(), 3);
+            // Every direct attempt EXCEPT the last gets the short budget.
+            assert_eq!(attempt_timeout(plan[0], true), Some(DIRECT_ATTEMPT_TIMEOUT));
+            assert_eq!(attempt_timeout(plan[1], true), Some(DIRECT_ATTEMPT_TIMEOUT));
+            // The relay (last attempt) is the unbounded slot the deadline
+            // must cover — `walk_dial_plan` wraps it in
+            // `timeout(deadline, …)`.
+            assert!(plan[2].via == DialVia::Relay);
+            assert_eq!(attempt_timeout(plan[2], false), None);
+
+            // Case B — no relay configured, single candidate: the ONE
+            // attempt is `has_fallback == false` → `attempt_timeout` is
+            // `None`. This is the "single unresponsive direct candidate"
+            // hang; the deadline is the bound.
+            let plan_b = dial_plan(&[sa("10.0.0.5:23097")], None, false);
+            assert_eq!(plan_b.len(), 1);
+            assert!(plan_b[0].via == DialVia::Direct);
+            assert_eq!(attempt_timeout(plan_b[0], false), None);
+
+            // The bound the caller passes for BOTH slots is the accept-to-
+            // first-byte deadline itself (a finite, sane, positive budget),
+            // not an unbounded one. A regression that drops the deadline
+            // from the relay/last slot makes this the only test that
+            // notices.
+            assert_eq!(deadline, std::time::Duration::from_secs(15));
+            assert!(!deadline.is_zero());
         }
 
         // ── Cache hit must dial the FULL ranked list (2026-10-05 follow-up) ──
@@ -3246,6 +3532,11 @@ async fn connect_tunnel(
     bind_addr: &str,
     ns_server: &str,
     relay_addr: Option<&str>,
+    // The caller's accept-to-first-byte deadline bounds the relay attempt
+    // and the last direct attempt when `walk_dial_plan` would otherwise
+    // leave them unbounded (PR #138 review — the gated TLS path dropped
+    // this deadline, so an unresponsive backend held the client open).
+    deadline: Option<Duration>,
 ) -> Result<ConnectedTunnel, Box<dyn std::error::Error + Send + Sync>> {
     // Candidates: on a VIP cache hit use the full ranked list the DNS
     // resolver published for this name (falls back to the single cached
@@ -3276,6 +3567,7 @@ async fn connect_tunnel(
         identity,
         bind_addr,
         relay_addr,
+        deadline,
     )
     .await
     {
@@ -3302,6 +3594,7 @@ async fn connect_tunnel(
                 identity,
                 bind_addr,
                 relay_addr,
+                deadline,
             )
             .await
         }
@@ -3321,6 +3614,11 @@ async fn walk_dial_plan(
     identity: &NodeIdentity,
     bind_addr: &str,
     relay_addr: Option<&str>,
+    // Bounds the attempt `attempt_timeout` leaves open (the relay, and the
+    // last/only attempt): the caller's accept-to-first-byte deadline
+    // (PR #138 review — without it a dead relay or a single unresponsive
+    // direct candidate hangs the connection forever).
+    deadline: Option<Duration>,
 ) -> Result<ConnectedTunnel, Box<dyn std::error::Error + Send + Sync>> {
     let relay: Option<SocketAddr> = match relay_addr {
         Some(r) => Some(
@@ -3378,8 +3676,21 @@ async fn walk_dial_plan(
                 .into()),
             },
             // Relay, or the LAST attempt: the caller's first-byte deadline
-            // bounds it (unchanged from before direct-first).
-            None => one.await,
+            // bounds it (unchanged from before direct-first); when the
+            // caller passed no deadline at all (legacy paths) the attempt
+            // runs unbounded, exactly as before.
+            None => match deadline {
+                Some(budget) => match tokio::time::timeout(budget, one).await {
+                    Ok(r) => r,
+                    Err(_) => Err(format!(
+                        "dial attempt {} (via {:?}) did not answer within the \
+                         accept-to-first-byte deadline",
+                        attempt.addr, attempt.via
+                    )
+                    .into()),
+                },
+                None => one.await,
+            },
         };
         match result {
             Ok((conn, session_id)) => {
@@ -3745,6 +4056,8 @@ mod option_a_tests {
             None, // relay
             None, // tls_acceptor (plain path)
             Some(deadline),
+            super::local_tls::TlsMode::Detect, // built-in table default for test ports
+            stall_close_strategy(port),
         )
         .await
         .err();
@@ -3941,6 +4254,8 @@ mod splash_wiring_tests {
                 &ns,
                 None,
                 port == 443, // the https port is the one the agent terminates TLS on
+                &crate::agent::config::VipPortPolicy::default(),
+                None, // no accept-time deadline in this test harness
             )
             .await;
         });

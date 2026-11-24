@@ -333,33 +333,73 @@ defmodule ZtlpNs.Store do
   def lookup_by_node_id(node_id_hex) when is_binary(node_id_hex) do
     node_id_lower = String.downcase(node_id_hex)
 
-    try do
-      case :mnesia.dirty_read(@node_id_index_table, node_id_lower) do
-        [{@node_id_index_table, _node_id, name}] ->
-          # A name can hold both a KEY and a DEVICE record; a node_id binds
-          # to at most one of them (registration enforces this), so probe
-          # :key first and fall back to :device.
-          probe = lookup(name, :key)
+    # A node_id can be revoked directly (a REVOKE record lists node_ids).
+    # Check that before the index read so a revoked identity is rejected
+    # rather than routed to the TOFU pin path by a stale index entry.
+    if revoked?(node_id_lower) do
+      {:error, :revoked}
+    else
+      try do
+        case :mnesia.dirty_read(@node_id_index_table, node_id_lower) do
+          [{@node_id_index_table, _node_id, name}] ->
+            # A name can hold both a KEY and a DEVICE record; a node_id binds
+            # to at most one of them (registration enforces this), so probe
+            # :key first and fall back to :device. In BOTH cases the returned
+            # record's node_id must match the requested one — otherwise a
+            # record whose node_id was rewritten at the same name (or a
+            # KEY/DEVICE pair with different node_ids) would be served for a
+            # different identity, letting B's key claim A (TOFU bypass).
+            key_probe = lookup(name, :key)
 
-          case probe do
-            {:ok, record} -> {:ok, :key, record}
-            {:error, :revoked} -> {:error, :revoked}
-            :not_found ->
-              case lookup(name, :device) do
-                {:ok, record} -> {:ok, :device, record}
-                other -> other
-              end
-          end
+            case key_probe do
+              {:ok, record} ->
+                if record_node_id_matches?(record, node_id_lower) do
+                  {:ok, :key, record}
+                else
+                  # KEY record's node_id doesn't match — try DEVICE.
+                  case lookup(name, :device) do
+                    {:ok, drecord} ->
+                      if record_node_id_matches?(drecord, node_id_lower) do
+                        {:ok, :device, drecord}
+                      else
+                        :not_found
+                      end
+                    other -> other
+                  end
+                end
 
-        [] ->
-          :not_found
+              {:error, :revoked} -> {:error, :revoked}
+              :not_found ->
+                case lookup(name, :device) do
+                  {:ok, drecord} ->
+                    if record_node_id_matches?(drecord, node_id_lower) do
+                      {:ok, :device, drecord}
+                    else
+                      :not_found
+                    end
+                  other -> other
+                end
+            end
+
+          [] ->
+            :not_found
+        end
+      rescue
+        # Table may not exist yet if Store hasn't fully initialized
+        ArgumentError -> :not_found
+      catch
+        :exit, {:aborted, {:no_exists, _}} -> :not_found
       end
-    rescue
-      # Table may not exist yet if Store hasn't fully initialized
-      ArgumentError -> :not_found
-    catch
-      :exit, {:aborted, {:no_exists, _}} -> :not_found
     end
+  end
+
+  # A record's node_id data field must equal the requested node_id (lowercase
+  # hex). Handles both atom and string keys (Record constructors use atoms;
+  # CBOR-decoded records may use strings).
+  defp record_node_id_matches?(%Record{data: data}, node_id_lower) do
+    value = Map.get(data, :node_id) || Map.get(data, "node_id")
+
+    is_binary(value) and String.downcase(value) == node_id_lower
   end
 
   @doc """
@@ -499,6 +539,16 @@ defmodule ZtlpNs.Store do
   @impl true
   def init(:ok) do
     ensure_tables()
+
+    # Backfill the node_id index from any persisted KEY/DEVICE records. On a
+    # restart with disc_copies storage the records table survives but the new
+    # index table starts empty — without this, a registered identity would be
+    # reported as :not_found (→ TOFU) by lookup_by_node_id/1 after an upgrade.
+    # The insert path maintains the index going forward; this covers
+    # pre-existing records. Only at real startup (not from clear/0, which
+    # wipes tables immediately after).
+    backfill_node_id_index()
+
     {:ok, %{}}
   end
 
@@ -563,6 +613,35 @@ defmodule ZtlpNs.Store do
         ],
         @mnesia_wait_timeout_ms
       )
+  end
+
+  # Rebuild the node_id → name index from every persisted KEY/DEVICE record.
+  # Called once at Store startup (after wait_for_tables) so the index is
+  # complete before any endpoint-auth lookup is served.
+  defp backfill_node_id_index do
+    records =
+      :mnesia.dirty_match_object({@records_table, :_, :_})
+      |> Enum.map(fn {@records_table, {_name, _type}, rec} -> rec end)
+      # Only KEY and DEVICE records carry a node_id to index.
+      |> Enum.filter(fn %Record{type: t} -> t in [:key, :device] end)
+
+    Enum.each(records, fn %Record{name: name, data: data} ->
+      backfill_one(name, data)
+    end)
+  end
+
+  defp backfill_one(name, data) do
+    node_id = Map.get(data, :node_id) || Map.get(data, "node_id")
+
+    if is_binary(node_id) and node_id != "" do
+      try do
+        :mnesia.dirty_write({@node_id_index_table, String.downcase(node_id), name})
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
   end
 
   defp create_table(name, opts) do

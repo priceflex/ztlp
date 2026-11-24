@@ -81,6 +81,22 @@ module Ztlp
       SH
     end
 
+    # First gateway release with `ztlp listen --ns-key` (issue #128): it then signature-checks every NS
+    # record it uses for admission and identity headers. Older releases reject the unknown flag and would
+    # not start, so the flag is only written for a release image at or above this version.
+    NS_KEY_MIN_VERSION = "0.37.1"
+
+    # `--ns-key <hex>` when the zone has a well-formed NS key and the image is a release that knows the flag.
+    def self.ns_key_args(gateway)
+      key = gateway.zone.ns_pubkey_hex.to_s.strip.downcase
+      return [] unless key.match?(/\A\h{64}\z/)
+
+      version = gateway.effective_image[RELEASE_IMAGE, 1]
+      return [] unless version && Gem::Version.new(version.delete_prefix("v")) >= Gem::Version.new(NS_KEY_MIN_VERSION)
+
+      [ "--ns-key", key ]
+    end
+
     RELEASE_REPO = "priceflex/ztlp"
     RELEASE_IMAGE = /\Aztlp-gateway-rust:(v\d+\.\d+\.\d+)\z/
 
@@ -133,6 +149,7 @@ module Ztlp
         cmd += [ "--forward", "#{s.name}:#{s.backend.to_s.sub(%r{\Ahttps?://}, '')}" ]
       end
       cmd += [ "--ns-server", gateway.effective_ns_server ]
+      cmd += ns_key_args(gateway)
       cmd += [ "--relay", relay ] if relay.present?
       cmd += [ "--service-name", gateway.name, "--zone", gateway.zone.name, "--ns-register-name", gateway.ns_name,
                "--max-sessions", gateway.max_sessions.to_s, "--policy", "/data/policy.toml" ]

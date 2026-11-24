@@ -51,6 +51,7 @@ pub mod error;
 pub mod fec;
 #[allow(unsafe_code)]
 pub mod ffi;
+pub mod gateway_ns_verify;
 pub mod h10_defaults;
 pub mod handshake;
 pub mod http_injector;

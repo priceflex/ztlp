@@ -217,6 +217,30 @@ pub fn parse_query_reply(reply: &[u8]) -> Result<ParsedRecord, NsVerifyError> {
     }
 }
 
+/// Wrap a parsed record WITHOUT signature verification (legacy trust).
+///
+/// Used by the gateway when no `--ns-key` is pinned: it behaves exactly as
+/// pre-#128 (unchecked) but still enforces the expiry check, so an expired
+/// record is never trusted even in legacy mode.
+pub fn unverified(rec: &ParsedRecord) -> Result<VerifiedRecord, NsVerifyError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if rec.created_at.saturating_add(u64::from(rec.ttl)) <= now {
+        return Err(NsVerifyError::Expired);
+    }
+    Ok(VerifiedRecord {
+        type_byte: rec.type_byte,
+        name: rec.name.clone(),
+        data_cbor: rec.data_cbor.clone(),
+        signer: rec.signer,
+        created_at: rec.created_at,
+        ttl: rec.ttl,
+        serial: rec.serial,
+    })
+}
+
 /// Verify a parsed record against the trusted name-server keys at `now`
 /// (unix seconds).
 pub fn verify(

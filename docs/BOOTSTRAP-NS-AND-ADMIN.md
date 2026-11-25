@@ -177,11 +177,77 @@ Start the ZTLP agent (the ZTLP app, or `ztlp agent start`), then open
 | Task | Command (on the server) |
 |---|---|
 | Token for another device | `sudo ./ztlp-bootstrap --mint-token --device-name bob-laptop` |
-| Another of your computers signs in as you | `sudo ./ztlp-bootstrap --mint-token --device-name alice-laptop`, enroll it, then `sudo ./ztlp-bootstrap --link-admin --device-name alice-laptop` |
+| Another computer signs in as an administrator | `sudo ./ztlp-bootstrap --admin-device <its static_public_key>=alice` (see 3.1) |
+| Add an administrator (another person) | Admins → New in the panel, then map their computer (see 3.1) |
 | Fresh backup | `sudo ./ztlp-bootstrap --backup` |
 | Stop a device signing in by itself | `sudo ./ztlp-bootstrap --unlink alice-laptop` |
 | Reserve a name for a new gateway | `sudo ./ztlp-bootstrap --allow-gateway files=<its ed25519_public_key>` |
 | Re-run the installer (keeps everything) | `sudo ./ztlp-bootstrap` |
+
+### 3.1 Administrators and the computers they sign in from
+
+The panel lets a computer in without a password when two things are true: the admin gateway
+lets that computer through, and the gateway maps the computer's key to an administrator.
+Both are set on the server. One administrator can have as many computers as you like.
+
+**Find the computer's name and key.** Enroll the computer first (token from the panel or
+`--mint-token`). Then:
+
+- Its **name** is what the panel shows under Devices (and what `ztlp setup` printed:
+  "Enrolled as ..."). It is often not the name typed into the token: the Mac and Windows apps
+  add the computer's user name, e.g. `alice-laptop-alice-smith`.
+- Its **key** is `static_public_key` in `~/.ztlp/identity.json` on that computer:
+
+  ```bash
+  python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.ztlp/identity.json")))["static_public_key"])'
+  ```
+
+**Another computer for an existing administrator** (on the server):
+
+1. Map it: `sudo ./ztlp-bootstrap --admin-device <its static_public_key>=alice`
+   (`alice` = the panel username). This restarts the admin gateway for a few seconds.
+2. If the admin gateway is locked to named computers (below, recommended), add the
+   computer's full name to the `allow` list and restart the gateway:
+
+   ```bash
+   sudo nano /opt/ztlp/admin-gateway/data/policy.toml
+   cd /opt/ztlp/admin-gateway && sudo docker compose up -d --force-recreate
+   ```
+
+3. Reconnect ZTLP on that computer (or quit and reopen the app) and open
+   `http://admin.example.ztlp`. The header shows "via ZTLP <its name>".
+
+**A new administrator (another person):**
+
+1. On their computer, make their sign-in key once: `ztlp keygen -o ~/ztlp-admin-key.json`.
+   Keep this file private; it is also how they sign in by challenge and signature if their
+   computer is not mapped.
+2. A super administrator opens **Admins → New** in the panel, enters their username, role,
+   and the `ed25519_public_key` value from that file.
+3. Enroll their computer and map it to that username as above (steps 1-3).
+
+**Lock the admin gateway to the administrators' computers (recommended).** The installer
+writes `allow = ["*"]`, which lets any ZTLP key that reaches the gateway see the sign-in page
+(nobody can sign in without an administrator's key, but there is no reason to show it).
+List the computers instead, by their exact names:
+
+```toml
+# /opt/ztlp/admin-gateway/data/policy.toml
+default = "deny"
+
+[[services]]
+name = "admin"
+allow = ["alice-mac.example.ztlp", "alice-laptop-alice-smith.example.ztlp"]
+```
+
+Restart the gateway after editing (command above). Re-running the full installer writes
+`allow = ["*"]` again, so re-apply the list afterwards.
+
+**Remove a computer:** `sudo ./ztlp-bootstrap --unlink <its name or key>`, take its name out
+of the `allow` list and restart the gateway, then revoke the device in the panel.
+**Remove a person:** disable them under Admins, then remove each of their computers.
+
+**A re-enrolled computer gets a new key and often a new name**: map and list it again.
 
 Where things live on the server:
 
@@ -211,9 +277,10 @@ Enroll the Mac (2.3), then on the server:
 `sudo ./ztlp-bootstrap --link-admin --device-name alice-mac`.
 
 **The panel asks you to request a challenge and paste a signature.**
-This device is not linked to an administrator. On the server:
-`sudo ./ztlp-bootstrap --link-admin --device-name <the device's name>`, then reconnect
-ZTLP on that device.
+This device is not mapped to an administrator. On the server:
+`sudo ./ztlp-bootstrap --admin-device <its static_public_key>=<username>`, add its name to
+the admin gateway's `allow` list if you locked it, then reconnect ZTLP on that device (3.1).
+If the gateway refuses the device outright ("ztlp policy denied"), its name is not in the list.
 
 **The enrollment token expired or was used.**
 Mint a new one: `sudo ./ztlp-bootstrap --mint-token --device-name alice-mac`.

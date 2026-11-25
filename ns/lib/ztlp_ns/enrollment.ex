@@ -410,6 +410,19 @@ defmodule ZtlpNs.Enrollment do
         do: Map.put(key_data, "signing_public_key", Base.encode16(signing_pubkey, case: :lower)),
         else: key_data
 
+    # Which token this enrollment used, as a fingerprint of the token's nonce. The admin panel
+    # stores the same fingerprint when it mints the token, so it can find the device whatever
+    # name the client chose (clients often append the computer's user name). Not a secret: the
+    # nonce alone cannot mint or replay a token (the HMAC needs the zone enrollment secret).
+    key_data =
+      case token do
+        %{nonce: nonce} when is_binary(nonce) and byte_size(nonce) == 16 and nonce != <<0::128>> ->
+          Map.put(key_data, "enrollment_ref", enrollment_ref(nonce))
+
+        _ ->
+          key_data
+      end
+
     # Create KEY record. Enrolled devices live for a sliding year
     # (RecordDefaults.enrolled_device_ttl/0); every check-in restarts it.
     key_record = %Record{
@@ -530,6 +543,15 @@ defmodule ZtlpNs.Enrollment do
 
     # Key by {timestamp, name} for ordered retrieval
     :ets.insert(@enrollments_table, {{ts, name}, entry})
+  end
+
+  @doc """
+  Fingerprint of an enrollment token's 16-byte nonce: the first 16 bytes of its SHA-256, as 32
+  lowercase hex characters. Written to the enrolled device's KEY record as `enrollment_ref`.
+  """
+  @spec enrollment_ref(binary()) :: String.t()
+  def enrollment_ref(nonce) when is_binary(nonce) do
+    :crypto.hash(:sha256, nonce) |> binary_part(0, 16) |> Base.encode16(case: :lower)
   end
 
   @doc """

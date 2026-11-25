@@ -56,7 +56,7 @@ defmodule ZtlpNs.EnrolledDeviceRefreshTest do
         do: <<>>,
         else: <<byte_size(spub)::16, spub::binary>>
 
-    tok = token(secret)
+    tok = Keyword.get(opts, :token) || token(secret)
 
     body =
       <<byte_size(tok)::16, tok::binary, tunnel_pk::binary, node_id::binary,
@@ -254,5 +254,57 @@ defmodule ZtlpNs.EnrolledDeviceRefreshTest do
     assert send_registration(name, data, pub, priv) == <<0x06>>
     {:ok, rec} = Store.lookup(name, :key)
     assert rec.ttl == RecordDefaults.default_ttl(:key)
+  end
+
+  # ── enrollment fingerprint (enrollment_ref) ────────────────────────
+  # The admin panel finds a device by the token it used, whatever name the client chose.
+
+  defp token_nonce(tok), do: binary_part(tok, byte_size(tok) - 48, 16)
+
+  test "enrollment writes the token's fingerprint and a check-in keeps it", %{secret: s, pfx: p} do
+    tok = token(s)
+    dev = enroll(s, dev_name(p, "ref"), token: tok)
+    want = Enrollment.enrollment_ref(token_nonce(tok))
+    assert String.length(want) == 32
+
+    {:ok, rec} = Store.lookup(dev.name, :key)
+    assert rec.data["enrollment_ref"] == want
+
+    assert send_registration(dev.name, refresh_data(dev), dev.spub, dev.spriv) == <<0x06>>
+    {:ok, rec2} = Store.lookup(dev.name, :key)
+    assert rec2.data["enrollment_ref"] == want, "a check-in must not erase the fingerprint"
+  end
+
+  test "a check-in cannot replace the fingerprint", %{secret: s, pfx: p} do
+    tok = token(s)
+    dev = enroll(s, dev_name(p, "ref2"), token: tok)
+    forged = refresh_data(dev, %{"enrollment_ref" => String.duplicate("ab", 16)})
+
+    assert send_registration(dev.name, forged, dev.spub, dev.spriv) == <<0x06>>
+    {:ok, rec} = Store.lookup(dev.name, :key)
+    assert rec.data["enrollment_ref"] == Enrollment.enrollment_ref(token_nonce(tok))
+  end
+
+  # ── back-to-back check-ins (Windows service + desktop app both check in) ──
+
+  test "a second check-in within the rate-limit window is accepted without a rewrite", %{secret: s, pfx: p} do
+    dev = enroll(s, dev_name(p, "twin"))
+    assert send_registration(dev.name, refresh_data(dev), dev.spub, dev.spriv) == <<0x06>>
+    {:ok, first} = Store.lookup(dev.name, :key)
+
+    assert send_registration(dev.name, refresh_data(dev), dev.spub, dev.spriv) == <<0x06>>,
+           "the device's own unchanged check-in must not be reported as a failure"
+
+    {:ok, second} = Store.lookup(dev.name, :key)
+    assert second.serial == first.serial, "nothing is rewritten inside the window"
+  end
+
+  test "a too-soon registration that is not an unchanged check-in is still rate-limited", %{secret: s, pfx: p} do
+    dev = enroll(s, dev_name(p, "twin2"))
+    assert send_registration(dev.name, refresh_data(dev), dev.spub, dev.spriv) == <<0x06>>
+    # Same signer, but a different node_id: not an enrolled refresh, so the limit applies
+    # (or authorization refuses it); either way it is not accepted.
+    changed = refresh_data(dev, %{"node_id" => Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)})
+    refute send_registration(dev.name, changed, dev.spub, dev.spriv) == <<0x06>>
   end
 end

@@ -591,7 +591,7 @@ defmodule ZtlpNs.Server do
          # 7. Check name revocation (revoked entities cannot re-register)
          :ok <- RegistrationAuth.check_name_revocation(name),
          # 8. Check rate limiting (max 1 registration per {name, type} per window)
-         :ok <- RegistrationAuth.check_rate_limit(name, type, pubkey) do
+         :ok <- rate_limit_unless_unchanged_checkin(name, type, pubkey, data) do
       # Build the record and sign with the NS registration key.
       # The registrant's identity was verified above (Ed25519 sig + zone auth).
       # The stored record needs a signature that matches Record.serialize()
@@ -603,10 +603,16 @@ defmodule ZtlpNs.Server do
       # tunnel key unchanged) gets the sliding one-year TTL; everything else
       # (gateway self-registration, new names) keeps the per-type default.
       # Decided BEFORE the insert, while the existing record is still there.
+      enrolled_refresh? = RegistrationAuth.enrolled_refresh?(pubkey, name, type, data)
+
       ttl =
-        if RegistrationAuth.enrolled_refresh?(pubkey, name, type, data),
+        if enrolled_refresh?,
           do: ZtlpNs.RecordDefaults.enrolled_device_ttl(),
           else: RegistrationAuth.refresh_ttl(name, type, default_ttl(type))
+
+      # A check-in re-sends the device's own fields; keep the enrollment fingerprint the NS
+      # wrote at enrollment (Enrollment.enrollment_ref/1) so the admin panel can still find it.
+      data = if enrolled_refresh?, do: RegistrationAuth.keep_enrollment_ref(name, data), else: data
 
       record = %Record{
         name: name,
@@ -676,10 +682,31 @@ defmodule ZtlpNs.Server do
           RegistrationError.encode(RegistrationError.from_internal(reason))
       end
     else
+      # Already refreshed inside the rate-limit window; nothing to write (see below).
+      :unchanged_checkin ->
+        <<0x06>>
+
       {:error, reason} ->
         StructuredLog.warn(:registration_rejected,
           name: name, reason: reason)
         RegistrationError.encode(RegistrationError.from_internal(reason))
+    end
+  end
+
+  # An enrolled device's own check-in (signed by its enrolled key, tunnel key, node id and signing
+  # key unchanged) that arrives inside the per-name rate-limit window is reported as accepted
+  # without rewriting the record: it was refreshed seconds ago. On Windows the background service
+  # and the desktop app both check in, and refusing the second one made the app show "Can't reach
+  # the name server". Every other too-soon registration is still refused.
+  defp rate_limit_unless_unchanged_checkin(name, type, pubkey, data) do
+    case RegistrationAuth.check_rate_limit(name, type, pubkey) do
+      {:error, :rate_limited} = limited ->
+        if RegistrationAuth.enrolled_refresh?(pubkey, name, type, data),
+          do: :unchanged_checkin,
+          else: limited
+
+      other ->
+        other
     end
   end
 

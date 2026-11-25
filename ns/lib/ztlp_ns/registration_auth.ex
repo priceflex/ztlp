@@ -323,6 +323,20 @@ defmodule ZtlpNs.RegistrationAuth do
 
   def enrolled_refresh?(_pubkey, _name, _type, _data), do: false
 
+  @doc """
+  Carry the `enrollment_ref` of the existing KEY record for `name` into `data` (an enrolled
+  device's check-in). The device never sends it, so without this a check-in would erase it.
+  """
+  @spec keep_enrollment_ref(String.t(), map()) :: map()
+  def keep_enrollment_ref(name, data) do
+    with {:ok, existing} <- Store.lookup(name, :key),
+         ref when is_binary(ref) <- Map.get(existing.data, "enrollment_ref") do
+      Map.put(data, "enrollment_ref", ref)
+    else
+      _ -> data
+    end
+  end
+
   defp enrolled_refresh_match?(existing, pubkey_hex, data) do
     enrolled_signer = field(existing.data, "signing_public_key")
 

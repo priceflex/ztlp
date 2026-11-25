@@ -43,6 +43,11 @@ class Enrollment < ApplicationRecord
     end
   end
 
+  # Fingerprint of a token's 16-byte nonce: first 16 bytes of SHA-256, 32 hex. The name server
+  # writes the same value as `enrollment_ref` on the device's KEY record when the token is used
+  # (ZtlpNs.Enrollment.enrollment_ref/1), so DevicePickup finds the device by token, not by name.
+  def self.token_ref_for(nonce) = Digest::SHA256.digest(nonce).byteslice(0, 16).unpack1("H*")
+
   def pending? = status == "pending"
   def revoked? = status == "revoked"
   def expired? = status == "expired" || (expires_at.present? && expires_at < Time.current)

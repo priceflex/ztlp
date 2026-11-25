@@ -23,6 +23,13 @@ class DevicePickupTest < ActiveSupport::TestCase
       @trusted = trusted_keys
       @records.fetch([ name, type ], :not_found)
     end
+
+    # NS admin API listing (NsClient.list): every record of a type in a zone.
+    def list(_port, _secret, type:, zone:, **)
+      raise @raise_error if @raise_error
+
+      @records.select { |(n, t), r| t == type && r.is_a?(Hash) && n.end_with?(".#{zone}") }.values
+    end
   end
 
   def key_rec(name, node:, pub:, created_at:)
@@ -213,5 +220,61 @@ class DevicePickupTest < ActiveSupport::TestCase
         Ztlp::DevicePickup.adopt!(@zone, @heidy, bad, ns_client: FakeNs.new, admin: @admin)
       end
     end
+  end
+
+  # ── token fingerprint (enrollment_ref): the client picks its own device name ──
+
+  def ref_rec(name, ref, created_at:)
+    r = key_rec(name, node: "4a" * 16, pub: "5b" * 32, created_at: created_at)
+    r[:data]["enrollment_ref"] = ref
+    r
+  end
+
+  test "the token's fingerprint finds the device under the name the client chose" do
+    @zone.update!(ns_admin_api_secret_ct: "01" * 32)
+    ref = Enrollment.token_ref_for("\x07" * 16)
+    @enr.update!(token_ref: ref)
+    chosen = "heidy-mba-heidy-smith.#{@zone.name}"
+    ns = FakeNs.new([ chosen, "key" ] => ref_rec(chosen, ref, created_at: @enr.created_at.to_i + 30))
+
+    assert_equal :redeemed, Ztlp::DevicePickup.check(@enr, ns_client: ns)
+    d = @zone.devices.find_by!(name: "heidy-mba-heidy-smith")
+    assert_equal "enrolled", d.status
+    assert_equal @heidy, d.user
+    assert_equal "redeemed", @enr.reload.status
+    assert_equal "active", @heidy.reload.status
+    assert_includes ns.queries, [ chosen, "key" ], "the listing hit is confirmed with a signed query"
+  end
+
+  test "a listed fingerprint the signed answer does not carry is ignored" do
+    @zone.update!(ns_admin_api_secret_ct: "01" * 32)
+    ref = Enrollment.token_ref_for("\x08" * 16)
+    @enr.update!(token_ref: ref)
+    chosen = "imposter.#{@zone.name}"
+    listed = ref_rec(chosen, ref, created_at: @enr.created_at.to_i + 30)
+    signed = key_rec(chosen, node: "4a" * 16, pub: "5b" * 32, created_at: @enr.created_at.to_i + 30)
+    ns = FakeNs.new([ chosen, "key" ] => listed)
+    ns.define_singleton_method(:query_verified) { |*_a, name:, type:, **| name == chosen ? signed : :not_found }
+
+    assert_equal :pending, Ztlp::DevicePickup.check(@enr, ns_client: ns)
+    assert_nil @zone.devices.find_by(name: "imposter")
+  end
+
+  test "the fingerprint wins over an older record that has the typed name" do
+    @zone.update!(ns_admin_api_secret_ct: "01" * 32)
+    ref = Enrollment.token_ref_for("\x09" * 16)
+    @enr.update!(token_ref: ref)
+    chosen = "heidy-mba-2.#{@zone.name}"
+    ns = FakeNs.new([ @name, "key" ] => key_rec(@name, node: "3f" * 16, pub: "0e" * 32,
+                                                       created_at: @enr.created_at.to_i - 86_400),
+                    [ chosen, "key" ] => ref_rec(chosen, ref, created_at: @enr.created_at.to_i + 30))
+
+    assert_equal :redeemed, Ztlp::DevicePickup.check(@enr, ns_client: ns)
+    assert @zone.devices.exists?(name: "heidy-mba-2")
+  end
+
+  test "token_ref_for matches the name server's enrollment_ref (first 16 bytes of SHA-256, hex)" do
+    assert_equal Digest::SHA256.hexdigest("\x01" * 16)[0, 32], Enrollment.token_ref_for("\x01" * 16)
+    assert_equal 32, Enrollment.token_ref_for(SecureRandom.random_bytes(16)).length
   end
 end

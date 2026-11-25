@@ -9,7 +9,8 @@ class EnrollmentPickupJob < ApplicationJob
 
   def perform(ns_client: Ztlp::NsClient)
     Enrollment.includes(:zone, :user)
-              .where(status: "pending").where.not(device_name: [ nil, "" ])
+              .where(status: "pending")
+              .where("COALESCE(device_name, '') <> '' OR COALESCE(token_ref, '') <> ''")
               .where("expires_at > ?", Time.current)
               .find_each.to_h do |e|
                 result = begin

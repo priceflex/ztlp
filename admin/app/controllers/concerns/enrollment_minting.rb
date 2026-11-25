@@ -56,6 +56,8 @@ module EnrollmentMinting
       created_by_admin: current_admin
     )
     enrollment.token_id = Enrollment.generate_token_id
+    nonce = SecureRandom.random_bytes(16)
+    enrollment.token_ref = Enrollment.token_ref_for(nonce)
 
     # The callback_url points the CLI (ztlp-cli.rs confirm_enrollment) at the panel's OWN
     # unauthenticated legacy endpoint. The panel's public URL comes from ZTLP_PANEL_PUBLIC_URL;
@@ -66,7 +68,7 @@ module EnrollmentMinting
 
     begin
       uri = Ztlp::TokenMinter.to_uri(
-        Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i, callback_url: callback_url,
+        Ztlp::TokenMinter.mint(@zone, expires_at: enrollment.expires_at.to_i, callback_url: callback_url, nonce: nonce,
                                       relay_secret: (embed_relay ? @zone.token_relay_secret : nil),
                                       ns_key_hex: @zone.ns_pubkey_hex)
       )

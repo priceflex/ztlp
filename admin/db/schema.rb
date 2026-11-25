@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_10_27_000003) do
+ActiveRecord::Schema[7.1].define(version: 2026_11_25_000001) do
   create_table "admins", charset: "utf8mb4", collation: "utf8mb4_unicode_ci", force: :cascade do |t|
     t.string "username", null: false
     t.string "display_name", null: false
@@ -91,8 +91,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_10_27_000003) do
     t.datetime "revoked_at"
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
+    t.string "token_ref", limit: 32
     t.index ["code"], name: "idx_enrollments_code", unique: true
     t.index ["token_id"], name: "idx_enrollments_token", unique: true
+    t.index ["token_ref"], name: "idx_enrollments_token_ref"
     t.index ["user_id"], name: "idx_enrollments_user"
     t.index ["zone_id"], name: "idx_enrollments_zone"
   end

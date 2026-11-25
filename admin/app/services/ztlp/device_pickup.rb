@@ -27,23 +27,32 @@ module Ztlp
 
     def self.check(enrollment, ns_client: NsClient)
       return :not_pending unless enrollment.pending? && !enrollment.expired?
-      return :no_device_name if enrollment.device_name.blank?
+      return :no_device_name if enrollment.device_name.blank? && enrollment.token_ref.blank?
       return :revoked_user if enrollment.user&.revoked?
 
       zone = enrollment.zone
       return :no_ns_key if zone.ns_pubkey_hex.blank?
 
-      rec = lookup_key(zone, enrollment.device_name, ns_client)
+      # The client may enroll under a different name than the one typed into the token (the
+      # Windows and Mac apps append the computer's user name), so look for the KEY record carrying
+      # this token's fingerprint first. Tokens minted before token_ref existed fall back to the name.
+      name, rec = find_by_token_ref(zone, enrollment.token_ref, ns_client)
+      via = "ns_enrollment_ref"
+      if rec.nil? && enrollment.device_name.present?
+        name = enrollment.device_name
+        rec = lookup_key(zone, name, ns_client)
+        via = "ns_key_lookup"
+      end
       return :pending unless rec
       return :stale_key if rec[:created_at].to_i < enrollment.created_at.to_i - CLOCK_SKEW
 
       Enrollment.transaction do
-        device = upsert_device!(zone, enrollment.user, enrollment.device_name, rec, enrollment: enrollment)
+        device = upsert_device!(zone, enrollment.user, name, rec, enrollment: enrollment)
         enrollment.update!(status: "redeemed", uses: enrollment.uses.to_i + 1, redeemed_device: device,
                            redeemed_at: Time.current)
         AuditLog.record!("enrollment.redeem", admin: nil, target: enrollment, status: "ok",
                                               details: { code: enrollment.code, device: device.ns_name,
-                                                         node_id: device.node_id_hex, via: "ns_key_lookup" })
+                                                         node_id: device.node_id_hex, via: via })
       end
       :redeemed
     rescue Ztlp::NsClient::UntrustedAnswer => e
@@ -75,6 +84,31 @@ module Ztlp
                                                     node_id: device.node_id_hex })
         device
       end
+    end
+
+    # [label, record] for the zone's KEY record whose `enrollment_ref` is this token's fingerprint,
+    # or nil. Found through the NS admin API listing, then re-read with a SIGNED query (the listing is
+    # only a hint) and the fingerprint checked again on the signed answer.
+    def self.find_by_token_ref(zone, ref, ns_client)
+      return nil if ref.blank? || zone.ns_admin_secret.blank? || !ns_client.respond_to?(:list)
+
+      records = ns_client.list(Reconciler.ns_admin_port(zone), zone.ns_admin_secret, type: "key", zone: zone.name)
+      hit = Array(records).find { |r| ref_of(r) == ref }
+      return nil unless hit
+
+      label = (hit[:name] || hit["name"]).to_s.delete_suffix(".#{zone.name}")
+      return nil if label.empty? || label.include?(".")
+
+      rec = lookup_key(zone, label, ns_client)
+      rec && ref_of(rec) == ref ? [ label, rec ] : nil
+    rescue *NS_ERRORS => e
+      Rails.logger.warn("device_pickup: NS listing failed (#{e.class}); falling back to the device name")
+      nil
+    end
+
+    def self.ref_of(rec)
+      data = rec[:data] || rec["data"]
+      data.is_a?(Hash) ? data.transform_keys(&:to_s)["enrollment_ref"].to_s.downcase : nil
     end
 
     def self.lookup_key(zone, name, ns_client)

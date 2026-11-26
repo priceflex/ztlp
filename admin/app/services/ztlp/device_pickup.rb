@@ -46,14 +46,19 @@ module Ztlp
       return :pending unless rec
       return :stale_key if rec[:created_at].to_i < enrollment.created_at.to_i - CLOCK_SKEW
 
-      Enrollment.transaction do
-        device = upsert_device!(zone, enrollment.user, name, rec, enrollment: enrollment)
-        enrollment.update!(status: "redeemed", uses: enrollment.uses.to_i + 1, redeemed_device: device,
+      device = Enrollment.transaction do
+        d = upsert_device!(zone, enrollment.user, name, rec, enrollment: enrollment)
+        enrollment.update!(status: "redeemed", uses: enrollment.uses.to_i + 1, redeemed_device: d,
                            redeemed_at: Time.current)
         AuditLog.record!("enrollment.redeem", admin: nil, target: enrollment, status: "ok",
-                                              details: { code: enrollment.code, device: device.ns_name,
-                                                         node_id: device.node_id_hex, via: via })
+                                              details: { code: enrollment.code, device: d.ns_name,
+                                                         node_id: d.node_id_hex, via: via })
+        d
       end
+      # The DEVICE record carries the owner the gateways sign into X-ZTLP-* (whoami, app sign-in).
+      # Write it now instead of waiting for the 6-hourly republish. Outside the transaction: the
+      # device IS enrolled either way; a failed write is retried by publish_pending! next run.
+      publish_owner(device, ns_client)
       :redeemed
     rescue Ztlp::NsClient::UntrustedAnswer => e
       Rails.logger.warn("device_pickup #{enrollment.code}: #{e.message}")
@@ -84,6 +89,31 @@ module Ztlp
                                                     node_id: device.node_id_hex })
         device
       end
+    end
+
+    # Owned, enrolled devices whose DEVICE record never reached the NS since their last enrollment
+    # (a failed publish during pickup, or a re-key): publish them now. Recent enrollments only, and
+    # only in zones that can publish at all, so a zone without an authority is not retried forever.
+    RETRY_WINDOW = 1.day
+
+    def self.publish_pending!(ns_client: NsClient)
+      Device.joins(:zone).includes(:zone, :user)
+            .where(status: "enrolled").where.not(user_id: nil)
+            .where.not(zones: { authority_seed_ct: [ nil, "" ] })
+            .where("devices.enrolled_at > ?", RETRY_WINDOW.ago)
+            .where("devices.ns_published_at IS NULL OR devices.ns_published_at < devices.enrolled_at")
+            .find_each.map { |d| [ d.ns_name, publish_owner(d, ns_client) ] }.to_h
+    end
+
+    def self.publish_owner(device, ns_client)
+      return :no_owner if device.user.nil?
+      return :no_authority unless device.zone.authority_configured?
+
+      Publisher.publish_device!(device, ns_client: ns_client)
+      :published
+    rescue *NS_ERRORS, Ztlp::Records::Error => e
+      Rails.logger.warn("device_pickup publish #{device.ns_name}: #{e.class}: #{e.message}")
+      :publish_failed
     end
 
     # [label, record] for the zone's KEY record whose `enrollment_ref` is this token's fingerprint,

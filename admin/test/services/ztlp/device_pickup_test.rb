@@ -9,10 +9,22 @@ class DevicePickupTest < ActiveSupport::TestCase
     attr_reader :queries, :trusted
 
     # Callers pass `FakeNs.new([name, "key"] => rec)`, which Ruby delivers as keywords.
-    def initialize(records = nil, raise_error: nil, **by_name_type)
+    attr_reader :registered
+
+    def initialize(records = nil, raise_error: nil, register_error: nil, **by_name_type)
       @records = records || by_name_type
       @raise_error = raise_error
+      @register_error = register_error
       @queries = []
+      @registered = []
+    end
+
+    # Publisher's NS write seam (register(ns_addr, timeout, name:, type:, data:, seed:)).
+    def register(_addr, _timeout, name:, type:, data:, **)
+      raise @register_error if @register_error
+
+      @registered << { name: name, type: type, data: data }
+      :ok
     end
 
     # Pickup must only accept answers signed by the zone's NS key (NsClient.query_verified).
@@ -179,6 +191,79 @@ class DevicePickupTest < ActiveSupport::TestCase
   ensure
     Ztlp::DevicePickup.define_singleton_method(:check, original) if original
     Ztlp::DevicePickup.remove_instance_variable(:@enr_id_to_fail) if Ztlp::DevicePickup.instance_variable_defined?(:@enr_id_to_fail)
+  end
+
+  # --- owner published the moment the device is picked up (whoami works right away) --------
+  def authority!
+    seed, = Ztlp::Ed25519.generate
+    @zone.update!(authority_seed_ct: seed)
+  end
+
+  def fresh_key_ns(**kw)
+    FakeNs.new({ [ @name, "key" ] => key_rec(@name, node: "3f" * 16, pub: "0e" * 32,
+                                                     created_at: @enr.created_at.to_i + 30) }, **kw)
+  end
+
+  test "pickup publishes the DEVICE record with the owner immediately, not at the next republish" do
+    authority!
+    ns = fresh_key_ns
+    assert_equal :redeemed, Ztlp::DevicePickup.check(@enr, ns_client: ns)
+    dev = ns.registered.find { |r| r[:type] == "device" }
+    assert dev, "a DEVICE record is written during pickup"
+    assert_equal @name, dev[:name]
+    assert_equal @heidy.reload.ns_name, dev[:data]["owner"], "the owner is the token's user"
+    assert_equal "0e" * 32, dev[:data]["public_key"]
+    assert_not_nil @zone.devices.find_by!(name: "heidy-mba").ns_published_at
+  end
+
+  test "a failed owner publish does not undo the redemption (the job retries it)" do
+    authority!
+    ns = fresh_key_ns(register_error: Ztlp::NsClient::NsError.new(0x05, "timeout"))
+    assert_equal :redeemed, Ztlp::DevicePickup.check(@enr, ns_client: ns)
+    d = @zone.devices.find_by!(name: "heidy-mba")
+    assert_equal "enrolled", d.status
+    assert_equal @heidy, d.user
+    assert_nil d.ns_published_at, "left unpublished so the next job run retries"
+    assert_equal "redeemed", @enr.reload.status
+  end
+
+  test "a device-only token (no user) publishes nothing" do
+    authority!
+    @enr.update_columns(user_id: nil, kind: "device_only")
+    ns = fresh_key_ns
+    assert_equal :redeemed, Ztlp::DevicePickup.check(@enr.reload, ns_client: ns)
+    assert_empty ns.registered
+  end
+
+  test "the job re-publishes an owned device whose owner never reached the name server" do
+    authority!
+    stuck = @zone.devices.create!(name: "heidy-pc", user: @heidy, status: "enrolled", node_id_hex: "44" * 16,
+                                  noise_pubkey_hex: "55" * 32, enrolled_at: 10.minutes.ago, ns_published_at: nil)
+    rekeyed = @zone.devices.create!(name: "heidy-pc2", user: @heidy, status: "enrolled", node_id_hex: "46" * 16,
+                                    noise_pubkey_hex: "57" * 32, enrolled_at: 2.minutes.ago,
+                                    ns_published_at: 1.hour.ago)
+    done = @zone.devices.create!(name: "heidy-old", user: @heidy, status: "enrolled", node_id_hex: "66" * 16,
+                                 noise_pubkey_hex: "77" * 32, enrolled_at: 1.hour.ago,
+                                 ns_published_at: 30.minutes.ago)
+    unowned = @zone.devices.create!(name: "spare-pc", status: "enrolled", node_id_hex: "88" * 16,
+                                    noise_pubkey_hex: "99" * 32, enrolled_at: 5.minutes.ago)
+    ns = FakeNs.new
+    EnrollmentPickupJob.new.perform(ns_client: ns)
+    names = ns.registered.select { |r| r[:type] == "device" }.map { |r| r[:name] }
+    assert_includes names, stuck.ns_name
+    assert_includes names, rekeyed.ns_name, "re-enrolled after its last publish"
+    refute_includes names, done.ns_name
+    refute_includes names, unowned.ns_name
+    assert_not_nil stuck.reload.ns_published_at
+  end
+
+  test "the retry skips zones without an authority (nothing could be published there)" do
+    @zone.update!(authority_seed_ct: nil)
+    @zone.devices.create!(name: "heidy-pc", user: @heidy, status: "enrolled", node_id_hex: "44" * 16,
+                          noise_pubkey_hex: "55" * 32, enrolled_at: 10.minutes.ago)
+    ns = FakeNs.new
+    EnrollmentPickupJob.new.perform(ns_client: ns)
+    assert_empty ns.registered
   end
 
   # --- adopt an already-enrolled device by name (no re-key) -----------------------------------

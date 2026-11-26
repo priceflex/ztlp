@@ -11,7 +11,7 @@ class RecurringScheduleTest < ActiveSupport::TestCase
     "ReconcileNsJob" => "every 30 minutes",
     "ExpireEnrollmentsJob" => "every 5 minutes",
     "GatewayStatusJob" => "every 30 minutes",
-    "EnrollmentPickupJob" => "every 5 minutes"
+    "EnrollmentPickupJob" => "every minute"
   }.freeze
 
   def loaded(env)

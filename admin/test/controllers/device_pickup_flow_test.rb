@@ -101,11 +101,11 @@ class DevicePickupFlowTest < ActionDispatch::IntegrationTest
     assert_equal 0, @zone.devices.count
   end
 
-  test "the pickup job is scheduled every 5 minutes" do
+  test "the pickup job runs every minute (a new device shows its owner within a minute)" do
     sched = YAML.safe_load(File.read(Rails.root.join("config/recurring.yml")), aliases: true)
     jobs = sched.values.flat_map { |env| env.is_a?(Hash) ? env.values : [] }
     pick = jobs.find { |j| j["class"] == "EnrollmentPickupJob" }
     assert pick, "EnrollmentPickupJob is in recurring.yml"
-    assert_match(/every 5 minutes/, pick["schedule"])
+    assert_equal "every minute", pick["schedule"]
   end
 end

@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
-# Every 5 minutes: for each pending, unexpired token that names a device, look for the device's KEY
-# record on the name server and list the device once it exists (Ztlp::DevicePickup.check). A failure on
-# one token (NS error, or a database conflict such as a node id already on another device) is reported
-# in the result as :error / :ns_error and does not stop the others.
+# Every minute: for each pending, unexpired token that names a device, look for the device's KEY
+# record on the name server and list the device once it exists (Ztlp::DevicePickup.check), which also
+# publishes its DEVICE record (owner) so gateways see the person right away. A failure on one token
+# (NS error, or a database conflict such as a node id already on another device) is reported in the
+# result as :error / :ns_error and does not stop the others. Then retry any owned device whose DEVICE
+# record never reached the NS (Ztlp::DevicePickup.publish_pending!).
 class EnrollmentPickupJob < ApplicationJob
   queue_as :default
 
@@ -21,5 +23,6 @@ class EnrollmentPickupJob < ApplicationJob
                 end
                 [ e.code, result ]
               end
+              .tap { Ztlp::DevicePickup.publish_pending!(ns_client: ns_client) }
   end
 end

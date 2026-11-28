@@ -1,184 +1,198 @@
-# Post-Quantum Migration for ZTLP (Zero-Trust Layer Protocol)
+# Post-Quantum Migration for ZTLP
 
-**Version:** 1.0 | **Date:** 2026-03-11
+**Status: plan. None of the post-quantum work described here is implemented.**
+Revised 2026-11-28. The earlier version of this document (2026-03-11) described
+suite negotiation, a minimum-suite setting and a suite field on name-server
+records as implemented, and quoted benchmark figures. Those statements were
+wrong and have been removed. Work is tracked in
+[issue #146](https://github.com/priceflex/ztlp/issues/146).
 
 ---
 
-## 1. Executive Summary
-ZTLP is an identity-first, zero-trust overlay network that already embraces a *crypto-aware* architecture.  The current suite (X25519 key exchange, Ed25519 signatures, ChaCha20-Poly1305 AEAD, BLAKE2s KDF) is strong against classical attacks but **Shor's algorithm** can break the key-exchange and signature primitives.  To protect long-lived deployments and to satisfy conference reviewers asking "what about quantum?", ZTLP adopts a **phased, algorithm-agile migration**:
+## 1. What ZTLP uses today
 
-1. **Hybrid Key-Exchange** - X25519 + ML-KEM-768 (Noise XX handshake).  Provides *forward secrecy* today while protecting against future "harvest-now, decrypt-later" attacks.
-2. **Hybrid Signatures** - Ed25519 + ML-DSA-65 (dual signatures on all ZTLP-NS records and static keys).  Secures identity roots without breaking compatibility.
-3. **Pure Post-Quantum Mode** - After the NIST 2025 standardization and at least 5 years of field experience, the classical fall-backs can be removed, leaving only lattice-based primitives.
+| Part | Algorithm | Where |
+|------|-----------|-------|
+| Tunnel handshake | `Noise_XX_25519_ChaChaPoly_BLAKE2s`, hard-coded | `proto/src/handshake.rs` |
+| Tunnel data | ChaCha20-Poly1305 | same |
+| Device identity and name-server record signatures | Ed25519 | `ns/lib/ztlp_ns/record.ex`, `enrollment.ex` |
+| QUIC outer layer | TLS 1.3 (rustls) | `proto/src/quic_transport.rs` |
+| Local browser certificates | ECDSA P-256 | `proto/src/agent/cert_mint.rs` |
+| Name-server certificate authority | RSA-4096 by default, Ed25519 optional | `ns/lib/ztlp_ns/cert_authority.ex` |
 
-The protocol's modular design (separate Rust client, Elixir gateway, eBPF filter, NS service, and relay) makes the transition **low-risk, low-impact**, and **transparent** to existing deployments.
----
+What exists toward agility, and what does not:
 
-## 2. Current Cryptographic Suite Analysis
-| Component | Primitive | NIST Security Level (Classical) | Quantum-Resistant? | NIST Post-Quantum Level* |
-|-----------|-----------|-------------------------------|-------------------|--------------------------|
-| Key Exchange (Noise XX) | X25519 (Curve25519) | L1 (128-bit) | **No** - broken by Shor | - |
-| Static/ephemeral identity keys | Ed25519 | L1 (128-bit) | **No** - broken by Shor | - |
-| AEAD | ChaCha20-Poly1305 | L1 (128-bit) | **Yes** (Grover gives 2 × security) | - |
-| Hash/KDF | BLAKE2s | L1 (256-bit output) | **Yes** (pre-image security reduces by √2) | - |
+- The original ZTLP packet header has a 16-bit `CryptoSuite` field
+  (`proto/src/packet.rs`). It is always `0x0001`. No code negotiates it.
+- The QUIC transport, which agents use today, does not carry a suite
+  identifier. Stream 0 starts with one magic byte and then the Noise handshake.
+- KEY records carry `"algorithm": "Ed25519"` as a label. Nothing branches on it.
+- `proto/src/pqkem.rs` defines a `Kem` trait and a hybrid combiner. Its ML-KEM
+  half is a placeholder that returns random bytes, and nothing outside the
+  module uses it. It provides no security and must not be wired in as it is.
+- There is no `min_crypto_suite` setting and no `crypto_suite` field on
+  name-server records.
 
-*Post-Quantum security levels are taken from NIST SP-800-208; *L3* corresponds to ≈128-bit security against quantum adversaries.
----
+All public-key algorithms in use (X25519, Ed25519, P-256) are elliptic-curve.
+RSA appears only as the certificate-authority default.
 
-## 3. Quantum Threat Assessment
-### 3.1 What Shor's algorithm breaks
-* **Discrete-logarithm problem (DLP)** → X25519 key exchange.
-* **Elliptic-curve DSA (ECDSA/EdDSA)** → Ed25519 signatures.
-* The **shared secret** derived from X25519 is therefore recoverable if an adversary records a handshake and later obtains a sufficiently large quantum computer.
+## 2. The threat
 
-### 3.2 What remains secure
-* **Symmetric primitives** - ChaCha20-Poly1305 and BLAKE2s retain ~2ⁿ⁄² security (i.e., 128-bit security becomes ~64-bit, which is still acceptable for short-lived data).
-* **Authenticated routing / packet filtering** - eBPF logic does not rely on asymmetric crypto.
+A large enough quantum computer running Shor's algorithm breaks every
+public-key algorithm in section 1: X25519, Ed25519, ECDSA and RSA.
 
-### 3.3 CRQC (Cryptographically-Relevant Quantum Computer) timeline
-| Source | Estimated "Quantum-Ready" year | Comments |
-|--------|------------------------------|----------|
-| **NSA CNSA 2.0** (Oct 2024) | 2028-2030 | Recommends NIST L3-L5 primitives for "Secret" data.
-| **NIST PQC Transition Schedule** (2023-2026) | 2027-2029 | First public-key algorithms to be standardized.
-| **IBM Q-Roadmap** (2025) | 2030-2032 | Claims >4 000 qubits with low error rates needed for breaking X25519.
+- **Recorded traffic.** The ephemeral X25519 public keys of a handshake travel
+  in the clear. Someone who records a session today can recover its keys once
+  such a computer exists. Forward secrecy does not help here: it protects past
+  sessions from a later theft of long-term keys, not from a break of the key
+  exchange itself. This is the "harvest now, decrypt later" risk, and it is
+  the reason key exchange comes first.
+- **Signatures.** A signature can only be forged while it is being relied on.
+  Identities and records need post-quantum signatures before such a computer
+  exists, not years ahead of it.
+- **Symmetric primitives.** ChaCha20-Poly1305 with a 256-bit key and BLAKE2s
+  are not affected in any practical way. Grover's algorithm halves the
+  effective key length at most, leaving about 128 bits.
 
-Given the *harvest-now, decrypt-later* risk, we must assume that adversaries can record traffic **today** and decrypt it **once** a CRQC appears.
+No one can say when such a computer will exist. A second reason to be able to
+change algorithms is classical: advances in factoring and discrete-logarithm
+algorithms, including AI-assisted work in 2026. Nothing published threatens
+the algorithms in section 1, and none of that work concerns elliptic curves,
+but it argues for the ability to replace an algorithm without upgrading every
+device at once.
 
-### 3.4 Forward Secrecy mitigation
-*Noise XX* already provides forward secrecy: each session uses a fresh ephemeral X25519 key.  However, the **static long-term identity keys** (used in ZTLP-NS records) are **not** protected by forward secrecy.  An attacker who records a handshake can later recover the static key once a quantum computer is available and then impersonate the node retroactively.
+## 3. Target algorithms
 
-**Conclusion:** forward secrecy mitigates but does **not** eliminate the threat; therefore we need *hybrid* handshakes and *dual* signatures to protect both session and identity material.
----
+Sizes are from the NIST standards, published August 2024.
 
-## 4. Target Post-Quantum Primitives
-| Primitive | Standard (FIPS) | Security Level (NIST) | Public-Key Size | Ciphertext / Signature Size | Typical Operation Latency (µs) |
-|-----------|----------------|-----------------------|----------------|----------------------------|--------------------------------|
-| **ML-KEM-768** | FIPS 203 | L3 (≈128-bit) | 1 184 B | 1 088 B (ciphertext) | Keygen ≈ 27 µs, Enc ≈ 42 µs, Dec ≈ 44 µs (2.6 GHz CPU) |
-| **ML-DSA-65** | FIPS 204 | L3 (≈128-bit) | 1 952 B (public) | 3 309 B (signature) | Sign ≈ 58 µs, Verify ≈ 41 µs |
-| **SLH-DSA-SHA2-128s** | FIPS 205 | L3 (≈128-bit) | 5 184 B | 7 856 B (signature) | Sign/Verify ≈ 0.5 ms - used only as a *fallback* for root-of-trust |
+| Algorithm | Standard | NIST category | Public key | Ciphertext or signature |
+|-----------|----------|---------------|-----------:|------------------------:|
+| ML-KEM-768 | FIPS 203 | 3 | 1,184 B | 1,088 B |
+| ML-KEM-1024 | FIPS 203 | 5 | 1,568 B | 1,568 B |
+| ML-DSA-65 | FIPS 204 | 3 | 1,952 B | 3,309 B |
+| ML-DSA-87 | FIPS 204 | 5 | 2,592 B | 4,627 B |
+| SLH-DSA-SHA2-128s | FIPS 205 | 1 | 32 B | 7,856 B |
 
-**Why L3?**  L3 gives *post-quantum* security comparable to the current 128-bit symmetric level while keeping CPU, memory, and MTU impact reasonable for a high-performance overlay network.
----
+ML-KEM and ML-DSA rest on lattice problems. SLH-DSA rests on hash functions
+only, which makes it a candidate for the few long-lived keys (the zone
+authority) where signature size matters less than independence from lattices.
 
-## 5. Migration Phase Details
-### 5.1 Phase 1 - Hybrid Key Exchange (Priority)
-1. **Noise XX modification** - three-message handshake is extended to carry a KEM payload.
-   * **Message 1 (HELLO)** – initiator sends: `X25519_eph_pub || ML‑KEM‑768_ek` (encapsulation key, 1 184 B).
-   * **Message 2 (HELLO_ACK)** – responder encapsulates against the initiator's `ek`, sends: `X25519_eph_pub || ML‑KEM‑768_ct` (ciphertext, 1 088 B) `|| static X25519_pub`. Both sides now hold the KEM shared secret.
-   * **Message 3** – same as before; the transcript hash now includes the KEM payloads, binding the PQ material to the session.
-2. **KDF** - both X25519 DH secret and ML-KEM shared secret are concatenated before feeding BLAKE2s:
-   ```
-   session_key = BLAKE2s( dh_X25519 || dh_KEM || transcript_hash )
-   ```
-3. **Wire-format impact** - the existing `payload_len` field (16-bit) can already express up to 65 535 bytes.  The hybrid payload grows from ~48 B (pure X25519) to **≈ 1 200 B** (max ≈ 1 600 B with both encaps/decaps).  This stays well below the limit and does not affect existing fragment/reassembly logic.
-4. **Performance impact** - measured on an Intel i7-12700K:
-   * X25519 only: **≈ 299 µs** (full handshake).
-   * Hybrid: **≈ 400 µs** (≈ + 101 µs for KEM ops).  Still comfortably under the 1 ms latency budget for interactive traffic.
-5. **Component impact**
-   * **Rust client (`proto/`)** - add `pqcrypto-kem-mlkem` dependency, generate/parse KEM fields.
-   * **Gateway (`gateway/`)** - same changes, plus fallback to pure X25519 if peer does not advertise hybrid.
-   * **Relay, eBPF** - unchanged; they treat handshake packets as opaque payloads.
+Parameter choice (768 or 1024, 65 or 87) is open. NSA's CNSA 2.0 suite, which
+applies to US national security systems, specifies ML-KEM-1024 and ML-DSA-87.
 
-### 5.2 Phase 2 - Hybrid Signatures (Identity Protection)
-1. **Dual signature format** - each ZTLP-NS record (KEY, SVC, RELAY, POLICY) and the static key payload in the handshake are signed with **both** Ed25519 and ML-DSA-65.  The record contains:
-   ```
-   { data, ed25519_sig, ml_dsa65_sig, ml_dsa65_pub }
-   ```
-2. **Size impact** - per record we add **3 309 B** signature + **1 952 B** public key ≈ **5 261 B**.  Records were previously ~200 B; the new size stays well below the UDP-payload limit (≈ 65 KB).
-3. **Verification** - receivers first verify the Ed25519 signature (fast) and, if present, also verify the ML-DSA-65 signature.  Nodes that lack PQ support can ignore the ML-DSA-65 part but still accept the Ed25519 signature, preserving interoperability.
-4. **Storage** - Mnesia disc-copies handle multi-megabyte rows without issue; indexing remains unchanged.
-5. **Component impact**
-   * **NS service (`ns/`)** - add `pqcrypto-sign-ml_dsa` crate (Rust) and an Erlang NIF wrapper for verification in Elixir.
-   * **Gateway** - verify dual signatures during session establishment.
-   * **Rust client** - generate dual signatures for static keys.
+No performance figures are given here. They will be measured on the
+implementation, on the platforms ZTLP ships for, including the iOS extension.
 
-### 5.3 Phase 3 - Pure Post-Quantum Mode (≈2030+)
-* After ≥5 years of stable operation and NIST's final L3-L5 specifications, the classic fall-backs can be **disabled** via configuration:
-  * `crypto_suite = PQ_ONLY`
-  * Remove X25519 and Ed25519 code paths.
-* **Optional hash upgrade** - replace BLAKE2s with BLAKE3 (speed-up, still quantum-safe).
-* **AEAD** - ChaCha20-Poly1305 remains; it already provides quantum-resistant confidentiality.
----
+## 4. Plan
 
-## 6. Version Negotiation & Algorithm Agility
-| CryptoSuite value | Meaning | Supported primitives |
-|-------------------|---------|----------------------|
-| `0x01` | **Legacy** - X25519 + Ed25519 (default, backward compatible) |
-| `0x02` | **Hybrid** - X25519 + ML-KEM-768, Ed25519 + ML-DSA-65 |
-| `0x03` | **PQ-Only** - ML-KEM-768, ML-DSA-65 (future) |
+In order. Each step is useful without the next.
 
-*Negotiation rules* (implemented in `handshake.rs` and `gateway/crypto.ex`):
-1. **Initiator** includes its highest supported suite in the first handshake payload.
-2. **Responder** selects the highest mutually supported suite and echoes it in `HELLO_ACK`.
-3. **No-downgrade policy** - an admin can set `min_crypto_suite = 0x02` to *require* hybrid or PQ-only, rejecting pure-legacy handshakes.
-4. The transcript hash (Noise XX) automatically captures the suite value, enabling detection of inadvertent downgrade attempts.
-5. ZTLP-NS records carry a `crypto_suite` field indicating which signature algorithm was used, allowing incremental rollout.
----
+### 4.1 Negotiable suites
 
-## 7. Component-by-Component Impact Analysis
-| Component | What changes | What stays the same | Implementation effort (person-days) | Library dependencies |
-|-----------|--------------|--------------------|-----------------------------------|----------------------|
-| **Rust client (`proto/`)** | Add KEM field handling, dual-signature generation, CryptoSuite negotiation | Transport, pipeline, packet framing | 4 d | `pqcrypto-kem-mlkem`, `pqcrypto-sign-ml_dsa`, `serde` updates |
-| **Elixir gateway (`gateway/`)** | Parse KEM payload, hybrid KDF, verify dual signatures, CryptoSuite handling | Session routing, policy engine, AEAD encryption | 6 d | `pqcrypto_nif` (wrapper around Rust NIF), existing `:crypto` for classic ops |
-| **eBPF/XDP filter** | No change - still works on encrypted payloads only | Magic-byte check, SessionID allow-list | 0 d (no code) | - |
-| **ZTLP-NS (`ns/`)** | Store ML-DSA-65 public key, signature; verification on queries | Mnesia schema, zone logic | 5 d | Rust crate `pqcrypto-sign-ml_dsa`, Erlang NIF wrapper |
-| **Relay (`relay/`)** | Transparent forwarding - unchanged; only needs to forward larger handshake payloads (no parsing) | Mesh routing, packet forwarding | 0 d | - |
----
+A suite is a fixed, named set of algorithms. Peers negotiate a whole suite,
+never individual algorithms.
 
-## 8. Performance Projections
-| Metric | Current (X25519/Ed25519) | Hybrid (X25519 + ML-KEM-768 / Ed25519 + ML-DSA-65) | Pure PQ (ML-KEM-768 / ML-DSA-65) |
-|--------|--------------------------|--------------------------------------------|-----------------------------------|
-| **Handshake latency** (client-to-gateway) | 0.30 ms | 0.40 ms (≈ + 0.10 ms) | 0.45 ms (KEM only, no DH) |
-| **CPU time per handshake** | 1.2 µs (DH) | 1.2 µs (DH) + 27 µs (KEM-keygen) + 42 µs (encap) + 44 µs (decap) ≈ 0.12 ms | 27 µs (KEM-keygen) + 42 µs (encap) + 44 µs (decap) ≈ 0.11 ms |
-| **Signature generation** (static key) | 0.08 ms (Ed25519) | 0.08 ms + 58 µs (ML-DSA-65) ≈ 0.14 ms | 58 µs (ML-DSA-65) |
-| **Signature verification** (per NS record) | 0.04 ms | 0.04 ms + 41 µs ≈ 0.08 ms | 41 µs |
-| **AEAD throughput** (ChaCha20-Poly1305) | 1.2 Gb/s (single core) | unchanged | unchanged |
-| **Maximum packet size** | 48 B (handshake) | 1 200 B (handshake) | 1 600 B (handshake) |
+| Suite | Key exchange | Signatures | Status |
+|-------|--------------|------------|--------|
+| 1 | X25519 | Ed25519 | in use (implicit) |
+| 2 | X25519 + ML-KEM | Ed25519 | planned |
+| 3 | X25519 + ML-KEM | Ed25519 + ML-DSA | planned |
 
-All data-path operations (packet forwarding, eBPF filtering, tunnel payload encryption) remain **identical** because they continue to use ChaCha20-Poly1305.
----
+Requirements:
 
-## 9. Comparison with Peer Protocols
-| Protocol | PQ migration approach | Maturity | Remarks |
-|----------|----------------------|----------|---------|
-| **WireGuard** (2024 pq branch) | Hybrid X25519 + ML-KEM-768 (now ML-KEM-768); optional post-quantum mode | Production in limited deployments | Mirrors ZTLP's hybrid design; ZTLP can be more aggressive because it has no legacy base.
-| **TLS 1.3** (Chrome/Firefox 2024) | Hybrid X25519 + ML-KEM-768 (RFC 8446 draft) | Widespread on the web | Demonstrates viability of hybrid handshakes at massive scale.
-| **QUIC** | Inherits TLS 1.3's hybrid handshake | Used by major browsers | Same security guarantees as TLS.
-| **Signal** (X3DH → PQXDH) | Hybrid X25519 + ML-KEM-768 for pre-key bundles; ML-DSA-65 signatures optional | Large-scale messager | Shows that dual signatures are feasible for identity.
-| **OpenSSH 9.x** | Hybrid `sntrup761x25519` (KEM-plus-DH) | Default in many servers | Confirms that hybrid key-exchange can be transparent to users.
+- The suite identifier is carried in the first handshake message on every
+  transport and is covered by the handshake transcript, so a downgrade fails
+  the handshake.
+- The responder picks the best suite both sides support. An operator setting
+  gives the minimum acceptable suite; the default stays suite 1 until a fleet
+  is ready.
+- A peer that sends no identifier is treated as suite 1, so existing devices
+  keep working.
+- Name-server records state which signature suite signed them, and verifiers
+  act on it.
+- An operator can see which suite each device last used.
 
-**ZTLP advantage:** the overlay architecture already isolates the cryptographic layer; we can adopt PQ primitives without breaking existing routing or mesh logic, and we can *require* PQ-only mode earlier than internet-scale protocols.
----
+### 4.2 Hybrid key exchange (suite 2)
 
-## 10. Implementation Roadmap
-| Milestone | Target version | Tasks |
-|-----------|----------------|-------|
-| **v1.1 - Hybrid Key Exchange** | 2026-Q2 | Implement KEM payload, CryptoSuite field, hybrid KDF, unit & integration tests; update client and gateway docs. |
-| **v1.2 - Hybrid Signatures** | 2026-Q4 | Add dual-signature generation & verification, extend NS schema, rollout optional support flag. |
-| **v1.3 - Interop & Optimisation** | 2027-Q2 | Benchmark on various CPUs, reduce memory overhead, add fallback detection, publish interoperability test suite. |
-| **v2.0 - Pure PQ-Only** | 2030-Q1 | Deprecate legacy suite, update configuration defaults, audit code-base for leftover classic primitives, publish migration guide for operators. |
----
+Combine X25519 with ML-KEM so the session key holds if either holds.
 
-## 11. NIST CNSA 2.0 Compliance Matrix
-| CNSA Level | Required algorithms (2024) | ZTLP mapping |
-|------------|----------------------------|--------------|
-| **SECRET** | ML-KEM-768 + ML-DSA-87 | ZTLP's hybrid configuration (`CryptoSuite=0x02`) uses ML-KEM-768 (✓) + ML-DSA-65. ML-DSA-65 is L3 vs CNSA 2.0's ML-DSA-87 (L5) requirement. Configurable upgrade to ML-DSA-87 planned. |
-| **TOP SECRET** | ML-KEM-1024 + ML-DSA-87 | Future `CryptoSuite=0x04` with larger parameter sets. Code-path changes are minimal (constant swaps). |
+Open design choices:
 
-ZTLP's ML-KEM-768 selection meets CNSA 2.0 for key exchange. The signature gap (ML-DSA-65 vs required ML-DSA-87) is addressed by making the parameter set configurable - organizations needing full CNSA 2.0 compliance can set `ml_dsa_level = 87` to use the larger ML-DSA-87 parameters (4,627 B signatures, 2,592 B public keys). The performance cost is modest (~2× sign/verify time).
----
+- **Construction.** Either a Noise pattern extended with a KEM (the Noise
+  hybrid-forward-secrecy extension or the PQNoise patterns) or a specified
+  hybrid KEM such as X-Wing (X25519 with ML-KEM-768). Prefer a published,
+  analysed construction over a new one. The combiner in `pqkem.rs` has had no
+  review.
+- **Implementation.** A maintained ML-KEM library that builds for Linux,
+  Windows, macOS and iOS, and one usable from the Elixir components.
+- **Size.** The first two handshake messages each grow by roughly 1.1 to
+  1.6 KB. The effect on the first QUIC flight, on relayed connections and on
+  the original packet format has to be measured.
 
-## 12. References
-1. **NIST FIPS 203** - *Specification for KEM-Based Key-Encapsulation Mechanisms* (ML-KEM). 2023.
-2. **NIST FIPS 204** - *Specification for Digital Signature Schemes* (ML-DSA). 2023.
-3. **NIST FIPS 205** - *Stateful Hash-Based Signatures* (SLH-DSA). 2023.
-4. **NSA CNSA 2.0** - *Commercial National Security Algorithm Suite* (2024).  https://www.nsa.gov/​
-5. **Noise Protocol Framework**, Version 3.0, Section 4.5 (Hybrid handshakes).  https://noiseprotocol.org/
-6. **OpenSSH 9.x Release Notes**, 2023 - Hybrid `sntrup761x25519` key exchange.
-7. **WireGuard pq-branch**, 2024 - Hybrid X25519 + ML-KEM-768 implementation.
-8. **TLS 1.3 Draft (post-quantum extensions)**, 2024 - Hybrid X25519 + ML-KEM-768.
-9. **PQ-Crypto Benchmarks**, PQ-Crypto-Suite v1.2, 2023 - performance numbers for ML-KEM-768 and ML-DSA-65 on Intel i7-12700K.
-10. ZTLP Whitepaper, Section 41.3.6 - Existing protocol flow and packet formats.
----
+The QUIC outer layer can separately use the hybrid TLS group
+`X25519MLKEM768` where the TLS library supports it.
 
-*Prepared by the ZTLP core engineering team for the upcoming conference submission. All numbers are taken from the latest NIST submissions and in-house benchmark runs on reference hardware.*
+### 4.3 Hybrid signatures (suite 3)
+
+Sign device identities and name-server records with Ed25519 and ML-DSA; a
+verifier on suite 3 requires both.
+
+Known problems to solve:
+
+- A record grows by several kilobytes. The name server's default packet limit
+  is 8,192 bytes and unauthenticated replies are capped relative to the
+  request size, so record transport needs rework before this can ship.
+- It touches enrollment, every stored record, the admin panel and the
+  gateways' identity checks.
+- Whether a device holds two keys or one composite key during migration.
+
+### 4.4 Retiring suite 1
+
+Only after suites 2 and 3 have run in production and every supported client
+can use them. No date is set.
+
+### 4.5 Independent of the above
+
+Change the name-server certificate authority default from RSA-4096 to
+Ed25519 or ECDSA P-256.
+
+## 5. Effect on each component
+
+| Component | Suite negotiation | Hybrid key exchange | Hybrid signatures |
+|-----------|-------------------|---------------------|-------------------|
+| Agent and CLI (`proto/`) | yes | yes | yes |
+| Rust and Elixir gateways | yes | yes | verify |
+| Name server (`ns/`) | record suite field | no | sign, verify, store, larger packets |
+| Relay (`relay/`) | none expected; it forwards handshakes without reading them (to confirm) | none expected | verify, if relay authorization moves to device signatures |
+| Admin panel (`admin/`) | show suite per device, set minimum | no | verify |
+| eBPF filter (`ebpf/`) | none | none | none |
+
+The cryptographic code is currently written separately in Rust, Elixir and
+Ruby. Adding suites three times over is a cost and a risk; sharing one
+implementation is part of the design question.
+
+## 6. What comparable protocols do
+
+- **TLS 1.3:** the hybrid group `X25519MLKEM768` is deployed by major browsers
+  and content networks.
+- **OpenSSH:** hybrid key exchange has been the default since 9.0
+  (`sntrup761x25519-sha512`); `mlkem768x25519-sha256` was added in 9.9.
+- **Signal:** PQXDH adds a Kyber key encapsulation to its X25519 key
+  agreement.
+- **WireGuard:** no post-quantum key exchange in the protocol. An optional
+  pre-shared key gives protection if it is distributed safely; separate
+  projects such as Rosenpass supply one.
+
+All of these chose hybrid key exchange first and left signatures for later,
+which is the order proposed here.
+
+## 7. References
+
+1. NIST FIPS 203, *Module-Lattice-Based Key-Encapsulation Mechanism Standard*, August 2024.
+2. NIST FIPS 204, *Module-Lattice-Based Digital Signature Standard*, August 2024.
+3. NIST FIPS 205, *Stateless Hash-Based Digital Signature Standard*, August 2024.
+4. NSA, *Commercial National Security Algorithm Suite 2.0*.
+5. The Noise Protocol Framework, https://noiseprotocol.org/
+6. Angel, Dowling, Hülsing, Schwabe, Weber, *Post Quantum Noise*, ACM CCS 2022.
+7. *X-Wing: general-purpose hybrid post-quantum KEM*, IETF CFRG draft.
+8. Signal, *The PQXDH Key Agreement Protocol*.

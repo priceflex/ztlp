@@ -867,7 +867,7 @@ Once confidence in lattice-based constructions is established through widespread
 
 ### 17.2 Forward Secrecy Under Quantum Threat
 
-ZTLP's existing forward secrecy property provides a meaningful defense: an attacker who records encrypted sessions today cannot derive past session keys even after obtaining a quantum computer, because the ephemeral X25519 values were never stored. The hybrid ML-KEM extension strengthens this by making *future* sessions quantum-resistant as well.
+Forward secrecy does not protect against a quantum attacker. It protects past sessions from a later theft of long-term keys, but the ephemeral X25519 public keys of every handshake travel in the clear, and an attacker who records a session today can recover its keys from them once a large enough quantum computer exists. Only the hybrid ML-KEM key exchange of Phase 1 closes this gap, and only for sessions made after it is deployed. This is why key exchange is migrated first.
 
 ### 17.3 Design Decisions
 

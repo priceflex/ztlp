@@ -55,6 +55,11 @@ services:
       ZTLP_NS_METRICS_BIND: "0.0.0.0"
       ZTLP_NS_RATE_LIMIT_PER_SEC: "1000"
       ZTLP_NS_RATE_LIMIT_BURST: "2000"
+      # Demo-only secret for the NS admin HTTP API (GET /admin/records,
+      # /admin/audit — the v0.35.1 replacement for the removed UDP admin
+      # path). Must match the `server` container's ZTLP_NS_ADMIN_API_SECRET
+      # below so `ztlp admin ls/devices/groups/audit` can authenticate.
+      ZTLP_NS_ADMIN_API_SECRET: "ac6670c8c1f90fc942309c47b7dbc381e663183800705af049d9294b371d6d77"
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 10s
@@ -153,6 +158,11 @@ services:
       ZTLP_BIND_ADDR: "0.0.0.0:23095"
       ZTLP_BACKEND: "172.28.0.30:22"
       RUST_LOG: "debug,ztlp_proto=debug"
+      # `ztlp admin ls/devices/groups/audit` (run via `docker exec` against
+      # this container in the demo) need these to reach the NS admin HTTP
+      # API; secret must match the `ns` container's above.
+      ZTLP_NS_ADMIN_BASE_URL: "http://ns:9103"
+      ZTLP_NS_ADMIN_API_SECRET: "ac6670c8c1f90fc942309c47b7dbc381e663183800705af049d9294b371d6d77"
     restart: unless-stopped
 
   # ── Client (ztlp connect + benchmarks) ───────────────────

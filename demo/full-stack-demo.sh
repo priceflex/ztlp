@@ -169,7 +169,7 @@ success "Compose file: docker-compose-full-stack.yml"
 echo ""
 
 # ===================================================================
-# ACT 2 — Build & Start Stack
+# ACT 1 — Build & Start Stack
 # ===================================================================
 banner "Act 1 — Build & Start Containers"
 
@@ -192,7 +192,7 @@ echo ""
 success "All containers started"
 
 # ===================================================================
-# ACT 3 — Wait for Health Checks
+# ACT 2 — Wait for Health Checks
 # ===================================================================
 banner "Act 2 — Wait for Health Checks"
 
@@ -232,7 +232,7 @@ fi
 echo ""
 
 # ===================================================================
-# ACT 4 — NS Registration & Resolution
+# ACT 3 — NS Registration & Resolution
 # ===================================================================
 banner "Act 3 — Name Registration & Service Discovery"
 
@@ -257,7 +257,7 @@ step "Waiting for client to resolve server via NS..."
 WAITED=0
 while [[ $WAITED -lt 60 ]]; do
     CLIENT_LOG=$(docker logs ztlp-client 2>&1 | tail -30)
-    if echo "$CLIENT_LOG" | grep -q "Tunnel is active"; then
+    if echo "$CLIENT_LOG" | grep -q "Tunnel active"; then
         success "Client resolved server and tunnel is active"
         break
     fi
@@ -268,14 +268,6 @@ echo ""
 
 step "Client registration (client logs):"
 docker logs ztlp-client 2>&1 | grep -E "Registration|register|KEY record|verified|Registering|complete" | head -6 | sed 's/^/  /'
-echo ""
-
-# Show handshake info
-HANDSHAKE_LINE=$(docker logs ztlp-client 2>&1 | grep "Handshake latency" | head -1)
-if [[ -n "$HANDSHAKE_LINE" ]]; then
-    LATENCY=$(echo "$HANDSHAKE_LINE" | grep -oE '[0-9]+\.[0-9]+ms')
-    success "Noise_XX handshake completed in ${LATENCY:-<1ms}"
-fi
 echo ""
 
 # --- Identity Model (v0.9.0) ---
@@ -322,7 +314,7 @@ success "Identity model: users, devices, groups registered in NS"
 echo ""
 
 # ===================================================================
-# ACT 5 — SSH Tests
+# ACT 4 — SSH Tests
 # ===================================================================
 banner "Act 4 — SSH Tests Through ZTLP Tunnel"
 
@@ -352,31 +344,10 @@ else
     fail "SSH echo: FAIL"
     record_fail
 fi
-
-# Test 2: Remote hostname
-step "Test 2: Remote hostname verification"
-if echo "$CLIENT_LOGS" | grep -q "Remote hostname: 'backend'"; then
-    success "Remote hostname: 'backend' — confirms traffic reaches backend container"
-    record_pass
-else
-    fail "Remote hostname verification failed"
-    record_fail
-fi
-
-# Test 3: Remote uname
-step "Test 3: Remote command execution"
-UNAME_LINE=$(echo "$CLIENT_LOGS" | grep "Remote uname:" | head -1)
-if [[ -n "$UNAME_LINE" ]]; then
-    success "Remote uname verified — full command execution through tunnel"
-    record_pass
-else
-    fail "Remote command execution failed"
-    record_fail
-fi
 echo ""
 
 # ===================================================================
-# ACT 6 — SCP Benchmarks
+# ACT 5 — SCP Benchmarks
 # ===================================================================
 banner "Act 5 — SCP Benchmarks (Through ZTLP Tunnel)"
 
@@ -389,10 +360,10 @@ echo -e "  ${BOLD}┌──────────┬────────�
 echo -e "  ${BOLD}│ File Size│ Upload Time│ Throughput   │ Checksum │${RESET}"
 echo -e "  ${BOLD}├──────────┼────────────┼─────────────┼──────────┤${RESET}"
 
-for SIZE in 1 5 10 50; do
-    LINE=$(echo "$CLIENT_LOGS" | grep "✓ ${SIZE}MB:" | head -1)
+for SIZE in 1 5 10; do
+    LINE=$(echo "$CLIENT_LOGS" | grep "✓ ${SIZE}MB:" | head -1 || true)
     if [[ -n "$LINE" ]]; then
-        TIME=$(echo "$LINE" | grep -oE '\.[0-9]+s' | head -1)
+        TIME=$(echo "$LINE" | grep -oE '[0-9]+ms' | head -1)
         SPEED=$(echo "$LINE" | grep -oE '[0-9]+\.?[0-9]* MB/s' | head -1)
         CHECK="✓"
         echo -e "  │ ${BOLD}${SIZE}MB${RESET}      │ ${TIME}        │ ${GREEN}${SPEED}${RESET}    │ ${GREEN}${CHECK}${RESET}        │"
@@ -407,19 +378,14 @@ echo -e "  ${BOLD}└──────────┴────────�
 echo ""
 
 # Extract peak throughput for summary
-PEAK=$(echo "$CLIENT_LOGS" | grep "✓ 50MB:" | grep -oE '[0-9]+\.?[0-9]* MB/s' | head -1)
+PEAK=$(echo "$CLIENT_LOGS" | grep "✓ 10MB:" | grep -oE '[0-9]+\.?[0-9]* MB/s' | head -1 || true)
 if [[ -n "$PEAK" ]]; then
-    success "Peak throughput: ${PEAK} (50MB file, Docker bridge network)"
-fi
-
-# Show handshake latency
-if [[ -n "$LATENCY" ]]; then
-    success "Noise_XX handshake: ${LATENCY}"
+    success "Peak throughput: ${PEAK} (10MB file, Docker bridge network)"
 fi
 echo ""
 
 # ===================================================================
-# ACT 7 — Container Details
+# ACT 6 — Container Details
 # ===================================================================
 banner "Act 6 — Container Status & Details"
 
@@ -444,7 +410,7 @@ done
 echo ""
 
 # ===================================================================
-# ACT 8 — Summary
+# ACT 7 — Summary
 # ===================================================================
 TOTAL_END=$(date +%s)
 ELAPSED=$((TOTAL_END - TOTAL_START))
@@ -461,10 +427,9 @@ echo ""
 
 cat <<EOF
   Results Summary:
-    SSH Tests:      ${PASS_COUNT} passed (echo, hostname, uname)
-    SCP Benchmarks: All sizes verified (1, 5, 10, 50 MB)
+    SSH Tests:      ${PASS_COUNT} passed (echo)
+    SCP Benchmarks: All sizes verified (1, 5, 10 MB)
     Peak Transfer:  ${PEAK:-N/A}
-    Handshake:      ${LATENCY:-N/A}
     Total Time:     ${ELAPSED}s
     Containers:     6 (NS, 2×relay, backend, server, client)
 

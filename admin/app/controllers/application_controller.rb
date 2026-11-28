@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 class ApplicationController < ActionController::Base
+  include CrossSiteGuard
+
   helper_method :current_admin, :signed_in?, :operator?
 
   before_action :require_gateway_identity

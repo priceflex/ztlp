@@ -144,6 +144,54 @@ pub struct QuicEndpointConfig {
     /// inserted_at and prevents the gateway from dropping the connection
     /// on idle).
     pub keep_alive_interval_ms: Option<u32>,
+    /// Flow-control windows (receive and send buffers). The default is the
+    /// desktop/server profile; a memory-constrained host (the iOS Network
+    /// Extension, 50 MiB hard limit) dials with [`TransportWindows::MOBILE`].
+    pub windows: TransportWindows,
+}
+
+/// QUIC flow-control windows for one endpoint.
+///
+/// These bound how much data quinn buffers per stream and per connection:
+/// a slow local reader fills its stream receive window, parallel uploads
+/// fill the send window. On the desktop the generous values keep large
+/// transfers in flight through a relay; inside an iOS Network Extension the
+/// same values put the process over its 50 MiB limit (measured: ~100 MB
+/// with 20 slow readers), hence the second profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportWindows {
+    /// Per-stream receive window in bytes.
+    pub stream_receive_window: u32,
+    /// Connection-level receive window in bytes (sum over all streams).
+    pub receive_window: u32,
+    /// Connection-level send window in bytes; `None` keeps quinn's default.
+    pub send_window: Option<u64>,
+}
+
+impl TransportWindows {
+    /// Desktop/server values (unchanged since the v0.35 throughput fix):
+    /// 4 MiB per stream, 16 MiB per connection, quinn's default send window.
+    pub const DESKTOP: Self = Self {
+        stream_receive_window: 4 * 1024 * 1024,
+        receive_window: 16 * 1024 * 1024,
+        send_window: None,
+    };
+
+    /// Mobile values: 256 KiB per stream, 8 MiB per connection, 256 KiB send
+    /// window. Measured peak ~25 MB under 30 parallel 20 MB uploads plus 20
+    /// parallel 20 MB downloads on one shared connection, with no
+    /// throughput loss on a LAN.
+    pub const MOBILE: Self = Self {
+        stream_receive_window: 256 * 1024,
+        receive_window: 8 * 1024 * 1024,
+        send_window: Some(256 * 1024),
+    };
+}
+
+impl Default for TransportWindows {
+    fn default() -> Self {
+        Self::DESKTOP
+    }
 }
 
 impl Default for QuicEndpointConfig {
@@ -159,6 +207,7 @@ impl Default for QuicEndpointConfig {
             // any natural traffic gap (e.g. user-initiated curl through the
             // local-forward) without flooding the relay.
             keep_alive_interval_ms: Some(15_000),
+            windows: TransportWindows::default(),
         }
     }
 }
@@ -496,18 +545,28 @@ pub mod tokio_endpoint {
     /// `max_idle_timeout_ms` / `keep_alive_interval_ms` are carried over from
     /// the existing v0.29.3 tuning (idle timeout / keepalive so gateway-side
     /// tunnels survive the 60 s relay-sweeper tick).
-    fn apply_ztlp_transport_tuning(
+    ///
+    /// The window sizes come from `windows`
+    /// ([`TransportWindows`](super::TransportWindows)): the desktop default
+    /// is the 4 MiB / 16 MiB pair described above; the mobile profile is
+    /// smaller and also caps the send window.
+    pub(crate) fn apply_ztlp_transport_tuning(
         mut tc: quinn::TransportConfig,
         max_idle_timeout_ms: Option<u32>,
         keep_alive_interval_ms: Option<u32>,
+        windows: super::TransportWindows,
     ) -> quinn::TransportConfig {
-        // Throughput: generous flow-control windows.
-        // Per-stream receive window: 4 MiB (lets a single large file transfer
-        // stay in flight without stalling on a 64 KiB default).
-        tc.stream_receive_window(quinn::VarInt::from_u32(4 * 1024 * 1024));
-        // Connection-level receive window: 16 MiB (aggregate across the
-        // parallel streams a browser / multi-tool load opens).
-        tc.receive_window(quinn::VarInt::from_u32(16 * 1024 * 1024));
+        // Per-stream receive window (desktop: 4 MiB, lets a single large
+        // file transfer stay in flight without stalling on a 64 KiB default).
+        tc.stream_receive_window(quinn::VarInt::from_u32(windows.stream_receive_window));
+        // Connection-level receive window (desktop: 16 MiB, aggregate across
+        // the parallel streams a browser / multi-tool load opens).
+        tc.receive_window(quinn::VarInt::from_u32(windows.receive_window));
+        // Send window: quinn's default unless the profile caps it (parallel
+        // uploads otherwise buffer ~10 MB per connection).
+        if let Some(send) = windows.send_window {
+            tc.send_window(send);
+        }
         // Allow up to 256 concurrent bidi/uni streams (initiated), so 8+
         // parallel tunnel streams never hit the stream-count cap.
         tc.max_concurrent_bidi_streams(quinn::VarInt::from_u32(256));
@@ -767,6 +826,9 @@ pub mod tokio_endpoint {
         }
 
         fn default_pin_dir() -> std::path::PathBuf {
+            if let Some(dir) = crate::state_home::override_dir() {
+                return dir.join(".ztlp").join("quic_pins");
+            }
             dirs::home_dir()
                 .map(|h| h.join(".ztlp").join("quic_pins"))
                 .unwrap_or_else(|| std::path::PathBuf::from(".ztlp/quic_pins"))
@@ -1229,6 +1291,7 @@ pub mod tokio_endpoint {
                 quinn::TransportConfig::default(),
                 cfg.max_idle_timeout_ms,
                 cfg.keep_alive_interval_ms,
+                cfg.windows,
             );
             server_config.transport_config(Arc::new(transport_config));
 
@@ -1278,6 +1341,7 @@ pub mod tokio_endpoint {
                 quinn::TransportConfig::default(),
                 cfg.max_idle_timeout_ms,
                 cfg.keep_alive_interval_ms,
+                cfg.windows,
             );
             server_config.transport_config(Arc::new(transport_config));
 
@@ -1417,6 +1481,7 @@ pub mod tokio_endpoint {
                 quinn::TransportConfig::default(),
                 cfg.max_idle_timeout_ms,
                 cfg.keep_alive_interval_ms,
+                cfg.windows,
             );
             client_config.transport_config(Arc::new(transport_config));
 
@@ -1460,6 +1525,7 @@ pub mod tokio_endpoint {
                 quinn::TransportConfig::default(),
                 cfg.max_idle_timeout_ms,
                 cfg.keep_alive_interval_ms,
+                cfg.windows,
             );
             client_config.transport_config(Arc::new(transport_config));
 
@@ -1596,6 +1662,7 @@ pub mod tokio_endpoint {
                 quinn::TransportConfig::default(),
                 cfg.max_idle_timeout_ms,
                 cfg.keep_alive_interval_ms,
+                cfg.windows,
             );
             client_config.transport_config(Arc::new(transport_config));
             endpoint.set_default_client_config(client_config);
@@ -2520,6 +2587,69 @@ pub mod tokio_endpoint {
     /// [`pinned_cert_sha256`] is how the direct-first dial carries existing
     /// trust to a candidate address, so it has to read exactly what the
     /// verifier writes and nothing that is pinned for another endpoint.
+    #[cfg(test)]
+    mod transport_windows_tests {
+        use super::super::{QuicEndpointConfig, TransportWindows};
+        use super::apply_ztlp_transport_tuning;
+
+        /// quinn's `TransportConfig` has no getters; its `Debug` output is
+        /// the only way to read back what was applied.
+        fn applied(windows: TransportWindows) -> String {
+            format!(
+                "{:?}",
+                apply_ztlp_transport_tuning(
+                    quinn::TransportConfig::default(),
+                    Some(60_000),
+                    Some(15_000),
+                    windows,
+                )
+            )
+        }
+
+        #[test]
+        fn default_endpoint_config_keeps_the_desktop_windows() {
+            let cfg = QuicEndpointConfig::default();
+            assert_eq!(cfg.windows, TransportWindows::DESKTOP);
+            assert_eq!(cfg.windows.stream_receive_window, 4 * 1024 * 1024);
+            assert_eq!(cfg.windows.receive_window, 16 * 1024 * 1024);
+            assert_eq!(cfg.windows.send_window, None);
+        }
+
+        #[test]
+        fn mobile_profile_values() {
+            let m = TransportWindows::MOBILE;
+            assert_eq!(m.stream_receive_window, 256 * 1024);
+            assert_eq!(m.receive_window, 8 * 1024 * 1024);
+            assert_eq!(m.send_window, Some(256 * 1024));
+        }
+
+        #[test]
+        fn desktop_windows_are_applied_and_send_window_is_left_at_quinn_default() {
+            let stock = format!("{:?}", quinn::TransportConfig::default());
+            let stock_send = stock
+                .split("send_window: ")
+                .nth(1)
+                .and_then(|r| r.split(',').next())
+                .expect("quinn Debug prints send_window")
+                .to_string();
+            let got = applied(TransportWindows::DESKTOP);
+            assert!(got.contains("stream_receive_window: 4194304"), "{got}");
+            assert!(got.contains(" receive_window: 16777216"), "{got}");
+            assert!(
+                got.contains(&format!("send_window: {stock_send},")),
+                "desktop must not touch the send window: {got}"
+            );
+        }
+
+        #[test]
+        fn mobile_windows_are_applied_including_the_send_window() {
+            let got = applied(TransportWindows::MOBILE);
+            assert!(got.contains("stream_receive_window: 262144"), "{got}");
+            assert!(got.contains(" receive_window: 8388608"), "{got}");
+            assert!(got.contains("send_window: 262144,"), "{got}");
+        }
+    }
+
     #[cfg(test)]
     mod pinned_lookup_tests {
         use super::tofu_tests::{loopback_server, tempfile_dir};

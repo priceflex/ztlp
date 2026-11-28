@@ -1,536 +1,103 @@
 // PacketTunnelProvider.swift
-// ZTLPTunnel (Network Extension)
+// ZTLPTunnel
 //
-// Session 5D: RELAY-SIDE VIP ARCHITECTURE.
-// Uses sync FFI (ztlp_connect_sync, ztlp_encrypt_packet, etc.) and
-// standalone PacketRouter — no tokio runtime, no VIP proxy listeners.
+// Hosts the Rust ZTLP agent inside the packet tunnel extension.
 //
-// Architecture:
-//   Identity + Config -> ztlp_connect_sync() -> ZtlpCryptoContext
-//   ZTLPTunnelConnection (NWConnection UDP) handles encrypt/decrypt via context
-//   Standalone PacketRouter (ztlp_router_*_sync) handles utun <-> ZTLP routing
-//   RelayPool FFI -> query NS for RELAY records -> select best relay
-//   VIP traffic: packetFlow.writePackets() -> encrypted tunnel -> relay
+// Measured on a device: iOS sends traffic for the tunnel's own addresses into
+// the tunnel as packets, so the agent cannot listen there. Loopback is
+// delivered from other apps to this extension's sockets. So:
+//   - the agent listens on 127.0.0.1 (resolver 53, web 80/443, health 8443)
+//     and tells sites apart by name (TLS server name / Host header);
+//   - iOS is given one routed DNS server address for `.ztlp`; those queries
+//     arrive here as packets and are passed to the agent's resolver, which
+//     answers every site with 127.0.0.1;
+//   - nothing else is routed here: this is not a VPN for general traffic.
 //
-// Memory: TEXT segment ~1.65 MB. NO NWListeners — ~10-13 MB total.
+// iOS kills this process above 50 MiB, so keep it lean: nothing here buffers
+// data, and the footprint is logged every 30 s.
 
-import NetworkExtension
-import Network
 import Foundation
-import Darwin
+import Network
+import NetworkExtension
+import os
 
-/// App Group identifier shared between the main app and this extension.
-private let appGroupId = "group.com.ztlp.shared"
+// @unchecked Sendable: the only mutable state is `memoryTimer`, which is
+// touched on `agentQueue` alone.
+final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
-/// UDP port used for relay communication.
-private let defaultRelayPort: UInt16 = 4433
+    private let log = ExtensionLog()
+    /// Serial queue for every blocking call into the Rust library.
+    private let agentQueue = DispatchQueue(label: "com.ztlp.tunnel.agent")
+    private var memoryTimer: DispatchSourceTimer?
+    /// Work that blocks on a socket (DNS relay, probes).
+    private let packetQueue = DispatchQueue(label: "com.ztlp.tunnel.packets", attributes: .concurrent)
+    /// At most this many DNS relays in flight; more are dropped (the client retries).
+    private let dnsSlots = DispatchSemaphore(value: 8)
+    private let stats = PacketStats()
+    /// Watches the device's real network (Wi-Fi, cellular) so the agent can
+    /// be told the moment it changes. Touched on `agentQueue` only.
+    private var pathMonitor: NWPathMonitor?
+    private var lastPath = ""
+    private let dnsAddress = AddressPlan.ipv4ToUInt32(AddressPlan.dnsAddress) ?? 0
 
-/// NS record type for RELAY records.
-private let NS_RECORD_TYPE_RELAY: UInt8 = 3
-
-private func rustRouterActionCallback(
-    userData: UnsafeMutableRawPointer?,
-    actionType: UInt8,
-    streamID: UInt32,
-    data: UnsafePointer<UInt8>?,
-    dataLen: Int
-) {
-    guard let userData else { return }
-    let provider = Unmanaged<PacketTunnelProvider>.fromOpaque(userData).takeUnretainedValue()
-    let payload: [UInt8]
-    if let data, dataLen > 0 {
-        payload = Array(UnsafeBufferPointer(start: data, count: dataLen))
-    } else {
-        payload = []
-    }
-    if actionType == 250 {
-        if let message = String(bytes: payload, encoding: .utf8) {
-            provider.handleRustFdIngressDiagnostic(message)
-        }
-        return
-    }
-    if actionType == 251 {
-        if let message = String(bytes: payload, encoding: .utf8) {
-            provider.handleRustFdOutboundDiagnostic(message)
-        }
-        return
-    }
-    provider.handleRustRouterAction(actionType: actionType, streamID: streamID, payload: payload)
-}
-
-/// UserDefaults keys for shared state.
-private enum SharedKey {
-    static let connectionState = "ztlp_connection_state"
-    static let connectedSince = "ztlp_connected_since"
-    static let bytesSent = "ztlp_bytes_sent"
-    static let bytesReceived = "ztlp_bytes_received"
-    static let peerAddress = "ztlp_peer_address"
-    static let lastError = "ztlp_last_error"
-    static let selectedRelay = "ztlp_selected_relay"
-    static let neMemoryMB = "ztlp_ne_memory_mb"
-    static let neVirtualMB = "ztlp_ne_virtual_mb"
-    static let replayRejectCount = "ztlp_replay_reject_count"
-}
-
-/// Messages the main app can send to the extension.
-enum AppToTunnelMessage: UInt8 {
-    case getStatus = 1
-    case getStats = 2
-    case resetCounters = 3
-}
-
-/// Connection state values written to shared UserDefaults.
-enum TunnelConnectionState: Int {
-    case disconnected = 0
-    case connecting = 1
-    case connected = 2
-    case reconnecting = 3
-    case disconnecting = 4
-}
-
-class PacketTunnelProvider: NEPacketTunnelProvider {
-
-    // MARK: - Properties
-
-    /// Serial queue for ZTLP operations.
-    private let tunnelQueue = DispatchQueue(label: "com.ztlp.tunnel.queue", qos: .userInitiated)
-
-    /// Shared UserDefaults for communicating state to the main app.
-    private lazy var sharedDefaults: UserDefaults? = {
-        UserDefaults(suiteName: appGroupId)
-    }()
-
-    /// Shared logger (writes to app group container).
-    private let logger = TunnelLogger.shared
-
-    /// Connection start time (for duration display).
-    private var connectedSince: Date?
-
-    /// Whether we're currently in a tunnel session.
-    private var isTunnelActive = false
-
-    /// The tunnel configuration (cached for reconnects).
-    private var currentConfig: TunnelConfiguration?
-
-    /// Current reconnect attempt counter.
-    private var reconnectAttempt = 0
-
-    /// Reconnect scheduling state. NWConnection can report one socket failure
-    /// through both stateUpdateHandler and receiveMessage; keep reconnects
-    /// idempotent so a single failure cannot consume multiple attempts.
-    private var reconnectScheduled = false
-    private var reconnectInProgress = false
-    private var reconnectGeneration = 0
-
-    /// Maximum reconnect attempts before giving up.
-    private static let maxReconnectAttempts = 10
-
-    /// Base reconnect delay in seconds (exponential backoff).
-    private static let baseReconnectDelay: TimeInterval = 1.0
-
-    /// Maximum reconnect delay cap.
-    private static let maxReconnectDelay: TimeInterval = 60.0
-
-    // MARK: - Sync Architecture (no tokio)
-
-    /// Identity handle — persists across reconnects.
-    private var identity: OpaquePointer?  // ZtlpIdentity*
-
-    /// The NWConnection-based tunnel connection (replaces tokio recv/send loop).
-    private var tunnelConnection: ZTLPTunnelConnection?
-
-    /// Relay pool for relay-side VIP selection and failover.
-    private var relayPool: OpaquePointer?  // ZtlpRelayPool*
-
-    /// Currently selected relay address ("host:port").
-    private var currentRelayAddress: String?
-
-    /// The address of the relay we're currently connected through.
-    private var activeRelayAddress: String?
-
-    /// Standalone packet router handle (replaces ZtlpClient-based router).
-    private var packetRouter: OpaquePointer?  // ZtlpPacketRouter*
-
-    /// Future Nebula-style Rust owner for the utun fd. In this Phase 2 smoke
-    /// test the Rust engine is lifecycle-only: it stores the fd but does not
-    /// read/write it, so Swift packetFlow remains the sole data-plane owner.
-    private var iosTunnelEngine: OpaquePointer?  // ZtlpIosTunnelEngine*
-    private static let enableRustIosTunnelEngineLifecycleSmokeTest = true
-    /// Phase 2 fd-owner smoke test. When true, Swift does NOT call packetFlow.readPackets;
-    /// Rust owns the utun fd and logs/drops packet metadata only.
-    private static let useRustFdDataPlane = true
-
-    // Nebula-pivot S1: the former Rust MuxEngine / SessionHealth / RTT
-    // instrumentation / byte-rwnd wiring has been removed. The Swift NE is
-    // now a dumb pipe — inner TCP terminated at the gateway VIP does all
-    // congestion control and reliability.
-
-    /// DNS responder for *.ztlp queries (answers directly on utun, no tokio).
-    private var dnsResponder: ZTLPDNSResponder?
-
-    /// Keepalive timer.
-    private var keepaliveTimer: DispatchSourceTimer?
-
-    /// Periodic timer to flush outbound packets from the router.
-    private var writePacketTimer: DispatchSourceTimer?
-
-    /// Periodic cleanup timer for stale TCP flows (reclaims memory).
-    private static let cleanupInterval: TimeInterval = 10.0
-    private var cleanupTimer: DispatchSourceTimer?
-
-    /// Rate-limit diagnostic work and shared-defaults churn while idle.
-    private var lastMemoryDiagnosticsAt: Date = .distantPast
-    private var lastStoredResidentMemoryMB: Int?
-    private var lastStoredVirtualMemoryMB: Int?
-    private var lastAvailableMemoryWarningAt: Date = .distantPast
-    private static let memoryDiagnosticsInterval: TimeInterval = 60.0
-
-    /// Action buffer for router write results (reusable, 64KB).
-    /// Previous value 256KB was excessive — max mux payload is 1135 bytes
-    /// per action with 64 actions/cycle = ~73KB theoretical max, so 64KB
-    /// covers the common case and overflows gracefully at the action count limit.
-    private var actionBuffer = [UInt8](repeating: 0, count: 65536)
-
-    // MARK: - Mux Frame Constants
-    private static let MUX_FRAME_DATA: UInt8 = 0x00
-    private static let MUX_FRAME_OPEN: UInt8 = 0x06
-    private static let MUX_FRAME_CLOSE: UInt8 = 0x05
-    private static let MAX_MUX_PAYLOAD: Int = 1135  // 1140 - 5 byte mux header
-    private static let maxRouterActionsPerCycle: Int = 64
-    private static let maxPacketsPerReadCycle: Int = 32
-    private static let maxOutboundPacketsPerFlush: Int = 64
-    private static let browserModeMaxOutboundPacketsPerFlush: Int = 32
-
-    /// Browser/WKWebView bursts fan out multiple streams. Only used by the
-    /// outbound-flush batch sizing (post-pivot there is no advertised rwnd).
-    private static let rwndBrowserBurstFlowThreshold = 2
-
-    /// Cached service map so the packet router can be rebuilt/reset during health recovery.
-    private var configuredServices: [(vip: String, name: String)] = []
-
-    /// Last observed router stats (populated by flushOutboundPackets / router
-    /// callbacks). Used only for adaptive outbound flush sizing and logging —
-    /// the session-health state machine they once fed has been removed.
-    private var lastRouterFlows = 0
-    private var lastRouterOutbound = 0
-    private var lastRouterStreamMappings = 0
-
-    /// Aggregate mux/router hot-path diagnostics instead of logging per packet.
-    private var muxSummaryLastLogAt: Date = .distantPast
-    private var muxSummaryDataFrames = 0
-    private var muxSummaryDataBytes = 0
-    private var muxSummaryOpen = 0
-    private var muxSummaryClose = 0
-    private var muxSummarySendData = 0
-    private var muxSummarySendBytes = 0
-    private var rustActionCallbackOpen = 0
-    private var rustActionCallbackSend = 0
-    private var rustActionCallbackClose = 0
-    private var rustActionCallbackUnknown = 0
-    private var rustActionCallbackBytes = 0
-    private var rustActionCallbackLastLogAt = Date.distantPast
-    private var rustFdIngressDiagCount = 0
-    private var rustFdIngressDiagLastLogAt = Date.distantPast
-    private var rustFdOutboundDiagCount = 0
-    private var rustFdOutboundDiagLastLogAt = Date.distantPast
-
-    /// Packet read buffer (reusable, MTU-sized).
-    private var readPacketBuffer = [UInt8](repeating: 0, count: 2048)
-
-    // MARK: - Activity Tracking
-
-    private var lastDataActivity: Date = Date()
-    private static let activityGracePeriod: TimeInterval = 60.0
-    private var consecutiveKeepaliveFailures = 0
-    private static let keepaliveFailureThreshold = 3
-
-    private func markDataActivity() {
-        lastDataActivity = Date()
-        consecutiveKeepaliveFailures = 0
-    }
-
-    // Nebula-pivot S1 removed:
-    //   markOutboundDemand / markUsefulRx — fed the deleted session-health
-    //     state machine; callers now just rely on markDataActivity.
-    //   refreshReplayRejectBaseline / clearSessionHealthState — health state.
-    //   RouterStatsSnapshot / parseRouterStats — only the health path used them.
-    //   startHealthTimer / handleHealthWatchdogTick / sendSessionProbe /
-    //     handleProbeSuccess / resetPacketRouterRuntimeState /
-    //     evaluateSessionHealth — entire session-health watchdog.
-    //   updateAdvertisedRwnd / reduceAdvertisedRwnd / maybeRampAdvertisedRwnd —
-    //     V1 advertised-rwnd ladder + pressure signals.
-    //   wireRttInstrumentationHook / maybeLogRttSnapshot — Rust MuxEngine
-    //     RTT/BDP shadow observation (FFI deleted in R4).
-
-    private var isDataActive: Bool {
-        return Date().timeIntervalSince(lastDataActivity) < Self.activityGracePeriod
-    }
-
-    private func shouldThrottleRouterWork() -> Bool {
-        if let tunnelConnection, tunnelConnection.isOverloaded {
-            logger.debug("Router throttle: tunnelConnection overloaded, yielding read loop", source: "Tunnel")
-            return true
-        }
-
-        return false
-    }
-
-    // MARK: - NEPacketTunnelProvider Overrides
+    // MARK: - Lifecycle
 
     override func startTunnel(
         options: [String: NSObject]?,
         completionHandler: @escaping (Error?) -> Void
     ) {
-        updateConnectionState(.connecting)
-        logger.info("═══════════════════════════════════════════", source: "Tunnel")
-        logger.info("ZTLP NE v5D — RELAY-SIDE VIP (no NWListeners)", source: "Tunnel")
-        logger.info("Build: \(Date())", source: "Tunnel")
-        logger.info("═══════════════════════════════════════════", source: "Tunnel")
+        guard let container = SharedPaths.container else {
+            completionHandler(TunnelError("Shared storage is not available. Reinstall ZTLP."))
+            return
+        }
+        log.open(SharedPaths.extensionLog(in: container))
+        log.write("startTunnel")
+        let done = UncheckedSendable(completionHandler)
 
-        tunnelQueue.async { [weak self] in
-            guard let self = self else {
-                completionHandler(NSError(
-                    domain: "com.ztlp.tunnel", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Provider deallocated"]
-                ))
+        agentQueue.async { [self] in
+            if case .failure(let error) = ZTLPAgent.initialize(home: container) {
+                log.write("init failed: \(error.message)")
+                done.value(TunnelError(error.message))
+                return
+            }
+            guard ZTLPAgent.isEnrolled else {
+                log.write("not enrolled")
+                done.value(TunnelError("This device is not enrolled. Open ZTLP and scan your enrollment code."))
                 return
             }
 
-            do {
-                // Step 1: Read tunnel configuration
-                self.logger.info("Loading tunnel config...", source: "Tunnel")
-                let config = try self.loadTunnelConfiguration()
-                self.currentConfig = config
-                self.logger.info(
-                    "Config: target=\(config.targetNodeId) relay=\(config.relayAddress ?? "none") ns=\(config.nsServer ?? "none") service=\(config.serviceName ?? "none")",
-                    source: "Tunnel"
-                )
-
-                // Step 2: Initialize library + identity (sync, no bridge)
-                self.logger.info("Initializing ZTLP library...", source: "Tunnel")
-                let initResult = ztlp_init()
-                if initResult != 0 {
-                    throw self.makeNSError("ztlp_init failed: \(self.lastError())")
+            setTunnelNetworkSettings(Self.makeSettings()) { [self] error in
+                if let error {
+                    log.write("setTunnelNetworkSettings failed: \(error.localizedDescription)")
+                    done.value(error)
+                    return
                 }
-
-                let identityPtr = try self.loadOrCreateIdentitySync(config: config)
-                self.identity = identityPtr
-
-                let nodeId = ztlp_identity_node_id(identityPtr)
-                if let nodeId = nodeId {
-                    self.logger.info("Node ID: \(String(cString: nodeId))", source: "Tunnel")
+                agentQueue.async { [self] in
+                    startAgent(done)
                 }
-
-                // Step 3: Build config
-                let cfgPtr = ztlp_config_new()
-                guard let cfgPtr = cfgPtr else {
-                    throw self.makeNSError("ztlp_config_new failed")
-                }
-                defer { ztlp_config_free(cfgPtr) }
-
-                if let relay = config.relayAddress, !relay.isEmpty {
-                    relay.withCString { ztlp_config_set_relay(cfgPtr, $0) }
-                    self.logger.debug("Config: relay=\(relay)", source: "Tunnel")
-                }
-
-                ztlp_config_set_nat_assist(cfgPtr, true)
-                ztlp_config_set_timeout_ms(cfgPtr, 60000)
-
-                let svcName = config.serviceName ?? "vault"
-                if !svcName.isEmpty {
-                    svcName.withCString { ztlp_config_set_service(cfgPtr, $0) }
-                    self.logger.debug("Config: service=\(svcName)", source: "Tunnel")
-                }
-
-                // Step 4: Discover relays from NS -> RelayPool, then select best
-                self.logger.info("Discovering relays from NS...", source: "Relay")
-                self.discoverRelays(config: config)
-                guard let relayAddr = self.selectRelay(config: config) else {
-                    throw self.makeNSError("No relay available. Cannot establish tunnel.")
-                }
-                self.currentRelayAddress = relayAddr
-                self.logger.info("Relay selected: \(relayAddr)", source: "Relay")
-
-                // Build config with selected relay
-                let cfgPtr2 = ztlp_config_new()
-                guard let cfgPtr2 = cfgPtr2 else {
-                    throw self.makeNSError("ztlp_config_new failed for relay tunnel")
-                }
-                defer { ztlp_config_free(cfgPtr2) }
-
-                relayAddr.withCString { ztlp_config_set_relay(cfgPtr2, $0) }
-                ztlp_config_set_nat_assist(cfgPtr2, true)
-                ztlp_config_set_timeout_ms(cfgPtr2, 60000)
-                if !svcName.isEmpty {
-                    svcName.withCString { ztlp_config_set_service(cfgPtr2, $0) }
-                }
-
-                // Step 6: Create tunnel connection first, then do handshake on the same NWConnection
-                let target = config.targetNodeId  // gateway identity
-                self.logger.info("Connecting to \(target) via relay \(relayAddr) using NWConnection handshake...", source: "Tunnel")
-
-                let conn = ZTLPTunnelConnection(
-                    gatewayAddress: relayAddr,
-                    queue: self.tunnelQueue
-                )
-                conn.delegate = self
-                conn.start()
-
-                let handshakeSemaphore = DispatchSemaphore(value: 0)
-                var handshakeError: Error?
-                conn.performHandshake(identity: identityPtr, config: cfgPtr2, target: target, timeoutMs: 20000) { result in
-                    switch result {
-                    case .success:
-                        break
-                    case .failure(let error):
-                        handshakeError = error
-                    }
-                    handshakeSemaphore.signal()
-                }
-                handshakeSemaphore.wait()
-
-                if let handshakeError = handshakeError {
-                    conn.stop()
-                    // Report this relay as failed
-                    if let pool = self.relayPool {
-                        relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
-                    }
-                    throw self.makeNSError("NWConnection handshake failed: \(handshakeError.localizedDescription)")
-                }
-
-                self.logger.info("Connected to \(target) via relay \(relayAddr)", source: "Tunnel")
-                self.activeRelayAddress = relayAddr
-
-                // Step 7: Discover services via NS, fall back to hardcoded
-                let zone = (config.zoneName ?? "").replacingOccurrences(of: ".ztlp", with: "")
-                var services: [(vip: String, name: String)] = []
-
-                // Try NS service discovery (sync UDP query)
-                if let nsAddr = config.nsServer, !nsAddr.isEmpty {
-                    self.logger.info("Querying NS at \(nsAddr) for services...", source: "Tunnel")
-                    let nsClient = ZTLPNSClient(timeoutSec: 3)
-                    let discovered = nsClient.discoverServices(
-                        zoneName: zone,
-                        nsServer: nsAddr
-                    )
-                    if !discovered.isEmpty {
-                        // Assign VIPs dynamically: 10.122.0.2, 10.122.0.3, ...
-                        var nextVIP: UInt8 = 2
-                        for record in discovered {
-                            let shortName = record.name
-                                .replacingOccurrences(of: ".\(zone).ztlp", with: "")
-                                .replacingOccurrences(of: ".ztlp", with: "")
-                            let vip = "10.122.0.\(nextVIP)"
-                            services.append((vip, shortName))
-                            self.logger.info("NS discovered: \(shortName) -> \(record.address) (VIP \(vip))", source: "Tunnel")
-                            nextVIP += 1
-                            if nextVIP > 254 { break }
-                        }
-                    }
-                }
-
-                // Fall back to hardcoded services if NS discovery found nothing
-                if services.isEmpty {
-                    self.logger.info("Using default service map (NS unavailable or empty)", source: "Tunnel")
-                    services = [
-                        ("10.122.0.2", svcName),
-                        ("10.122.0.3", "http"),
-                        ("10.122.0.4", "vault"),
-                    ]
-                }
-
-                self.configuredServices = services
-                try self.startPacketRouter(services: services)
-
-                // Step 7b: Start DNS responder for *.ztlp queries
-                self.dnsResponder = ZTLPDNSResponder(
-                    services: services.map { ($0.name, $0.vip) },
-                    zoneName: zone
-                )
-                self.logger.info("DNS responder active (\(services.count) services) for *.\(zone.isEmpty ? "" : zone + ".")ztlp", source: "Tunnel")
-
-                // Step 8: Reuse the handshaken ZTLPTunnelConnection (UDP NWConnection to relay)
-                // All traffic (including VIP-proxied services) flows through the relay.
-                // VIP traffic goes: packetFlow -> router -> send to tunnelConnection -> relay
-                self.logger.info("Tunnel connection ready on relay \(relayAddr) with shared handshake/data socket", source: "Tunnel")
-                self.tunnelConnection = conn
-
-                // VIP traffic is now routed through packetFlow -> encrypted tunnel -> relay
-                // (relay-side TCP termination replaces in-extension NWListeners)
-                self.logger.info("VIP traffic routes: packetFlow -> tunnel -> relay \(relayAddr)", source: "Tunnel")
-
-                // Report successful relay connection
-                if let pool = self.relayPool {
-                    relayAddr.withCString { ztlp_relay_pool_report_success(pool, $0, 0) }
-                }
-
-                // Step 9: Apply tunnel network settings
-                let tunSettings = self.createTunnelNetworkSettings(
-                    tunnelRemoteAddress: relayAddr,
-                    usePacketRouter: true
-                )
-
-                let settingsSemaphore = DispatchSemaphore(value: 0)
-                var settingsError: Error?
-
-                self.setTunnelNetworkSettings(tunSettings) { error in
-                    settingsError = error
-                    settingsSemaphore.signal()
-                }
-
-                settingsSemaphore.wait()
-
-                if let err = settingsError {
-                    self.logger.error("Failed to apply tunnel settings: \(err.localizedDescription)", source: "Tunnel")
-                    throw err
-                }
-
-                self.logger.info("Tunnel network settings applied", source: "Tunnel")
-                if let fd = self.tunnelFileDescriptor {
-                    self.logger.info("utun fd acquired fd=\(fd)", source: "Tunnel")
-                    self.startRustIosTunnelEngineLifecycleSmokeTest(fd: fd)
-                } else {
-                    self.logger.warn("utun fd not found after tunnel settings applied", source: "Tunnel")
-                }
-
-                // Step 10: Start timers and finalize
-                self.isTunnelActive = true
-                self.connectedSince = Date()
-                self.reconnectAttempt = 0
-                self.consecutiveKeepaliveFailures = 0
-                self.lastDataActivity = Date()
-
-                // Nebula-pivot S1: the former Rust MuxEngine / SessionHealth setup,
-                // advertised-rwnd priming, and health timer have been removed. The
-                // NE is now a dumb pipe — only keepalive + flow cleanup timers run.
-                self.startKeepaliveTimer()
-                self.startCleanupTimer()
-                self.logger.info("Idle quiesce: packet/ACK timers disabled; using demand-driven flush", source: "Tunnel")
-
-                // Update shared state
-                self.updateConnectionState(.connected)
-                self.sharedDefaults?.set(
-                    Date().timeIntervalSince1970,
-                    forKey: SharedKey.connectedSince
-                )
-                self.sharedDefaults?.set(target, forKey: SharedKey.peerAddress)
-
-                self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
-                self.logger.info("TUNNEL ACTIVE — v5D RELAY-SIDE VIP (no NWListeners)", source: "Tunnel")
-                self.logger.info("TEXT seg: 1.65MB | Crypto: sync FFI", source: "Tunnel")
-                self.logger.info("Router: standalone | VIP: relay-terminated", source: "Tunnel")
-                self.logger.info("═══════════════════════════════════════════", source: "Tunnel")
-                completionHandler(nil)
-
-            } catch {
-                self.logger.error("startTunnel failed: \(error.localizedDescription)", source: "Tunnel")
-                self.updateConnectionState(.disconnected)
-                self.sharedDefaults?.set(
-                    error.localizedDescription,
-                    forKey: SharedKey.lastError
-                )
-                completionHandler(error)
             }
+        }
+    }
+
+    /// Runs on `agentQueue` once the tunnel addresses exist.
+    private func startAgent(_ done: UncheckedSendable<(Error?) -> Void>) {
+        // HTTP still works without the CA, so a CA failure is logged and
+        // shown by the app's HTTPS row; it does not stop the tunnel.
+        if case .failure(let error) = ZTLPAgent.ensureCA() {
+            log.write("ensure_ca failed: \(error.message)")
+        }
+        switch ZTLPAgent.start(dnsIP: AddressPlan.agentAddress, vipCIDR: AddressPlan.agentCIDR) {
+        case .success:
+            log.write("agent started on \(AddressPlan.agentAddress)")
+            startMemoryLog()
+            readPackets()
+            startLoopbackEcho()
+            startPathMonitor()
+            done.value(nil)
+            runSelfTest()
+        case .failure(let error):
+            log.write("agent_start failed: \(error.message)")
+            done.value(TunnelError(error.message))
         }
     }
 
@@ -538,1162 +105,364 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
-        logger.info("Stopping tunnel (reason: \(reason.rawValue))", source: "Tunnel")
-        updateConnectionState(.disconnecting)
-
-        tunnelQueue.async { [weak self] in
-            guard let self = self else {
-                completionHandler()
-                return
-            }
-
-            self.isTunnelActive = false
-
-            // Stop timers
-            self.keepaliveTimer?.cancel()
-            self.keepaliveTimer = nil
-            self.stopWritePacketTimer()
-            self.cleanupTimer?.cancel()
-            self.cleanupTimer = nil
-
-            // Nebula-pivot S1: ackFlushTimer / healthTimer / rustMux / rustHealth
-            // teardown removed along with the reliability layer they served.
-
-            // Stop DNS responder
-            self.dnsResponder = nil
-            self.logger.info("DNS responder stopped", source: "Tunnel")
-
-            // Stop future fd-backed Rust engine if Phase 2 starts it.
-            if let engine = self.iosTunnelEngine {
-                _ = ztlp_ios_tunnel_engine_stop(engine)
-                ztlp_ios_tunnel_engine_free(engine)
-                self.iosTunnelEngine = nil
-                self.logger.info("Rust iOS tunnel engine stopped", source: "Tunnel")
-            }
-
-            // Stop packet router
-            if let router = self.packetRouter {
-                ztlp_router_stop_sync(router)
-                self.packetRouter = nil
-                self.logger.info("Packet router stopped", source: "Tunnel")
-            }
-
-            // Stop tunnel connection (frees crypto context)
-            self.tunnelConnection?.stop()
-            self.tunnelConnection = nil
-            self.logger.info("Tunnel connection stopped", source: "Tunnel")
-
-            // Free identity
-            if let id = self.identity {
-                ztlp_identity_free(id)
-                self.identity = nil
-            }
-
-            // Shut down library
-            ztlp_shutdown()
-
-            // Update shared state
-            self.updateConnectionState(.disconnected)
-            self.connectedSince = nil
-            self.currentRelayAddress = nil
-            self.activeRelayAddress = nil
-            self.currentConfig = nil
-
-            // Free relay pool
-            if let pool = self.relayPool {
-                ztlp_relay_pool_free(pool)
-                self.relayPool = nil
-            }
-
-            self.sharedDefaults?.removeObject(forKey: SharedKey.connectedSince)
-            self.sharedDefaults?.removeObject(forKey: SharedKey.peerAddress)
-            self.sharedDefaults?.removeObject(forKey: SharedKey.lastError)
-            self.sharedDefaults?.removeObject(forKey: SharedKey.selectedRelay)
-            self.sharedDefaults?.removeObject(forKey: SharedKey.neMemoryMB)
-            self.sharedDefaults?.removeObject(forKey: SharedKey.neVirtualMB)
-            self.logger.info("Tunnel stopped", source: "Tunnel")
-
-            completionHandler()
+        log.write("stopTunnel reason=\(reason.rawValue)")
+        let done = UncheckedSendable(completionHandler)
+        agentQueue.async { [self] in
+            memoryTimer?.cancel()
+            memoryTimer = nil
+            pathMonitor?.cancel()
+            pathMonitor = nil
+            stats.closeEcho()
+            let rc = ZTLPAgent.stop()
+            log.write("agent stopped rc=\(rc) footprint=\(Self.footprintText())")
+            done.value()
         }
     }
 
-    override func handleAppMessage(
-        _ messageData: Data,
-        completionHandler: ((Data?) -> Void)?
-    ) {
-        guard let firstByte = messageData.first,
-              let messageType = AppToTunnelMessage(rawValue: firstByte) else {
-            completionHandler?(nil)
-            return
-        }
+    override func sleep(completionHandler: @escaping () -> Void) {
+        log.write("device sleeping")
+        completionHandler()
+    }
 
-        switch messageType {
-        case .getStatus:
-            let status: [String: Any] = [
-                "connected": isTunnelActive,
-                "connectedSince": connectedSince?.timeIntervalSince1970 ?? 0,
-                "bytesSent": tunnelConnection?.bytesSent ?? 0,
-                "bytesReceived": tunnelConnection?.bytesReceived ?? 0
-            ]
-            completionHandler?(try? JSONSerialization.data(withJSONObject: status))
-
-        case .getStats:
-            let stats: [String: Any] = [
-                "bytesSent": tunnelConnection?.bytesSent ?? 0,
-                "bytesReceived": tunnelConnection?.bytesReceived ?? 0,
-            ]
-            completionHandler?(try? JSONSerialization.data(withJSONObject: stats))
-
-        case .resetCounters:
-            tunnelConnection?.resetCounters()
-            sharedDefaults?.set(0, forKey: SharedKey.bytesSent)
-            sharedDefaults?.set(0, forKey: SharedKey.bytesReceived)
-            completionHandler?(Data([1]))
+    /// Connections made before the device slept are usually dead.
+    override func wake() {
+        agentQueue.async { [self] in
+            log.write("device woke: telling the agent (rc=\(ZTLPAgent.networkChanged()))")
         }
     }
 
-    // MARK: - Identity (sync, no bridge)
+    // MARK: - Network changes
 
-    private func loadOrCreateIdentitySync(config: TunnelConfiguration) throws -> OpaquePointer {
-        let identityPath = config.identityPath ?? defaultIdentityPath()
-
-        // Try loading saved identity first (has node ID from previous session)
-        if let path = identityPath, FileManager.default.fileExists(atPath: path) {
-            let ptr = path.withCString { ztlp_identity_from_file($0) }
-            if let ptr = ptr {
-                logger.info("Loaded existing identity from \(path)", source: "Tunnel")
-                return ptr
-            }
-            logger.warn("Failed to load identity from \(path): \(lastError())", source: "Tunnel")
-        }
-
-        // Generate software identity (has node ID immediately).
-        // NOTE: Secure Enclave identity skipped — ztlp_connect_sync requires
-        // a node identity (node ID) which hardware keys don't have until
-        // enrollment via ztlp_client_new. Software identity works directly.
-        guard let swPtr = ztlp_identity_generate() else {
-            throw makeNSError("Failed to generate identity: \(lastError())")
-        }
-
-        // Save so we reuse the same node ID on reconnects
-        if let path = identityPath {
-            let dirPath = (path as NSString).deletingLastPathComponent
-            try? FileManager.default.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
-            path.withCString { ztlp_identity_save(swPtr, $0) }
-            logger.info("Saved new identity to \(path)", source: "Tunnel")
-        }
-
-        let nodeId = ztlp_identity_node_id(swPtr)
-        let nodeIdStr = nodeId != nil ? String(cString: nodeId!) : "unknown"
-        logger.info("Generated software identity: \(nodeIdStr)", source: "Tunnel")
-        return swPtr
-    }
-
-    // MARK: - Packet Router (standalone sync FFI)
-
-    private func startPacketRouter(services: [(vip: String, name: String)]) throws {
-        let router = "10.122.0.1".withCString { ztlp_router_new_sync($0) }
-        guard let router = router else {
-            throw makeNSError("ztlp_router_new_sync failed: \(lastError())")
-        }
-        self.packetRouter = router
-        logger.info("Packet router initialized (tunnel=10.122.0.1)", source: "Tunnel")
-
-        for svc in services {
-            let result = svc.vip.withCString { vipCStr in
-                svc.name.withCString { nameCStr in
-                    ztlp_router_add_service_sync(router, vipCStr, nameCStr)
-                }
-            }
-            if result != 0 {
-                logger.warn("Failed to add service \(svc.name) at \(svc.vip): \(lastError())", source: "Tunnel")
-            } else {
-                logger.info("Router service: \(svc.vip) → \(svc.name)", source: "Tunnel")
-            }
-        }
-
-        // Start the utun packet I/O loop unless a later debug build explicitly
-        // switches ownership to Rust. For the current lifecycle-only smoke test,
-        // Rust stores the fd but does not read/write it, so Swift remains owner.
-        if Self.useRustFdDataPlane {
-            logger.info("Rust fd data plane requested; Swift packet I/O loop disabled", source: "Tunnel")
-        } else {
-            startPacketLoop()
-        }
-    }
-
-    private func startPacketLoop() {
-        logger.info("Starting packet I/O loop", source: "Tunnel")
-        readPacketLoop()
-    }
-
-    private func startRustIosTunnelEngineLifecycleSmokeTest(fd: Int32) {
-        guard Self.enableRustIosTunnelEngineLifecycleSmokeTest else {
-            logger.info("Rust iOS tunnel engine scaffold disabled mode=swift_packetFlow", source: "Tunnel")
-            return
-        }
-        guard iosTunnelEngine == nil else {
-            logger.warn("Rust iOS tunnel engine scaffold already started; ignoring duplicate fd=\(fd)", source: "Tunnel")
-            return
-        }
-
-        var engine: OpaquePointer?
-        let result = ztlp_ios_tunnel_engine_start(fd, &engine)
-        guard result == 0, let engine = engine else {
-            logger.error("Rust iOS tunnel engine scaffold start failed fd=\(fd): \(lastError())", source: "Tunnel")
-            return
-        }
-
-        iosTunnelEngine = engine
-        if Self.useRustFdDataPlane {
-            guard let router = packetRouter else {
-                logger.error("Rust iOS tunnel engine router ingress requested but packetRouter is nil", source: "Tunnel")
-                return
-            }
-            let userData = Unmanaged.passUnretained(self).toOpaque()
-            let callbackResult = ztlp_ios_tunnel_engine_set_router_action_callback(engine, rustRouterActionCallback, userData)
-            if callbackResult == 0 {
-                logger.info("Rust router action callback registered", source: "Tunnel")
-            } else {
-                logger.error("Rust router action callback registration failed fd=\(fd): \(lastError())", source: "Tunnel")
-            }
-
-            let readResult = ztlp_ios_tunnel_engine_start_router_ingress_loop(engine, router)
-            if readResult == 0 {
-                logger.info("Rust iOS tunnel engine scaffold started fd=\(fd) mode=router_ingress swift_packetFlow=disabled transport=swift_action_callback", source: "Tunnel")
-            } else {
-                logger.error("Rust iOS tunnel engine router ingress start failed fd=\(fd): \(lastError())", source: "Tunnel")
-            }
-        } else {
-            logger.info("Rust iOS tunnel engine scaffold started fd=\(fd) mode=lifecycle_only", source: "Tunnel")
-        }
-    }
-
-    /// Locate the utun file descriptor created by NEPacketTunnelProvider.
-    /// This follows Nebula's iOS pattern: Swift configures NE settings, then
-    /// hands the fd to a native data-plane owner. Phase 1 logs only; production
-    /// packet I/O still uses packetFlow until the Rust engine is validated.
-    private var tunnelFileDescriptor: Int32? {
-        let fd = ztlp_find_utun_fd()
-        return fd >= 0 ? fd : nil
-    }
-
-    /// Recursive readPackets loop: utun → standalone router → ZTLP
-    private func readPacketLoop() {
-        packetFlow.readPackets { [weak self] packets, protocols in
-            guard let self = self, self.isTunnelActive, let router = self.packetRouter else { return }
-
-            var packetsProcessed = 0
-            let packetLimit = Self.maxPacketsPerReadCycle
-            for (i, packet) in packets.enumerated() {
-                if packetsProcessed >= packetLimit {
-                    break
-                }
-                if self.shouldThrottleRouterWork() {
-                    break
-                }
-
-                let proto = protocols[i]
-                if proto.intValue == AF_INET {
-                    // Intercept DNS queries for *.ztlp before they hit the router
-                    if let dns = self.dnsResponder, dns.isDNSQuery(packet) {
-                        if let response = dns.handleQuery(packet) {
-                            // Write DNS response directly back to utun
-                            self.packetFlow.writePackets([response], withProtocols: [NSNumber(value: AF_INET)])
-                            packetsProcessed += 1
-                            continue
-                        } else {
-                            self.logger.warn("DNS query matched but no response generated", source: "DNS")
-                        }
-                    }
-
-                    var actionWritten: Int = 0
-
-                    let actionCount = packet.withUnsafeBytes { pktPtr -> Int32 in
-                        guard let baseAddr = pktPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                            return -1
-                        }
-                        return ztlp_router_write_packet_sync(
-                            router,
-                            baseAddr, pktPtr.count,
-                            &self.actionBuffer, self.actionBuffer.count,
-                            &actionWritten
-                        )
-                    }
-
-                    // Process router actions (OpenStream, SendData, CloseStream)
-                    if actionCount > 0 && actionWritten > 0 {
-                        if actionCount > 1 {
-                            self.logger.debug("Router: \(actionCount) action(s), \(actionWritten) bytes", source: "Router")
-                        }
-                        self.processRouterActions(
-                            actionBuffer: self.actionBuffer,
-                            actionLen: actionWritten,
-                            maxActions: Self.maxRouterActionsPerCycle
-                        )
-                    }
-
-                    packetsProcessed += 1
-                }
-            }
-
-            if !packets.isEmpty {
-                self.markDataActivity()
-            }
-
-            // Flush outbound response packets immediately, but in bounded batches.
-            self.flushOutboundPackets(maxPackets: self.currentOutboundFlushLimit())
-
-            self.readPacketLoop()
-        }
-    }
-
-
-
-    fileprivate func handleRustFdIngressDiagnostic(_ message: String) {
-        tunnelQueue.async { [weak self] in
+    /// Runs on `agentQueue`. The first report is the starting state; every
+    /// later report that differs is a network change.
+    private func startPathMonitor() {
+        pathMonitor?.cancel()
+        lastPath = ""
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            self.rustFdIngressDiagCount += 1
-            let now = Date()
-            if self.rustFdIngressDiagCount <= 30 || message.contains("tcp_payload=0") == false || now.timeIntervalSince(self.rustFdIngressDiagLastLogAt) >= 1.0 {
-                self.logger.debug("Rust fd ingress diag count=\(self.rustFdIngressDiagCount) \(message)", source: "Tunnel")
-                self.rustFdIngressDiagLastLogAt = now
+            let now = Self.describe(path)
+            // Already on agentQueue (the monitor's queue).
+            if self.lastPath.isEmpty {
+                self.lastPath = now
+                self.log.write("network: \(now)")
+            } else if now != self.lastPath {
+                let before = self.lastPath
+                self.lastPath = now
+                self.log.write("network changed: \(before) -> \(now) (rc=\(ZTLPAgent.networkChanged()))")
             }
+        }
+        monitor.start(queue: agentQueue)
+        pathMonitor = monitor
+    }
+
+    /// The interface the device is actually using: the first real one iOS
+    /// lists (it lists them in order of preference), ignoring this tunnel's
+    /// own. Only a change of THIS is a network change: telling the agent
+    /// cuts transfers in progress, so a second interface merely becoming
+    /// available (cellular coming up while on Wi-Fi) must not count.
+    static func describe(_ path: Network.NWPath) -> String {
+        guard path.status == .satisfied else { return "offline" }
+        for iface in path.availableInterfaces {
+            switch iface.type {
+            case .wifi: return "wifi(\(iface.name))"
+            case .cellular: return "cellular(\(iface.name))"
+            case .wiredEthernet: return "wired(\(iface.name))"
+            default: continue
+            }
+        }
+        return "other"
+    }
+
+    /// Any message from the app is answered with the agent's status JSON.
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
+        guard let completionHandler else { return }
+        let done = UncheckedSendable(completionHandler)
+        // Not on agentQueue: status must answer even while a start is blocked.
+        DispatchQueue.global(qos: .userInitiated).async {
+            done.value(ZTLPAgent.statusJSON())
         }
     }
 
-    fileprivate func handleRustFdOutboundDiagnostic(_ message: String) {
-        tunnelQueue.async { [weak self] in
-            guard let self else { return }
-            self.rustFdOutboundDiagCount += 1
-            let now = Date()
-            if self.rustFdOutboundDiagCount <= 30 || now.timeIntervalSince(self.rustFdOutboundDiagLastLogAt) >= 1.0 {
-                self.logger.debug("Rust fd outbound diag count=\(self.rustFdOutboundDiagCount) \(message)", source: "Tunnel")
-                self.rustFdOutboundDiagLastLogAt = now
-            }
-        }
-    }
+    // MARK: - Network settings
 
-    fileprivate func handleRustRouterAction(actionType: UInt8, streamID: UInt32, payload: [UInt8]) {
-        tunnelQueue.async { [weak self] in
-            guard let self else { return }
-            switch actionType {
-            case 0:
-                self.rustActionCallbackOpen += 1
-            case 1:
-                self.rustActionCallbackSend += 1
-                self.rustActionCallbackBytes += payload.count
-            case 2:
-                self.rustActionCallbackClose += 1
-            default:
-                self.rustActionCallbackUnknown += 1
-            }
-            let now = Date()
-            if actionType == 1 || now.timeIntervalSince(self.rustActionCallbackLastLogAt) >= 1.0 {
-                self.logger.debug("Rust action callback summary open=\(self.rustActionCallbackOpen) send=\(self.rustActionCallbackSend) close=\(self.rustActionCallbackClose) unknown=\(self.rustActionCallbackUnknown) bytes=\(self.rustActionCallbackBytes) lastType=\(actionType) lastStream=\(streamID) lastLen=\(payload.count)", source: "Tunnel")
-                self.rustActionCallbackLastLogAt = now
-                self.rustActionCallbackOpen = 0
-                self.rustActionCallbackSend = 0
-                self.rustActionCallbackClose = 0
-                self.rustActionCallbackUnknown = 0
-                self.rustActionCallbackBytes = 0
-            }
-            // Reuse the existing Swift RouterAction -> mux transport path.
-            // This keeps packetFlow bytes out of Swift while preserving current transport/session behavior.
-            var action = [UInt8]()
-            action.reserveCapacity(7 + payload.count)
-            action.append(actionType)
-            action.append(contentsOf: self.beStreamIdBytes(streamID))
-            let len = UInt16(min(payload.count, Int(UInt16.max)))
-            action.append(UInt8(len >> 8))
-            action.append(UInt8(len & 0xff))
-            if len > 0 {
-                action.append(contentsOf: payload.prefix(Int(len)))
-            }
-            self.processRouterActions(actionBuffer: action, actionLen: action.count, maxActions: 1)
-        }
-    }
-
-    /// Parse and dispatch serialized RouterActions from the standalone router.
-    /// Format: [1B type][4B stream_id BE][2B data_len BE][data...]
-    /// Type: 0=OpenStream, 1=SendData, 2=CloseStream
-    ///
-    /// Router actions must be translated into mux payloads for the gateway:
-    ///   OPEN  = [0x06 | stream_id(4 BE) | service_name_len(1) | service_name]
-    ///   DATA  = [0x00 | stream_id(4 BE) | payload]
-    ///   CLOSE = [0x05 | stream_id(4 BE)]
-    ///
-    /// tunnelConnection.sendData() then wraps those mux payloads in the outer
-    /// encrypted FRAME_DATA transport envelope.
-    private func processRouterActions(actionBuffer: [UInt8], actionLen: Int, maxActions: Int = Int.max) {
-        var offset = 0
-        var actionsProcessed = 0
-        while offset < actionLen {
-            if actionsProcessed >= maxActions {
-                break
-            }
-            if shouldThrottleRouterWork() {
-                break
-            }
-            guard offset + 7 <= actionLen else { break }  // min: 1+4+2 = 7 bytes
-
-            let actionType = actionBuffer[offset]
-            offset += 1
-
-            let streamId = UInt32(actionBuffer[offset]) << 24
-                | UInt32(actionBuffer[offset + 1]) << 16
-                | UInt32(actionBuffer[offset + 2]) << 8
-                | UInt32(actionBuffer[offset + 3])
-            offset += 4
-
-            let dataLen = Int(actionBuffer[offset]) << 8
-                | Int(actionBuffer[offset+1])
-            offset += 2
-
-            guard offset + dataLen <= actionLen else { break }
-
-            let actionData: Data? = dataLen > 0 ? Data(actionBuffer[offset..<(offset+dataLen)]) : nil
-            offset += dataLen
-            actionsProcessed += 1
-
-            switch actionType {
-            case 0: // OpenStream
-                guard let serviceData = actionData, serviceData.count <= 255 else {
-                    logger.warn("Router: OpenStream missing/oversize service name for stream \(streamId)", source: "Router")
-                    continue
-                }
-                var muxOpen = Data(capacity: 6 + serviceData.count)
-                muxOpen.append(Self.MUX_FRAME_OPEN)
-                muxOpen.append(contentsOf: beStreamIdBytes(streamId))
-                muxOpen.append(UInt8(serviceData.count))
-                muxOpen.append(serviceData)
-                muxSummaryOpen += 1
-                maybeLogMuxSummary(force: false)
-                let sent = tunnelConnection?.sendData(muxOpen) == true
-                logger.debug("RouterAction send OpenStream stream=\(streamId) serviceBytes=\(serviceData.count) sent=\(sent)", source: "Router")
-                if !sent {
-                    logger.warn("Router: OpenStream backpressured for stream \(streamId)", source: "Router")
-                    return
-                }
-
-            case 1: // SendData
-                guard let payload = actionData else { continue }
-                var muxData = Data(capacity: 5 + payload.count)
-                muxData.append(Self.MUX_FRAME_DATA)
-                muxData.append(contentsOf: beStreamIdBytes(streamId))
-                muxData.append(payload)
-                muxSummarySendData += 1
-                muxSummarySendBytes += payload.count
-                maybeLogMuxSummary(force: false)
-                let sent = tunnelConnection?.sendData(muxData) == true
-                logger.debug("RouterAction send SendData stream=\(streamId) bytes=\(payload.count) sent=\(sent)", source: "Router")
-                if !sent {
-                    logger.warn("Router: SendData backpressured for stream \(streamId) bytes=\(payload.count)", source: "Router")
-                    return
-                }
-
-            case 2: // CloseStream
-                var muxClose = Data(capacity: 5)
-                muxClose.append(Self.MUX_FRAME_CLOSE)
-                muxClose.append(contentsOf: beStreamIdBytes(streamId))
-                muxSummaryClose += 1
-                maybeLogMuxSummary(force: false)
-                let sent = tunnelConnection?.sendData(muxClose) == true
-                logger.debug("RouterAction send CloseStream stream=\(streamId) sent=\(sent)", source: "Router")
-                if !sent {
-                    logger.warn("Router: CloseStream backpressured for stream \(streamId)", source: "Router")
-                    return
-                }
-
-            default:
-                logger.warn("Unknown router action type: \(actionType)", source: "Tunnel")
-            }
-        }
-    }
-
-    private func handleGatewayMuxPayload(_ data: Data) {
-        guard let router = packetRouter, !data.isEmpty else { return }
-
-        let frameType = data[0]
-        switch frameType {
-        case Self.MUX_FRAME_DATA:
-            guard data.count >= 5 else {
-                logger.warn("GW->NE mux DATA too short: \(data.count)", source: "Tunnel")
-                return
-            }
-            let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            let payload = data.dropFirst(5)
-            muxSummaryDataFrames += 1
-            muxSummaryDataBytes += payload.count
-            maybeLogMuxSummary(force: false)
-            payload.withUnsafeBytes { ptr in
-                guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                ztlp_router_gateway_data_sync(router, streamId, baseAddr, ptr.count)
-            }
-
-        case Self.MUX_FRAME_CLOSE:
-            guard data.count >= 5 else {
-                logger.warn("GW->NE mux CLOSE too short: \(data.count)", source: "Tunnel")
-                return
-            }
-            let streamId = data.dropFirst().prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-            muxSummaryClose += 1
-            maybeLogMuxSummary(force: false)
-            ztlp_router_gateway_close_sync(router, streamId)
-
-        default:
-            data.withUnsafeBytes { ptr in
-                guard let baseAddr = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-                ztlp_router_gateway_data_sync(router, 0, baseAddr, ptr.count)
-            }
-        }
-
-        flushOutboundPackets(maxPackets: currentOutboundFlushLimit())
-    }
-
-    private func maybeLogMuxSummary(force: Bool) {
-        let now = Date()
-        guard force || now.timeIntervalSince(muxSummaryLastLogAt) >= 1.0 else { return }
-        let totalEvents = muxSummaryDataFrames + muxSummaryOpen + muxSummaryClose + muxSummarySendData
-        guard totalEvents > 0 else { return }
-        muxSummaryLastLogAt = now
-        logger.debug(
-            "Mux summary gwData=\(muxSummaryDataFrames)/\(muxSummaryDataBytes)B open=\(muxSummaryOpen) close=\(muxSummaryClose) send=\(muxSummarySendData)/\(muxSummarySendBytes)B",
-            source: "Tunnel"
+    static func makeSettings() -> NEPacketTunnelNetworkSettings {
+        let settings = NEPacketTunnelNetworkSettings(
+            tunnelRemoteAddress: AddressPlan.tunnelRemotePlaceholder
         )
-        muxSummaryDataFrames = 0
-        muxSummaryDataBytes = 0
-        muxSummaryOpen = 0
-        muxSummaryClose = 0
-        muxSummarySendData = 0
-        muxSummarySendBytes = 0
-    }
 
-    private func beStreamIdBytes(_ streamId: UInt32) -> [UInt8] {
-        withUnsafeBytes(of: streamId.bigEndian) { Array($0) }
-    }
-
-
-    private func currentOutboundFlushLimit() -> Int {
-        let browserMode = lastRouterFlows >= Self.rwndBrowserBurstFlowThreshold ||
-            lastRouterStreamMappings >= Self.rwndBrowserBurstFlowThreshold
-        return browserMode ? Self.browserModeMaxOutboundPacketsPerFlush : Self.maxOutboundPacketsPerFlush
-    }
-
-    /// Write response packets from the router back to the utun interface.
-    private func flushOutboundPackets(maxPackets: Int = Int.max) {
-        guard let router = packetRouter else { return }
-
-        var packets: [Data] = []
-        var protocols: [NSNumber] = []
-        var drained = 0
-
-        // Drain available outbound packets in bounded batches so the runloop can
-        // get back to inbound UDP processing and ACK generation.
-        while drained < maxPackets {
-            let bytesRead = ztlp_router_read_packet_sync(
-                router,
-                &readPacketBuffer,
-                readPacketBuffer.count
-            )
-            if bytesRead <= 0 { break }
-
-            packets.append(Data(readPacketBuffer[0..<Int(bytesRead)]))
-            protocols.append(NSNumber(value: AF_INET))
-            drained += 1
-        }
-
-        // Nebula-pivot S1: saturation no longer feeds an advertised-rwnd
-        // ladder. Track the counter only for logging/diagnostics if useful.
-        _ = drained
-
-        if !packets.isEmpty {
-            markDataActivity()
-            packetFlow.writePackets(packets, withProtocols: protocols)
-        }
-    }
-
-    // Nebula-pivot S1 removed: updateAdvertisedRwnd / reduceAdvertisedRwnd /
-    // maybeRampAdvertisedRwnd — the V1 packet-count rwnd ladder and its
-    // browser-burst / replay-delta / pressure-cooldown policy went away with
-    // the reliability layer.
-
-    private func startWritePacketTimer() {
-        writePacketTimer?.cancel()
-        writePacketTimer = nil
-    }
-
-    private func stopWritePacketTimer() {
-        writePacketTimer?.cancel()
-        writePacketTimer = nil
-    }
-
-    /// Every 10 seconds, clean up stale TCP flows (120s timeout) to reclaim
-    /// flow memory. Each flow has a 48-byte VecDeque struct + send_buf overhead.
-    /// Also logs NE memory for diagnostics.
-    private func startCleanupTimer() {
-        cleanupTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
-        timer.schedule(deadline: .now() + .seconds(10), repeating: .seconds(10))
-        timer.setEventHandler { [weak self] in
-            guard let self = self, self.isTunnelActive else { return }
-            if let router = self.packetRouter {
-                let cleaned = ztlp_router_cleanup_stale_flows(router)
-                if cleaned > 0 {
-                    self.logger.info("Cleaned up \(cleaned) stale TCP flows", source: "Tunnel")
-                    if let statsPtr = ztlp_router_stats(router) {
-                        let stats = String(cString: statsPtr)
-                        ztlp_free_string(statsPtr)
-                        self.logger.debug("Router stats: \(stats)", source: "Tunnel")
-                    }
-                } else if self.isDataActive, let statsPtr = ztlp_router_stats(router) {
-                    let stats = String(cString: statsPtr)
-                    ztlp_free_string(statsPtr)
-                    self.logger.debug("Router stats: \(stats)", source: "Tunnel")
-                }
-            }
-            self.logMemoryDiagnostics()
-        }
-        timer.resume()
-        cleanupTimer = timer
-    }
-
-    // MARK: - Relay Discovery and Selection (sync NS + RelayPool FFI)
-
-    /// Discover relays via NS and populate the RelayPool.
-    private func discoverRelays(config: TunnelConfiguration) {
-        // Free existing pool if present
-        if let existing = relayPool {
-            ztlp_relay_pool_free(existing)
-        }
-
-        // Gateway region for selection tiebreak — derive from config
-        let regionStr = config.gatewayRegion ?? ""
-
-        relayPool = regionStr.withCString { ztlp_relay_pool_new($0) }
-        guard let pool = relayPool else {
-            logger.warn("Failed to create relay pool, will use fallback relay", source: "Relay")
-            return
-        }
-
-        // Query NS for RELAY records (type 3)
-        if let nsAddr = config.nsServer, !nsAddr.isEmpty {
-            let zoneName = (config.zoneName ?? "").replacingOccurrences(of: ".ztlp", with: "")
-            logger.info("Querying NS for RELAY records at \(nsAddr) (zone=\(zoneName))", source: "Relay")
-
-            let relayList = nsAddr.withCString { nsCStr in
-                zoneName.withCString { zoneCStr in
-                    ztlp_ns_resolve_relays_sync(nsCStr, zoneCStr, 5000)
-                }
-            }
-
-            if let relayList = relayList {
-                // Check for errors in the result
-                if let errMsg = relayList.pointee.error {
-                    let errorStr = String(cString: errMsg)
-                    logger.warn("NS relay query returned error: \(errorStr)", source: "Relay")
-                } else if relayList.pointee.count > 0 {
-                    let updateResult = ztlp_relay_pool_update_from_ns(pool, relayList)
-                    if updateResult == 0 {
-                        let healthy = ztlp_relay_pool_healthy_count(pool)
-                        let total = ztlp_relay_pool_total_count(pool)
-                        logger.info("Relay pool updated: \(total) total, \(healthy) healthy from NS", source: "Relay")
-
-                        // Log discovered relays
-                        for i in 0..<relayList.pointee.count {
-                            let addr = relayList.pointee.addresses[i]
-                            let region = relayList.pointee.regions[i]
-                            let latency = relayList.pointee.latency_ms[i]
-                            let load = relayList.pointee.load_pct[i]
-                            let health = relayList.pointee.health[i]
-                            let healthStr: String
-                            switch health {
-                                case 0: healthStr = "healthy"
-                                case 1: healthStr = "degraded"
-                                case 2: healthStr = "dead"
-                                case 3: healthStr = "deprioritized"
-                                default: healthStr = "unknown"
-                            }
-                            let regionStr = region.map { String(cString: $0) } ?? "?"
-                            let addrStr = addr.map { String(cString: $0) } ?? "?"
-                            logger.info("  Relay #\(i+1): \(addrStr) region=\(regionStr) lat=\(latency)ms load=\(load)% health=\(healthStr)", source: "Relay")
-                        }
-                    } else {
-                        logger.warn("Failed to update relay pool from NS", source: "Relay")
-                    }
-                } else {
-                    logger.info("NS returned no relay records", source: "Relay")
-                }
-                ztlp_relay_list_free(relayList)
-            } else {
-                logger.warn("NS relay query failed: \(lastError())", source: "Relay")
-            }
-        } else {
-            logger.info("No NS server configured for relay discovery", source: "Relay")
-        }
-    }
-
-    /// Select the best relay from the pool. Falls back to config relay if pool is empty.
-    private func selectRelay(config: TunnelConfiguration) -> String? {
-        guard let pool = relayPool, ztlp_relay_pool_healthy_count(pool) > 0 else {
-            // Fall back to configured relay or direct gateway
-            if let relay = config.relayAddress, !relay.isEmpty {
-                logger.info("No relay pool available, using configured fallback: \(relay)", source: "Relay")
-                return relay
-            }
-            logger.warn("No relay available (pool empty, no configured fallback)", source: "Relay")
-            return nil
-        }
-
-        let selected = ztlp_relay_pool_select(pool)
-        defer { if let s = selected { ztlp_string_free(s) } }
-
-        if let relayAddr = selected, let addrStr = String(utf8String: relayAddr), !addrStr.isEmpty {
-            logger.info("Selected relay: \(addrStr) (healthy=\(ztlp_relay_pool_healthy_count(pool)))", source: "Relay")
-            currentRelayAddress = addrStr
-            sharedDefaults?.set(addrStr, forKey: SharedKey.selectedRelay)
-            return addrStr
-        }
-
-        // Pool has relays but none selected — try configured relay
-        if let relay = config.relayAddress, !relay.isEmpty {
-            logger.info("Pool returned no relay, using configured fallback: \(relay)", source: "Relay")
-            return relay
-        }
-
-        logger.warn("No relay available from pool or config", source: "Relay")
-        return nil
-    }
-
-    // MARK: - Reconnect
-
-    /// Dedicated queue for reconnect backoff sleeps, so they don't fight the
-    /// main tunnelQueue (which is already handling the send/receive loops).
-    private let reconnectQueue = DispatchQueue(label: "com.ztlp.tunnel.reconnect", qos: .utility)
-
-    private func scheduleReconnect() {
-        scheduleReconnect(reason: "transport_failure")
-    }
-
-    private func scheduleReconnect(reason: String) {
-        guard isTunnelActive else { return }
-        guard !reconnectScheduled && !reconnectInProgress else {
-            logger.debug("Reconnect already scheduled/in progress; ignoring duplicate trigger reason=\(reason)", source: "Tunnel")
-            return
-        }
-
-        reconnectAttempt += 1
-        reconnectGeneration += 1
-        let generation = reconnectGeneration
-
-        if reconnectAttempt > Self.maxReconnectAttempts {
-            logger.error("Failed to reconnect after \(Self.maxReconnectAttempts) attempts", source: "Tunnel")
-            cancelTunnelWithError(
-                makeNSError("Failed to reconnect after \(Self.maxReconnectAttempts) attempts")
-            )
-            return
-        }
-
-        let delay = min(
-            Self.baseReconnectDelay * pow(2.0, Double(reconnectAttempt - 1)),
-            Self.maxReconnectDelay
+        let addresses = AddressPlan.tunnelAddresses
+        let ipv4 = NEIPv4Settings(
+            addresses: addresses,
+            subnetMasks: Array(repeating: AddressPlan.hostMask, count: addresses.count)
         )
-        let jitter = delay * Double.random(in: -0.2...0.2)
-        let finalDelay = max(0.5, delay + jitter)
+        // The only route is the DNS server address, so `.ztlp` lookups reach
+        // this extension as packets. Nothing else is routed here.
+        ipv4.includedRoutes = [
+            NEIPv4Route(destinationAddress: AddressPlan.dnsAddress, subnetMask: AddressPlan.hostMask)
+        ]
+        ipv4.excludedRoutes = []
+        settings.ipv4Settings = ipv4
 
-        reconnectScheduled = true
-        logger.info("Reconnect attempt \(reconnectAttempt)/\(Self.maxReconnectAttempts) gen=\(generation) in \(String(format: "%.1f", finalDelay))s reason=\(reason)", source: "Tunnel")
-        updateConnectionState(.reconnecting)
-
-        reconnectQueue.asyncAfter(deadline: .now() + finalDelay) { [weak self] in
-            guard let self = self, self.isTunnelActive else { return }
-            self.tunnelQueue.async { [weak self] in
-                guard let self = self, self.isTunnelActive else { return }
-                guard self.reconnectScheduled && self.reconnectGeneration == generation else { return }
-                self.reconnectScheduled = false
-                self.attemptReconnect(generation: generation, reason: reason)
-            }
-        }
-    }
-
-    private func attemptReconnect(generation: Int) {
-        attemptReconnect(generation: generation, reason: "transport_failure")
-    }
-
-    private func attemptReconnect(generation: Int, reason: String) {
-        guard !reconnectInProgress else {
-            logger.debug("Reconnect gen=\(generation) ignored; reconnect already in progress", source: "Tunnel")
-            return
-        }
-        reconnectInProgress = true
-        defer {
-            reconnectInProgress = false
-        }
-        logger.info("Reconnect gen=\(generation) starting reason=\(reason)", source: "Tunnel")
-
-        // Nebula-pivot S1: router runtime-state reset here was tied to the
-        // session-health state machine. Without that machine, the
-        // NWConnection-failure path is the only reconnect trigger and a
-        // handshake teardown/rebuild is sufficient.
-
-        guard let identityPtr = identity else {
-            logger.error("Identity lost during reconnect", source: "Tunnel")
-            cancelTunnelWithError(makeNSError("Identity lost during reconnect"))
-            return
-        }
-
-        // Stop old tunnel connection
-        tunnelConnection?.stop()
-        tunnelConnection = nil
-
-        // Reload config
-        let config = currentConfig ?? (try? loadTunnelConfiguration())
-        guard let config = config else {
-            logger.error("Failed to load config for reconnect", source: "Tunnel")
-            scheduleReconnect()
-            return
-        }
-
-        // Try to select a NEW relay (different from the failed one)
-        // First report the currently active relay as failed
-        if let pool = relayPool, let failedRelay = activeRelayAddress {
-            failedRelay.withCString { ztlp_relay_pool_report_failure(pool, $0) }
-            logger.info("Reported relay failure for \(failedRelay)", source: "Relay")
-        }
-
-        // Do NOT perform a blocking plain-UDP NS refresh while the packet tunnel
-        // is active. On iOS NE this can route through the tunnel itself and fail
-        // with ENETUNREACH, then destroy useful relay state mid-reconnect. Use
-        // cached relays/fallback during reconnect; refresh NS on fresh tunnel start.
-        if let pool = relayPool, ztlp_relay_pool_needs_refresh(pool) {
-            logger.info("Relay pool stale during reconnect; skipping active-tunnel NS refresh and using cached/fallback relay", source: "Relay")
-        }
-
-        // Select next best relay from pool
-        let svcName = config.serviceName ?? "vault"
-        guard let relayAddr = selectRelay(config: config) else {
-            logger.error("No relay available for reconnect", source: "Relay")
-            scheduleReconnect()
-            return
-        }
-
-        logger.info("Reconnect gen=\(generation) via relay \(relayAddr)...", source: "Relay")
-        currentRelayAddress = relayAddr
-
-        // Build config for reconnect through new relay
-        let cfgPtr = ztlp_config_new()
-        defer { if let c = cfgPtr { ztlp_config_free(c) } }
-
-        if let cfgPtr = cfgPtr {
-            relayAddr.withCString { ztlp_config_set_relay(cfgPtr, $0) }
-            ztlp_config_set_nat_assist(cfgPtr, true)
-            ztlp_config_set_timeout_ms(cfgPtr, 15000)
-            if !svcName.isEmpty {
-                svcName.withCString { ztlp_config_set_service(cfgPtr, $0) }
-            }
-        }
-
-        // Reconnect using handshake on the same NWConnection that will carry data
-        let target = config.targetNodeId
-        let conn = ZTLPTunnelConnection(
-            gatewayAddress: relayAddr,
-            queue: tunnelQueue
-        )
-        conn.delegate = self
-        conn.start()
-
-        let handshakeSemaphore = DispatchSemaphore(value: 0)
-        var handshakeError: Error?
-        conn.performHandshake(identity: identityPtr, config: cfgPtr, target: target, timeoutMs: 15000) { result in
-            switch result {
-            case .success:
-                break
-            case .failure(let error):
-                handshakeError = error
-            }
-            handshakeSemaphore.signal()
-        }
-        let waitResult = handshakeSemaphore.wait(timeout: .now() + 20.0)
-        if waitResult == .timedOut {
-            conn.stop()
-            logger.warn("Reconnect gen=\(generation) handshake wait timed out for relay \(relayAddr), will retry", source: "Tunnel")
-            scheduleReconnect()
-            return
-        }
-
-        if let handshakeError = handshakeError {
-            conn.stop()
-            // Report this relay as failed and retry
-            if let pool = relayPool {
-                relayAddr.withCString { ztlp_relay_pool_report_failure(pool, $0) }
-            }
-            logger.warn("Reconnect gen=\(generation) to \(relayAddr) failed: \(handshakeError.localizedDescription), will retry", source: "Tunnel")
-            scheduleReconnect()
-            return
-        }
-
-        tunnelConnection = conn
-
-        // Update active relay tracking
-        activeRelayAddress = relayAddr
-
-        // Report successful connection to relay
-        if let pool = relayPool {
-            relayAddr.withCString { ztlp_relay_pool_report_success(pool, $0, 0) }
-        }
-
-        // Success
-        reconnectAttempt = 0
-        consecutiveKeepaliveFailures = 0
-        lastDataActivity = Date()
-        logger.info("Reconnect gen=\(generation) succeeded via relay \(relayAddr)", source: "Tunnel")
-        updateConnectionState(.connected)
-        sharedDefaults?.set(
-            Date().timeIntervalSince1970,
-            forKey: SharedKey.connectedSince
-        )
-        sharedDefaults?.set(relayAddr, forKey: SharedKey.selectedRelay)
-    }
-
-    // MARK: - Keepalive
-
-    private func startKeepaliveTimer() {
-        keepaliveTimer?.cancel()
-
-        let timer = DispatchSource.makeTimerSource(queue: tunnelQueue)
-        timer.schedule(deadline: .now() + 25, repeating: 25)
-        timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-
-            self.logMemoryDiagnostics()
-
-            if self.isDataActive {
-                self.consecutiveKeepaliveFailures = 0
-                self.logger.debug("Keepalive skipped — data active (\(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s ago)", source: "Tunnel")
-                return
-            }
-
-            // Send keepalive as a minimal encrypted packet
-            let keepaliveData = Data([0])
-            let sent = self.tunnelConnection?.sendData(keepaliveData) ?? false
-            if sent {
-                self.consecutiveKeepaliveFailures = 0
-            } else {
-                self.consecutiveKeepaliveFailures += 1
-                let relayInfo = self.activeRelayAddress ?? "unknown"
-                self.logger.debug(
-                    "Keepalive send failed via relay \(relayInfo) (\(self.consecutiveKeepaliveFailures)/\(Self.keepaliveFailureThreshold))",
-                    source: "Tunnel"
-                )
-
-                if self.consecutiveKeepaliveFailures >= Self.keepaliveFailureThreshold
-                    && !self.isDataActive
-                    && self.isTunnelActive {
-                    self.logger.warn(
-                        "Connection appears dead — \(self.consecutiveKeepaliveFailures) keepalive failures via relay \(relayInfo), no data for \(String(format: "%.0f", Date().timeIntervalSince(self.lastDataActivity)))s",
-                        source: "Tunnel"
-                    )
-                    self.scheduleReconnect()
-                }
-            }
-        }
-        timer.resume()
-        keepaliveTimer = timer
-    }
-
-    // MARK: - Configuration
-
-    private func loadTunnelConfiguration() throws -> TunnelConfiguration {
-        guard let proto = protocolConfiguration as? NETunnelProviderProtocol else {
-            throw makeNSError("Invalid protocol configuration")
-        }
-
-        guard let providerConfig = proto.providerConfiguration,
-              let config = TunnelConfiguration.from(dictionary: providerConfig) else {
-            throw makeNSError("Missing or invalid provider configuration")
-        }
-
-        return config
-    }
-
-    private func defaultIdentityPath() -> String? {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupId
-        ) else { return nil }
-        return containerURL.appendingPathComponent("identity.json").path
-    }
-
-    private func createTunnelNetworkSettings(
-        tunnelRemoteAddress: String,
-        usePacketRouter: Bool = true
-    ) -> NEPacketTunnelNetworkSettings {
-        let remoteAddress = tunnelRemoteAddress.components(separatedBy: ":").first ?? tunnelRemoteAddress
-
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
-
-        if usePacketRouter {
-            let ipv4 = NEIPv4Settings(
-                addresses: ["10.122.0.1"],
-                subnetMasks: ["255.255.0.0"]
-            )
-            let vipRoute = NEIPv4Route(
-                destinationAddress: "10.122.0.0",
-                subnetMask: "255.255.0.0"
-            )
-            ipv4.includedRoutes = [vipRoute]
-            ipv4.excludedRoutes = [NEIPv4Route.default()]
-            settings.ipv4Settings = ipv4
-        } else {
-            let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
-            ipv4.includedRoutes = []
-            ipv4.excludedRoutes = [NEIPv4Route.default()]
-            settings.ipv4Settings = ipv4
-        }
-
-        let dns = NEDNSSettings(servers: ["10.122.0.1"])
-        dns.matchDomains = ["ztlp"]
+        let dns = NEDNSSettings(servers: [AddressPlan.dnsAddress])
+        dns.matchDomains = [AddressPlan.matchDomain]
+        dns.matchDomainsNoSearch = true
         settings.dnsSettings = dns
-        settings.mtu = NSNumber(value: 1400)
 
+        // MTU is left at the system default.
         return settings
     }
 
-    // MARK: - Shared State
+    // MARK: - Packet flow
 
-    private func updateConnectionState(_ state: TunnelConnectionState) {
-        sharedDefaults?.set(state.rawValue, forKey: SharedKey.connectionState)
-        sharedDefaults?.synchronize()
+    /// The data path is meant to be kernel sockets, not packets. Whatever
+    /// iOS still delivers as packets is counted, the first few are logged,
+    /// and DNS queries for the agent are answered through its socket.
+    private func readPackets() {
+        packetFlow.readPackets { [weak self] packets, _ in
+            guard let self else { return }
+            for packet in packets { self.handle(packet) }
+            self.readPackets()
+        }
     }
 
-    // MARK: - Memory Diagnostics
-
-    private func logMemoryDiagnostics(force: Bool = false) {
-        let now = Date()
-        if !force && now.timeIntervalSince(lastMemoryDiagnosticsAt) < Self.memoryDiagnosticsInterval {
+    private func handle(_ packet: Data) {
+        let seen = stats.countPacket()
+        if seen <= 40 { log.write("packet #\(seen): \(PacketCodec.describe(packet))") }
+        guard let query = PacketCodec.parseIPv4UDP(packet),
+              query.destinationPort == 53, query.destination == dnsAddress else { return }
+        // Our own relay socket's packet came back as a packet: relaying it
+        // again would loop forever.
+        if stats.isRelayPort(query.sourcePort) {
+            if stats.countLoop() <= 3 { log.write("dns relay looped back into the tunnel; dropped") }
             return
         }
-        lastMemoryDiagnosticsAt = now
-
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+        // Names outside `.ztlp` (for example iOS's own resolver-discovery
+        // query) are refused here at once; the agent is only asked about ours.
+        switch DNSAnswer.classify(query: query.payload) {
+        case .malformed:
+            return
+        case .outside(let refusal):
+            if let reply = PacketCodec.buildIPv4UDP(UDPDatagram(
+                source: query.destination, destination: query.source,
+                sourcePort: 53, destinationPort: query.sourcePort, payload: refusal
+            )) {
+                packetFlow.writePackets([reply], withProtocols: [NSNumber(value: AF_INET)])
             }
+            return
+        case .inside:
+            break
         }
-
-        var reportedMemoryMB: Double?
-        if result == KERN_SUCCESS {
-            let residentMB = Double(info.resident_size) / 1_048_576.0
-            let virtualMB = Double(info.virtual_size) / 1_048_576.0
-            reportedMemoryMB = residentMB
-            let residentRounded = Int(residentMB.rounded())
-            let virtualRounded = Int(virtualMB.rounded())
-
-            if lastStoredResidentMemoryMB != residentRounded {
-                sharedDefaults?.set(residentRounded, forKey: SharedKey.neMemoryMB)
-                lastStoredResidentMemoryMB = residentRounded
+        guard dnsSlots.wait(timeout: .now()) == .success else { return }
+        packetQueue.async { [self] in
+            defer { dnsSlots.signal() }
+            let outcome = relayDNS(query.payload)
+            let relayed = stats.countRelay()
+            guard case .success(let answer) = outcome else {
+                if relayed <= 10, case .failure(let why) = outcome { log.write("dns relay #\(relayed) failed: \(why.message)") }
+                return
             }
-            if lastStoredVirtualMemoryMB != virtualRounded {
-                sharedDefaults?.set(virtualRounded, forKey: SharedKey.neVirtualMB)
-                lastStoredVirtualMemoryMB = virtualRounded
-            }
-
-            // The NE is stable around ~18-20MB on current builds; avoid noisy
-            // warning spam that wakes the process and obscures real failures.
-            logger.debug(
-                "v5D-SYNC | Memory resident=\(String(format: "%.1f", residentMB))MB virtual=\(String(format: "%.1f", virtualMB))MB",
-                source: "Tunnel"
-            )
-        }
-
-        if #available(iOS 13.0, *) {
-            let available = os_proc_available_memory()
-            let availableMB = Double(available) / 1_048_576.0
-            if availableMB < 20.0 && now.timeIntervalSince(lastAvailableMemoryWarningAt) >= Self.memoryDiagnosticsInterval {
-                lastAvailableMemoryWarningAt = now
-                logger.warn(
-                    "v5B-SYNC | Low available memory: \(String(format: "%.1f", availableMB))MB",
-                    source: "Tunnel"
-                )
-            }
-        }
-
-        if let reportedMemoryMB {
-            logger.debug("v5D-SYNC | Shared NE memory snapshot stored: \(Int(reportedMemoryMB.rounded()))MB", source: "Tunnel")
+            guard let reply = PacketCodec.buildIPv4UDP(UDPDatagram(
+                source: query.destination, destination: query.source,
+                sourcePort: 53, destinationPort: query.sourcePort, payload: answer
+            )) else { return }
+            packetFlow.writePackets([reply], withProtocols: [NSNumber(value: AF_INET)])
+            if relayed <= 10 { log.write("dns relay #\(relayed): answered \(answer.count) bytes") }
         }
     }
 
-    // MARK: - Helpers
-
-    private func lastError() -> String {
-        if let err = ztlp_last_error() {
-            return String(cString: err)
-        }
-        return "unknown error"
-    }
-
-    private func detectClientInterfaceType() -> UInt8 {
-        let pathMonitor = NWPathMonitor()
-        let pathSemaphore = DispatchSemaphore(value: 0)
-        let monitorQueue = DispatchQueue(label: "com.ztlp.tunnel.path-monitor", qos: .utility)
-        var detectedInterface: UInt8 = 0
-
-        pathMonitor.pathUpdateHandler = { path in
-            if path.usesInterfaceType(.cellular) {
-                detectedInterface = 1
-            } else if path.usesInterfaceType(.wifi) {
-                detectedInterface = 2
-            } else if path.usesInterfaceType(.wiredEthernet) {
-                detectedInterface = 3
+    /// One query to the agent's resolver socket, one answer back.
+    private func relayDNS(_ payload: Data) -> Result<Data, TunnelError> {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return .failure(TunnelError("socket errno=\(errno)")) }
+        defer { close(fd) }
+        var local = sockaddr_in()
+        local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        local.sin_family = sa_family_t(AF_INET)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &local) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, len) == 0 && getsockname(fd, $0, &len) == 0
             }
-
-            pathMonitor.cancel()
-            pathSemaphore.signal()
         }
+        guard bound else { return .failure(TunnelError("bind errno=\(errno)")) }
+        let port = UInt16(bigEndian: local.sin_port)
+        stats.addRelayPort(port)
+        defer { stats.removeRelayPort(port) }
 
-        pathMonitor.start(queue: monitorQueue)
-        _ = pathSemaphore.wait(timeout: .now() + 0.5)
-        pathMonitor.cancel()
-
-        return detectedInterface
+        guard var to = NetDiag.address(AddressPlan.agentAddress, 53) else { return .failure(TunnelError("bad address")) }
+        let sent = payload.withUnsafeBytes { raw in
+            withUnsafePointer(to: &to) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(fd, raw.baseAddress, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        guard sent == payload.count else { return .failure(TunnelError("send errno=\(errno)")) }
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, 8000) > 0 else { return .failure(TunnelError("no answer from the agent in 8 s")) }
+        var buf = [UInt8](repeating: 0, count: 1500)
+        let n = recv(fd, &buf, buf.count, 0)
+        guard n > 0 else { return .failure(TunnelError("recv errno=\(errno)")) }
+        return .success(Data(buf[0..<n]))
     }
 
-    private func interfaceTypeName(_ interfaceType: UInt8) -> String {
-        switch interfaceType {
-        case 1:
-            return "cellular"
-        case 2:
-            return "wifi"
-        case 3:
-            return "wired"
-        default:
-            return "unknown"
+    // MARK: - Path probes
+
+    /// UDP echo on loopback, so the app can test whether loopback crosses
+    /// from an app into this extension.
+    private func startLoopbackEcho() {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0, var me = NetDiag.address("127.0.0.1", NetDiag.loopbackEchoPort) else { return }
+        let rc = withUnsafePointer(to: &me) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard rc == 0 else {
+            log.write("loopback echo bind failed errno=\(errno)")
+            close(fd)
+            return
+        }
+        stats.setEcho(fd)
+        packetQueue.async {
+            var buf = [UInt8](repeating: 0, count: 64)
+            while true {
+                var from = sockaddr_in()
+                var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let n = withUnsafeMutablePointer(to: &from) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        recvfrom(fd, &buf, buf.count, 0, $0, &len)
+                    }
+                }
+                guard n > 0 else { return }
+                _ = withUnsafePointer(to: &from) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        sendto(fd, buf, n, 0, $0, len)
+                    }
+                }
+            }
         }
     }
 
-    private func makeNSError(_ message: String) -> NSError {
-        NSError(
-            domain: "com.ztlp.tunnel",
-            code: -1,
-            userInfo: [NSLocalizedDescriptionKey: message]
+    /// What this process itself can reach, written to the diagnostics log.
+    private func runSelfTest() {
+        packetQueue.asyncAfter(deadline: .now() + 1) { [log] in
+            let lines = [
+                "interfaces: \(NetDiag.interfaces())",
+                "agent dns \(AddressPlan.agentAddress):53: \(NetDiag.dnsProbe(server: AddressPlan.agentAddress))",
+                "agent health tcp \(AddressPlan.agentAddress):8443: \(NetDiag.tcpProbe(host: AddressPlan.agentAddress, port: 8443))",
+            ]
+            SharedPaths.appendDiag(lines, who: "ext")
+            for line in lines { log.write("selftest \(line)") }
+        }
+    }
+
+    // MARK: - Memory log
+
+    /// Runs on `agentQueue`.
+    private func startMemoryLog() {
+        memoryTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 1, repeating: 30, leeway: .seconds(5))
+        timer.setEventHandler { [log, stats] in
+            log.write("memory footprint=\(Self.footprintText()) packets=\(stats.packets) dnsRelayed=\(stats.relays)")
+        }
+        timer.resume()
+        memoryTimer = timer
+    }
+
+    /// Physical footprint of this process, the number iOS compares with the
+    /// 50 MiB extension limit.
+    static func physFootprintBytes() -> UInt64? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
         )
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? info.phys_footprint : nil
+    }
+
+    static func footprintText() -> String {
+        guard let bytes = physFootprintBytes() else { return "unknown" }
+        return String(format: "%.1fMiB", Double(bytes) / 1_048_576.0)
     }
 }
 
-extension PacketTunnelProvider: ZTLPTunnelConnectionDelegate {
+/// Counters and the small shared state of the packet path.
+final class PacketStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var packetCount = 0
+    private var relayCount = 0
+    private var loopCount = 0
+    private var relayPorts: Set<UInt16> = []
+    private var echoFD: Int32 = -1
 
-    func tunnelConnection(_ connection: ZTLPTunnelConnection, didReceiveData data: Data, sequence: UInt64) {
-        guard isTunnelActive else { return }
-
-        markDataActivity()
-        handleGatewayMuxPayload(data)
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
+        return body()
     }
 
-    func tunnelConnection(_ connection: ZTLPTunnelConnection, didFailWithError error: Error) {
-        logger.error("Tunnel connection failed: \(error.localizedDescription)", source: "Tunnel")
-        if isTunnelActive {
-            scheduleReconnect()
+    var packets: Int { locked { packetCount } }
+    var relays: Int { locked { relayCount } }
+    func countPacket() -> Int { locked { packetCount += 1; return packetCount } }
+    func countRelay() -> Int { locked { relayCount += 1; return relayCount } }
+    func countLoop() -> Int { locked { loopCount += 1; return loopCount } }
+    func addRelayPort(_ port: UInt16) { locked { _ = relayPorts.insert(port) } }
+    func removeRelayPort(_ port: UInt16) { locked { _ = relayPorts.remove(port) } }
+    func isRelayPort(_ port: UInt16) -> Bool { locked { relayPorts.contains(port) } }
+    func setEcho(_ fd: Int32) { locked { echoFD = fd } }
+    func closeEcho() {
+        let fd: Int32 = locked { let f = echoFD; echoFD = -1; return f }
+        if fd >= 0 { close(fd) }
+    }
+}
+
+/// Error whose text iOS shows the app through `NEVPNConnection`'s last
+/// disconnect error.
+struct TunnelError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
+}
+
+/// Tiny append-only log in the App Group container, readable from the app's
+/// Settings page. Also mirrored to the unified log. Never holds more than
+/// one line in memory and restarts the file at 256 KiB.
+final class ExtensionLog: @unchecked Sendable {
+    private static let maxBytes: UInt64 = 256 * 1024
+    private let queue = DispatchQueue(label: "com.ztlp.tunnel.log")
+    private let oslog = Logger(subsystem: "com.ztlp.app.tunnel", category: "tunnel")
+    private var url: URL?
+    private let formatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    func open(_ url: URL) {
+        queue.sync { self.url = url }
+    }
+
+    func write(_ message: String) {
+        oslog.info("\(message, privacy: .public)")
+        queue.async { [self] in
+            guard let url else { return }
+            let line = Data("\(formatter.string(from: Date())) \(message)\n".utf8)
+            let fm = FileManager.default
+            let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
+            if size > Self.maxBytes || !fm.fileExists(atPath: url.path) {
+                try? line.write(to: url, options: .atomic)
+                return
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: line)
         }
     }
 }

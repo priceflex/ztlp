@@ -10,7 +10,7 @@
 > does not work end-to-end through a Launch-provisioned gateway.**
 >
 > New integrations should use the gateway-auth path documented in
-> [`z2ls_gateway_auth_runbook.md`](./z2ls_gateway_auth_runbook.md)
+> [`z2ls_gateway_auth_runbook.md`](z2ls_gateway_auth_runbook.md)
 > (`POST /api/admin/enrollment_tokens`). This document is kept as
 > historical/secondary reference for the underlying signing contract
 > and for any future direct-Rails-without-gateway deployments.
@@ -77,7 +77,7 @@ A super-admin does this once per Z2LS instance.
 1. Confirm the per-zone secret env var is set on the bootstrap
    container:
    ```bash
-   ssh trs@10.69.95.12 'docker exec bootstrap_web_1 \
+   ssh trs@10.0.10.12 'docker exec bootstrap_web_1 \
      bash -lc "test -n \"\${ZTLP_HMAC_SECRET_ACME_ZTLP}\" && echo set || echo MISSING"'
    ```
    If MISSING, set it before continuing (otherwise every
@@ -468,7 +468,7 @@ specific reason is **only** in the server-side log + audit trail
 logs:
 
 ```bash
-ssh trs@10.69.95.12 'docker logs bootstrap_web_1 2>&1 | \
+ssh trs@10.0.10.12 'docker logs bootstrap_web_1 2>&1 | \
   grep -E "Api::V1.*auth rejected" | tail -10'
 ```
 
@@ -552,7 +552,7 @@ Every successful issuance writes an `api.v1.enrollment_token.issued`
 audit log row. Find tokens issued today:
 
 ```bash
-ssh trs@10.69.95.12 'docker exec bootstrap_web_1 bash -lc \
+ssh trs@10.0.10.12 'docker exec bootstrap_web_1 bash -lc \
   "cd /rails && bin/rails runner \"
     AuditLog.where(action: '\\''api.v1.enrollment_token.issued'\\'')
             .where('\\''created_at > ?'\\'', 24.hours.ago)

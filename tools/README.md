@@ -328,22 +328,22 @@ cargo test
 
 ## Z2LS Windows gateway deploy scripts (v0.32, added 2026-05-28)
 
-`deploy-z2ls-v032.ps1` and `rollback-z2ls.ps1` are NSSM-based deployment scripts for the Z2LS Windows gateway at `10.170.3.111`. Captured 2026-05-28 during v0.32 bench validation — see [`docs/v0.32.0-bench-validation.md`](../docs/v0.32.0-bench-validation.md#update-2026-05-28--z2ls-windows-gateway-bench-result).
+`deploy-z2ls-v032.ps1` and `rollback-z2ls.ps1` are NSSM-based deployment scripts for the Z2LS Windows gateway at `10.0.20.111`. Captured 2026-05-28 during v0.32 bench validation — see `docs/v0.32.0-bench-validation.md`.
 
 **Workflow:**
 
 ```powershell
 # Stage the new binary
-scp ztlp.exe trs@10.170.3.111:Downloads\ztlp-v032.exe
+scp ztlp.exe trs@10.0.20.111:Downloads\ztlp-v032.exe
 
 # Stage the script
-scp deploy-z2ls-v032.ps1 trs@10.170.3.111:deploy-z2ls-v032.ps1
+scp deploy-z2ls-v032.ps1 trs@10.0.20.111:deploy-z2ls-v032.ps1
 
 # Run (as Administrator)
-ssh trs@10.170.3.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\deploy-z2ls-v032.ps1'
+ssh trs@10.0.20.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\deploy-z2ls-v032.ps1'
 
 # Emergency rollback
-ssh trs@10.170.3.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\rollback-z2ls.ps1'
+ssh trs@10.0.20.111 'powershell -ExecutionPolicy Bypass -File C:\Users\TRS\rollback-z2ls.ps1'
 ```
 
 **Pitfalls captured (DO NOT REPEAT):**

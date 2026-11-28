@@ -19,7 +19,6 @@ flowchart LR
         macos["macos/\nnative macOS client"]
         ios["ios/\nnative iOS client"]
         sdkgo["sdk/go/\nGo client SDK"]
-        wayfinder["wayfinder-desktop-client/\ndesktop client variant"]
     end
 
     subgraph FleetMgmt["Fleet Management"]
@@ -46,7 +45,6 @@ flowchart LR
         config["config/\nexample YAML configs"]
         scripts["scripts/\nrepo automation"]
         tools["tools/\ndev tooling"]
-        captures["captures/\npacket captures"]
         rel["rel/\nOTP release config"]
         ztlpnet["ztlp.net/\nproject website"]
         bin["bin/\nbuilt/prebuilt binaries"]

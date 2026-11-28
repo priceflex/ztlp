@@ -3,7 +3,7 @@
 Goal (Steven, 2026-10-27): host a tiny app that shows the ZTLP identity (examples/whoami) and bring it
 online using only what the admin panel offers, to find what the UI is missing.
 
-Setup: app `ztlp-whoami` on the Hermes VM (10.69.95.14), Docker, 127.0.0.1:8095. Gateway on the same
+Setup: app `ztlp-whoami` on the Hermes VM (10.0.10.14), Docker, 127.0.0.1:8095. Gateway on the same
 box, UDP 23098 (23095/23097 already taken there). Name `whoami.trs.ztlp`. Panel v0.5.2.
 Driven as a real admin: HTTP through ZTLP from Steven's Mac Studio (SSO), submitting the forms the
 pages render.

@@ -73,6 +73,319 @@ fn prefer_relay() -> bool {
     PREFER_RELAY.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── Transport memory profile + connection reuse ───────────────────────────
+//
+// `[tunnel] profile` / `reuse_connections` from the agent config, installed
+// once by `run_daemon`, read on the client dial path (`connect_one`,
+// `connect_tunnel`). Process-wide for the same reason as the relay secret.
+// Defaults are the desktop values, so a process that never installs a
+// profile (the CLI, tests) behaves exactly as before.
+static DIAL_WINDOWS: std::sync::RwLock<crate::quic_transport::TransportWindows> =
+    std::sync::RwLock::new(crate::quic_transport::TransportWindows::DESKTOP);
+static REUSE_CONNECTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Install the QUIC flow-control windows the agent dials with.
+pub(crate) fn set_dial_windows(w: crate::quic_transport::TransportWindows) {
+    if let Ok(mut g) = DIAL_WINDOWS.write() {
+        *g = w;
+    }
+}
+
+fn dial_windows() -> crate::quic_transport::TransportWindows {
+    DIAL_WINDOWS
+        .read()
+        .map(|g| *g)
+        .unwrap_or(crate::quic_transport::TransportWindows::DESKTOP)
+}
+
+/// The endpoint config every agent client dial uses: the defaults plus the
+/// installed window profile.
+fn dial_endpoint_config() -> crate::quic_transport::QuicEndpointConfig {
+    crate::quic_transport::QuicEndpointConfig {
+        windows: dial_windows(),
+        ..Default::default()
+    }
+}
+
+/// Turn the shared connection per (name, port) on or off.
+pub(crate) fn set_reuse_connections(v: bool) {
+    REUSE_CONNECTIONS.store(v, std::sync::atomic::Ordering::Relaxed);
+    if !v {
+        tunnel_conn_cache().clear();
+        // Network changes are only tracked for shared connections.
+        if network_epoch() != 0 {
+            network_epoch_tx().send_replace(0);
+        }
+    }
+}
+
+fn reuse_connections() -> bool {
+    REUSE_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Cache key: the lower-cased ZTLP name plus the port. The name (not just
+/// its leading service label) is part of the key because the same label in
+/// two zones is two different gateways.
+type TunnelKey = (String, u16);
+
+fn tunnel_key(ztlp_name: &str, port: u16) -> TunnelKey {
+    (ztlp_name.trim_end_matches('.').to_ascii_lowercase(), port)
+}
+
+fn tunnel_conn_cache() -> &'static super::conn_cache::ConnCache<TunnelKey, ConnectedTunnel> {
+    static CACHE: std::sync::OnceLock<super::conn_cache::ConnCache<TunnelKey, ConnectedTunnel>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(super::conn_cache::ConnCache::new)
+}
+
+fn tunnel_is_open(t: &ConnectedTunnel) -> bool {
+    t.conn.inner.close_reason().is_none()
+}
+
+/// Drop the shared connection for this name/port after a failure on it
+/// (stream open failed, or the backend never answered), so the next request
+/// dials a fresh one instead of riding a connection that may be dead but
+/// not yet timed out. No-op when reuse is off.
+fn forget_shared_tunnel(ztlp_name: &str, port: u16) {
+    if reuse_connections() && tunnel_conn_cache().invalidate(&tunnel_key(ztlp_name, port)) {
+        info!(
+            "shared tunnel for {} (port {}) dropped after a failure; next request redials",
+            ztlp_name, port
+        );
+    }
+}
+
+/// Drop the shared connection for this name/port only when it still is
+/// `tunnel` (the caller saw THAT connection fail; one dialed since by
+/// another request must stay). `close` also closes it, which ends every
+/// stream on it at once: only for a connection that showed no sign of
+/// life, never for a failure of one stream.
+fn drop_shared_tunnel_if_same(
+    ztlp_name: &str,
+    port: u16,
+    tunnel: &crate::quic_transport::tokio_endpoint::QuicConnection,
+    close: bool,
+    reason: &str,
+) {
+    let id = tunnel.inner.stable_id();
+    if close {
+        // After this `tunnel_is_open` is false, so even a cache entry that
+        // could not be removed right now is never handed out again.
+        tunnel.inner.close(0u32.into(), b"no answer");
+    }
+    let removed = tunnel_conn_cache().invalidate_if(&tunnel_key(ztlp_name, port), |t| {
+        t.conn.inner.stable_id() == id
+    });
+    if removed {
+        info!(
+            "shared tunnel for {} (port {}) dropped ({}); dialing a new one",
+            ztlp_name, port, reason
+        );
+    }
+}
+
+// ── Network changes (shared-connection mode) ─────────────────────────────
+//
+// Nothing below runs unless `[tunnel] reuse_connections` is on: the task
+// that serves the signal is only started then, and the epoch stays 0, which
+// every reader treats as "never changed" (today's behaviour).
+
+static NETWORK_CHANGE: super::reconnect::ChangeSignal = super::reconnect::ChangeSignal::new();
+
+fn network_epoch_tx() -> &'static tokio::sync::watch::Sender<u64> {
+    static TX: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> = std::sync::OnceLock::new();
+    TX.get_or_init(|| tokio::sync::watch::channel(0u64).0)
+}
+
+/// How many network changes were acted on since the process started.
+fn network_epoch() -> u64 {
+    *network_epoch_tx().borrow()
+}
+
+/// Tell the agent the device's network changed (new interface, wake from
+/// sleep). Safe from any thread, never blocks, and a burst of calls is
+/// coalesced. Returns `false`, having done nothing, when no agent with
+/// shared connections is running. The effect is in
+/// [`apply_network_change`].
+pub fn notify_network_changed() -> bool {
+    NETWORK_CHANGE.raise()
+}
+
+/// How many times a network change was acted on (calls in a burst count
+/// once or twice, see `reconnect::ChangeSignal`).
+pub fn network_change_runs() -> u64 {
+    NETWORK_CHANGE.effective()
+}
+
+/// What a network change does: every shared connection is closed and
+/// forgotten (the next request dials on the current network), every name
+/// must be resolved again before its next dial (the ranking of a gateway's
+/// addresses depends on the network the device is on, and the address a
+/// listener cached may be the one that just became unreachable), the
+/// memory of which path won last is cleared, and the sites that had an
+/// open shared connection are dialed again in the background. Listeners,
+/// resolver, site table and certificates are untouched.
+fn apply_network_change() {
+    network_epoch_tx().send_modify(|e| *e += 1);
+    if let Ok(mut g) = relay_wins().lock() {
+        g.clear();
+    }
+    let taken = tunnel_conn_cache().take_where(|_| true);
+    let mut open: Vec<&ConnectedTunnel> = taken.iter().filter(|t| tunnel_is_open(t)).collect();
+    let open_count = open.len();
+    // The sites somebody is using right now come first.
+    open.sort_by_key(|t| !t.shared.as_ref().is_some_and(|s| s.uses.in_use()));
+    let prewarm: Vec<Arc<SharedInfo>> = open
+        .iter()
+        .filter_map(|t| t.shared.clone())
+        .take(super::reconnect::PREWARM_MAX_SITES)
+        .collect();
+    for t in &taken {
+        t.conn.inner.close(0u32.into(), b"network changed");
+    }
+    info!(
+        "network changed: {} shared tunnel(s) closed, {} being dialed again in the background; \
+         names are resolved again before their next dial",
+        open_count,
+        prewarm.len()
+    );
+    for site in prewarm {
+        tokio::spawn(prewarm_shared_tunnel(site));
+    }
+}
+
+/// Dial one site's shared connection ahead of the next request. It goes
+/// through the same single-flight slot as a request, so a request that
+/// arrives meanwhile waits for this dial instead of starting its own. One
+/// try: a failure is left to the next request. Only another network change
+/// starts it over (the dial in flight belongs to the previous network).
+async fn prewarm_shared_tunnel(site: Arc<SharedInfo>) {
+    let p = &site.params;
+    let mut epoch = network_epoch_tx().subscribe();
+    for _ in 0..3 {
+        epoch.borrow_and_update();
+        let started = Instant::now();
+        let dial = connect_tunnel_opts(
+            &p.ztlp_name,
+            p.port,
+            None,
+            p.peer_node_id,
+            &p.identity,
+            &p.bind_addr,
+            &p.ns_server,
+            p.relay_addr.as_deref(),
+            Some(super::reconnect::PREWARM_DIAL_BUDGET),
+            false,
+        );
+        tokio::select! {
+            r = dial => {
+                match r {
+                    Ok(t) => info!(
+                        "shared tunnel for {} (port {}) is ready again via {:?} after {:?}",
+                        p.ztlp_name, p.port, t.tunnel.via, started.elapsed()
+                    ),
+                    Err(e) => info!(
+                        "background dial for {} (port {}) failed ({}); the next request dials",
+                        p.ztlp_name, p.port, e
+                    ),
+                }
+                return;
+            }
+            _ = epoch.changed() => {}
+        }
+    }
+}
+
+/// Close shared connections nobody has used for `idle` (and drop the ones
+/// that closed by themselves). Returns how many open ones were closed.
+fn reap_idle_shared_tunnels(idle: Duration) -> usize {
+    let now = Instant::now();
+    let taken = tunnel_conn_cache().take_where(|t| {
+        !tunnel_is_open(t)
+            || t.shared
+                .as_ref()
+                .is_some_and(|s| s.uses.idle_for(now).is_some_and(|d| d >= idle))
+    });
+    let mut closed = 0;
+    for t in taken.iter().filter(|t| tunnel_is_open(t)) {
+        t.conn.inner.close(0u32.into(), b"idle");
+        closed += 1;
+        if let Some(s) = &t.shared {
+            info!(
+                "shared tunnel for {} (port {}) unused for {:?}: closed, the next request dials again",
+                s.params.ztlp_name, s.params.port, idle
+            );
+        }
+    }
+    closed
+}
+
+/// The background work of shared-connection mode: act on network changes
+/// and, when `idle_close` is set (mobile profile), close unused shared
+/// connections. Runs until dropped.
+async fn keep_shared_tunnels(idle_close: Option<Duration>) {
+    let changes = NETWORK_CHANGE.serve(
+        super::reconnect::NETWORK_CHANGE_COALESCE,
+        apply_network_change,
+    );
+    let reaper = async {
+        let Some(idle) = idle_close else {
+            return std::future::pending::<()>().await;
+        };
+        loop {
+            tokio::time::sleep(super::reconnect::IDLE_REAP_INTERVAL).await;
+            reap_idle_shared_tunnels(idle);
+        }
+    };
+    tokio::join!(changes, reaper);
+}
+
+/// Names whose last shared connection was won by the relay: their next
+/// dial starts the relay together with the direct candidates instead of
+/// after the head start. Cleared by a network change; an entry goes away
+/// with the name's candidate list.
+fn relay_wins() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static WINS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WINS.get_or_init(Default::default)
+}
+
+fn note_dial_winner(ztlp_name: &str, via: DialVia) {
+    if let Ok(mut g) = relay_wins().lock() {
+        match via {
+            DialVia::Relay => g.insert(ztlp_name.to_ascii_lowercase()),
+            DialVia::Direct => g.remove(&ztlp_name.to_ascii_lowercase()),
+        };
+    }
+}
+
+fn relay_won_last(ztlp_name: &str) -> bool {
+    relay_wins()
+        .lock()
+        .map(|g| g.contains(&ztlp_name.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+/// A dial failure that trying again cannot fix (wrong certificate, bad
+/// configuration). Everything else may be the network being away.
+fn dial_error_is_permanent(err: &str) -> bool {
+    is_ns_cert_failure(err)
+        || err.contains(crate::quic_transport::TRUSTED_MISMATCH_MARKER)
+        || err.contains("does not match the pinned value")
+        || err.contains("invalid relay address")
+        || err.contains("no dialable endpoint")
+}
+
+/// Number of shared tunnel connections currently open (0 when reuse is off).
+pub fn shared_tunnel_count() -> usize {
+    tunnel_conn_cache().count_open(tunnel_is_open)
+}
+
+/// Close every shared tunnel connection (agent shutdown).
+pub(crate) fn close_shared_tunnels() {
+    tunnel_conn_cache().clear();
+}
+
 // ── Per-name ranked candidate cache ───────────────────────────────────────
 //
 // The VIP listener snapshots `(peer_addr, peer_node_id)` once per entry
@@ -82,20 +395,43 @@ fn prefer_relay() -> bool {
 // resolution (same process-wide pattern as the relay secret above);
 // `connect_tunnel` consults it on a cache hit. `VipEntry.peer_candidates`
 // holds the same list for status/inspection.
-static PEER_CANDIDATES: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>>,
-> = std::sync::OnceLock::new();
+//
+// Each list carries the network epoch it was resolved in (always 0 unless
+// `notify_network_changed` was ever acted on).
+type CandidateMap = std::collections::HashMap<String, (u64, Vec<SocketAddr>)>;
 
-fn candidate_cache(
-) -> &'static std::sync::RwLock<std::collections::HashMap<String, Vec<SocketAddr>>> {
+static PEER_CANDIDATES: std::sync::OnceLock<std::sync::RwLock<CandidateMap>> =
+    std::sync::OnceLock::new();
+
+fn candidate_cache() -> &'static std::sync::RwLock<CandidateMap> {
     PEER_CANDIDATES.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Whether what is cached for `ztlp_name` (its candidate list here and the
+/// single address a listener holds) was resolved on the network the device
+/// is on now. Always true when connections are not shared, and until a
+/// network change was acted on; after one, only once the name has been
+/// resolved again.
+fn cached_route_is_current(ztlp_name: &str) -> bool {
+    let epoch = network_epoch();
+    if epoch == 0 || !reuse_connections() {
+        return true;
+    }
+    candidate_cache()
+        .read()
+        .ok()
+        .and_then(|g| g.get(&ztlp_name.to_ascii_lowercase()).map(|(e, _)| *e))
+        == Some(epoch)
 }
 
 /// Record the ranked candidate list for `ztlp_name` (called by the DNS
 /// resolver after each successful NS resolution).
 pub(crate) fn set_peer_candidates(ztlp_name: &str, candidates: &[SocketAddr]) {
     if let Ok(mut g) = candidate_cache().write() {
-        g.insert(ztlp_name.to_ascii_lowercase(), candidates.to_vec());
+        g.insert(
+            ztlp_name.to_ascii_lowercase(),
+            (network_epoch(), candidates.to_vec()),
+        );
     }
 }
 
@@ -103,6 +439,9 @@ pub(crate) fn set_peer_candidates(ztlp_name: &str, candidates: &[SocketAddr]) {
 /// reaped, so the cache cannot grow without bound or outlive the entry).
 pub(crate) fn forget_peer_candidates(ztlp_name: &str) {
     if let Ok(mut g) = candidate_cache().write() {
+        g.remove(&ztlp_name.to_ascii_lowercase());
+    }
+    if let Ok(mut g) = relay_wins().lock() {
         g.remove(&ztlp_name.to_ascii_lowercase());
     }
     forget_peer_cert(ztlp_name);
@@ -173,7 +512,10 @@ fn cached_peer_candidates(ztlp_name: &str) -> Vec<SocketAddr> {
     candidate_cache()
         .read()
         .ok()
-        .and_then(|g| g.get(&ztlp_name.to_ascii_lowercase()).cloned())
+        .and_then(|g| {
+            g.get(&ztlp_name.to_ascii_lowercase())
+                .map(|(_, list)| list.clone())
+        })
         .unwrap_or_default()
 }
 
@@ -247,15 +589,18 @@ pub(crate) fn build_signed_client_route(
 /// dangerous case this code was meant to prevent: a REMOTE peer reaching
 /// these listeners (which should be impossible anyway since they bind to
 /// 127.100.0.0/16, but defense in depth against a misconfigured bind).
-fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
+fn verify_local_peer(stream: &tokio::net::TcpStream, policy: ClientPeerPolicy) -> bool {
     match stream.peer_addr() {
         Ok(addr) => {
             let ip = addr.ip();
-            if ip.is_loopback() {
+            if ip.is_loopback()
+                || (policy == ClientPeerPolicy::OnHost
+                    && peer_is_on_host(ip, &host_addresses_cached()))
+            {
                 true
             } else {
                 warn!(
-                    "Rejected VIP connection from non-loopback peer {} (VIP listeners must only accept loopback traffic)",
+                    "Rejected VIP connection from non-local peer {} (VIP listeners only accept traffic from this device)",
                     addr
                 );
                 false
@@ -269,6 +614,69 @@ fn verify_local_peer(stream: &tokio::net::TcpStream) -> bool {
             false
         }
     }
+}
+
+/// Which client source addresses a VIP listener accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientPeerPolicy {
+    /// Loopback only (VIP pool inside 127.0.0.0/8 — every desktop).
+    LoopbackOnly,
+    /// Loopback, or any address assigned to one of this host's own
+    /// interfaces. For a VIP pool that lives on a non-loopback local
+    /// interface (the iOS tunnel interface): a connection from another app
+    /// on the device arrives with one of the device's own addresses as its
+    /// source. A remote peer never has one of those.
+    OnHost,
+}
+
+impl ClientPeerPolicy {
+    /// Policy for a `[dns] vip_range`: loopback ranges keep the strict
+    /// loopback-only check. An unparseable range is treated as loopback
+    /// (strict); `VipPool::new` rejects it separately.
+    pub fn for_vip_range(cidr: &str) -> Self {
+        let base = cidr
+            .split('/')
+            .next()
+            .and_then(|ip| ip.trim().parse::<Ipv4Addr>().ok());
+        match base {
+            Some(ip) if !ip.is_loopback() => Self::OnHost,
+            _ => Self::LoopbackOnly,
+        }
+    }
+}
+
+/// Is `peer` one of this host's own addresses? Pure (the address list is
+/// passed in) so it is testable without interfaces.
+fn peer_is_on_host(peer: std::net::IpAddr, host_addrs: &[std::net::IpAddr]) -> bool {
+    let peer = match peer {
+        // an IPv4 client seen through a dual-stack socket
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => peer,
+        },
+        v4 => v4,
+    };
+    host_addrs.contains(&peer)
+}
+
+/// This host's interface addresses, refreshed at most every few seconds
+/// (interfaces change on Wi-Fi/cellular switches; a getifaddrs call per
+/// accepted connection would be wasteful).
+fn host_addresses_cached() -> Vec<std::net::IpAddr> {
+    const MAX_AGE: Duration = Duration::from_secs(5);
+    static CACHE: std::sync::Mutex<Option<(Instant, Vec<std::net::IpAddr>)>> =
+        std::sync::Mutex::new(None);
+    let mut guard = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((at, addrs)) = guard.as_ref() {
+        if at.elapsed() < MAX_AGE {
+            return addrs.clone();
+        }
+    }
+    let addrs: Vec<std::net::IpAddr> = if_addrs::get_if_addrs()
+        .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
+        .unwrap_or_default();
+    *guard = Some((Instant::now(), addrs.clone()));
+    addrs
 }
 
 // KNOWN COVERAGE GAP [egi-dcvj]: loopback-address verification (above)
@@ -646,6 +1054,46 @@ pub async fn run_daemon(
     config: &AgentConfig,
     foreground: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_daemon_with_hooks(config, foreground, DaemonHooks::default()).await
+}
+
+/// What an embedding host (the iOS agent runs the daemon inside the Network
+/// Extension process, not as `ztlp agent start`) can hook into.
+#[derive(Default)]
+pub struct DaemonHooks {
+    /// Receives [`DaemonReady`] once the resolver and control listeners are
+    /// bound and the proxy is running. Dropped unsent when startup fails
+    /// (the error is the daemon's return value).
+    pub ready: Option<tokio::sync::oneshot::Sender<DaemonReady>>,
+    /// Completing (or dropping) the sender stops the daemon, exactly like
+    /// the control socket's `shutdown` command.
+    pub shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+/// Startup result handed to [`DaemonHooks::ready`].
+pub struct DaemonReady {
+    /// Address the DNS resolver actually bound (may differ from the
+    /// configured one when that port was taken), `None` when disabled.
+    pub dns_listen: Option<SocketAddr>,
+    /// Whether the control socket bound (`[ipc] listen`).
+    pub control_bound: bool,
+    /// Whether local TLS termination is active.
+    pub tls_ready: bool,
+    /// Resolver state (VIP pool) for status reporting.
+    pub dns_state: Arc<Mutex<DnsResolverState>>,
+    /// Single-address mode (`[dns] single_address`): where the name-routed
+    /// HTTPS and HTTP listeners are bound. `None` when the mode is off (and
+    /// for HTTP, when its port could not be bound).
+    pub single_https_listen: Option<SocketAddr>,
+    pub single_http_listen: Option<SocketAddr>,
+}
+
+/// [`run_daemon`] with [`DaemonHooks`].
+pub async fn run_daemon_with_hooks(
+    config: &AgentConfig,
+    foreground: bool,
+    hooks: DaemonHooks,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let start_time = Instant::now();
 
     // ── [tunnel] vip_ports: env override + startup validation ─────────
@@ -724,8 +1172,17 @@ pub async fn run_daemon(
     // Mismatch is fatal (the daemon refuses to operate). ResolutionFailed is
     // logged as a warning so a broken whoami/id environment can't brick the
     // daemon when the identity is in fact unbound (the common case).
-    match crate::agent::user_binding::current_user_sid() {
-        Ok(current_sid) => {
+    // iOS: one sandboxed app user, no `id` to run, and enrollment there never
+    // binds an identity; a bound identity (copied from a desktop) is refused
+    // below because the user cannot be resolved.
+    let current_user = if cfg!(target_os = "ios") && identity.bound_user_sid.is_none() {
+        None
+    } else {
+        Some(crate::agent::user_binding::current_user_sid())
+    };
+    match current_user {
+        None => {}
+        Some(Ok(current_sid)) => {
             if let Err(e) = crate::agent::user_binding::verify_user_binding(&identity, &current_sid)
             {
                 match &e {
@@ -747,7 +1204,7 @@ pub async fn run_daemon(
                 return Err(format!("bound_user_mismatch: {e}").into());
             }
         }
-        Err(e) => {
+        Some(Err(e)) => {
             // Couldn't resolve the current user. If the identity is bound we
             // can't safely enforce, so refuse. If unbound, log and continue.
             if identity.bound_user_sid.is_some() {
@@ -814,6 +1271,26 @@ pub async fn run_daemon(
         info!("domain mappings: {} configured", domain_mapper.len());
     }
 
+    // Health probe address: the platform default (Windows/macOS loopback
+    // alias) unless `[tls] health_ip` moves it somewhere the host's clients
+    // can reach. `.1` says whether a responder is wanted on this platform.
+    let health_addr: (Ipv4Addr, bool) = match cfg.tls.health_ip.as_deref().map(str::trim) {
+        Some(ip) if !ip.is_empty() => (
+            ip.parse()
+                .map_err(|e| format!("invalid [tls] health_ip '{}': {}", ip, e))?,
+            true,
+        ),
+        _ => (
+            super::peruser::HEALTH_VIP,
+            cfg!(target_os = "windows") || cfg!(target_os = "macos"),
+        ),
+    };
+
+    // Single-address (name-routed) mode: off unless `[dns] single_address`
+    // is set. When on, no VIP is ever allocated or restored and the VIP
+    // proxy is not started; see `agent::name_route`.
+    let single_addr: Option<Ipv4Addr> = cfg.dns.single_address_ip()?;
+
     // Shared DNS resolver state
     let mut dns_resolver_state = DnsResolverState {
         vip_pool,
@@ -821,11 +1298,17 @@ pub async fn run_daemon(
         ns_server: cfg.ns_server().to_string(),
         upstream_dns: cfg.dns.upstream.clone(),
         vip_state_path: Some(config::vip_state_path()),
+        health_vip: health_addr.0,
+        single: single_addr.map(super::name_route::SingleAddress::new),
     };
     // Re-bind VIP listeners from the previous run before any DNS query:
     // clients that cached the A record (browsers, `curl --resolve`) would
     // otherwise get ECONNREFUSED until they resolved again.
-    let restored = dns_resolver_state.restore_vips();
+    let restored = if single_addr.is_some() {
+        0
+    } else {
+        dns_resolver_state.restore_vips()
+    };
     if restored > 0 {
         info!(
             "VIP pool: restored {} allocation(s) from previous run",
@@ -1005,10 +1488,41 @@ pub async fn run_daemon(
         }
     };
     let _ = nrpt_bind_overridden;
+    let bound_dns_addr: Option<SocketAddr> = dns_socket_and_addr.as_ref().map(|(_, addr)| *addr);
     let effective_dns_listen = dns_socket_and_addr
         .as_ref()
         .map(|(_, addr)| addr.to_string())
         .unwrap_or_else(|| cfg.dns.listen.clone());
+
+    // ── Single-address mode: bind the shared address on 443 and 80 ───────
+    // Up front, like the resolver socket: a host that cannot listen on 443
+    // cannot serve any site in this mode, so that is a failed start (before
+    // the PID file and any task exist), not a warning. Port 80 is optional.
+    let single_listeners: Option<(TcpListener, Option<TcpListener>)> = match single_addr {
+        None => None,
+        Some(addr) => {
+            let https_addr = SocketAddr::new(addr.into(), cfg.dns.single_address_https_port);
+            let https = bind_vip_listener(https_addr).await.map_err(|e| {
+                format!(
+                    "single-address mode ([dns] single_address = \"{addr}\"): \
+                     cannot listen on {https_addr} for HTTPS: {e}"
+                )
+            })?;
+            let http_addr = SocketAddr::new(addr.into(), cfg.dns.single_address_http_port);
+            let http = match bind_vip_listener(http_addr).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    warn!(
+                        "single-address mode: cannot listen on {} for HTTP: {} \
+                         (http:// sites will not work; https:// is unaffected)",
+                        http_addr, e
+                    );
+                    None
+                }
+            };
+            Some((https, http))
+        }
+    };
 
     // ── macOS root startup, phase 2 (resolver files, CA trust, token) ─────
     // Needs the EFFECTIVE bound DNS port, hence after the bind.
@@ -1077,13 +1591,47 @@ pub async fn run_daemon(
         None
     };
 
+    // ── DNS over TCP on the same address (`[dns] tcp = true`) ────────────
+    // Off by default. A failed bind is logged, not fatal: UDP is what
+    // resolvers use first.
+    let dns_tcp_handle = match (cfg.dns.tcp, bound_dns_addr) {
+        (true, Some(addr)) => match TcpListener::bind(addr).await {
+            Ok(listener) => {
+                info!("DNS resolver also listening on {} (TCP)", addr);
+                let state = dns_state.clone();
+                Some(tokio::spawn(async move {
+                    if let Err(e) = dns::run_dns_tcp_resolver_on_listener(listener, state).await {
+                        error!("DNS TCP resolver error: {}", e);
+                    }
+                }))
+            }
+            Err(e) => {
+                warn!("DNS resolver: cannot bind TCP {}: {}", addr, e);
+                None
+            }
+        },
+        _ => None,
+    };
+
     // ── Spawn control socket ────────────────────────────────────────────
+    // Bound here (not inside the task) so `DaemonHooks::ready` can say
+    // whether it worked; a failed bind is logged and the daemon keeps
+    // running without a control socket, as before.
     let ipc_addr = cfg.ipc.listen.clone();
     let ctrl_state = agent_state.clone();
-    let ctrl_path = ipc_addr.clone();
-    let ctrl_handle = tokio::spawn(async move {
-        if let Err(e) = control::run_control_socket(&ctrl_path, ctrl_state).await {
+    let ctrl_listener = match control::bind_control_socket(&ipc_addr).await {
+        Ok(l) => Some(l),
+        Err(e) => {
             error!("control socket error: {}", e);
+            None
+        }
+    };
+    let control_bound = ctrl_listener.is_some();
+    let ctrl_handle = tokio::spawn(async move {
+        if let Some(listener) = ctrl_listener {
+            if let Err(e) = control::run_control_socket_on(listener, ctrl_state).await {
+                error!("control socket error: {}", e);
+            }
         }
     });
 
@@ -1182,14 +1730,12 @@ pub async fn run_daemon(
     // `https://ztlp-health.ztlp:8443/` (which resolves to HEALTH_VIP) and
     // expects the `ztlp-health-ok` body — so the macOS agent must serve it
     // too. Linux keeps its per-device CA flow and has no such app probe.
-    let health_handle = if cfg!(target_os = "windows") || cfg!(target_os = "macos") {
+    let health_handle = if health_addr.1 {
         tls_acceptor.as_ref().map(|acc| {
             let acc = (**acc).clone();
+            let health_ip = health_addr.0;
             tokio::spawn(async move {
-                let addr = SocketAddr::new(
-                    super::peruser::HEALTH_VIP.into(),
-                    super::peruser::HEALTH_PORT,
-                );
+                let addr = SocketAddr::new(health_ip.into(), super::peruser::HEALTH_PORT);
                 match TcpListener::bind(addr).await {
                     Ok(l) => {
                         info!("health probe listening on {addr}");
@@ -1215,6 +1761,16 @@ pub async fn run_daemon(
     let proxy_relay = cfg.tunnel.relays.0.first().cloned();
     let proxy_first_byte_timeout = cfg.tunnel.first_byte_timeout.clone();
     let proxy_vip_policy = vip_policy.clone();
+    // Loopback VIP pool (every desktop): only loopback clients, as before.
+    // A pool on another local interface (the iOS tunnel): clients are other
+    // apps on this device, whose source address is one of the device's own.
+    let proxy_peer_policy = ClientPeerPolicy::for_vip_range(&cfg.dns.vip_range);
+    if proxy_peer_policy == ClientPeerPolicy::OnHost {
+        info!(
+            "VIP pool {} is not loopback: accepting clients from this host's own addresses",
+            cfg.dns.vip_range
+        );
+    }
     if let Some(ref r) = proxy_relay {
         info!("relay configured: {}", r);
         // Direct-first dial order (docs/DIRECT-FIRST-DIAL-PLAN.md step B):
@@ -1249,19 +1805,97 @@ pub async fn run_daemon(
             set_relay_secret(None);
         }
     }
-    let proxy_handle = tokio::spawn(async move {
-        run_tcp_proxy(
-            proxy_dns_state,
-            proxy_identity,
-            proxy_bind,
-            proxy_ns_server,
-            proxy_tls_acceptor,
-            proxy_relay,
-            proxy_first_byte_timeout,
-            proxy_vip_policy,
-        )
-        .await;
+    // Transport memory profile ([tunnel] profile / reuse_connections).
+    let windows = cfg.tunnel.transport_windows();
+    let reuse = cfg.tunnel.reuse_connections_enabled();
+    set_dial_windows(windows);
+    set_reuse_connections(reuse);
+    // Shared-connection mode only: act on network changes; the mobile
+    // profile also closes shared connections nobody uses.
+    let shared_keeper = reuse.then(|| {
+        let idle_close = (cfg.tunnel.profile == super::config::TunnelProfile::Mobile)
+            .then_some(super::reconnect::MOBILE_IDLE_CLOSE);
+        info!(
+            "shared connections: dropped and dialed again on a network change or after {:?} \
+             without an answer; closed when unused for {}",
+            super::reconnect::LIVENESS_WINDOW,
+            match idle_close {
+                Some(d) => format!("{d:?}"),
+                None => "never (not the mobile profile)".to_string(),
+            }
+        );
+        tokio::spawn(keep_shared_tunnels(idle_close))
     });
+    info!(
+        "transport profile: {:?} (stream window {} KiB, connection window {} KiB, send window {}, \
+         shared connection per service: {})",
+        cfg.tunnel.profile,
+        windows.stream_receive_window / 1024,
+        windows.receive_window / 1024,
+        match windows.send_window {
+            Some(w) => format!("{} KiB", w / 1024),
+            None => "default".to_string(),
+        },
+        if reuse { "on" } else { "off" }
+    );
+    let mut single_https_listen: Option<SocketAddr> = None;
+    let mut single_http_listen: Option<SocketAddr> = None;
+    let mut single_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let proxy_handle = match (single_addr, single_listeners) {
+        (Some(addr), Some((https, http))) => {
+            // Name-routed listeners instead of the VIP proxy.
+            if proxy_tls_acceptor.is_none() {
+                warn!(
+                    "single-address mode without local TLS: https connections are passed \
+                     to the site's port 443 undecrypted, as on a VIP"
+                );
+            }
+            let carrier = SingleAddressCarrier {
+                addr,
+                dns_state: proxy_dns_state,
+                identity: proxy_identity,
+                bind: proxy_bind,
+                ns_server: proxy_ns_server,
+                tls: proxy_tls_acceptor,
+                relay: proxy_relay,
+                first_byte_timeout: proxy_first_byte_timeout,
+                policy: proxy_vip_policy,
+                // The shared address is the "pool": loopback keeps the
+                // loopback-only client check.
+                peer_policy: ClientPeerPolicy::for_vip_range(&addr.to_string()),
+            };
+            single_https_listen = https.local_addr().ok();
+            info!(
+                "single-address mode: every site on {} - HTTPS by TLS server name on {}",
+                addr,
+                single_https_listen.map_or_else(|| "?".to_string(), |a| a.to_string())
+            );
+            single_handles.push(carrier.clone().spawn(https, 443));
+            if let Some(http) = http {
+                single_http_listen = http.local_addr().ok();
+                info!(
+                    "single-address mode: HTTP by Host header on {}",
+                    single_http_listen.map_or_else(|| "?".to_string(), |a| a.to_string())
+                );
+                single_handles.push(carrier.spawn(http, 80));
+            }
+            None
+        }
+        _ => Some(tokio::spawn(async move {
+            run_tcp_proxy(
+                proxy_dns_state,
+                proxy_identity,
+                proxy_bind,
+                proxy_ns_server,
+                proxy_tls_acceptor,
+                proxy_relay,
+                proxy_first_byte_timeout,
+                proxy_vip_policy,
+                proxy_peer_policy,
+            )
+            .await;
+        })),
+    };
 
     // ── Spawn GC task ───────────────────────────────────────────────────
     // Two responsibilities, both on the same ~GC_INTERVAL cadence:
@@ -1284,6 +1918,9 @@ pub async fn run_daemon(
                 let freed = st.vip_pool.gc_expired();
                 if freed > 0 {
                     debug!("GC: freed {} expired VIP allocations", freed);
+                }
+                if let Some(single) = st.single.as_mut() {
+                    single.purge_expired(Instant::now());
                 }
             }
 
@@ -1405,7 +2042,11 @@ pub async fn run_daemon(
         }
         eprintln!("  Control:  {}", ipc_addr);
         eprintln!("  NS:       {}", config.ns_server());
-        eprintln!("  VIP pool: {}", config.dns.vip_range);
+        match single_addr {
+            // Only with `[dns] single_address` set; otherwise as always.
+            Some(addr) => eprintln!("  Sites:    {} (single address, routed by name)", addr),
+            None => eprintln!("  VIP pool: {}", config.dns.vip_range),
+        }
         if config.tls.enabled {
             eprintln!(
                 "  TLS:      enabled (certs: {})",
@@ -1418,8 +2059,33 @@ pub async fn run_daemon(
         eprintln!("Agent running. Press Ctrl+C to stop.");
     }
 
+    // ── Tell an embedding host that startup is complete ─────────────────
+    let DaemonHooks {
+        ready: ready_hook,
+        shutdown: shutdown_hook,
+    } = hooks;
+    if let Some(tx) = ready_hook {
+        let _ = tx.send(DaemonReady {
+            dns_listen: bound_dns_addr,
+            control_bound,
+            tls_ready: tls_acceptor.is_some(),
+            dns_state: dns_state.clone(),
+            single_https_listen,
+            single_http_listen,
+        });
+    }
+
     // ── Wait for shutdown ───────────────────────────────────────────────
     let mut shutdown_rx = shutdown_tx.subscribe();
+    // No hook = a future that never completes (desktop: unchanged).
+    let host_shutdown = async move {
+        match shutdown_hook {
+            Some(rx) => {
+                let _ = rx.await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
 
     tokio::select! {
         _ = shutdown_rx.recv() => {
@@ -1427,6 +2093,9 @@ pub async fn run_daemon(
         }
         _ = tokio::signal::ctrl_c() => {
             info!("Ctrl+C received, shutting down...");
+        }
+        _ = host_shutdown => {
+            info!("shutdown requested by the host process");
         }
     }
 
@@ -1440,13 +2109,26 @@ pub async fn run_daemon(
     if let Some(h) = dns_handle {
         h.abort();
     }
+    if let Some(h) = dns_tcp_handle {
+        h.abort();
+    }
     ctrl_handle.abort();
-    proxy_handle.abort();
+    if let Some(h) = proxy_handle {
+        h.abort();
+    }
+    for h in single_handles {
+        h.abort();
+    }
     gc_handle.abort();
     lockdown_handle.abort();
     if let Some(h) = health_handle {
         h.abort();
     }
+
+    if let Some(h) = shared_keeper {
+        h.abort();
+    }
+    close_shared_tunnels();
 
     info!("agent stopped");
     Ok(())
@@ -1470,6 +2152,7 @@ async fn run_tcp_proxy(
     relay_addr: Option<String>,
     first_byte_timeout: String,
     vip_policy: super::config::VipPortPolicy,
+    peer_policy: ClientPeerPolicy,
 ) {
     // The resolved listener list (built-in eight ∪ configured `vip_ports`,
     // deduped and sorted) plus the per-port TLS overrides, built ONCE at
@@ -1604,7 +2287,7 @@ async fn run_tcp_proxy(
                                         // local connection unconditionally, letting any
                                         // local user/process ride the daemon owner's
                                         // ZTLP identity.
-                                        if !verify_local_peer(&tcp_stream) {
+                                        if !verify_local_peer(&tcp_stream, peer_policy) {
                                             continue;
                                         }
                                         // Session locked (`freeze`): no new
@@ -1642,122 +2325,24 @@ async fn run_tcp_proxy(
                                         let tls = tls.clone();
                                         let relay = relay.clone();
                                         let fbt = fbt.clone();
-                                        let tls_mode = policy.tls_mode(port);
-                                        let stall_strategy = policy.stall_close_strategy(port);
                                         let policy = policy.clone();
 
                                         tokio::spawn(async move {
-                                            // ── Accept-to-first-byte deadline (PR 1 / Option A) ─
-                                            // ONE deadline covering NS resolve → tunnel dial →
-                                            // TLS wrap/peek → first response byte, set at
-                                            // accept. The steady-state bridge is EXEMPT:
-                                            // long-lived idle flows (websockets, SSE, RDP)
-                                            // must survive arbitrary idle; only the setup
-                                            // phase is deadline-covered.
-                                            //
-                                            // Option A restructure (PR #107): the client
-                                            // socket is split up front — the READ half
-                                            // enters the deadline-covered dial task, the
-                                            // WRITE half stays here. On deadline expiry we
-                                            // write the branded 504 page (HTTP-ish ports)
-                                            // or bare-close (non-HTTP ports) through the
-                                            // write half we still own — closing the PR #106
-                                            // gap where the socket was dropped with the
-                                            // aborted task and the client saw a silent RST.
-                                            let deadline = first_byte_deadline(&fbt, port);
-
-                                            // The handler splits the socket internally: the
-                                            // dial task owns both halves during the dial phase
-                                            // (the write half delivers the 504 page on deadline
-                                            // expiry), then hands back what the bridge needs.
-                                            let relay_for_err = relay.clone();
-
-                                            // ── Local TLS termination fast-path ──────────────
-                                            // Routing by the policy's RESOLVED decision
-                                            // (`VipPortPolicy::tls_routing` — a configured
-                                            // `[[tunnel.vip_ports]]` override first, then the
-                                            // built-in table): `Some(Always)` terminates the
-                                            // TLS handshake LOCALLY (client sees a real TLS
-                                            // connection) and bridges the DECRYPTED stream
-                                            // through the tunnel; `Some(Detect)` peeks the
-                                            // first bytes and terminates only when they look
-                                            // like a TLS ClientHello (an explicitly configured
-                                            // `auto` port — PR #138 review: these used to be
-                                            // sent to the plain path with no detection);
-                                            // `None` (e.g. `passthrough` ports such as Wazuh
-                                            // 1514/1515) must NEVER enter the TLS-terminating
-                                            // branch — their bytes go through the tunnel
-                                            // untouched, still encrypted end to end.
-                                            let result =
-                                                if let Some(tls_mode) = policy.tls_routing(port) {
-                                                    match tls {
-                                                        Some(acceptor) => {
-                                                            handle_tcp_connection_with_tls(
-                                                                tcp_stream,
-                                                                &name,
-                                                                port,
-                                                                peer,
-                                                                peer_node_id,
-                                                                &identity,
-                                                                &bind,
-                                                                &ns,
-                                                                &acceptor,
-                                                                relay.as_deref(),
-                                                                tls_mode,
-                                                                &policy,
-                                                                deadline,
-                                                            )
-                                                            .await
-                                                        }
-                                                        // No TLS acceptor (tls disabled): the
-                                                        // Detect path has nothing to wrap with —
-                                                        // fall through to the plain path so the
-                                                        // connection is still tunneled (plain),
-                                                        // exactly as when TLS is unconfigured.
-                                                        None => {
-                                                            proxy_dial_then_bridge(
-                                                                tcp_stream,
-                                                                &name,
-                                                                port,
-                                                                peer,
-                                                                peer_node_id,
-                                                                &identity,
-                                                                &bind,
-                                                                &ns,
-                                                                relay.as_deref(),
-                                                                tls.as_deref(),
-                                                                deadline,
-                                                                tls_mode,
-                                                                stall_strategy,
-                                                            )
-                                                            .await
-                                                        }
-                                                    }
-                                                } else {
-                                                    proxy_dial_then_bridge(
-                                                        tcp_stream,
-                                                        &name,
-                                                        port,
-                                                        peer,
-                                                        peer_node_id,
-                                                        &identity,
-                                                        &bind,
-                                                        &ns,
-                                                        relay.as_deref(),
-                                                        tls.as_deref(),
-                                                        deadline,
-                                                        tls_mode,
-                                                        stall_strategy,
-                                                    )
-                                                    .await
-                                                };
-
-                                            if let Err(e) = result {
-                                                warn!(
-                                                    "tunnel error for {}: {} (relay={:?})",
-                                                    name, e, relay_for_err
-                                                );
-                                            }
+                                            carry_client_connection(
+                                                tcp_stream,
+                                                name,
+                                                port,
+                                                peer,
+                                                peer_node_id,
+                                                identity,
+                                                bind,
+                                                ns,
+                                                tls,
+                                                relay,
+                                                fbt,
+                                                policy,
+                                            )
+                                            .await;
 
                                             // Decrement connection count
                                             {
@@ -1787,6 +2372,230 @@ async fn run_tcp_proxy(
                 });
             }
         }
+    }
+}
+
+/// What the name-routed listeners of single-address mode share: the same
+/// values `run_tcp_proxy` hands to every VIP listener.
+#[derive(Clone)]
+struct SingleAddressCarrier {
+    addr: Ipv4Addr,
+    dns_state: Arc<Mutex<DnsResolverState>>,
+    identity: NodeIdentity,
+    bind: String,
+    ns_server: String,
+    tls: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    relay: Option<String>,
+    first_byte_timeout: String,
+    policy: super::config::VipPortPolicy,
+    peer_policy: ClientPeerPolicy,
+}
+
+impl SingleAddressCarrier {
+    /// Serve `listener` as the shared address's port `port` (443: the name
+    /// is the TLS server name; 80: the HTTP `Host` header). Each accepted
+    /// connection passes the VIP listeners' checks (local client, session
+    /// not locked), is matched to a site by name, and is then carried by
+    /// [`carry_client_connection`] exactly like a connection to that
+    /// site's VIP on `port`. `port` is the port at the site; the listener
+    /// may be bound elsewhere (tests).
+    fn spawn(self, listener: TcpListener, port: u16) -> tokio::task::JoinHandle<()> {
+        use super::name_route::{self, NameSource};
+
+        let source = if port == 443 {
+            NameSource::Sni
+        } else {
+            NameSource::HttpHost
+        };
+        let peer_policy = self.peer_policy;
+        let admit = move |stream: &TcpStream, client: SocketAddr| {
+            if !verify_local_peer(stream, peer_policy) {
+                return false;
+            }
+            if !super::peruser::accept_new_connection(super::peruser::is_frozen()) {
+                debug!("frozen: refusing new connection from {}", client);
+                return false;
+            }
+            true
+        };
+        let dns_state = self.dns_state.clone();
+        let resolve = move |host: String| {
+            let dns_state = dns_state.clone();
+            async move {
+                name_route::resolve_site(
+                    &dns_state,
+                    &host,
+                    super::peruser::is_frozen(),
+                    |name, ns_server| async move { proxy::ns_resolve(&name, &ns_server).await },
+                )
+                .await
+            }
+        };
+        let carry = move |stream: TcpStream, site: name_route::Site, client: SocketAddr| {
+            let c = self.clone();
+            async move {
+                info!(
+                    "TCP connection {} → {} ({}:{})",
+                    client, site.ztlp_name, c.addr, port
+                );
+                carry_client_connection(
+                    stream,
+                    site.ztlp_name,
+                    port,
+                    site.peer_addr,
+                    site.peer_node_id,
+                    c.identity,
+                    c.bind,
+                    c.ns_server,
+                    c.tls,
+                    c.relay,
+                    c.first_byte_timeout,
+                    c.policy,
+                )
+                .await;
+            }
+        };
+        tokio::spawn(name_route::run_listener(
+            listener, source, admit, resolve, carry,
+        ))
+    }
+}
+
+/// Carry one accepted client connection for the site `name` on `port`:
+/// local TLS termination or pass-through as the port policy says, the
+/// accept-to-first-byte deadline, the dial (direct first, then relay) and
+/// the bridge, with the deadline's 504 page / close on HTTP-class ports.
+///
+/// The single place a client connection is carried from, whichever way
+/// its site was identified: by the VIP it arrived on (`run_tcp_proxy`) or
+/// by name on the shared address (`[dns] single_address`).
+#[allow(clippy::too_many_arguments)]
+async fn carry_client_connection(
+    tcp_stream: TcpStream,
+    name: String,
+    port: u16,
+    peer: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: NodeIdentity,
+    bind: String,
+    ns: String,
+    tls: Option<Arc<tokio_rustls::TlsAcceptor>>,
+    relay: Option<String>,
+    fbt: String,
+    policy: super::config::VipPortPolicy,
+) {
+    let tls_mode = policy.tls_mode(port);
+    let stall_strategy = policy.stall_close_strategy(port);
+
+    // ── Accept-to-first-byte deadline (PR 1 / Option A) ─
+    // ONE deadline covering NS resolve → tunnel dial →
+    // TLS wrap/peek → first response byte, set at
+    // accept. The steady-state bridge is EXEMPT:
+    // long-lived idle flows (websockets, SSE, RDP)
+    // must survive arbitrary idle; only the setup
+    // phase is deadline-covered.
+    //
+    // Option A restructure (PR #107): the client
+    // socket is split up front — the READ half
+    // enters the deadline-covered dial task, the
+    // WRITE half stays here. On deadline expiry we
+    // write the branded 504 page (HTTP-ish ports)
+    // or bare-close (non-HTTP ports) through the
+    // write half we still own — closing the PR #106
+    // gap where the socket was dropped with the
+    // aborted task and the client saw a silent RST.
+    let deadline = first_byte_deadline(&fbt, port);
+
+    // The handler splits the socket internally: the
+    // dial task owns both halves during the dial phase
+    // (the write half delivers the 504 page on deadline
+    // expiry), then hands back what the bridge needs.
+    let relay_for_err = relay.clone();
+
+    // ── Local TLS termination fast-path ──────────────
+    // Routing by the policy's RESOLVED decision
+    // (`VipPortPolicy::tls_routing` — a configured
+    // `[[tunnel.vip_ports]]` override first, then the
+    // built-in table): `Some(Always)` terminates the
+    // TLS handshake LOCALLY (client sees a real TLS
+    // connection) and bridges the DECRYPTED stream
+    // through the tunnel; `Some(Detect)` peeks the
+    // first bytes and terminates only when they look
+    // like a TLS ClientHello (an explicitly configured
+    // `auto` port — PR #138 review: these used to be
+    // sent to the plain path with no detection);
+    // `None` (e.g. `passthrough` ports such as Wazuh
+    // 1514/1515) must NEVER enter the TLS-terminating
+    // branch — their bytes go through the tunnel
+    // untouched, still encrypted end to end.
+    let result = if let Some(tls_mode) = policy.tls_routing(port) {
+        match tls {
+            Some(acceptor) => {
+                handle_tcp_connection_with_tls(
+                    tcp_stream,
+                    &name,
+                    port,
+                    peer,
+                    peer_node_id,
+                    &identity,
+                    &bind,
+                    &ns,
+                    &acceptor,
+                    relay.as_deref(),
+                    tls_mode,
+                    &policy,
+                    deadline,
+                )
+                .await
+            }
+            // No TLS acceptor (tls disabled): the
+            // Detect path has nothing to wrap with —
+            // fall through to the plain path so the
+            // connection is still tunneled (plain),
+            // exactly as when TLS is unconfigured.
+            None => {
+                proxy_dial_then_bridge(
+                    tcp_stream,
+                    &name,
+                    port,
+                    peer,
+                    peer_node_id,
+                    &identity,
+                    &bind,
+                    &ns,
+                    relay.as_deref(),
+                    tls.as_deref(),
+                    deadline,
+                    tls_mode,
+                    stall_strategy,
+                )
+                .await
+            }
+        }
+    } else {
+        proxy_dial_then_bridge(
+            tcp_stream,
+            &name,
+            port,
+            peer,
+            peer_node_id,
+            &identity,
+            &bind,
+            &ns,
+            relay.as_deref(),
+            tls.as_deref(),
+            deadline,
+            tls_mode,
+            stall_strategy,
+        )
+        .await
+    };
+
+    if let Err(e) = result {
+        warn!(
+            "tunnel error for {}: {} (relay={:?})",
+            name, e, relay_for_err
+        );
     }
 }
 
@@ -1969,6 +2778,9 @@ pub enum DialOutcome {
         /// so the bridge would otherwise read 0 bytes and the client
         /// gets nothing (HTTP 000).
         first_frame: Option<Vec<u8>>,
+        /// Hold until the bridge ends (marks a shared tunnel connection
+        /// as in use; empty when connections are not shared).
+        keep: TunnelKeep,
     },
     /// The client or tunnel/backend closed before a first response byte.
     ClientClosedBeforeFirstByte,
@@ -2011,7 +2823,11 @@ async fn proxy_dial_phase(
     // See `connect_tunnel`: ranked direct candidates each get a short
     // timeout; the relay/last attempt is bounded by the accept-time
     // first-byte deadline.
-    let connected = connect_tunnel(
+    let OpenedTunnel {
+        leased,
+        mut q_send,
+        mut q_recv,
+    } = connect_and_open(
         ztlp_name,
         port,
         peer_addr,
@@ -2021,18 +2837,95 @@ async fn proxy_dial_phase(
         ns_server,
         relay_addr,
         deadline,
+        " (dial)",
     )
     .await?;
-    let quic_conn = connected.conn;
+    let connected = &leased.tunnel;
     debug!(
         "dial phase: tunnel active: {} → {} via {:?} (session {})",
         ztlp_name, connected.addr, connected.via, connected.session_id
     );
 
-    let (mut q_send, mut q_recv) = quic_conn
-        .open_bi()
-        .await
-        .map_err(|e| format!("failed to open QUIC data stream (dial): {}", e))?;
+    if leased.reused {
+        // A shared connection that was already there may be dead without
+        // QUIC knowing yet (the device changed network): watch the first
+        // exchange and move the request to a fresh connection if so.
+        use super::reconnect::{first_exchange, ExchangeConfig, ExchangeEnd, Leg};
+        let dead_conn = leased.tunnel.conn.clone();
+        let leg = Leg {
+            send: q_send,
+            recv: q_recv,
+            keep: TunnelKeep {
+                _lease: leased.lease,
+            },
+            progress: datagrams_received(&dead_conn),
+        };
+        let mut unchanged = |c: Option<&[u8]>| c.map(<[u8]>::to_vec).unwrap_or_default();
+        let cfg = ExchangeConfig {
+            window: super::reconnect::LIVENESS_WINDOW,
+            cap: super::reconnect::REPLAY_CAP,
+            eof_ends: true,
+        };
+        let redial = |dead: super::reconnect::Dead| async move {
+            // A failed stream says nothing about the connection's other
+            // streams: only a closed or silent connection is dropped.
+            if dead.silent || dead_conn.inner.close_reason().is_some() {
+                drop_shared_tunnel_if_same(ztlp_name, port, &dead_conn, dead.silent, &dead.reason);
+            }
+            drop(dead_conn);
+            let o = connect_and_open(
+                ztlp_name,
+                port,
+                peer_addr,
+                peer_node_id,
+                identity,
+                bind_addr,
+                ns_server,
+                relay_addr,
+                deadline,
+                " (dial)",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(Leg {
+                progress: datagrams_received(&o.leased.tunnel.conn),
+                send: o.q_send,
+                recv: o.q_recv,
+                keep: TunnelKeep {
+                    _lease: o.leased.lease,
+                },
+            })
+        };
+        return match first_exchange(&mut client_read, &mut unchanged, &[], leg, cfg, redial).await {
+            Err(ExchangeEnd::ClientClosed) => Ok(DialOutcome::ClientClosedBeforeFirstByte),
+            Err(ExchangeEnd::RedialFailed(e)) => Err(e.into()),
+            Ok(handoff) => {
+                if handoff.replayed {
+                    info!(
+                        "request for {} (port {}) carried on a fresh tunnel connection",
+                        ztlp_name, port
+                    );
+                }
+                let (tunnel_read, first) = handoff.first.await;
+                match first {
+                    Ok(frame) => Ok(DialOutcome::Complete {
+                        client_read,
+                        tunnel_read,
+                        tunnel_write: handoff.send,
+                        first_frame: Some(frame),
+                        keep: handoff.keep,
+                    }),
+                    Err(e) => {
+                        warn!("[DIAL] tunnel read error before the first byte: {}", e);
+                        Ok(DialOutcome::ClientClosedBeforeFirstByte)
+                    }
+                }
+            }
+        };
+    }
+    let keep = TunnelKeep {
+        _lease: leased.lease,
+    };
 
     // Pump up: client → tunnel. Reads at most ONE client frame (the
     // complete request) and forwards it to the backend. Owns
@@ -2098,6 +2991,7 @@ async fn proxy_dial_phase(
             tunnel_read: q_recv,
             tunnel_write: q_send,
             first_frame,
+            keep,
         })
     } else {
         // The client hung up during dial (EOF), or the tunnel/backend
@@ -2296,6 +3190,10 @@ pub async fn proxy_dial_then_bridge(
                     d, name_for_log, port
                 );
                 dial_task.abort();
+                // A shared connection that produced no answer may be dead
+                // without quinn knowing yet: do not hand it to the next
+                // request.
+                forget_shared_tunnel(&name_for_log, port);
 
                 if stall_strategy == StallCloseStrategy::Deliver504 {
                     if let Some(page) =
@@ -2335,6 +3233,7 @@ pub async fn proxy_dial_then_bridge(
             tunnel_read,
             tunnel_write,
             first_frame,
+            keep: _keep,
         }) => {
             // Write the first backend frame to the client immediately —
             // the tunnel may be closed after the first frame (the gateway
@@ -2383,6 +3282,48 @@ struct DialedTunnel {
     q_send: quinn::SendStream,
     q_recv: quinn::RecvStream,
     session_id: String,
+    /// The stream is on a shared connection that already existed.
+    reused: bool,
+    _keep: TunnelKeep,
+}
+
+/// Dials again for a client connection whose reused shared connection
+/// turned out to be dead. Only built in shared-connection mode.
+type RedialFn = Box<
+    dyn FnOnce() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<DialedTunnel, Box<dyn std::error::Error + Send + Sync>>,
+                    > + Send,
+            >,
+        > + Send,
+>;
+
+/// The gateway's datagram counter for [`super::reconnect::Leg::progress`].
+fn datagrams_received(
+    conn: &crate::quic_transport::tokio_endpoint::QuicConnection,
+) -> Box<dyn Fn() -> u64 + Send + Sync> {
+    let conn = conn.inner.clone();
+    Box::new(move || conn.stats().udp_rx.datagrams)
+}
+
+impl super::reconnect::FrameSend for quinn::SendStream {
+    async fn send_frame(&mut self, payload: &[u8]) -> Result<(), String> {
+        crate::quic_transport::noise_stream::write_ztlp_frame(self, payload)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    fn finish(&mut self) {
+        let _ = quinn::SendStream::finish(self);
+    }
+}
+
+impl super::reconnect::FrameRecv for quinn::RecvStream {
+    async fn recv_frame(&mut self) -> Result<Vec<u8>, String> {
+        crate::quic_transport::noise_stream::read_ztlp_frame(self)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Establish a ZTLP tunnel: NS resolve (when uncached), relay CLIENT_ROUTE,
@@ -2406,7 +3347,11 @@ async fn dial_tunnel(
     // Direct-first plan, then relay (see `connect_tunnel`): ranked direct
     // candidates each get a short timeout; the relay attempt is bounded
     // by the caller's first-byte deadline.
-    let connected = connect_tunnel(
+    let OpenedTunnel {
+        leased,
+        q_send,
+        q_recv,
+    } = connect_and_open(
         &ztlp_name,
         port,
         peer_addr,
@@ -2416,20 +3361,19 @@ async fn dial_tunnel(
         &ns_server,
         relay_addr.as_deref(),
         deadline,
+        "",
     )
     .await?;
-    let quic_conn = connected.conn;
-
-    let (q_send, q_recv) = quic_conn
-        .open_bi()
-        .await
-        .map_err(|e| format!("failed to open QUIC data stream: {}", e))?;
 
     Ok(DialedTunnel {
-        _conn: quic_conn,
+        session_id: leased.tunnel.session_id.to_string(),
+        _conn: leased.tunnel.conn,
         q_send,
         q_recv,
-        session_id: connected.session_id.to_string(),
+        reused: leased.reused,
+        _keep: TunnelKeep {
+            _lease: leased.lease,
+        },
     })
 }
 
@@ -2475,12 +3419,19 @@ where
 
 /// Bridge a local stream to a dialed tunnel until either side closes.
 /// `initial` (the already-read request head, if any) is sent first.
+///
+/// `redial` is only given in shared-connection mode. When the tunnel's
+/// stream is on a connection that already existed, the first exchange is
+/// watched (`reconnect::first_exchange`) and the request is carried on a
+/// connection from `redial` if that one turns out to be dead.
 async fn bridge_tunnel<S>(
     stream: S,
     tunnel: DialedTunnel,
     initial: &[u8],
     ztlp_name: &str,
+    port: u16,
     tls_terminated: bool,
+    redial: Option<RedialFn>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2488,13 +3439,90 @@ where
     let DialedTunnel {
         _conn,
         mut q_send,
-        mut q_recv,
+        q_recv,
         session_id,
+        reused,
+        _keep,
     } = tunnel;
 
     // The splash gate may already have read the first request head; it must
     // be stamped like everything after it.
     let mut stamper = request_stamper(tls_terminated);
+
+    if let (true, Some(redial)) = (reused, redial) {
+        use super::reconnect::{first_exchange, ExchangeConfig, ExchangeEnd, Leg};
+        use tokio::io::AsyncWriteExt;
+        let (mut local_read, mut local_write) = tokio::io::split(stream);
+        let dead_conn = _conn.clone();
+        let leg = Leg {
+            progress: datagrams_received(&_conn),
+            send: q_send,
+            recv: q_recv,
+            keep: (_conn, _keep, session_id),
+        };
+        let cfg = ExchangeConfig {
+            window: super::reconnect::LIVENESS_WINDOW,
+            cap: super::reconnect::REPLAY_CAP,
+            eof_ends: false,
+        };
+        let outcome = {
+            let mut stamp = |chunk: Option<&[u8]>| match (stamper.as_mut(), chunk) {
+                (Some(st), Some(bytes)) => st.feed(bytes),
+                (Some(st), None) => st.finish(),
+                (None, Some(bytes)) => bytes.to_vec(),
+                (None, None) => Vec::new(),
+            };
+            let again = |dead: super::reconnect::Dead| async move {
+                // A failed stream says nothing about the connection's other
+                // streams: only a closed or silent connection is dropped.
+                if dead.silent || dead_conn.inner.close_reason().is_some() {
+                    drop_shared_tunnel_if_same(
+                        ztlp_name,
+                        port,
+                        &dead_conn,
+                        dead.silent,
+                        &dead.reason,
+                    );
+                }
+                drop(dead_conn);
+                let t = redial().await.map_err(|e| e.to_string())?;
+                Ok(Leg {
+                    progress: datagrams_received(&t._conn),
+                    send: t.q_send,
+                    recv: t.q_recv,
+                    keep: (t._conn, t._keep, t.session_id),
+                })
+            };
+            first_exchange(&mut local_read, &mut stamp, initial, leg, cfg, again).await
+        };
+        let handoff = match outcome {
+            Ok(h) => h,
+            Err(ExchangeEnd::ClientClosed) => return Ok(()),
+            Err(ExchangeEnd::RedialFailed(e)) => {
+                let _ = local_write.shutdown().await;
+                return Err(e.into());
+            }
+        };
+        if handoff.replayed {
+            info!(
+                "request for {} (port {}) carried on a fresh tunnel connection",
+                ztlp_name, port
+            );
+        }
+        let (_conn, _keep, session_id) = handoff.keep;
+        run_bridge_pumps(
+            local_read,
+            local_write,
+            handoff.send,
+            BridgeDown::First(handoff.first),
+            stamper,
+            handoff.client_eof,
+        )
+        .await;
+        debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
+        return Ok(());
+    }
+
     if !initial.is_empty() {
         let first = match stamper.as_mut() {
             Some(st) => st.feed(initial),
@@ -2511,10 +3539,49 @@ where
     // data stream, one task per direction (mirrors `cmd_connect`'s
     // v0.36.0 quic-pump-throughput fix: coupling both directions in a
     // single select! let a stalled direction starve the other).
-    let (mut local_read, mut local_write) = tokio::io::split(stream);
+    let (local_read, local_write) = tokio::io::split(stream);
+    run_bridge_pumps(
+        local_read,
+        local_write,
+        q_send,
+        BridgeDown::Stream(q_recv),
+        stamper,
+        false,
+    )
+    .await;
 
+    debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
+
+    Ok(())
+}
+
+/// Where the tunnel-to-client pump starts.
+enum BridgeDown {
+    /// Read frames from the stream.
+    Stream(quinn::RecvStream),
+    /// The first frame is already being awaited (it follows a watched
+    /// first exchange); deliver it, then read frames from the stream.
+    First(super::reconnect::FirstFrame<quinn::RecvStream>),
+}
+
+/// The two pumps of [`bridge_tunnel`], until both ended. `client_eof` =
+/// the client already closed its sending side and the stream was finished.
+async fn run_bridge_pumps<R, W>(
+    mut local_read: R,
+    mut local_write: W,
+    mut q_send: quinn::SendStream,
+    down: BridgeDown,
+    mut stamper: Option<super::forwarded_proto::ForwardedProtoStamper>,
+    client_eof: bool,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let pump_up = tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
+        if client_eof {
+            return;
+        }
         let mut buf = vec![0u8; 65000];
         loop {
             match local_read.read(&mut buf).await {
@@ -2562,6 +3629,21 @@ where
 
     let pump_down = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
+        let mut q_recv = match down {
+            BridgeDown::Stream(q_recv) => q_recv,
+            BridgeDown::First(first) => {
+                let (q_recv, frame) = first.await;
+                let delivered = match frame {
+                    Ok(payload) => local_write.write_all(&payload).await.is_ok(),
+                    Err(_) => false,
+                };
+                if !delivered {
+                    let _ = local_write.shutdown().await;
+                    return;
+                }
+                q_recv
+            }
+        };
         loop {
             match crate::quic_transport::noise_stream::read_ztlp_frame(&mut q_recv).await {
                 Ok(payload) => {
@@ -2576,10 +3658,6 @@ where
     });
 
     let _ = tokio::join!(pump_up, pump_down);
-
-    debug!("tunnel closed: {} (session {})", ztlp_name, session_id);
-
-    Ok(())
 }
 
 /// Inner handler: establish ZTLP tunnel and bridge an arbitrary AsyncRead+AsyncWrite stream.
@@ -2619,7 +3697,54 @@ where
         deadline,
     )
     .await?;
-    bridge_tunnel(stream, tunnel, &[], ztlp_name, tls_terminated).await
+    let redial = shared_redial(
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
+        deadline,
+    );
+    bridge_tunnel(stream, tunnel, &[], ztlp_name, port, tls_terminated, redial).await
+}
+
+/// The redial for [`bridge_tunnel`]: `None` unless connections are shared.
+#[allow(clippy::too_many_arguments)]
+fn shared_redial(
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+    deadline: Option<Duration>,
+) -> Option<RedialFn> {
+    if !reuse_connections() {
+        return None;
+    }
+    let name = ztlp_name.to_string();
+    let identity = identity.clone();
+    let bind = bind_addr.to_string();
+    let ns = ns_server.to_string();
+    let relay = relay_addr.map(|r| r.to_string());
+    Some(Box::new(move || {
+        Box::pin(dial_tunnel(
+            name,
+            port,
+            peer_addr,
+            peer_node_id,
+            identity,
+            bind,
+            ns,
+            relay,
+            deadline,
+        ))
+    }))
 }
 
 /// Like `handle_tcp_connection_bridged`, but for HTTP-ish ports it first reads
@@ -2673,6 +3798,17 @@ where
         .await;
     }
 
+    let redial = shared_redial(
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
+        deadline,
+    );
     let name = ztlp_name.to_string();
     let identity = identity.clone();
     let bind = bind_addr.to_string();
@@ -2704,7 +3840,16 @@ where
 
     match outcome {
         GateOutcome::Proceed { head, tunnel } => {
-            bridge_tunnel(stream, tunnel, &head, ztlp_name, tls_terminated).await
+            bridge_tunnel(
+                stream,
+                tunnel,
+                &head,
+                ztlp_name,
+                port,
+                tls_terminated,
+                redial,
+            )
+            .await
         }
         GateOutcome::DialFailed { error, .. } => Err(error),
         GateOutcome::DialAborted { .. } => Err("tunnel dial task aborted".into()),
@@ -3423,11 +4568,75 @@ mod tests {
         let _client_stream = client_task.await.unwrap();
 
         assert!(
-            super::verify_local_peer(&server_stream),
+            super::verify_local_peer(&server_stream, super::ClientPeerPolicy::LoopbackOnly),
             "a real loopback TCP connection must be accepted — this is \
              exactly the case the old SO_PEERCRED-on-TCP code silently \
              broke, rejecting 100% of real traffic"
         );
+    }
+
+    // ── non-loopback VIP pools (iOS tunnel interface) ────────────────────
+
+    #[test]
+    fn loopback_vip_ranges_keep_the_loopback_only_policy() {
+        use super::ClientPeerPolicy as P;
+        assert_eq!(P::for_vip_range("127.100.0.0/16"), P::LoopbackOnly);
+        assert_eq!(P::for_vip_range("127.200.0.0/30"), P::LoopbackOnly);
+        // unparseable = strict
+        assert_eq!(P::for_vip_range("not-a-cidr"), P::LoopbackOnly);
+        assert_eq!(P::for_vip_range(""), P::LoopbackOnly);
+    }
+
+    #[test]
+    fn a_tunnel_interface_vip_range_accepts_on_host_clients() {
+        use super::ClientPeerPolicy as P;
+        assert_eq!(P::for_vip_range("100.64.77.32/27"), P::OnHost);
+        assert_eq!(P::for_vip_range("10.77.3.0/24"), P::OnHost);
+    }
+
+    #[test]
+    fn only_this_hosts_own_addresses_count_as_on_host() {
+        use std::net::IpAddr;
+        let host: Vec<IpAddr> = vec![
+            "127.0.0.1".parse().unwrap(),
+            "100.64.77.1".parse().unwrap(),
+            "100.64.77.33".parse().unwrap(),
+            "192.0.2.10".parse().unwrap(),
+        ];
+        assert!(super::peer_is_on_host(
+            "100.64.77.33".parse().unwrap(),
+            &host
+        ));
+        assert!(super::peer_is_on_host("192.0.2.10".parse().unwrap(), &host));
+        // IPv4-mapped form of an own address
+        assert!(super::peer_is_on_host(
+            "::ffff:100.64.77.1".parse().unwrap(),
+            &host
+        ));
+        // same subnet but NOT this host: rejected
+        assert!(!super::peer_is_on_host(
+            "100.64.77.34".parse().unwrap(),
+            &host
+        ));
+        assert!(!super::peer_is_on_host(
+            "192.0.2.11".parse().unwrap(),
+            &host
+        ));
+        assert!(!super::peer_is_on_host("203.0.113.5".parse().unwrap(), &[]));
+    }
+
+    #[tokio::test]
+    async fn on_host_policy_still_accepts_loopback_clients() {
+        use tokio::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server_stream, _) = listener.accept().await.unwrap();
+        let _c = client.await.unwrap();
+        assert!(super::verify_local_peer(
+            &server_stream,
+            super::ClientPeerPolicy::OnHost
+        ));
     }
 
     #[test]
@@ -3562,13 +4771,51 @@ fn conventional_service_name_for_port(port: u16) -> String {
 const DIRECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// A QUIC connection with the Noise handshake done; what both VIP dial
-/// paths need before they open the data stream.
+/// paths need before they open the data stream. Cloning yields another
+/// handle to the same connection (that is how a shared connection is
+/// handed to each request).
+#[derive(Clone)]
 struct ConnectedTunnel {
     conn: crate::quic_transport::tokio_endpoint::QuicConnection,
     session_id: crate::packet::SessionId,
     /// Which attempt won (for the log line and tests).
     via: DialVia,
     addr: SocketAddr,
+    /// Set on a connection that lives in the shared cache.
+    shared: Option<Arc<SharedInfo>>,
+}
+
+/// What the agent keeps about a shared connection besides the connection.
+struct SharedInfo {
+    /// Who is using it right now (idle close, see `reap_idle_shared_tunnels`).
+    uses: Arc<super::reconnect::UseState>,
+    /// How it was dialed, so it can be dialed again after a network change.
+    params: DialParams,
+}
+
+struct DialParams {
+    ztlp_name: String,
+    port: u16,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: NodeIdentity,
+    bind_addr: String,
+    ns_server: String,
+    relay_addr: Option<String>,
+}
+
+/// A tunnel connection handed to one client connection.
+struct LeasedTunnel {
+    tunnel: ConnectedTunnel,
+    /// An existing shared connection (not one dialed for this request).
+    reused: bool,
+    /// Marks the shared connection as in use until dropped (`None` when
+    /// connections are not shared).
+    lease: Option<super::reconnect::Lease>,
+}
+
+/// Kept by a client connection for as long as it uses its tunnel stream.
+pub struct TunnelKeep {
+    _lease: Option<super::reconnect::Lease>,
 }
 
 /// Resolve `ztlp_name` (or use the cached peer), build the dial plan and
@@ -3580,8 +4827,237 @@ struct ConnectedTunnel {
 /// Shared by `proxy_dial_phase` (deadline path, PR #108) and
 /// `handle_tcp_connection_bridged` (plain path), which previously carried
 /// two copies of the single-address dial.
+///
+/// With `[tunnel] reuse_connections` on, the connection is shared: one per
+/// (name, port), dialed by the first request (concurrent first requests
+/// wait for that one dial) and reused while it is open; the caller opens
+/// its own stream on it. Off (the default), every call dials.
+///
+/// In that mode the dial itself is retried with a short backoff until the
+/// caller's deadline (the network may be away for a moment), inside the
+/// single-flight slot, so every request waiting for the same name shares
+/// the one dial in progress.
 #[allow(clippy::too_many_arguments)]
 async fn connect_tunnel(
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+    deadline: Option<Duration>,
+) -> Result<LeasedTunnel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_tunnel_opts(
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
+        deadline,
+        true,
+    )
+    .await
+}
+
+/// [`connect_tunnel`]; `retry = false` makes a shared dial a single try
+/// (the background dial after a network change).
+#[allow(clippy::too_many_arguments)]
+async fn connect_tunnel_opts(
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+    deadline: Option<Duration>,
+    retry: bool,
+) -> Result<LeasedTunnel, Box<dyn std::error::Error + Send + Sync>> {
+    if !reuse_connections() {
+        let tunnel = connect_tunnel_fresh(
+            ztlp_name,
+            port,
+            peer_addr,
+            peer_node_id,
+            identity,
+            bind_addr,
+            ns_server,
+            relay_addr,
+            deadline,
+        )
+        .await?;
+        return Ok(LeasedTunnel {
+            tunnel,
+            reused: false,
+            lease: None,
+        });
+    }
+    // The budget counts from now, not from when this request gets its turn
+    // in the slot: a request that waited for somebody else's failed dial
+    // until its own deadline does not start dialing after it.
+    let give_up_at = match (retry, deadline) {
+        (true, Some(d)) => Some(tokio::time::Instant::now() + d),
+        _ => None,
+    };
+    let taken_lease: std::sync::Mutex<Option<super::reconnect::Lease>> =
+        std::sync::Mutex::new(None);
+    let fresh = || {
+        connect_tunnel_fresh(
+            ztlp_name,
+            port,
+            peer_addr,
+            peer_node_id,
+            identity,
+            bind_addr,
+            ns_server,
+            relay_addr,
+            deadline,
+        )
+    };
+    let (tunnel, reused) = tunnel_conn_cache()
+        .get_or_dial(
+            &tunnel_key(ztlp_name, port),
+            |t| {
+                if !tunnel_is_open(t) {
+                    return false;
+                }
+                // Marked as in use under the slot's lock, so the idle
+                // close cannot take it between here and the return.
+                if let (Some(s), Ok(mut slot)) = (&t.shared, taken_lease.lock()) {
+                    *slot = Some(s.uses.acquire());
+                }
+                true
+            },
+            || async {
+                let mut t = if retry {
+                    super::reconnect::retry_dial(
+                        ztlp_name,
+                        give_up_at,
+                        Some(network_epoch_tx().subscribe()),
+                        dial_error_is_permanent,
+                        fresh,
+                    )
+                    .await?
+                } else {
+                    fresh().await?
+                };
+                t.shared = Some(Arc::new(SharedInfo {
+                    uses: super::reconnect::UseState::new(),
+                    params: DialParams {
+                        ztlp_name: ztlp_name.to_string(),
+                        port,
+                        peer_node_id,
+                        identity: identity.clone(),
+                        bind_addr: bind_addr.to_string(),
+                        ns_server: ns_server.to_string(),
+                        relay_addr: relay_addr.map(str::to_string),
+                    },
+                }));
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(t)
+            },
+        )
+        .await?;
+    if reused {
+        debug!(
+            "reusing shared tunnel: {} (port {}) → {} via {:?} (session {})",
+            ztlp_name, port, tunnel.addr, tunnel.via, tunnel.session_id
+        );
+    }
+    let lease = taken_lease
+        .into_inner()
+        .unwrap_or(None)
+        .or_else(|| tunnel.shared.as_ref().map(|s| s.uses.acquire()));
+    Ok(LeasedTunnel {
+        tunnel,
+        reused,
+        lease,
+    })
+}
+
+/// A tunnel connection with a data stream open on it.
+struct OpenedTunnel {
+    leased: LeasedTunnel,
+    q_send: quinn::SendStream,
+    q_recv: quinn::RecvStream,
+}
+
+/// [`connect_tunnel`] plus the data stream. On a REUSED shared connection
+/// a stream that cannot be opened (the connection closed, or no stream
+/// within the liveness window) drops that connection and dials once more;
+/// a connection dialed for this request fails as before. `what` is the
+/// suffix of the error text (the two callers always differed in it).
+#[allow(clippy::too_many_arguments)]
+async fn connect_and_open(
+    ztlp_name: &str,
+    port: u16,
+    peer_addr: Option<SocketAddr>,
+    peer_node_id: Option<crate::identity::NodeId>,
+    identity: &NodeIdentity,
+    bind_addr: &str,
+    ns_server: &str,
+    relay_addr: Option<&str>,
+    deadline: Option<Duration>,
+    what: &str,
+) -> Result<OpenedTunnel, Box<dyn std::error::Error + Send + Sync>> {
+    let mut leased = connect_tunnel(
+        ztlp_name,
+        port,
+        peer_addr,
+        peer_node_id,
+        identity,
+        bind_addr,
+        ns_server,
+        relay_addr,
+        deadline,
+    )
+    .await?;
+    if leased.reused {
+        let window = super::reconnect::LIVENESS_WINDOW;
+        let reason = match tokio::time::timeout(window, leased.tunnel.conn.open_bi()).await {
+            Ok(Ok((q_send, q_recv))) => {
+                return Ok(OpenedTunnel {
+                    leased,
+                    q_send,
+                    q_recv,
+                })
+            }
+            Ok(Err(e)) => format!("could not open a stream: {e}"),
+            Err(_) => format!("no stream within {window:?}"),
+        };
+        drop_shared_tunnel_if_same(ztlp_name, port, &leased.tunnel.conn, false, &reason);
+        leased = connect_tunnel(
+            ztlp_name,
+            port,
+            peer_addr,
+            peer_node_id,
+            identity,
+            bind_addr,
+            ns_server,
+            relay_addr,
+            deadline,
+        )
+        .await?;
+    }
+    let (q_send, q_recv) = leased.tunnel.conn.open_bi().await.map_err(|e| {
+        forget_shared_tunnel(ztlp_name, port);
+        format!("failed to open QUIC data stream{}: {}", what, e)
+    })?;
+    Ok(OpenedTunnel {
+        leased,
+        q_send,
+        q_recv,
+    })
+}
+
+/// Dial a new connection (see [`connect_tunnel`]).
+#[allow(clippy::too_many_arguments)]
+async fn connect_tunnel_fresh(
     ztlp_name: &str,
     port: u16,
     peer_addr: Option<SocketAddr>,
@@ -3606,7 +5082,11 @@ async fn connect_tunnel(
         .unwrap_or(true);
     let cached = candidates_for_dial(peer_addr, &cached_peer_candidates(ztlp_name));
     let cached_cert = cached_peer_cert(ztlp_name);
-    let from_cache = !cached.is_empty() && cache_hit_usable(cached_cert.as_ref(), strict);
+    // After a network change the cached view is from the other network
+    // (never the case unless `notify_network_changed` was acted on).
+    let from_cache = !cached.is_empty()
+        && cache_hit_usable(cached_cert.as_ref(), strict)
+        && cached_route_is_current(ztlp_name);
     let (candidates, resolved_node_id, expect) = if from_cache {
         (cached, peer_node_id, cached_cert.unwrap_or_default())
     } else {
@@ -3703,77 +5183,71 @@ async fn walk_dial_plan(
     });
 
     let n = plan.len();
-    let mut last_err: String = String::new();
-    for (i, attempt) in plan.into_iter().enumerate() {
-        info!(
-            "dial {}/{} {} → {} via {:?} (service={})",
-            i + 1,
-            n,
-            ztlp_name,
-            attempt.addr,
-            attempt.via,
-            service_name
-        );
-        let one = connect_one(
-            attempt,
-            &service_name,
-            resolved_node_id,
-            responder_id,
-            service_hash,
-            identity,
-            bind_addr,
-            expect,
-        );
-        let result = match attempt_timeout(attempt, i + 1 < n) {
-            Some(budget) => match tokio::time::timeout(budget, one).await {
-                Ok(r) => r,
-                Err(_) => Err(format!(
-                    "direct candidate {} did not answer within {:?}",
-                    attempt.addr, budget
+    let ctx = AttemptContext {
+        ztlp_name,
+        service_name: &service_name,
+        resolved_node_id,
+        responder_id,
+        service_hash,
+        identity,
+        bind_addr,
+        expect,
+        n,
+    };
+
+    // Shared-connection mode with a relay behind the direct candidates:
+    // do not make the relay wait for every direct candidate's full
+    // timeout. The direct candidates run in their usual order and get a
+    // short head start; then the relay is dialed next to them and the
+    // first finished handshake is taken (direct when both are ready).
+    if reuse_connections() && !prefer_relay() && n >= 2 {
+        if let Some(relay_attempt) = plan.last().copied().filter(|a| a.via == DialVia::Relay) {
+            let directs = &plan[..n - 1];
+            let head_start = if relay_won_last(ztlp_name) {
+                Duration::ZERO
+            } else {
+                super::reconnect::RELAY_HEAD_START
+            };
+            let direct = async {
+                let mut last = String::new();
+                for (i, attempt) in directs.iter().copied().enumerate() {
+                    let budget = AttemptBudget::Direct(DIRECT_ATTEMPT_TIMEOUT);
+                    match run_dial_attempt(&ctx, i + 1, attempt, budget).await {
+                        Ok(t) => return Ok(t),
+                        Err(e) => last = e,
+                    }
+                }
+                Err(last)
+            };
+            let relay =
+                || run_dial_attempt(&ctx, n, relay_attempt, AttemptBudget::Deadline(deadline));
+            return match super::reconnect::race_direct_relay(direct, relay, head_start).await {
+                Ok((tunnel, _)) => {
+                    note_dial_winner(ztlp_name, tunnel.via);
+                    Ok(tunnel)
+                }
+                Err((direct_err, relay_err)) => Err(format!(
+                    "all {} dial attempts failed for '{}': {} (direct: {})",
+                    n, ztlp_name, relay_err, direct_err
                 )
                 .into()),
-            },
+            };
+        }
+    }
+
+    let mut last_err: String = String::new();
+    for (i, attempt) in plan.into_iter().enumerate() {
+        let budget = match attempt_timeout(attempt, i + 1 < n) {
+            Some(budget) => AttemptBudget::Direct(budget),
             // Relay, or the LAST attempt: the caller's first-byte deadline
             // bounds it (unchanged from before direct-first); when the
             // caller passed no deadline at all (legacy paths) the attempt
             // runs unbounded, exactly as before.
-            None => match deadline {
-                Some(budget) => match tokio::time::timeout(budget, one).await {
-                    Ok(r) => r,
-                    Err(_) => Err(format!(
-                        "dial attempt {} (via {:?}) did not answer within the \
-                         accept-to-first-byte deadline",
-                        attempt.addr, attempt.via
-                    )
-                    .into()),
-                },
-                None => one.await,
-            },
+            None => AttemptBudget::Deadline(deadline),
         };
-        match result {
-            Ok((conn, session_id)) => {
-                info!(
-                    "tunnel active: {} → {} via {:?} (session {})",
-                    ztlp_name, attempt.addr, attempt.via, session_id
-                );
-                return Ok(ConnectedTunnel {
-                    conn,
-                    session_id,
-                    via: attempt.via,
-                    addr: attempt.addr,
-                });
-            }
-            Err(e) => {
-                info!(
-                    "dial {}/{} {} via {:?} failed: {}",
-                    i + 1,
-                    n,
-                    attempt.addr,
-                    attempt.via,
-                    e
-                );
-                last_err = e.to_string();
-            }
+        match run_dial_attempt(&ctx, i + 1, attempt, budget).await {
+            Ok(tunnel) => return Ok(tunnel),
+            Err(e) => last_err = e,
         }
     }
     Err(format!(
@@ -3781,6 +5255,95 @@ async fn walk_dial_plan(
         n, ztlp_name, last_err
     )
     .into())
+}
+
+/// What every attempt of one dial plan shares.
+struct AttemptContext<'a> {
+    ztlp_name: &'a str,
+    service_name: &'a str,
+    resolved_node_id: Option<NodeId>,
+    responder_id: NodeId,
+    service_hash: [u8; 16],
+    identity: &'a NodeIdentity,
+    bind_addr: &'a str,
+    expect: &'a crate::quic_transport::CertExpectation,
+    /// Number of attempts in the plan (for the log lines).
+    n: usize,
+}
+
+/// How long one attempt may take.
+#[derive(Clone, Copy)]
+enum AttemptBudget {
+    /// A direct candidate with something after it: the short timeout.
+    Direct(Duration),
+    /// The relay or the last attempt: the caller's deadline, if any.
+    Deadline(Option<Duration>),
+}
+
+/// Run attempt number `i` of a plan within its budget, with the log lines.
+async fn run_dial_attempt(
+    ctx: &AttemptContext<'_>,
+    i: usize,
+    attempt: DialAttempt,
+    budget: AttemptBudget,
+) -> Result<ConnectedTunnel, String> {
+    let n = ctx.n;
+    info!(
+        "dial {}/{} {} → {} via {:?} (service={})",
+        i, n, ctx.ztlp_name, attempt.addr, attempt.via, ctx.service_name
+    );
+    let one = connect_one(
+        attempt,
+        ctx.service_name,
+        ctx.resolved_node_id,
+        ctx.responder_id,
+        ctx.service_hash,
+        ctx.identity,
+        ctx.bind_addr,
+        ctx.expect,
+    );
+    let result = match budget {
+        AttemptBudget::Direct(budget) => match tokio::time::timeout(budget, one).await {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "direct candidate {} did not answer within {:?}",
+                attempt.addr, budget
+            )
+            .into()),
+        },
+        AttemptBudget::Deadline(Some(budget)) => match tokio::time::timeout(budget, one).await {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "dial attempt {} (via {:?}) did not answer within the \
+                 accept-to-first-byte deadline",
+                attempt.addr, attempt.via
+            )
+            .into()),
+        },
+        AttemptBudget::Deadline(None) => one.await,
+    };
+    match result {
+        Ok((conn, session_id)) => {
+            info!(
+                "tunnel active: {} → {} via {:?} (session {})",
+                ctx.ztlp_name, attempt.addr, attempt.via, session_id
+            );
+            Ok(ConnectedTunnel {
+                conn,
+                session_id,
+                via: attempt.via,
+                addr: attempt.addr,
+                shared: None,
+            })
+        }
+        Err(e) => {
+            info!(
+                "dial {}/{} {} via {:?} failed: {}",
+                i, n, attempt.addr, attempt.via, e
+            );
+            Err(e.to_string())
+        }
+    }
 }
 
 /// One attempt: (CLIENT_ROUTE when via relay) + QUIC connect + Noise handshake.
@@ -3840,7 +5403,7 @@ async fn connect_one(
 
     let quic_conn =
         crate::quic_transport::tokio_endpoint::QuicEndpoint::connect_with_socket_for_service(
-            crate::quic_transport::QuicEndpointConfig::default(),
+            dial_endpoint_config(),
             attempt.addr,
             "localhost",
             std_socket,
@@ -4270,6 +5833,1184 @@ mod option_a_tests {
 // and the core property that the local acceptor is ready to complete a real
 // TLS handshake (the cert chain + key load correctly).
 // ────────────────────────────────────────────────────────────────────────────
+/// Single-address mode through the daemon's own wiring: the real accept
+/// loop, the real name -> site step, and the real VIP carrier
+/// (`carry_client_connection`). The name server is a black hole, so the
+/// test ends where a VIP connection to an unreachable site ends: the 504
+/// page, which names the site the connection was carried for.
+/// Tests that turn shared connections on (a process-wide switch) take this
+/// lock, so they do not change the mode under one another.
+#[cfg(test)]
+pub(crate) static SHARED_MODE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Shared-connection mode against a gateway, a name server and network
+/// paths that all live on loopback in this process: what happens to a
+/// request when the path under a shared connection dies, when the network
+/// changes, when no dial works for a while, and that none of it happens
+/// with connections not shared (the desktop default).
+#[cfg(test)]
+mod reconnect_wiring_tests {
+    use super::*;
+    use crate::quic_transport::noise_stream::{
+        read_ztlp_frame, run_responder_handshake, write_ztlp_frame,
+    };
+    use crate::quic_transport::tokio_endpoint::QuicEndpoint;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UdpSocket;
+
+    /// The process-wide mode for one test, with pins and caches in a
+    /// directory of its own. Everything is put back when it is dropped.
+    ///
+    /// In test builds the state-home override is per thread, so every test
+    /// here runs on a current-thread runtime: a dial on another worker
+    /// thread would read and write pins in the real state directory, and
+    /// a pin left there for a reused loopback port fails a later run.
+    struct Mode {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+        _home: tempfile::TempDir,
+    }
+
+    impl Mode {
+        async fn shared() -> Self {
+            Self::enter(true).await
+        }
+        async fn desktop() -> Self {
+            Self::enter(false).await
+        }
+        async fn enter(reuse: bool) -> Self {
+            let guard = SHARED_MODE_TEST_LOCK.lock().await;
+            let home = tempfile::tempdir().unwrap();
+            crate::state_home::set_override(Some(home.path().to_path_buf()));
+            set_prefer_relay(false);
+            set_reuse_connections(reuse);
+            Self {
+                _guard: guard,
+                _home: home,
+            }
+        }
+    }
+
+    impl Drop for Mode {
+        fn drop(&mut self) {
+            drop_all_shared();
+            set_reuse_connections(false);
+            crate::state_home::set_override(None);
+        }
+    }
+
+    fn drop_all_shared() {
+        for t in tunnel_conn_cache().take_where(|_| true) {
+            t.conn.close();
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Backend {
+        Answers,
+        /// Acknowledges at once (QUIC does), answers after this long.
+        Slow(Duration),
+    }
+
+    /// A gateway: QUIC + Noise, then one answer per stream that says which
+    /// connection (1, 2, ...) carried the request.
+    struct Gateway {
+        addr: SocketAddr,
+        handshakes: Arc<AtomicUsize>,
+        requests: Arc<std::sync::Mutex<Vec<(usize, Vec<u8>)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Gateway {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl Gateway {
+        fn handshakes(&self) -> usize {
+            self.handshakes.load(Ordering::SeqCst)
+        }
+        fn requests(&self) -> Vec<(usize, String)> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(n, r)| (*n, String::from_utf8_lossy(r).into_owned()))
+                .collect()
+        }
+    }
+
+    async fn gateway(backend: Backend) -> Gateway {
+        let ep = QuicEndpoint::bind(crate::quic_transport::QuicEndpointConfig {
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let addr = ep.inner.local_addr().unwrap();
+        let identity = NodeIdentity::generate().unwrap();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (hs, reqs) = (handshakes.clone(), requests.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok(conn) = ep.accept().await else {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    continue;
+                };
+                let (identity, hs, reqs) = (identity.clone(), hs.clone(), reqs.clone());
+                tokio::spawn(async move {
+                    if run_responder_handshake(&conn, &identity, NodeId::zero())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let n = hs.fetch_add(1, Ordering::SeqCst) + 1;
+                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                        let reqs = reqs.clone();
+                        tokio::spawn(async move {
+                            let Ok(req) = read_ztlp_frame(&mut recv).await else {
+                                return;
+                            };
+                            reqs.lock().unwrap().push((n, req));
+                            if let Backend::Slow(d) = backend {
+                                tokio::time::sleep(d).await;
+                            }
+                            let body = format!("conn{n}");
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = write_ztlp_frame(&mut send, resp.as_bytes()).await;
+                            let _ = send.finish();
+                            while read_ztlp_frame(&mut recv).await.is_ok() {}
+                        });
+                    }
+                });
+            }
+        });
+        Gateway {
+            addr,
+            handshakes,
+            requests,
+            task,
+        }
+    }
+
+    /// A network path to `to`: datagrams are carried both ways while `up`,
+    /// silently dropped otherwise (what a device that left the network
+    /// looks like from both ends).
+    struct NetPath {
+        addr: SocketAddr,
+        up: Arc<AtomicBool>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for NetPath {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn path(to: SocketAddr) -> NetPath {
+        let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = front.local_addr().unwrap();
+        let up = Arc::new(AtomicBool::new(true));
+        let flag = up.clone();
+        let task = tokio::spawn(async move {
+            let mut backs: std::collections::HashMap<SocketAddr, Arc<UdpSocket>> =
+                std::collections::HashMap::new();
+            let mut buf = vec![0u8; 65535];
+            loop {
+                let Ok((n, src)) = front.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if !flag.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let back = match backs.get(&src) {
+                    Some(b) => b.clone(),
+                    None => {
+                        let b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                        backs.insert(src, b.clone());
+                        let (b2, front, flag) = (b.clone(), front.clone(), flag.clone());
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 65535];
+                            while let Ok(n) = b2.recv(&mut buf).await {
+                                if flag.load(Ordering::SeqCst) {
+                                    let _ = front.send_to(&buf[..n], src).await;
+                                }
+                            }
+                        });
+                        b
+                    }
+                };
+                let _ = back.send_to(&buf[..n], to).await;
+            }
+        });
+        NetPath { addr, up, task }
+    }
+
+    /// An address nothing answers on.
+    async fn dead_end() -> (UdpSocket, SocketAddr) {
+        let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a = s.local_addr().unwrap();
+        (s, a)
+    }
+
+    /// A name server (the unsigned protocol): every name has the SVC
+    /// addresses in `addresses` ("" = not found) and no KEY record.
+    struct NameServer {
+        addr: String,
+        addresses: Arc<std::sync::Mutex<String>>,
+        asked: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for NameServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl NameServer {
+        fn set(&self, addrs: &[SocketAddr]) {
+            *self.addresses.lock().unwrap() = join(addrs);
+        }
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    fn join(addrs: &[SocketAddr]) -> String {
+        addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    async fn name_server(addrs: &[SocketAddr]) -> NameServer {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap().to_string();
+        let addresses = Arc::new(std::sync::Mutex::new(join(addrs)));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (list, count) = (addresses.clone(), asked.clone());
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                let Ok((n, src)) = sock.recv_from(&mut buf).await else {
+                    continue;
+                };
+                if n < 4 || buf[0] != 0x01 {
+                    continue;
+                }
+                let name_len = u16::from_be_bytes([buf[1], buf[2]]) as usize;
+                if n < 3 + name_len + 1 {
+                    continue;
+                }
+                let name = buf[3..3 + name_len].to_vec();
+                let record_type = buf[3 + name_len];
+                let list = list.lock().unwrap().clone();
+                if record_type != 2 {
+                    let _ = sock.send_to(&[0x03], src).await;
+                    continue;
+                }
+                count.fetch_add(1, Ordering::SeqCst);
+                if list.is_empty() {
+                    let _ = sock.send_to(&[0x03], src).await;
+                    continue;
+                }
+                let mut cbor = Vec::new();
+                ciborium::ser::into_writer(
+                    &ciborium::value::Value::Map(vec![(
+                        ciborium::value::Value::Text("addresses".into()),
+                        ciborium::value::Value::Text(list),
+                    )]),
+                    &mut cbor,
+                )
+                .unwrap();
+                let mut reply = vec![0x02, 0x02];
+                reply.extend_from_slice(&(name.len() as u16).to_be_bytes());
+                reply.extend_from_slice(&name);
+                reply.extend_from_slice(&(cbor.len() as u32).to_be_bytes());
+                reply.extend_from_slice(&cbor);
+                let _ = sock.send_to(&reply, src).await;
+            }
+        });
+        NameServer {
+            addr,
+            addresses,
+            asked,
+            task,
+        }
+    }
+
+    /// One site as a listener knows it.
+    #[derive(Clone)]
+    struct Site {
+        name: String,
+        peer: Option<SocketAddr>,
+        ns: String,
+        relay: Option<String>,
+        deadline: Option<Duration>,
+        identity: NodeIdentity,
+    }
+
+    impl Site {
+        fn new(name: &str, peer: Option<SocketAddr>, ns: &str) -> Self {
+            // What resolving the name leaves behind for a listener's site.
+            if let Some(peer) = peer {
+                set_peer_candidates(name, &[peer]);
+            }
+            Self {
+                name: name.to_string(),
+                peer,
+                ns: ns.to_string(),
+                relay: None,
+                deadline: Some(Duration::from_secs(15)),
+                identity: NodeIdentity::generate().unwrap(),
+            }
+        }
+
+        async fn connect(&self) -> Result<LeasedTunnel, String> {
+            connect_tunnel(
+                &self.name,
+                80,
+                self.peer,
+                None,
+                &self.identity,
+                "127.0.0.1:0",
+                &self.ns,
+                self.relay.as_deref(),
+                self.deadline,
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+
+        /// A browser connection on port 80: the plain path
+        /// (`proxy_dial_then_bridge`). Returns what the client read until
+        /// the connection closed, and how long that took.
+        async fn get_http(&self, request: &str) -> (String, Duration) {
+            let site = self.clone();
+            self.exchange(request, move |sock| async move {
+                proxy_dial_then_bridge(
+                    sock,
+                    &site.name,
+                    80,
+                    site.peer,
+                    None,
+                    &site.identity,
+                    "127.0.0.1:0",
+                    &site.ns,
+                    site.relay.as_deref(),
+                    None,
+                    site.deadline,
+                    local_tls::TlsMode::Never,
+                    StallCloseStrategy::Deliver504,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            })
+            .await
+        }
+
+        /// A browser connection on port 443 after the local TLS handshake:
+        /// the gated path (`handle_tcp_connection_gated`, then
+        /// `bridge_tunnel`), with the agent's TLS already taken off.
+        async fn get_https(&self, request: &str) -> (String, Duration) {
+            let site = self.clone();
+            self.exchange(request, move |sock| async move {
+                let policy = AgentConfig::default().tunnel.vip_ports_policy();
+                handle_tcp_connection_gated(
+                    sock,
+                    &site.name,
+                    443,
+                    site.peer,
+                    None,
+                    &site.identity,
+                    "127.0.0.1:0",
+                    &site.ns,
+                    site.relay.as_deref(),
+                    true,
+                    &policy,
+                    site.deadline,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            })
+            .await
+        }
+
+        async fn exchange<F, Fut>(&self, request: &str, carry: F) -> (String, Duration)
+        where
+            F: FnOnce(TcpStream) -> Fut + Send + 'static,
+            Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (sock, _) = listener.accept().await.unwrap();
+                // Shown when a test fails (output is captured otherwise).
+                if let Err(e) = carry(sock).await {
+                    eprintln!("carrying the connection ended with: {e}");
+                }
+            });
+            let started = Instant::now();
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            c.write_all(request.as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(40), c.read_to_end(&mut out)).await;
+            let took = started.elapsed();
+            // Let the carrier report how it ended before it is dropped.
+            let mut server = server;
+            if tokio::time::timeout(Duration::from_millis(500), &mut server)
+                .await
+                .is_err()
+            {
+                server.abort();
+            }
+            (String::from_utf8_lossy(&out).into_owned(), took)
+        }
+    }
+
+    /// Wait (up to 5 s) for something another task is about to do.
+    async fn eventually(cond: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition not reached within 5 s");
+    }
+
+    fn get(name: &str, path: &str) -> String {
+        format!("GET {path} HTTP/1.1\r\nHost: {name}\r\nAccept: */*\r\n\r\n")
+    }
+
+    fn body(response: &str) -> &str {
+        response.rsplit("\r\n\r\n").next().unwrap_or("")
+    }
+
+    // ---- connect times: direct with a head start, relay next to it ----
+
+    #[tokio::test]
+    async fn shared_mode_connect_times_direct_alive_direct_dead_and_both_dead() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let direct = path(gw.addr).await;
+        let relay = path(gw.addr).await;
+        let (_d1, dead_direct) = dead_end().await;
+        let (_d2, dead_relay) = dead_end().await;
+        let ns = name_server(&[]).await;
+
+        // direct alive: taken, and well inside its head start
+        let name = "wiki.connect-times.example.ztlp";
+        let mut site = Site::new(name, Some(direct.addr), &ns.addr);
+        site.relay = Some(relay.addr.to_string());
+        let t = Instant::now();
+        let got = site.connect().await.unwrap();
+        let direct_alive = t.elapsed();
+        assert_eq!(got.tunnel.via, DialVia::Direct);
+        assert!(!got.reused);
+        assert!(direct_alive < DIRECT_ATTEMPT_TIMEOUT, "{direct_alive:?}");
+        drop(got);
+        drop_all_shared();
+        forget_peer_candidates(name);
+
+        // direct dead, relay alive: the relay starts after the head start,
+        // not after the direct candidate's 750 ms
+        let name = "mail.connect-times.example.ztlp";
+        let mut site = Site::new(name, Some(dead_direct), &ns.addr);
+        site.relay = Some(relay.addr.to_string());
+        let t = Instant::now();
+        let got = site.connect().await.unwrap();
+        let direct_dead = t.elapsed();
+        assert_eq!(got.tunnel.via, DialVia::Relay);
+        assert!(
+            direct_dead >= super::super::reconnect::RELAY_HEAD_START,
+            "{direct_dead:?}"
+        );
+        assert!(direct_dead < DIRECT_ATTEMPT_TIMEOUT, "{direct_dead:?}");
+        drop(got);
+        drop_all_shared();
+
+        // the same name again: the relay won last time, so it starts
+        // together with the direct candidate
+        assert!(relay_won_last(name));
+        let t = Instant::now();
+        let got = site.connect().await.unwrap();
+        let relay_again = t.elapsed();
+        assert_eq!(got.tunnel.via, DialVia::Relay);
+        assert!(
+            relay_again < direct_dead,
+            "{relay_again:?} vs {direct_dead:?}"
+        );
+        drop(got);
+        drop_all_shared();
+        forget_peer_candidates(name);
+        assert!(!relay_won_last(name));
+
+        // both dead: the request is held until its deadline, then fails
+        let name = "files.connect-times.example.ztlp";
+        let mut site = Site::new(name, Some(dead_direct), &ns.addr);
+        site.relay = Some(dead_relay.to_string());
+        site.deadline = Some(Duration::from_secs(2));
+        let t = Instant::now();
+        let err = site.connect().await.err().unwrap();
+        let both_dead = t.elapsed();
+        assert!(err.contains("dial attempt"), "{err}");
+        assert!(both_dead >= Duration::from_millis(1900), "{both_dead:?}");
+        assert!(both_dead < Duration::from_secs(4), "{both_dead:?}");
+        forget_peer_candidates(name);
+
+        eprintln!(
+            "connect times (loopback, shared mode): direct alive {direct_alive:?}; \
+             direct dead + relay alive {direct_dead:?} (same name again {relay_again:?}); \
+             both dead {both_dead:?} with a 2 s deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_shared_connections_nothing_new_happens() {
+        let _mode = Mode::desktop().await;
+        let gw = gateway(Backend::Answers).await;
+        let relay = path(gw.addr).await;
+        let (_d, dead_direct) = dead_end().await;
+        let ns = name_server(&[]).await;
+        let name = "wiki.desktop-unchanged.example.ztlp";
+        let mut site = Site::new(name, Some(dead_direct), &ns.addr);
+        site.relay = Some(relay.addr.to_string());
+
+        // the plan is walked in order: the dead direct candidate costs its
+        // full 750 ms before the relay is tried
+        let t = Instant::now();
+        let got = site.connect().await.unwrap();
+        let took = t.elapsed();
+        assert_eq!(got.tunnel.via, DialVia::Relay);
+        assert!(took >= DIRECT_ATTEMPT_TIMEOUT, "{took:?}");
+        // nothing is shared, leased, remembered or cached
+        assert!(!got.reused);
+        assert!(got.lease.is_none());
+        assert!(got.tunnel.shared.is_none());
+        assert!(!relay_won_last(name));
+        assert_eq!(shared_tunnel_count(), 0);
+        assert!(tunnel_conn_cache().take_where(|_| true).is_empty());
+        // every request dials its own connection
+        let (resp, _) = site.get_http(&get(name, "/")).await;
+        assert_eq!(body(&resp), "conn2", "{resp}");
+        let (resp, _) = site.get_https(&get(name, "/")).await;
+        assert_eq!(body(&resp), "conn3", "{resp}");
+        assert_eq!(gw.handshakes(), 3);
+        drop(got);
+
+        // a dial that fails is not retried: the client is closed at once
+        let unknown = "gone.desktop-unchanged.example.ztlp";
+        let mut site = Site::new(unknown, None, &ns.addr);
+        site.deadline = Some(Duration::from_secs(5));
+        let (resp, took) = site.get_http(&get(unknown, "/")).await;
+        assert_eq!(resp, "", "closed without an answer, as before");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert_eq!(ns.asked(), 1);
+
+        // and a network change is nobody's business
+        let runs = network_change_runs();
+        assert!(!notify_network_changed());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(network_change_runs(), runs);
+        forget_peer_candidates(name);
+        forget_peer_candidates(unknown);
+    }
+
+    // ---- a reused connection whose path died ----
+
+    /// One request on the shared connection, then its path goes silent and
+    /// a second path to the same gateway appears. The next request must
+    /// arrive, once, over a fresh connection, after about the liveness
+    /// window: far from QUIC's 60 s idle timeout and the first-byte
+    /// deadline.
+    async fn dead_shared_connection_is_replaced(https: bool, name: &str) {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let wifi = path(gw.addr).await;
+        let cellular = path(gw.addr).await;
+        let ns = name_server(&[]).await;
+        let site = Site::new(name, Some(wifi.addr), &ns.addr);
+        let fetch = |p: &'static str| {
+            let site = site.clone();
+            let req = get(name, p);
+            async move {
+                if https {
+                    site.get_https(&req).await
+                } else {
+                    site.get_http(&req).await
+                }
+            }
+        };
+
+        let (resp, _) = fetch("/first").await;
+        assert_eq!(body(&resp), "conn1", "{resp}");
+        let (resp, warm) = fetch("/second").await;
+        assert_eq!(body(&resp), "conn1", "the connection is shared: {resp}");
+        assert_eq!(gw.handshakes(), 1);
+
+        // the device leaves the network; nothing tells the agent
+        wifi.up.store(false, Ordering::SeqCst);
+        set_peer_candidates(name, &[cellular.addr]);
+        assert_eq!(shared_tunnel_count(), 1, "QUIC still believes in it");
+
+        let (resp, took) = fetch("/after-the-switch").await;
+        assert_eq!(body(&resp), "conn2", "{resp}");
+        let window = super::super::reconnect::LIVENESS_WINDOW;
+        assert!(took >= window, "{took:?}");
+        assert!(took < window + Duration::from_secs(3), "{took:?}");
+        let after: Vec<_> = gw
+            .requests()
+            .into_iter()
+            .filter(|(_, r)| r.contains("/after-the-switch"))
+            .collect();
+        assert_eq!(after.len(), 1, "carried exactly once: {after:?}");
+        assert_eq!(after[0].0, 2);
+        if https {
+            assert!(
+                after[0]
+                    .1
+                    .to_ascii_lowercase()
+                    .contains("x-forwarded-proto: https"),
+                "the replayed head is the stamped one: {}",
+                after[0].1
+            );
+        }
+        // the fresh connection is what later requests share
+        let (resp, again) = fetch("/later").await;
+        assert_eq!(body(&resp), "conn2", "{resp}");
+        assert!(again < Duration::from_secs(1), "{again:?}");
+        assert_eq!(gw.handshakes(), 2);
+        eprintln!(
+            "dead shared connection ({}): warm request {warm:?}, request after the path died \
+             {took:?}, next request {again:?}",
+            if https {
+                "port 443 path"
+            } else {
+                "port 80 path"
+            }
+        );
+        forget_peer_candidates(name);
+    }
+
+    #[tokio::test]
+    async fn a_dead_shared_connection_is_replaced_within_the_liveness_window_on_port_80() {
+        dead_shared_connection_is_replaced(false, "wiki.dead-path-80.example.ztlp").await;
+    }
+
+    #[tokio::test]
+    async fn a_dead_shared_connection_is_replaced_within_the_liveness_window_on_port_443() {
+        dead_shared_connection_is_replaced(true, "wiki.dead-path-443.example.ztlp").await;
+    }
+
+    #[tokio::test]
+    async fn many_requests_on_a_dead_shared_connection_share_one_new_dial() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let wifi = path(gw.addr).await;
+        let cellular = path(gw.addr).await;
+        let ns = name_server(&[]).await;
+        let name = "wiki.dead-path-many.example.ztlp";
+        let site = Site::new(name, Some(wifi.addr), &ns.addr);
+        let (resp, _) = site.get_https(&get(name, "/first")).await;
+        assert_eq!(body(&resp), "conn1", "{resp}");
+        wifi.up.store(false, Ordering::SeqCst);
+        set_peer_candidates(name, &[cellular.addr]);
+
+        // what the phone log showed: fourteen connections on the dead one
+        let mut tasks = Vec::new();
+        for i in 0..14 {
+            let site = site.clone();
+            tasks.push(tokio::spawn(async move {
+                site.get_https(&get(&site.name, &format!("/asset{i}")))
+                    .await
+            }));
+        }
+        for t in tasks {
+            let (resp, took) = t.await.unwrap();
+            assert_eq!(body(&resp), "conn2", "{resp}");
+            assert!(took < Duration::from_secs(7), "{took:?}");
+        }
+        assert_eq!(gw.handshakes(), 2, "one new connection for all fourteen");
+        let assets = gw
+            .requests()
+            .into_iter()
+            .filter(|(_, r)| r.contains("/asset"))
+            .count();
+        assert_eq!(assets, 14, "each carried exactly once");
+        forget_peer_candidates(name);
+    }
+
+    #[tokio::test]
+    async fn a_gateway_that_is_alive_with_a_slow_backend_is_not_dialed_again() {
+        let _mode = Mode::shared().await;
+        // longer than the liveness window
+        let slow = super::super::reconnect::LIVENESS_WINDOW + Duration::from_millis(500);
+        let gw = gateway(Backend::Slow(slow)).await;
+        let net = path(gw.addr).await;
+        let ns = name_server(&[]).await;
+        let name = "report.slow-backend.example.ztlp";
+        let site = Site::new(name, Some(net.addr), &ns.addr);
+
+        // ports 443 and 80 each have their own shared connection
+        for (https, conn) in [(true, "conn1"), (false, "conn2")] {
+            let first = get(name, "/first");
+            let req = "POST /pay HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok";
+            for req in [first.as_str(), req] {
+                let (resp, took) = if https {
+                    site.get_https(req).await
+                } else {
+                    site.get_http(req).await
+                };
+                assert_eq!(body(&resp), conn, "{resp}");
+                assert!(took >= slow, "{took:?}");
+            }
+        }
+        assert_eq!(gw.handshakes(), 2, "never dialed again");
+        let posts = gw
+            .requests()
+            .into_iter()
+            .filter(|(_, r)| r.starts_with("POST /pay"))
+            .count();
+        assert_eq!(posts, 2, "each POST reached the backend exactly once");
+        forget_peer_candidates(name);
+    }
+
+    // ---- the dial itself fails for a while ----
+
+    #[tokio::test]
+    async fn a_failing_dial_is_retried_and_waiting_requests_share_it() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let net = path(gw.addr).await;
+        // no route yet: the name server has nothing for the name
+        let ns = name_server(&[]).await;
+        let name = "wiki.dial-retry.example.ztlp";
+        let site = Site::new(name, None, &ns.addr);
+
+        let mut tasks = Vec::new();
+        for i in 0..5 {
+            let site = site.clone();
+            tasks.push(tokio::spawn(async move {
+                site.get_http(&get(&site.name, &format!("/r{i}"))).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let asked_while_down = ns.asked();
+        ns.set(&[net.addr]);
+        for t in tasks {
+            let (resp, took) = t.await.unwrap();
+            assert_eq!(
+                body(&resp),
+                "conn1",
+                "the client was held, then served: {resp}"
+            );
+            assert!(took >= Duration::from_millis(1200), "{took:?}");
+            assert!(took < Duration::from_secs(5), "{took:?}");
+        }
+        assert_eq!(gw.handshakes(), 1);
+        // 250 ms, 500 ms, 1 s apart: one retry loop, not five
+        assert!(
+            (2..=4).contains(&asked_while_down),
+            "{asked_while_down} lookups in 1.2 s"
+        );
+        forget_peer_candidates(name);
+    }
+
+    #[tokio::test]
+    async fn a_dial_that_never_works_ends_at_the_deadline_with_the_usual_504() {
+        let _mode = Mode::shared().await;
+        let ns = name_server(&[]).await;
+        let name = "wiki.dial-never.example.ztlp";
+        let mut site = Site::new(name, None, &ns.addr);
+        site.deadline = Some(Duration::from_millis(1500));
+        let (resp, took) = site.get_http(&get(name, "/")).await;
+        assert!(resp.starts_with("HTTP/1.1 504 "), "{resp:?}");
+        assert!(resp.contains(&format!("<code>{name}</code>")), "{resp}");
+        assert!(took >= Duration::from_millis(1500), "{took:?}");
+        assert!(took < Duration::from_secs(3), "{took:?}");
+        assert!(ns.asked() >= 3, "{} lookups", ns.asked());
+        forget_peer_candidates(name);
+    }
+
+    // ---- the network changed ----
+
+    #[tokio::test]
+    async fn a_network_change_drops_shared_connections_and_dials_them_again_at_once() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let wifi = path(gw.addr).await;
+        let cellular = path(gw.addr).await;
+        let ns = name_server(&[wifi.addr]).await;
+        let name = "wiki.network-change.example.ztlp";
+        let site = Site::new(name, Some(wifi.addr), &ns.addr);
+        let keeper = tokio::spawn(keep_shared_tunnels(None));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (resp, _) = site.get_http(&get(name, "/first")).await;
+        assert_eq!(body(&resp), "conn1", "{resp}");
+        let old = tunnel_conn_cache()
+            .get_or_dial(&tunnel_key(name, 80), tunnel_is_open, || async {
+                Err::<ConnectedTunnel, String>("expected a cached connection".into())
+            })
+            .await
+            .unwrap()
+            .0;
+        assert!(cached_route_is_current(name));
+        note_dial_winner(name, DialVia::Relay);
+
+        // Wi-Fi goes, cellular comes; the extension reports it in a burst
+        wifi.up.store(false, Ordering::SeqCst);
+        ns.set(&[cellular.addr]);
+        let lookups = ns.asked();
+        let runs = network_change_runs();
+        let changed = Instant::now();
+        for _ in 0..20 {
+            assert!(notify_network_changed());
+        }
+
+        // the old connection is closed, not left to its idle timeout, and
+        // the site is dialed again without waiting for a request
+        let mut ready = None;
+        for _ in 0..200 {
+            if gw.handshakes() >= 2 && shared_tunnel_count() == 1 {
+                ready = Some(changed.elapsed());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let ready = ready.expect("the site was not dialed again in the background");
+        assert!(old.conn.inner.close_reason().is_some());
+        assert!(!relay_won_last(name), "the path memory is reset");
+        assert!(ns.asked() > lookups, "the name was resolved again");
+        assert!(cached_route_is_current(name));
+
+        // the burst was one event (at most the run after the window too)
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let acted = network_change_runs() - runs;
+        assert!((1..=2).contains(&acted), "{acted} runs for 20 calls");
+
+        // the next request rides the connection that is already there,
+        // although the listener still holds the old address for the site
+        let (resp, took) = site.get_http(&get(name, "/after")).await;
+        let n = gw.handshakes();
+        assert_eq!(body(&resp), format!("conn{n}"), "{resp}");
+        assert!(n <= 3, "{n} connections (2, or 3 when the burst ran twice)");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        eprintln!(
+            "network change: site dialed again in the background after {ready:?}; \
+             the next request took {took:?}"
+        );
+
+        // with the task gone the call is a no-op again
+        keeper.abort();
+        let _ = keeper.await;
+        let runs = network_change_runs();
+        assert!(!notify_network_changed());
+        assert_eq!(network_change_runs(), runs);
+        forget_peer_candidates(name);
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_request_in_flight_is_closed_not_replayed_by_a_network_change() {
+        // The connection is alive but the answer takes 2 s; 300 ms in, the
+        // network "changes" and every shared connection is closed. The
+        // gateway had acknowledged the request, so it is NOT sent again:
+        // the client connection is closed, as an in-flight transfer is.
+        // A request that arrives right after is carried normally.
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Slow(Duration::from_secs(2))).await;
+        let net = path(gw.addr).await;
+        let ns = name_server(&[net.addr]).await;
+        let name = "wiki.change-in-flight.example.ztlp";
+        let site = Site::new(name, Some(net.addr), &ns.addr);
+        let keeper = tokio::spawn(keep_shared_tunnels(None));
+        let (resp, _) = site.get_https(&get(name, "/first")).await;
+        assert_eq!(body(&resp), "conn1", "{resp}");
+
+        let in_flight = {
+            let site = site.clone();
+            tokio::spawn(async move { site.get_https(&get(&site.name, "/in-flight")).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(notify_network_changed());
+        let (resp, took) = in_flight.await.unwrap();
+        assert_eq!(resp, "", "closed, not answered twice");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        let seen = gw
+            .requests()
+            .into_iter()
+            .filter(|(_, r)| r.contains("/in-flight"))
+            .count();
+        assert_eq!(seen, 1, "an acknowledged request is never replayed");
+
+        let (resp, _) = site.get_https(&get(name, "/next")).await;
+        assert!(body(&resp).starts_with("conn"), "{resp}");
+        assert_ne!(body(&resp), "conn1");
+        keeper.abort();
+        forget_peer_candidates(name);
+    }
+
+    #[tokio::test]
+    async fn at_most_eight_sites_are_dialed_again_after_a_network_change() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let net = path(gw.addr).await;
+        let ns = name_server(&[net.addr]).await;
+        let keeper = tokio::spawn(keep_shared_tunnels(None));
+        let names: Vec<String> = (0..10)
+            .map(|i| format!("site{i}.prewarm-cap.example.ztlp"))
+            .collect();
+        for name in &names {
+            let site = Site::new(name, Some(net.addr), &ns.addr);
+            drop(site.connect().await.unwrap());
+        }
+        // (the gateway counts a handshake a moment after the client has it)
+        eventually(|| gw.handshakes() == 10).await;
+        assert_eq!(shared_tunnel_count(), 10);
+
+        assert!(notify_network_changed());
+        let cap = super::super::reconnect::PREWARM_MAX_SITES;
+        eventually(|| gw.handshakes() == 10 + cap).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert_eq!(shared_tunnel_count(), cap);
+        assert_eq!(gw.handshakes(), 10 + cap, "and no more than that");
+        keeper.abort();
+        for name in &names {
+            forget_peer_candidates(name);
+        }
+    }
+
+    // ---- idle close (mobile profile) ----
+
+    #[tokio::test]
+    async fn an_unused_shared_connection_is_closed_and_the_next_request_dials() {
+        let _mode = Mode::shared().await;
+        let gw = gateway(Backend::Answers).await;
+        let net = path(gw.addr).await;
+        let ns = name_server(&[]).await;
+        let name = "wiki.idle-close.example.ztlp";
+        let site = Site::new(name, Some(net.addr), &ns.addr);
+
+        let in_use = site.connect().await.unwrap();
+        assert!(in_use.lease.is_some());
+        // in use: never closed, however short the idle time asked for
+        assert_eq!(reap_idle_shared_tunnels(Duration::ZERO), 0);
+        assert_eq!(shared_tunnel_count(), 1);
+        // a second user keeps it alive after the first left
+        let second = site.connect().await.unwrap();
+        assert!(second.reused);
+        drop(in_use);
+        assert_eq!(reap_idle_shared_tunnels(Duration::ZERO), 0);
+        let conn = second.tunnel.conn.clone();
+        drop(second);
+
+        // unused, but not for long enough
+        assert_eq!(reap_idle_shared_tunnels(Duration::from_secs(120)), 0);
+        assert_eq!(shared_tunnel_count(), 1);
+        // unused for long enough
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(reap_idle_shared_tunnels(Duration::from_millis(50)), 1);
+        assert_eq!(shared_tunnel_count(), 0);
+        assert!(
+            conn.inner.close_reason().is_some(),
+            "closed, keep-alive stops"
+        );
+
+        let (resp, took) = site.get_http(&get(name, "/")).await;
+        assert_eq!(body(&resp), "conn2", "{resp}");
+        eprintln!("idle close: the request after it dialed again in {took:?}");
+        forget_peer_candidates(name);
+    }
+
+    #[test]
+    fn the_mobile_idle_close_is_longer_than_a_keep_alive_and_bounded() {
+        let idle = super::super::reconnect::MOBILE_IDLE_CLOSE;
+        let cfg = crate::quic_transport::QuicEndpointConfig::default();
+        // the transport values themselves are the desktop ones, untouched
+        assert_eq!(cfg.keep_alive_interval_ms, Some(15_000));
+        assert_eq!(cfg.max_idle_timeout_ms, Some(60_000));
+        assert!(idle >= Duration::from_secs(60));
+        assert!(idle <= Duration::from_secs(300));
+    }
+
+    #[test]
+    fn permanent_dial_failures_are_told_apart_from_a_missing_network() {
+        for permanent in [
+            "invalid relay address 'x': bad",
+            "no dialable endpoint for 'a.example.ztlp'",
+            "[ztlp-ns-cert-mismatch] gateway presented ...",
+            "[ztlp-ns-unverified] no verified name-server record",
+            "QUIC certificate fingerprint for 'localhost' does not match the pinned value",
+        ] {
+            assert!(dial_error_is_permanent(permanent), "{permanent}");
+        }
+        for transient in [
+            "Network is unreachable (os error 101)",
+            "all 2 dial attempts failed for 'a.example.ztlp': timed out",
+            "no SVC address found for 'a.example.ztlp'",
+            "dial attempt did not finish within 5s",
+        ] {
+            assert!(!dial_error_is_permanent(transient), "{transient}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod single_address_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UdpSocket;
+
+    /// A name server that accepts and never answers (not expected to be
+    /// asked at all here: the sites are already known).
+    async fn blackhole_ns() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        addr.to_string()
+    }
+
+    /// A "gateway" on loopback that receives the agent's dial and never
+    /// answers it.
+    async fn silent_gateway() -> UdpSocket {
+        UdpSocket::bind("127.0.0.1:0").await.unwrap()
+    }
+
+    /// Did a datagram (the QUIC dial) arrive at this gateway?
+    fn was_dialed(gw: &UdpSocket) -> bool {
+        let mut buf = [0u8; 2048];
+        gw.try_recv_from(&mut buf).is_ok()
+    }
+
+    /// The carrier the daemon builds, with `sites` already resolved (what
+    /// a DNS query for each name leaves behind).
+    fn carrier(ns_server: String, sites: &[(&str, SocketAddr)]) -> SingleAddressCarrier {
+        let mut single = super::super::name_route::SingleAddress::new(Ipv4Addr::LOCALHOST);
+        for (name, gateway) in sites {
+            let r = proxy::NsResolution {
+                addr: *gateway,
+                node_id: None,
+                ztlp_name: name.to_string(),
+                candidates: vec![*gateway],
+                cert: Default::default(),
+            };
+            single.record(name, &r, Instant::now());
+        }
+        let dns_state = Arc::new(Mutex::new(DnsResolverState {
+            vip_pool: VipPool::new("127.100.0.0/24").unwrap(),
+            domain_mapper: DomainMapper::empty(),
+            ns_server: ns_server.clone(),
+            upstream_dns: "192.0.2.53:53".to_string(),
+            vip_state_path: None,
+            health_vip: Ipv4Addr::LOCALHOST,
+            single: Some(single),
+        }));
+        SingleAddressCarrier {
+            addr: Ipv4Addr::LOCALHOST,
+            dns_state,
+            identity: NodeIdentity::generate().unwrap(),
+            bind: "127.0.0.1:0".to_string(),
+            ns_server,
+            tls: None,
+            relay: None,
+            first_byte_timeout: "400ms".to_string(),
+            policy: AgentConfig::default().tunnel.vip_ports_policy(),
+            peer_policy: ClientPeerPolicy::LoopbackOnly,
+        }
+    }
+
+    async fn exchange(addr: SocketAddr, request: &str) -> String {
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(request.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(10), c.read_to_end(&mut out)).await;
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[tokio::test]
+    async fn http_by_host_is_carried_by_the_vip_path_to_the_named_sites_gateway() {
+        // (not while another test has shared connections and a network
+        // change in progress: this one counts on the sites' cached routes)
+        let _mode = SHARED_MODE_TEST_LOCK.lock().await;
+        let ns = blackhole_ns().await;
+        let wiki_gw = silent_gateway().await;
+        let mail_gw = silent_gateway().await;
+        let wiki = "wiki.single-address-test.example.ztlp";
+        let mail = "mail.single-address-test.example.ztlp";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = carrier(
+            ns,
+            &[
+                (wiki, wiki_gw.local_addr().unwrap()),
+                (mail, mail_gw.local_addr().unwrap()),
+            ],
+        )
+        .spawn(listener, 80);
+
+        // Host in upper case with a port: the wiki site, and only it
+        let got = exchange(
+            addr,
+            &format!("GET / HTTP/1.1\r\nHost: {}:80\r\n\r\n", wiki.to_uppercase()),
+        )
+        .await;
+        assert!(got.starts_with("HTTP/1.1 504 "), "{got:?}");
+        assert!(got.contains(&format!("<code>{wiki}</code>")), "{got}");
+        assert!(was_dialed(&wiki_gw), "the wiki gateway must be dialed");
+        assert!(!was_dialed(&mail_gw), "the mail gateway must not be");
+        while was_dialed(&wiki_gw) {}
+
+        let got = exchange(addr, &format!("GET / HTTP/1.1\r\nHost: {mail}\r\n\r\n")).await;
+        assert!(got.starts_with("HTTP/1.1 504 "), "{got:?}");
+        assert!(got.contains(&format!("<code>{mail}</code>")), "{got}");
+        assert!(was_dialed(&mail_gw), "the mail gateway must be dialed");
+        while was_dialed(&mail_gw) {}
+
+        // not a ZTLP name: a short 4xx from the listener and no dial
+        let got = exchange(addr, "GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n").await;
+        assert!(got.starts_with("HTTP/1.1 421 "), "{got:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!was_dialed(&wiki_gw) && !was_dialed(&mail_gw));
+        task.abort();
+        forget_peer_candidates(wiki);
+        forget_peer_candidates(mail);
+    }
+
+    #[tokio::test]
+    async fn a_locked_session_refuses_new_connections_like_a_vip_listener() {
+        let ns = blackhole_ns().await;
+        let gw = silent_gateway().await;
+        let name = "wiki.single-address-lock.example.ztlp";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = carrier(ns, &[(name, gw.local_addr().unwrap())]).spawn(listener, 80);
+
+        super::super::peruser::set_frozen(true);
+        let got = exchange(addr, &format!("GET / HTTP/1.1\r\nHost: {name}\r\n\r\n")).await;
+        super::super::peruser::set_frozen(false);
+        assert_eq!(got, "", "closed without an answer, as on a VIP");
+        assert!(!was_dialed(&gw));
+        task.abort();
+        forget_peer_candidates(name);
+    }
+}
+
 #[cfg(test)]
 mod splash_wiring_tests {
     //! The real `dial_tunnel` against a black-hole NS (it hangs), driven

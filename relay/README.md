@@ -172,7 +172,7 @@ config :ztlp_relay,
 Gateway dynamic registration and client routing are HMAC-SHA256 signed.
 The relay supports a **per-zone secret map** so multiple tenants can
 share one relay process while remaining cryptographically isolated. The
-full design lives in [`../docs/per_zone_hmac_design.md`](../docs/per_zone_hmac_design.md).
+full design lives in [`../docs/per_zone_hmac_design.md`](../docs/architecture/per-zone-hmac.md).
 
 **Operator quick reference:**
 

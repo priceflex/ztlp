@@ -21,9 +21,9 @@ names, emails or phone numbers. Access to the panel requires a verified ZTLP tun
 **Tech stack:** Ruby 3.2 / Rails 7.1.6 / MariaDB 11.4 / Propshaft / minitest + mocha / Docker.
 Removed: tailwindcss-rails, importmap, turbo-rails, stimulus-rails, any external `<script>`/`<link>`.
 
-**Branch / worktree:** `plan/admin-panel` checked out at `/home/trs/ztlp-admin` (NOT /tmp — /tmp is
-pruned). Always `export HOME=/home/trs` before bundler/git in a Hermes profile shell.
-Existing spec: `docs/ADMIN-PANEL-SPEC.md` (v1.1). This file is an addendum; where they conflict,
+**Branch / worktree:** `plan/admin-panel` checked out at `~/ztlp-admin` (NOT /tmp — /tmp is
+pruned). Always `export HOME=~` before bundler/git in a Hermes profile shell.
+Existing spec: `docs/admin-panel/specification.md` (v1.1). This file is an addendum; where they conflict,
 THIS file wins (decisions below supersede spec §4.2 browser-login, §5 users/devices/policies shape,
 §8.2 policy UI, and §10.1 Gemfile).
 
@@ -188,7 +188,7 @@ data-act="test-access"      POST /policies/test (JSON, X-CSRF-Token from meta) �
 ```
 Rules: no `innerHTML` with server data except the drawer fragment (server-rendered, escaped by
 ERB); search results built with `textContent`. CSRF token read from `<meta name="csrf-token">`.
-Lint: `node --check directory.js` in CI (node is at `/home/trs/.local/bin/node`).
+Lint: `node --check directory.js` in CI (node is at `~/.local/bin/node`).
 
 ---
 
@@ -210,7 +210,7 @@ A test pins that (`records_test.rb: "user record carries no PII"`).
 
 ## 4. Slice queue (one per tick, in order; each ends with green tests + a commit)
 
-Every slice: `cd /home/trs/ztlp-admin/admin && export HOME=/home/trs`, start
+Every slice: `cd ~/ztlp-admin/admin && export HOME=~`, start
 `ztlp-admin-dev-db`, `SKIP_CLAIM_BOOT=1 bin/rails test`, `bundle exec rubocop -A`,
 `bundle exec brakeman -q --no-pager`, `node --check app/assets/javascripts/directory.js`
 (from Slice 2 on), then `git add <explicit paths>` and `git commit`. Never `git add -A`.
@@ -472,7 +472,7 @@ Every slice: `cd /home/trs/ztlp-admin/admin && export HOME=/home/trs`, start
   `docker exec ztlp-admin-web /rails/bin/docker-entrypoint ./bin/rails zone:import_authority[/data/identity.json]`
   **only if the operator has placed the file there** — otherwise leave the checklist warning and
   report BLOCKED-on-operator.
-- Live verify from the AI computer (real client path, per skill): `ssh trs@10.170.3.207
+- Live verify from the AI computer (real client path, per skill): `ssh trs@10.0.20.207
   'curl.exe -s -m 25 -o NUL -w "HTTP %{http_code}" http://admin.trs.ztlp/up'` → 200; then the
   operator opens `http://admin.trs.ztlp/` in Chrome: lands on Overview signed in via ZTLP, checklist
   visible, Users page lists `steve`. Read the newest `auth.login_ztlp` audit row and record the
@@ -524,7 +524,7 @@ All true, each verified by a command or a real click and recorded in STATUS with
 5. Update STATUS (DONE / PENDING / BLOCKED / UNCERTAIN) with evidence lines. Mark `.build_state`
    `done <sha>`.
 6. Never: push tags, recreate the prod gateway container, print or commit secrets, use `hosts:
-   all`, add a CDN/npm dependency, touch `/home/trs/ztlp` (main worktree) or other worktrees.
+   all`, add a CDN/npm dependency, touch `~/ztlp` (main worktree) or other worktrees.
 7. If a slice needs the operator (identity.json, a click-through, a real-client check), do the
    rest of the slice, mark BLOCKED-on-operator with the exact one-line ask, and continue to the
    next slice that does not depend on it.
@@ -826,7 +826,7 @@ All true, each verified by a command or a real click and recorded in STATUS with
   - `http_get` gains a `follow:` keyword (default true) so callers can opt out of redirect-following.
   - `smoke-directory.sh` header updated: fresh-panel requirement + LOGIN round-trip ownership.
   - `bash scripts/ci-admin.sh` -> `== all gates passed` (node 29/29, rubocop clean, brakeman EOL-only). `ruby -c` + `bash -n` on both edited files: Syntax OK.
-  - smoke-directory run against the CURRENT (stale) admintest DB: PASS /up -> smoke-claim-login 422 (expected; the DB is already claimed; the fix requires a clean fresh DB). The stale DB (Admin.count=2) cannot be cleared from a cron tick (docker container/volume lifecycle commands are blocked by the cron dangerous-command guard). BLOCKED-on-operator: reset the admintest compose stack to a fresh DB, then re-run `bash scripts/smoke-directory.sh` in /home/trs/ztlp-admin/admin.
+  - smoke-directory run against the CURRENT (stale) admintest DB: PASS /up -> smoke-claim-login 422 (expected; the DB is already claimed; the fix requires a clean fresh DB). The stale DB (Admin.count=2) cannot be cleared from a cron tick (docker container/volume lifecycle commands are blocked by the cron dangerous-command guard). BLOCKED-on-operator: reset the admintest compose stack to a fresh DB, then re-run `bash scripts/smoke-directory.sh` in ~/ztlp-admin/admin.
   PENDING: Slice 12 local smoke (fresh-DB run) — BLOCKED on operator fresh-DB reset. Prod deploy remains BLOCKED-on-operator per the 12:40Z reminders.
   BLOCKED: admintest stale DB (cron cannot reset the compose stack). UNCERTAIN: none.
   Next: operator resets the admintest stack; next tick re-runs `smoke-directory.sh` on the fresh DB.
@@ -2363,6 +2363,6 @@ All true, each verified by a command or a real click and recorded in STATUS with
     only (local, throwaway). Never copy claim codes into this file.
   - Next: Slice 1 (strip frontend stack, directory shell, CSS port).
 
-- 2026-10-21 — plan written. Nothing started. Worktree `/home/trs/ztlp-admin` at `329674d4`.
+- 2026-10-21 — plan written. Nothing started. Worktree `~/ztlp-admin` at `329674d4`.
   Untracked: `docs/admin-panel/BUILD_LOOP.md`, `docs/admin-panel/ui-mock-2026-10-20.html`.
   Next: Slice 0.

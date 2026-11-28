@@ -6,7 +6,7 @@
 > headers — including this API's signing headers — before they
 > reach Rails. New Z2LS↔ZTLP integrations should use the gateway-auth
 > contract documented in
-> [`z2ls_gateway_auth_runbook.md`](./z2ls_gateway_auth_runbook.md)
+> [`z2ls_gateway_auth_runbook.md`](z2ls_gateway_auth_runbook.md)
 > (`POST /api/admin/enrollment_tokens`). That path is no-HMAC,
 > no-CSRF, and authenticated by the ZTLP device identity itself.
 >
@@ -297,5 +297,5 @@ implemented.** See `~/hermes_session_handoff.md` § BS-PR-3.
   `test/models/api_client_test.rb`,
   `test/controllers/api/v1/health_controller_test.rb`
 - Per-zone HMAC design (covers the secret store both Bootstrap and
-  the gateway/relay read from): `docs/per_zone_hmac_design.md` in
+  the gateway/relay read from): `docs/architecture/per-zone-hmac.md` in
   the ZTLP repo

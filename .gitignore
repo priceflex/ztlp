@@ -62,3 +62,11 @@ tenants/*/root_key.json
 
 # Wayfinder decision maps (internal planning; not for GitHub by default)
 /wayfinder/
+
+# Build output from cross-compiling the desktop app
+/desktop/target-cross*/
+
+# Local test and capture logs
+/captures/
+/ns/*.log
+/fullstack/last-run.log

@@ -51,6 +51,9 @@ impl From<std::io::Error> for CacheError {
 
 /// Default cache directory: `$HOME/.ztlp/ns_cache` (same base as quic_pins).
 pub fn default_dir() -> PathBuf {
+    if let Some(dir) = crate::state_home::override_dir() {
+        return dir.join(".ztlp").join("ns_cache");
+    }
     #[cfg(feature = "tokio-runtime")]
     let home = dirs::home_dir();
     #[cfg(not(feature = "tokio-runtime"))]

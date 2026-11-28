@@ -56,6 +56,12 @@ pub mod h10_defaults;
 pub mod handshake;
 pub mod http_injector;
 pub mod identity;
+/// C interface for the iOS native agent (`include/ztlp_ios.h`): the desktop
+/// agent hosted inside the iOS app and Network Extension. Compiled on every
+/// target that has the agent, so it is unit-tested on Linux.
+#[cfg(all(feature = "tokio-runtime", feature = "quic-transport"))]
+#[allow(unsafe_code)]
+pub mod ios_agent;
 #[cfg(any(target_os = "ios", feature = "ios-sync"))]
 pub mod ios_tunnel_engine;
 /// v0.32 multi-candidate discovery (M1): enumerate the gateway's local
@@ -85,6 +91,7 @@ pub mod security;
 pub mod session;
 #[cfg(feature = "ios-sync")]
 pub mod session_health;
+pub mod state_home;
 pub mod stats;
 pub mod svc_candidates;
 pub mod updater;

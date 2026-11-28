@@ -129,6 +129,44 @@ pub struct DnsConfig {
 
     /// Map custom domains to ZTLP zones.
     pub domain_map: HashMap<String, String>,
+
+    /// Also answer DNS over TCP on the resolver's address and port
+    /// (default: false, UDP only as before). Set by the iOS agent, where
+    /// the OS resolver is pointed at the agent's tunnel address and may
+    /// retry over TCP.
+    pub tcp: bool,
+
+    /// Single-address (name-routed) mode. Unset (the default): every site
+    /// gets its own virtual IP from `vip_range`, as always. Set to an IPv4
+    /// address (iOS: "127.0.0.1"): every site name resolves to this one
+    /// address, no VIP is allocated, and the agent listens on it on TCP
+    /// 443 and 80 only, picking the site from the TLS server name (443)
+    /// or the HTTP `Host` header (80). For hosts that cannot have one
+    /// local address per site. Web only: other ports (SSH, RDP, ...)
+    /// cannot be told apart by name and are not served in this mode.
+    pub single_address: Option<String>,
+
+    /// Listen port for HTTPS in single-address mode (default 443). The
+    /// connection is carried to the site's port 443 whatever this is;
+    /// change it only when something forwards 443 to it, or in tests.
+    pub single_address_https_port: u16,
+
+    /// Listen port for HTTP in single-address mode (default 80), carried
+    /// to the site's port 80.
+    pub single_address_http_port: u16,
+}
+
+impl DnsConfig {
+    /// The `[dns] single_address` address, `None` when the mode is off
+    /// (key unset or empty). An unparseable value is an error naming it.
+    pub fn single_address_ip(&self) -> Result<Option<std::net::Ipv4Addr>, String> {
+        match self.single_address.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(s) => s.parse().map(Some).map_err(|e| {
+                format!("invalid [dns] single_address '{s}' (expected an IPv4 address): {e}")
+            }),
+        }
+    }
 }
 
 /// Namespace server configuration.
@@ -275,6 +313,49 @@ pub struct TunnelConfig {
     /// ports).
     #[serde(default, deserialize_with = "deserialize_vip_ports")]
     pub vip_ports: Vec<VipPortConfig>,
+
+    /// Transport memory profile for the tunnels this agent dials.
+    ///
+    /// * `"desktop"` (default): 4 MiB stream / 16 MiB connection receive
+    ///   windows, quinn's default send window, one QUIC connection per
+    ///   client connection. Today's behaviour.
+    /// * `"mobile"`: 256 KiB stream / 8 MiB connection receive windows,
+    ///   256 KiB send window, and one QUIC connection per (service, port)
+    ///   shared by all client connections. Required inside the iOS Network
+    ///   Extension (50 MiB process limit).
+    pub profile: TunnelProfile,
+
+    /// Share one QUIC connection per (service, port) between client
+    /// connections (a new stream per client connection) instead of dialing
+    /// a new connection for each. Unset = the profile's choice (`mobile`:
+    /// on, `desktop`: off).
+    pub reuse_connections: Option<bool>,
+}
+
+/// `[tunnel] profile` — see [`TunnelConfig::profile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelProfile {
+    #[default]
+    Desktop,
+    Mobile,
+}
+
+impl TunnelConfig {
+    /// The QUIC flow-control windows this profile dials with.
+    pub fn transport_windows(&self) -> crate::quic_transport::TransportWindows {
+        match self.profile {
+            TunnelProfile::Desktop => crate::quic_transport::TransportWindows::DESKTOP,
+            TunnelProfile::Mobile => crate::quic_transport::TransportWindows::MOBILE,
+        }
+    }
+
+    /// Whether client connections share one QUIC connection per (service,
+    /// port): an explicit `reuse_connections` wins, else the profile decides.
+    pub fn reuse_connections_enabled(&self) -> bool {
+        self.reuse_connections
+            .unwrap_or(self.profile == TunnelProfile::Mobile)
+    }
 }
 
 /// Maximum number of `[tunnel] vip_ports` entries. Every VIP the pool hands
@@ -690,6 +771,10 @@ impl Default for DnsConfig {
             zones: Vec::new(),
             auto_discover: true,
             domain_map: HashMap::new(),
+            tcp: false,
+            single_address: None,
+            single_address_https_port: 443,
+            single_address_http_port: 80,
         }
     }
 }
@@ -720,6 +805,8 @@ impl Default for TunnelConfig {
             relay_secret: None,
             relay_secret_file: None,
             vip_ports: Vec::new(),
+            profile: TunnelProfile::default(),
+            reuse_connections: None,
         }
     }
 }
@@ -1046,6 +1133,11 @@ fn expand_tilde(path: &str) -> PathBuf {
 /// and `.join(...)` onto the result instead — one resolution point instead
 /// of N copies that could drift.
 pub fn ztlp_state_dir() -> PathBuf {
+    // 0. An explicit in-process override (iOS: the App Group container;
+    //    see `crate::state_home`). Never set on desktop builds.
+    if let Some(dir) = crate::state_home::override_dir() {
+        return dir;
+    }
     if let Ok(override_home) = std::env::var("ZTLP_HOME") {
         if !override_home.is_empty() {
             return PathBuf::from(override_home);
@@ -1226,6 +1318,75 @@ pub(crate) static ZTLP_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_home_override_wins_over_everything() {
+        let _guard = ZTLP_HOME_TEST_LOCK.lock().unwrap();
+        crate::state_home::set_override(Some(PathBuf::from("/tmp/ztlp-override-marker")));
+        std::env::set_var("ZTLP_HOME", "/tmp/ztlp-home-test-marker");
+        let dir = ztlp_state_dir();
+        let ident = AgentConfig::default().identity_path();
+        std::env::remove_var("ZTLP_HOME");
+        crate::state_home::set_override(None);
+        assert_eq!(dir, PathBuf::from("/tmp/ztlp-override-marker"));
+        assert!(
+            ident.starts_with("/tmp/ztlp-override-marker"),
+            "{}",
+            ident.display()
+        );
+    }
+
+    // ── [tunnel] profile / reuse_connections ─────────────────────────────
+
+    #[test]
+    fn tunnel_profile_defaults_to_desktop_without_reuse() {
+        let cfg: AgentConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.tunnel.profile, TunnelProfile::Desktop);
+        assert_eq!(cfg.tunnel.reuse_connections, None);
+        assert!(!cfg.tunnel.reuse_connections_enabled());
+        assert_eq!(
+            cfg.tunnel.transport_windows(),
+            crate::quic_transport::TransportWindows::DESKTOP
+        );
+        // a [tunnel] table without the new keys is still the desktop profile
+        let cfg: AgentConfig = toml::from_str("[tunnel]\nprefer_relay = true\n").unwrap();
+        assert_eq!(cfg.tunnel.profile, TunnelProfile::Desktop);
+        assert!(!cfg.tunnel.reuse_connections_enabled());
+    }
+
+    #[test]
+    fn tunnel_profile_mobile_selects_small_windows_and_reuse() {
+        let cfg: AgentConfig = toml::from_str("[tunnel]\nprofile = \"mobile\"\n").unwrap();
+        assert_eq!(cfg.tunnel.profile, TunnelProfile::Mobile);
+        assert!(cfg.tunnel.reuse_connections_enabled());
+        let w = cfg.tunnel.transport_windows();
+        assert_eq!(w.stream_receive_window, 256 * 1024);
+        assert_eq!(w.receive_window, 8 * 1024 * 1024);
+        assert_eq!(w.send_window, Some(256 * 1024));
+    }
+
+    #[test]
+    fn reuse_connections_can_be_set_independently_of_the_profile() {
+        let cfg: AgentConfig =
+            toml::from_str("[tunnel]\nprofile = \"mobile\"\nreuse_connections = false\n").unwrap();
+        assert!(!cfg.tunnel.reuse_connections_enabled());
+        assert_eq!(
+            cfg.tunnel.transport_windows(),
+            crate::quic_transport::TransportWindows::MOBILE
+        );
+        let cfg: AgentConfig = toml::from_str("[tunnel]\nreuse_connections = true\n").unwrap();
+        assert!(cfg.tunnel.reuse_connections_enabled());
+        assert_eq!(
+            cfg.tunnel.transport_windows(),
+            crate::quic_transport::TransportWindows::DESKTOP
+        );
+    }
+
+    #[test]
+    fn unknown_tunnel_profile_is_a_config_error() {
+        let r: Result<AgentConfig, _> = toml::from_str("[tunnel]\nprofile = \"tiny\"\n");
+        assert!(r.is_err());
+    }
+
     use super::*;
 
     #[test]
@@ -2016,6 +2177,58 @@ tls  = "nope"
             msg.contains("nope"),
             "load error must name the offending value: {msg}"
         );
+    }
+
+    // ── [dns] single_address ────────────────────────────────────────────
+
+    #[test]
+    fn single_address_is_off_by_default() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.dns.single_address, None);
+        assert_eq!(cfg.dns.single_address_ip(), Ok(None));
+        assert_eq!(cfg.dns.single_address_https_port, 443);
+        assert_eq!(cfg.dns.single_address_http_port, 80);
+        // a config file that does not mention it: still off
+        let cfg: AgentConfig = toml::from_str("[dns]\nlisten = \"127.0.0.53:5353\"\n").unwrap();
+        assert_eq!(cfg.dns.single_address_ip(), Ok(None));
+        // an empty value is "unset", not an error
+        let cfg: AgentConfig = toml::from_str("[dns]\nsingle_address = \"\"\n").unwrap();
+        assert_eq!(cfg.dns.single_address_ip(), Ok(None));
+    }
+
+    #[test]
+    fn single_address_parses_an_ipv4_address_and_optional_ports() {
+        let cfg: AgentConfig = toml::from_str("[dns]\nsingle_address = \"127.0.0.1\"\n").unwrap();
+        assert_eq!(
+            cfg.dns.single_address_ip(),
+            Ok(Some(std::net::Ipv4Addr::LOCALHOST))
+        );
+        assert_eq!(cfg.dns.single_address_https_port, 443);
+        assert_eq!(cfg.dns.single_address_http_port, 80);
+        // the pool key keeps its default and is simply unused
+        assert_eq!(cfg.dns.vip_range, "127.100.0.0/16");
+
+        let cfg: AgentConfig = toml::from_str(
+            "[dns]\nsingle_address = \" 192.0.2.7 \"\nsingle_address_https_port = 8443\n\
+             single_address_http_port = 8080\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.dns.single_address_ip(),
+            Ok(Some("192.0.2.7".parse().unwrap()))
+        );
+        assert_eq!(cfg.dns.single_address_https_port, 8443);
+        assert_eq!(cfg.dns.single_address_http_port, 8080);
+    }
+
+    #[test]
+    fn single_address_rejects_what_is_not_an_ipv4_address() {
+        for bad in ["localhost", "127.0.0.1/32", "::1", "127.0.0.1:443"] {
+            let cfg: AgentConfig =
+                toml::from_str(&format!("[dns]\nsingle_address = \"{bad}\"\n")).unwrap();
+            let err = cfg.dns.single_address_ip().unwrap_err();
+            assert!(err.contains(bad) && err.contains("single_address"), "{err}");
+        }
     }
 
     // ── validate_vip_ports ─────────────────────────────────────────────

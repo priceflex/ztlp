@@ -677,7 +677,7 @@ See *Trust authority forward path* above.
 
 ## Related documentation
 
-- `docs/ACL-ARCHITECTURE.md` — overall ACL model, including how
+- `docs/architecture/access-control.md` — overall ACL model, including how
   tenant-level ACLs compose with per-device ACLs.
 - `docs/Z2LS-E2E-RUNBOOK.md` — end-to-end runbook; the SVC-record
   naming convention used in zone globs is documented there.

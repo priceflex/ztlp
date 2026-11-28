@@ -1,248 +1,149 @@
-# ZTLP iOS App
+# ZTLP for iOS
 
-Native iOS client for the **Zero Trust Layer Protocol (ZTLP)**. Provides encrypted peer-to-peer connectivity via a system VPN tunnel backed by Noise_XX handshakes and hardware-secured identity keys.
+An iPhone app plus a packet tunnel extension that hosts the same Rust agent
+the Mac runs. Enroll once; after that any `http://` or `https://` site under
+`.ztlp` opens in Safari with the app closed. There is no Connect button: ZTLP
+is an identity network, not a VPN, and iOS keeps the tunnel up on demand.
 
-## Architecture
+Status: in development. It runs on a real iPhone: enrollment by QR code,
+`.ztlp` sites over HTTPS in Safari with the app closed, and recovery when the
+phone moves between Wi-Fi and cellular. Design, device measurements and open
+issues are in
+[`docs/plans/2026-11-27-ios-native-agent.md`](../docs/plans/2026-11-27-ios-native-agent.md).
 
-Current production-ish iOS architecture is in transition from an in-extension VIP proxy to an iOS-first relay-side VIP model.
+## How it works
 
-### Current implementation
+iOS delivers loopback traffic from other apps to sockets the extension binds,
+and it hands `.ztlp` DNS queries to the extension as packets. The design
+follows from those two facts:
 
+- `ZTLPTunnel` (packet tunnel extension) starts the Rust agent in-process on
+  `127.0.0.1`: resolver on port 53, web on 80 and 443, health on 8443. It
+  gives iOS one routed DNS server address for the `ztlp` domain only; the
+  queries arrive as packets and are passed to the agent's resolver, which
+  answers every site with `127.0.0.1`. Nothing else is routed through the
+  tunnel.
+- Loopback has one address, so all sites share it. The agent picks the site
+  from the TLS server name or the HTTP `Host` header. This covers web
+  applications; other protocols by `.ztlp` name are not supported yet.
+- The extension watches the device's network and tells the agent when it
+  changes or the phone wakes, so connections made on the old network are
+  dropped and re-made at once (directly when the gateway is reachable,
+  through a relay otherwise).
+- `ZTLP` (the app) is one page with three rows: Enrolled, Tunnel running,
+  HTTPS trusted. It enrolls the device, saves the VPN configuration with an
+  on-demand rule, and walks the user through trusting the device's own
+  certificate.
+- Both link `libztlp_proto.a` and talk to it through the C functions in
+  `ZTLP/Libraries/ztlp_ios.h`. Agent state lives in the App Group container
+  (`group.com.ztlp.shared`) under `.ztlp/`.
+
+## Build and install
+
+You need a Mac with Xcode, Rust (`rustup target add aarch64-apple-ios`), an
+Apple ID in Xcode for team `5527A7TH5P`, and an iPhone with Developer Mode
+on, connected by cable and unlocked.
+
+Run this in Terminal on the Mac itself (not over SSH: signing needs the
+unlocked login keychain):
+
+```sh
+ios/build-and-install.sh --launch
 ```
-┌───────────────────────────────────────────────┐
-│  ZTLP App (Main Process)                      │
-│  ┌─────────┐ ┌──────────┐ ┌───────────────┐  │
-│  │ SwiftUI │←│ViewModels│←│  ZTLPBridge    │  │
-│  │  Views  │ │  (MVVM)  │ │  (C FFI)      │  │
-│  └─────────┘ └──────────┘ └───────┬───────┘  │
-│                                    │          │
-│  ┌─────────────┐  ┌───────────────┐│          │
-│  │  Keychain   │  │Secure Enclave ││          │
-│  │  Service    │  │   Service     ││          │
-│  └──────┬──────┘  └──────┬────────┘│          │
-│         │                │         │          │
-│    [App Group Keychain + UserDefaults]        │
-│         │                │         │          │
-├─────────┴────────────────┴─────────┴──────────┤
-│  ZTLPTunnel (Network Extension Process)       │
-│  ┌────────────────────────────────────────┐   │
-│  │     PacketTunnelProvider               │   │
-│  │  ┌──────────┐  ┌─────────────────┐    │   │
-│  │  │ TUN R/W  │  │  ztlp C FFI     │    │   │
-│  │  │ (packet  │←→│  (Rust static   │    │   │
-│  │  │  flow)   │  │   library)      │    │   │
-│  │  └──────────┘  └─────────────────┘    │   │
-│  │  ┌──────────┐                         │   │
-│  │  │VIP proxy │  NWListener x5 on       │   │
-│  │  │(Swift)   │  127.0.0.1:80/443/...   │   │
-│  │  └──────────┘                         │   │
-│  └────────────────────────────────────────┘   │
-└───────────────────────────────────────────────┘
-```
 
-### Target architecture: relay-side VIP for iOS first
+It builds the Rust agent, checks it exports the contract, builds and signs
+the app, and installs it on the connected iPhone.
 
-```
-App → packetFlow → PacketTunnelProvider → encrypted UDP tunnel → relay
-                                                     │
-                                                     ▼
-                                        relay-side VIP termination
-                                                     │
-                                                     ▼
-                                              backend TCP service
-```
+| Option | What it does |
+| --- | --- |
+| `--rust-dir <path>` | Rust crate to build (default `proto/` in this repo; also `ZTLP_RUST_DIR`) |
+| `--device <udid or name>` | Pick a phone when more than one is connected |
+| `--launch` | Start the app after installing |
+| `--no-sign` | Compile check only: no signing, nothing installed. Works over SSH |
+| `--no-sign --stub` | Compile check against a stub library, no Rust needed |
+| `--test` | Run the unit tests on an iOS Simulator (stub library) |
 
-In the target design, the iOS Network Extension stops hosting `NWListener` VIP ports entirely. It becomes a pure packet encrypt/decrypt tunnel endpoint plus relay-selection client. The relay terminates VIP traffic on behalf of the phone.
+### From Xcode instead
 
-This is iOS-first because the immediate problem is the iOS Network Extension memory ceiling (~15 MB jetsam budget). Moving VIP proxying off-device is expected to recover roughly 5-8 MB and bring the extension back into a safe operating range.
+1. Run `ios/build-and-install.sh --no-sign` once so
+   `ios/ZTLP/Libraries/libztlp_proto.a` exists.
+2. Open `ios/ZTLP/ZTLP.xcodeproj`.
+3. Pick the `ZTLP` scheme and your iPhone, then Run.
 
-Reference design: `docs/RELAY-VIP-ARCHITECTURE.md`
+## First run on the phone
 
-### Key Design Decisions
+1. Open ZTLP. Tap **Scan QR code** and scan the code from the admin panel,
+   or tap **Paste code** and paste the `ztlp://enroll/...` text. Scanning the
+   code with the Camera app also opens ZTLP with the code filled in.
+2. Tap **Allow** when iOS asks to add a VPN configuration.
+3. Tap **Show steps** on the HTTPS row and follow the three steps: download
+   the certificate in Safari, install it under Settings > General > VPN &
+   Device Management, then turn on full trust for it under Settings > General >
+   About > Certificate Trust Settings. The last step is a separate switch and
+   is required: browsers go to HTTPS first.
+4. Open `https://name.zone.ztlp` in Safari.
 
-### Relay-side VIP notes
+The gear button shows the device name, zone, the last 200 log lines (agent
+log and extension log) and **Remove this device**.
 
-- NS is the control-plane source of truth for relay discovery and selection
-- iOS queries NS for `ZTLP_RELAY` records, then selects the best relay using latency/load-aware scoring
-- The NE keeps only packet flow, one UDP tunnel connection, sync crypto, ACK handling, and failover logic
-- The relay now performs the TCP termination work that used to live in `ZTLPVIPProxy.swift`
-- This changes relay trust properties for iOS VIP traffic: the relay can see plaintext unless relay→backend is re-encrypted
-- Recommended defense-in-depth is relay→backend TLS/mTLS, with future upgrade paths for double-encryption or relay mesh
-
-### Security model for iOS relay-side VIP
-
-For ordinary ZTLP relay mode, the relay only forwards opaque ciphertext by SessionID. For the new iOS relay-side VIP path, the relay becomes an application proxy for selected VIP services and therefore can inspect plaintext for that proxied traffic. That is an intentional tradeoff to fit inside Apple's Network Extension memory limits.
-
-What the relay still cannot do:
-- Forge a client identity without the client's device keys
-- Bypass ZTLP admission/authentication for tunnel establishment
-- Read traffic that remains ordinary end-to-end ZTLP relay traffic
-
-What changes:
-- The relay can see proxied VIP payloads for services it terminates
-- The relay becomes part of the trusted computing base for those iOS VIP sessions
-
-Use relay→backend TLS or mTLS wherever possible.
-
-### Migration status
-
-- Current code still contains `ZTLPVIPProxy.swift` and `NWListener`-based localhost VIP ports
-- `PacketTunnelProvider.swift` still falls back to a configured gateway address because sync NS relay resolution is being wired in
-- `docs/RELAY-VIP-ARCHITECTURE.md` is the active design for the next iOS memory-reduction step
-
-### Key Design Decisions
-
-- **MVVM + SwiftUI** — All views are declarative SwiftUI (iOS 16+), driven by `@Published` ViewModels
-- **Two-process architecture** — Main app handles UI; Network Extension handles the actual VPN tunnel in a sandboxed process
-- **Shared state via App Group** — Keychain (identity), UserDefaults (config/stats), and file container are shared between processes via `group.com.ztlp.shared`
-- **Rust FFI via C** — The ZTLP protocol library is written in Rust, compiled to a static library, and exposed via a C header (`ztlp.h`)
-- **Hardware-backed keys** — Secure Enclave P-256 keys on supported devices, with software fallback
-
-## Project Structure
+## Layout
 
 ```
 ios/
-├── build-ios.sh                    # Cross-compile Rust → iOS static lib
-├── README.md                       # This file
-└── ZTLP/
-    ├── ZTLP/                       # Main app target
-    │   ├── App/
-    │   │   ├── ZTLPApp.swift       # @main entry point
-    │   │   └── AppDelegate.swift   # UIKit adapter for lifecycle events
-    │   ├── Models/
-    │   │   ├── ConnectionStatus.swift
-    │   │   ├── ZTLPConfiguration.swift
-    │   │   ├── ZTLPIdentity.swift
-    │   │   └── ZTLPService.swift
-    │   ├── ViewModels/
-    │   │   ├── TunnelViewModel.swift
-    │   │   ├── SettingsViewModel.swift
-    │   │   ├── EnrollmentViewModel.swift
-    │   │   └── ServicesViewModel.swift
-    │   ├── Views/
-    │   │   ├── ContentView.swift       # Root tab navigation
-    │   │   ├── HomeView.swift          # Connect/disconnect with status ring
-    │   │   ├── ServicesView.swift       # Service discovery list
-    │   │   ├── IdentityView.swift       # Node ID, keys, enrollment
-    │   │   ├── SettingsView.swift       # Configuration
-    │   │   ├── EnrollmentView.swift     # QR scanner + enrollment flow
-    │   │   └── OnboardingView.swift     # First-run experience
-    │   ├── Services/
-    │   │   ├── ZTLPBridge.swift        # Swift ↔ C FFI bridge
-    │   │   ├── KeychainService.swift   # Keychain wrapper
-    │   │   ├── SecureEnclaveService.swift # SE key ops
-    │   │   └── NetworkMonitor.swift    # NWPathMonitor
-    │   ├── Extensions/
-    │   │   └── Color+ZTLP.swift       # Brand colors
-    │   ├── Resources/
-    │   │   ├── Info.plist
-    │   │   └── Assets.xcassets/
-    │   └── ZTLP-Bridging-Header.h
-    ├── ZTLPTunnel/                 # Network Extension target
-    │   ├── PacketTunnelProvider.swift
-    │   ├── TunnelConfiguration.swift
-    │   ├── Info.plist
-    │   └── ZTLPTunnel-Bridging-Header.h
-    ├── ZTLPTests/                  # Unit tests
-    │   ├── ZTLPBridgeTests.swift
-    │   ├── KeychainServiceTests.swift
-    │   ├── EnrollmentViewModelTests.swift
-    │   └── ConnectionStatusTests.swift
-    └── Libraries/                  # Output from build-ios.sh
-        ├── libztlp_proto.a
-        ├── libztlp_proto.xcframework/
-        └── ztlp.h
+  build-and-install.sh        build, sign, install; also --no-sign and --test
+  scripts/
+    make-stub-lib.sh          stub libztlp_proto.a for compile checks and tests
+    ztlp_ios_stub.c
+    regen-project.sh          regenerate the Xcode project from project.yml
+  ZTLP/
+    project.yml               source of truth for ZTLP.xcodeproj (XcodeGen)
+    ZTLP.xcodeproj            generated, committed
+    Libraries/ztlp_ios.h      C contract; libztlp_proto.a lands here (not committed)
+    Shared/                   compiled into both targets
+      AddressPlan.swift       the address plan, in one place
+      PacketCodec.swift       IPv4/UDP for DNS queries delivered as packets
+      NetDiag.swift           on-device path probes (diag.log)
+      ZTLPAgent.swift         Swift wrapper over ztlp_ios.h
+    ZTLP/                     the app (SwiftUI, iOS 16+)
+    ZTLPTunnel/               the packet tunnel extension
+    ZTLPTests/                unit tests for the pure logic
 ```
 
-## Build Instructions
+`ZTLP.xcodeproj` is generated. After adding, removing or renaming a source
+file, or editing `project.yml`, run `ios/scripts/regen-project.sh` and commit
+the result. XcodeGen builds from source without Homebrew; the script says how.
 
-### Prerequisites
+`ZTLP/Libraries/ztlp_ios.h` must stay identical to `proto/include/ztlp_ios.h`.
+`build-and-install.sh` copies the Rust header over it when that file exists.
 
-1. **Xcode 15+** with iOS 16.0 SDK
-2. **Rust** (via [rustup](https://rustup.rs/))
-3. iOS cross-compilation targets:
-   ```bash
-   rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-   ```
+## Memory
 
-### Step 1: Build the Rust Library
+iOS kills a packet tunnel extension above 50 MiB. The extension's Swift code
+buffers nothing, and the agent runs with small flow-control windows and one
+shared connection per site. Measured on an iPhone 15 Pro Max, the extension
+sits at about 4 MiB when idle. Every 30 seconds it writes a line like
+`memory footprint=4.0MiB` to its log (Settings > Log > Extension in the app,
+and the unified log under subsystem `com.ztlp.app.tunnel`).
 
-```bash
-cd ios
-./build-ios.sh release
+## Logs from a connected phone
+
+With the phone paired to the Mac, the logs can be copied without opening the
+app:
+
+```sh
+xcrun devicectl device copy from --device <id> \
+  --domain-type appGroupDataContainer --domain-identifier group.com.ztlp.shared \
+  --source .ztlp/agent.log --destination agent.log
 ```
 
-This compiles `proto/` for all iOS architectures, creates a universal static library, and copies it + the header to `ZTLP/Libraries/`.
+`extension.log` (start, stop, network changes, memory) and `diag.log` (path
+and certificate trust probes) sit next to `.ztlp/` in the same container.
 
-### Step 2: Open in Xcode
+## Known limits
 
-```bash
-open ZTLP/ZTLP.xcodeproj
-```
-
-### Step 3: Configure Signing
-
-1. Select the **ZTLP** target → Signing & Capabilities
-2. Set your Team and Bundle Identifier
-3. Repeat for the **ZTLPTunnel** target
-4. Ensure both targets use the same App Group: `group.com.ztlp.shared`
-
-### Step 4: Link the Library
-
-1. Both targets: Build Settings → **Library Search Paths** → `$(PROJECT_DIR)/Libraries`
-2. Both targets: Build Settings → **Header Search Paths** → `$(PROJECT_DIR)/Libraries`
-3. Both targets: Build Settings → **Other Linker Flags** → `-lztlp_proto -lresolv`
-4. Both targets: Build Settings → **Objective-C Bridging Header** → set to the respective `*-Bridging-Header.h` path
-
-### Step 5: Build & Run
-
-Select your device/simulator and build (⌘B) / run (⌘R).
-
-## Entitlements
-
-Both targets require:
-
-| Entitlement | Key | Value |
-|---|---|---|
-| App Groups | `com.apple.security.application-groups` | `group.com.ztlp.shared` |
-| Keychain Sharing | `keychain-access-groups` | `group.com.ztlp.shared` |
-
-**Main app additionally:**
-| Entitlement | Key | Value |
-|---|---|---|
-| Network Extensions | `com.apple.developer.networking.networkextension` | `packet-tunnel-provider` |
-| Personal VPN | `com.apple.developer.networking.vpn.api` | `allow-vpn` |
-
-**Network Extension additionally:**
-| Entitlement | Key | Value |
-|---|---|---|
-| Network Extensions | `com.apple.developer.networking.networkextension` | `packet-tunnel-provider` |
-
-## Enrollment Flow
-
-1. Admin generates an enrollment token via the ZTLP control plane
-2. Token is encoded as a QR code with URI scheme `ztlp://enroll/...`
-3. User scans QR in-app → token is validated → identity is generated
-4. Device is registered with the zone's Name Service
-5. App stores identity in shared keychain → tunnel extension can access it
-
-## Key Concepts
-
-- **Node ID** — 16-byte identifier derived from the public key (hex-encoded, 32 chars)
-- **Zone** — A logical network of ZTLP nodes that can discover and communicate with each other
-- **Relay** — A server that forwards ZTLP traffic and, for the iOS-first relay-side VIP design, may also terminate selected VIP TCP services on behalf of the phone
-- **Name Service (NS)** — Zone-scoped service for node registration and service discovery
-
-## Development Notes
-
-- The C header is at `proto/include/ztlp.h` and must be copied to `ios/ZTLP/Libraries/ztlp.h` after FFI changes
-- Current tunnel code still includes `ZTLPVIPProxy.swift`, but the direction is to remove localhost VIP listeners from the NE for iOS and send VIP traffic through a selected relay instead
-- Sync NS relay discovery and `RelayPool` selection are the next required pieces for the iOS-first relay-side VIP architecture
-- FFI callbacks fire on the Rust tokio thread where tokio-backed paths still exist — always dispatch to main before touching UI
-- The `ZTLPBridge` singleton manages all C pointer lifecycle with RAII wrappers
-- Identity ownership transfers to `ztlp_client_new()` — don't use the handle after
-- Strings from C accessors are library-owned — copy immediately, don't free
-
-## License
-
-See repository root for license information.
+- A download or upload in progress when the network changes is cut and has to
+  be retried.
+- Only web traffic is carried by name; SSH or remote desktop to a `.ztlp` name
+  is not available on iOS yet.
+- The path probes that run when the app opens are development aids and will be
+  removed before a release.

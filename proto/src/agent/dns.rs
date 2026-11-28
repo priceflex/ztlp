@@ -74,6 +74,14 @@ pub struct DnsResolverState {
     /// Where name→VIP allocations are persisted across agent restarts
     /// (`~/.ztlp/vip_state.json`). `None` disables persistence.
     pub vip_state_path: Option<std::path::PathBuf>,
+    /// Address answered for the health name (`ztlp-health.ztlp`):
+    /// [`peruser::HEALTH_VIP`](super::peruser::HEALTH_VIP) unless
+    /// `[tls] health_ip` moves it.
+    pub health_vip: Ipv4Addr,
+    /// Single-address (name-routed) mode, `[dns] single_address`: every
+    /// site name is answered with this one address and no VIP is
+    /// allocated. `None` (the default) is the VIP-per-site behaviour.
+    pub single: Option<super::name_route::SingleAddress>,
 }
 
 impl DnsResolverState {
@@ -355,6 +363,73 @@ pub async fn run_dns_resolver_on_socket(
     }
 }
 
+/// Largest DNS message accepted over TCP. Queries are tiny; this only
+/// bounds what a misbehaving client can make us buffer.
+const MAX_TCP_DNS_MSG: usize = 4096;
+/// A TCP DNS client that sends nothing for this long is dropped.
+const TCP_DNS_IDLE: Duration = Duration::from_secs(10);
+
+/// DNS over TCP (RFC 1035 4.2.2: each message is prefixed with its 16-bit
+/// length) on an already-bound listener, answering exactly like the UDP
+/// resolver. Enabled by `[dns] tcp = true`; an OS resolver falls back to
+/// TCP when it wants to, and a tunnel that only delivers to the agent's
+/// address has nothing else to answer it.
+pub async fn run_dns_tcp_resolver_on_listener(
+    listener: tokio::net::TcpListener,
+    state: Arc<Mutex<DnsResolverState>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut stream, peer) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("[DNS/TCP] accept error: {}", e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut len_buf = [0u8; 2];
+                match tokio::time::timeout(TCP_DNS_IDLE, stream.read_exact(&mut len_buf)).await {
+                    Ok(Ok(_)) => {}
+                    _ => break, // closed, error or idle
+                }
+                let len = u16::from_be_bytes(len_buf) as usize;
+                if len == 0 || len > MAX_TCP_DNS_MSG {
+                    debug!("[DNS/TCP] {}: refusing a {}-byte message", peer, len);
+                    break;
+                }
+                let mut query = vec![0u8; len];
+                match tokio::time::timeout(TCP_DNS_IDLE, stream.read_exact(&mut query)).await {
+                    Ok(Ok(_)) => {}
+                    _ => break,
+                }
+                let response = match process_dns_query(&query, &state).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        debug!("[DNS/TCP] query from {} failed: {}", peer, e);
+                        match build_error_response(&query, FLAGS_RESPONSE_SERVFAIL) {
+                            Ok(r) => r,
+                            Err(_) => break,
+                        }
+                    }
+                };
+                if response.len() > u16::MAX as usize {
+                    break;
+                }
+                let mut out = Vec::with_capacity(2 + response.len());
+                out.extend_from_slice(&(response.len() as u16).to_be_bytes());
+                out.extend_from_slice(&response);
+                if stream.write_all(&out).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
 /// Process a single DNS query and return the response bytes.
 async fn process_dns_query(
     query: &[u8],
@@ -369,6 +444,26 @@ async fn process_dns_query_with_freeze(
     state: &Mutex<DnsResolverState>,
     frozen: bool,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    process_dns_query_with(query, state, frozen, |name, ns_server| async move {
+        proxy::ns_resolve(&name, &ns_server).await
+    })
+    .await
+}
+
+/// [`process_dns_query_with_freeze`] with the name-server lookup passed in
+/// (`proxy::ns_resolve` outside tests).
+async fn process_dns_query_with<F, Fut>(
+    query: &[u8],
+    state: &Mutex<DnsResolverState>,
+    frozen: bool,
+    ns_resolve: F,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<proxy::NsResolution, Box<dyn std::error::Error + Send + Sync>>,
+    >,
+{
     if query.len() < DNS_HEADER_SIZE {
         return Err("query too short".into());
     }
@@ -409,7 +504,8 @@ async fn process_dns_query_with_freeze(
         if qtype == QTYPE_AAAA {
             return build_empty_response(query);
         }
-        return build_a_response(query, super::peruser::HEALTH_VIP, 5);
+        let health_vip = state.lock().await.health_vip;
+        return build_a_response(query, health_vip, 5);
     }
 
     // Check if this is a ZTLP name or custom domain
@@ -441,9 +537,22 @@ async fn process_dns_query_with_freeze(
     // Resolve via ZTLP-NS and allocate a VIP
     info!("[DNS] resolving {} via ZTLP-NS ({})", ztlp_name, ns_server);
 
-    match proxy::ns_resolve(&ztlp_name, &ns_server).await {
+    match ns_resolve(ztlp_name.clone(), ns_server.clone()).await {
         Ok(resolution) => {
             let mut st = state.lock().await;
+            // Single-address mode: same checks up to here, but the answer
+            // is the one shared address. No VIP, no listener to wait for;
+            // the site is remembered for the name-routed listeners.
+            if let Some(single) = st.single.as_mut() {
+                let addr = single.addr;
+                single.record(&ztlp_name, &resolution, std::time::Instant::now());
+                drop(st);
+                debug!(
+                    "DNS: {} → {} (single address {})",
+                    qname_lower, ztlp_name, addr
+                );
+                return build_a_response(query, addr, DEFAULT_TTL);
+            }
             let pool_before = st.vip_pool.allocated_count();
             let alloc_result = st.allocate_resolved_vip(&ztlp_name, &resolution);
             let pool_after = st.vip_pool.allocated_count();
@@ -473,6 +582,9 @@ async fn process_dns_query_with_freeze(
         }
         Err(e) => {
             debug!("DNS: NS resolution failed for {}: {}", ztlp_name, e);
+            if let Some(single) = state.lock().await.single.as_mut() {
+                single.record_failure(&ztlp_name, std::time::Instant::now());
+            }
             build_error_response(query, FLAGS_RESPONSE_NXDOMAIN)
         }
     }
@@ -776,8 +888,148 @@ mod tests {
             ns_server: "127.0.0.1:1".to_string(),
             upstream_dns: "1.1.1.1:53".to_string(),
             vip_state_path: Some(path.clone()),
+            health_vip: super::super::peruser::HEALTH_VIP,
+            single: None,
         };
         (st, path)
+    }
+
+    // ── single-address mode ([dns] single_address) ──────────────────────
+
+    type BoxErr = Box<dyn std::error::Error + Send + Sync>;
+
+    fn single_state() -> Mutex<DnsResolverState> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "apps.example.com".to_string(),
+            "office.example.ztlp".to_string(),
+        );
+        Mutex::new(DnsResolverState {
+            vip_pool: VipPool::new("127.100.0.0/24").unwrap(),
+            domain_mapper: DomainMapper::new(&map),
+            ns_server: "192.0.2.1:23096".to_string(),
+            upstream_dns: "192.0.2.53:53".to_string(),
+            vip_state_path: None,
+            health_vip: Ipv4Addr::LOCALHOST,
+            single: Some(super::super::name_route::SingleAddress::new(
+                Ipv4Addr::LOCALHOST,
+            )),
+        })
+    }
+
+    fn query_of_type(name: &str, qtype: u16) -> Vec<u8> {
+        let mut q = build_dns_query(name, 0x4242);
+        let n = q.len();
+        q[n - 4..n - 2].copy_from_slice(&qtype.to_be_bytes());
+        q
+    }
+
+    /// A name server that knows every name, and records what it was asked.
+    fn ns_ok(
+        asked: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> impl FnOnce(String, String) -> std::future::Ready<Result<proxy::NsResolution, BoxErr>>
+    {
+        move |name, _ns| {
+            asked.lock().unwrap().push(name.clone());
+            std::future::ready(Ok(fake_resolution(&name)))
+        }
+    }
+
+    fn ns_unknown(
+    ) -> impl FnOnce(String, String) -> std::future::Ready<Result<proxy::NsResolution, BoxErr>>
+    {
+        |name, _ns| std::future::ready(Err(format!("{name}: not found").into()))
+    }
+
+    #[tokio::test]
+    async fn single_address_answers_every_site_with_the_one_address_and_no_vip() {
+        let state = single_state();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for name in ["Wiki.Office.Example.ZTLP", "mail.office.example.ztlp"] {
+            let q = query_of_type(name, QTYPE_A);
+            let resp = process_dns_query_with(&q, &state, false, ns_ok(asked.clone()))
+                .await
+                .unwrap();
+            let n = resp.len();
+            assert_eq!(&resp[2..4], &FLAGS_RESPONSE_OK.to_be_bytes());
+            assert_eq!(&resp[6..8], &[0, 1], "one answer");
+            assert_eq!(&resp[n - 4..], &[127, 0, 0, 1], "{name}");
+            assert_eq!(&resp[n - 10..n - 6], &DEFAULT_TTL.to_be_bytes());
+        }
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec!["wiki.office.example.ztlp", "mail.office.example.ztlp"],
+            "the name server is asked exactly as for a VIP"
+        );
+        let st = state.lock().await;
+        assert_eq!(st.vip_pool.allocated_count(), 0, "no VIP in this mode");
+        let single = st.single.as_ref().unwrap();
+        assert_eq!(single.live_sites(std::time::Instant::now()), 2);
+        assert!(matches!(
+            single.lookup("wiki.office.example.ztlp", std::time::Instant::now()),
+            super::super::name_route::Lookup::Hit(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn single_address_maps_a_custom_domain_like_the_vip_resolver() {
+        let state = single_state();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let q = query_of_type("wiki.apps.example.com", QTYPE_A);
+        let resp = process_dns_query_with(&q, &state, false, ns_ok(asked.clone()))
+            .await
+            .unwrap();
+        assert_eq!(&resp[resp.len() - 4..], &[127, 0, 0, 1]);
+        assert_eq!(*asked.lock().unwrap(), vec!["wiki.office.example.ztlp"]);
+    }
+
+    #[tokio::test]
+    async fn single_address_negative_and_other_answers_match_the_vip_resolver() {
+        // The same queries against a VIP-mode state and a single-address
+        // state must produce byte-identical answers for: a name the name
+        // server does not know, AAAA, the health name, a locked session.
+        let vip_state = {
+            let st = single_state();
+            st.lock().await.single = None;
+            st
+        };
+        let single = single_state();
+
+        let cases: Vec<(Vec<u8>, bool)> = vec![
+            (query_of_type("gone.office.example.ztlp", QTYPE_A), false),
+            (query_of_type("wiki.office.example.ztlp", QTYPE_AAAA), false),
+            (query_of_type("ztlp-health.ztlp", QTYPE_A), false),
+            (query_of_type("ztlp-health.ztlp", QTYPE_AAAA), false),
+            (query_of_type("wiki.office.example.ztlp", QTYPE_A), true),
+        ];
+        for (q, frozen) in cases {
+            let a = process_dns_query_with(&q, &vip_state, frozen, ns_unknown())
+                .await
+                .unwrap();
+            let b = process_dns_query_with(&q, &single, frozen, ns_unknown())
+                .await
+                .unwrap();
+            assert_eq!(a, b, "frozen={frozen} query={q:02x?}");
+        }
+        // and the unknown name is NXDOMAIN, the health name its address
+        let nx = process_dns_query_with(
+            &query_of_type("gone.office.example.ztlp", QTYPE_A),
+            &single,
+            false,
+            ns_unknown(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&nx[2..4], &FLAGS_RESPONSE_NXDOMAIN.to_be_bytes());
+        let st = single.lock().await;
+        assert_eq!(st.vip_pool.allocated_count(), 0);
+        assert_eq!(
+            st.single
+                .as_ref()
+                .unwrap()
+                .live_sites(std::time::Instant::now()),
+            0
+        );
     }
 
     fn fake_resolution(name: &str) -> proxy::NsResolution {
@@ -855,6 +1107,55 @@ mod tests {
         assert_eq!(&resp[resp.len() - 4..], &[127, 100, 255, 2]);
         // nothing allocated from the VIP pool
         assert_eq!(st.lock().await.vip_pool.allocated_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn health_name_follows_a_configured_health_address() {
+        let (mut st, _) = state_with_persist("health-moved");
+        st.health_vip = "100.64.77.1".parse().unwrap();
+        let st = Mutex::new(st);
+        let resp = process_dns_query(&a_query("ztlp-health.ztlp", QTYPE_A), &st)
+            .await
+            .unwrap();
+        assert_eq!(rcode(&resp), 0, "NOERROR");
+        assert_eq!(&resp[resp.len() - 4..], &[100, 64, 77, 1]);
+    }
+
+    #[tokio::test]
+    async fn tcp_resolver_answers_length_prefixed_queries_like_udp() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (st, _) = state_with_persist("tcp");
+        let state = Arc::new(Mutex::new(st));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(run_dns_tcp_resolver_on_listener(listener, state.clone()));
+
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // two queries on one connection
+        for _ in 0..2 {
+            let q = a_query("ztlp-health.ztlp", QTYPE_A);
+            c.write_all(&(q.len() as u16).to_be_bytes()).await.unwrap();
+            c.write_all(&q).await.unwrap();
+            let mut len = [0u8; 2];
+            c.read_exact(&mut len).await.unwrap();
+            let mut resp = vec![0u8; u16::from_be_bytes(len) as usize];
+            c.read_exact(&mut resp).await.unwrap();
+            let udp = process_dns_query(&q, &state).await.unwrap();
+            assert_eq!(resp, udp, "TCP answer must equal the UDP answer");
+            assert_eq!(&resp[resp.len() - 4..], &[127, 100, 255, 2]);
+        }
+
+        // an oversized length prefix closes the connection instead of
+        // allocating for it
+        let mut c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c2.write_all(&u16::MAX.to_be_bytes()).await.unwrap();
+        let mut one = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(5), c2.read(&mut one))
+            .await
+            .expect("server must close promptly")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        server.abort();
     }
 
     #[tokio::test]

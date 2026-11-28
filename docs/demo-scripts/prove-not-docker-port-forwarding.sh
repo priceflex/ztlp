@@ -113,7 +113,7 @@ if grep -q "$DEMO_HOST" /etc/hosts 2>/dev/null; then
   echo "agent has re-allocated VIPs since /etc/hosts was pinned. Both"
   echo "addresses are still 127.100.x.x agent-owned virtual IPs either"
   echo "way — this is a workaround for a known lazy-allocation quirk, not"
-  echo "evidence against the ZTLP claim. See docs/defcon-2026-kali-buildout-notes.md #7."
+  echo "evidence against the ZTLP claim."
 fi
 pause
 

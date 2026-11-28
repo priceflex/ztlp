@@ -406,12 +406,28 @@ pub async fn run_control_socket(
     ipc_addr: &str,
     state: Arc<AgentState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let listener = bind_control_socket(ipc_addr).await?;
+    run_control_socket_on(listener, state).await
+}
+
+/// Bind the control listener (split from the accept loop so the daemon can
+/// report "listeners bound" before it starts serving).
+pub async fn bind_control_socket(
+    ipc_addr: &str,
+) -> Result<TcpListener, Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(ipc_addr)
         .await
         .map_err(|e| format!("failed to bind control socket {}: {}", ipc_addr, e))?;
 
     info!("control socket listening on {}", ipc_addr);
+    Ok(listener)
+}
 
+/// Serve control requests on an already-bound listener.
+pub async fn run_control_socket_on(
+    listener: TcpListener,
+    state: Arc<AgentState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(result) => result,
@@ -876,6 +892,14 @@ pub fn resolve_enroll_exec_path(current_exe: &std::path::Path) -> std::path::Pat
 /// environment (including `HOME`), so `~/.ztlp` resolves to the daemon's
 /// own config dir, not a human user's.
 async fn cmd_enroll(cmd: &ControlCommand) -> ControlResponse {
+    // The desktop enrolls by running `ztlp setup` as a child process. iOS
+    // cannot exec: the app enrolls in-process through `ztlp_ios_enroll`
+    // (same code, `agent::enroll`).
+    if cfg!(target_os = "ios") {
+        return ControlResponse::err(
+            "enroll over the control socket is not available on iOS; the app enrolls in-process",
+        );
+    }
     let last = crate::agent::peruser::last_checkin();
     let replace = enroll_should_replace_identity(last.as_ref().map(|r| r.state.as_str()));
     if replace {
@@ -1611,6 +1635,8 @@ impl AgentState {
             ns_server: "127.0.0.53:53".to_string(),
             upstream_dns: "1.1.1.1:53".to_string(),
             vip_state_path: None,
+            health_vip: super::peruser::HEALTH_VIP,
+            single: None,
         }));
         let tunnel_pool = Arc::new(Mutex::new(super::tunnel_pool::TunnelPool::new(1)));
         let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);

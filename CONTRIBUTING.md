@@ -627,7 +627,7 @@ the codebase.
 - Ops runbook improvements
 - Translations (README, docs site)
 
-**Key files:** `README.md`, `CLI.md`, `PROTOTYPE.md`, `docs/index.html`, `ops/`
+**Key files:** `README.md`, `docs/reference/cli.md`, `docs/development/reference-implementation.md`, `docs/index.html`, `ops/`
 
 ### Testing (Easy → Medium)
 
@@ -657,7 +657,7 @@ on GitHub. These are specifically chosen to be:
 If you're new to the project, start with a documentation or testing issue. They're a
 great way to learn the codebase while making a real contribution.
 
-See also [Good First Issues](https://github.com/priceflex/ztlp/blob/main/docs/GOOD-FIRST-ISSUES.md) for detailed descriptions
+See also [Good First Issues](https://github.com/priceflex/ztlp/blob/main/docs/development/good-first-issues.md) for detailed descriptions
 of starter issues with file pointers and acceptance criteria.
 
 ---

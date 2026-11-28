@@ -1,6 +1,6 @@
 # DEF CON Demo Scripts
 
-Three scripts to run live on the Kali box (`10.3.2.28`) alongside the browser
+Three scripts to run live on the Kali box (`10.0.40.28`) alongside the browser
 tab showing `https://demo-dashboard.defcon.ztlp/`, for proving the demo is
 real and not a static mockup.
 

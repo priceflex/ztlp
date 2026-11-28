@@ -115,7 +115,7 @@ One page, sensible defaults, "Advanced" section collapsed (plain HTML `<details>
 | Field | Default | Becomes |
 |---|---|---|
 | Service name (FQDN) | - | zone (longest suffix), label, `--service-name`, `--ns-register-name` |
-| Gateway host description | - | `host_note` (e.g. "ChooseForce box 10.42.42.112") |
+| Gateway host description | - | `host_note` (e.g. "ChooseForce box 10.0.30.112") |
 | Backend host:port | - | `--forward <label>:<backend>` |
 | Protocol | http | http enables the sign-in header options; tcp hides them |
 | Sign-in headers (SSO) | on for http | `--http-inject-headers`, audience = label |

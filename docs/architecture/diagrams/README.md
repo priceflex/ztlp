@@ -1,7 +1,7 @@
 # ZTLP Architecture Diagrams
 
 High-level Mermaid diagrams for getting oriented in the ZTLP repository. These are
-deliberately zoomed out — for implementation-level detail see `docs/ARCHITECTURE.md`
+deliberately zoomed out — for implementation-level detail see [the architecture overview](../overview.md)
 and the whitepaper (`whitepaper/ZTLP-Whitepaper.md`).
 
 | Diagram | What it shows |

@@ -1,14 +1,2 @@
-//
-//  ZTLP-Bridging-Header.h
-//  ZTLP
-//
-//  Bridging header to expose the ZTLP C FFI to Swift.
-//  The static library (libztlp_proto.a) must be linked in the build settings.
-//
-
-#ifndef ZTLP_Bridging_Header_h
-#define ZTLP_Bridging_Header_h
-
-#include "ztlp.h"
-
-#endif /* ZTLP_Bridging_Header_h */
+// Exposes the Rust agent's C contract (Libraries/ztlp_ios.h) to Swift.
+#include "ztlp_ios.h"

@@ -20,6 +20,7 @@ pub mod ca_trust;
 pub mod cert_install;
 pub mod cert_mint;
 pub mod config;
+pub mod conn_cache;
 pub mod control;
 pub mod daemon;
 pub mod discovery;
@@ -33,6 +34,7 @@ pub mod os_trust;
 // inside it is gated to `cfg(windows)` in D4.T2.
 pub mod dns_setup_windows;
 pub mod domain_map;
+pub mod enroll;
 pub mod enroll_trust;
 pub mod forwarded_proto;
 pub mod hardware_key;
@@ -50,6 +52,7 @@ pub mod legacy_migrate;
 // daemon.rs behind cfg!(target_os = "macos").
 #[cfg(unix)]
 pub mod macos_daemon;
+pub mod name_route;
 pub mod ns_checkin;
 pub mod ns_trust;
 pub mod nsset;
@@ -58,6 +61,7 @@ pub mod port_broker;
 // Per-user (unelevated) agent support: freeze/thaw, health probe, machine CA.
 pub mod peruser;
 pub mod proxy;
+pub(crate) mod reconnect;
 pub mod renewal;
 pub mod session_lock;
 pub mod splash;

@@ -2,7 +2,7 @@
 
 > **STATUS as of 2026-09-21 (end of session): Phase A + Phase B are CODE-COMPLETE
 > and test-verified, on branch `feat/linux-service-parity-phase-a` in
-> `/home/trs/ztlp`. NOT YET DONE: pushing that branch to GitHub (blocked mid-push
+> `~/ztlp`. NOT YET DONE: pushing that branch to GitHub (blocked mid-push
 > this session — `~/.ssh/github_token` was missing/stale on this box, see the
 > `ztlp-desktop-browser-clients` skill's git-push-token pitfall), Task B4, and all
 > of Phase C + Phase D. Read the "Session 2026-09-21 progress" section right below
@@ -49,7 +49,7 @@ Windows box — that's the actual gap, not "does it compile."
 **Immediate next steps for a fresh session:**
 1. Push `feat/linux-service-parity-phase-a` to `origin` (GitHub). This was
    attempted and BLOCKED this session because `~/.ssh/github_token` didn't
-   exist at the expected path (`cat: /home/trs/.ssh/github_token: No such file
+   exist at the expected path (`cat: ~/.ssh/github_token: No such file
    or directory`) — check where the token actually lives now (may have moved,
    rotated, or need re-creating via `gh auth token` or a fresh PAT), then push
    with the one-shot-URL pattern documented in the `ztlp-desktop-browser-clients`
@@ -59,7 +59,7 @@ Windows box — that's the actual gap, not "does it compile."
    runner builds the REAL MSVC artifact.
 3. Once that CI run is green, do Task B4 (verify whether `install-ca-cert
    --machine-scope` succeeds unattended as LocalSystem) and Phase D (drive the
-   real installer via the AI-computer worker, 10.170.3.207:7777).
+   real installer via the AI-computer worker, 10.0.20.207:7777).
 4. Phase C (single-page Home checklist UI, Tasks C1-C4) has NOT been started at
    all — it doesn't depend on Windows CI and could be done in parallel/first if
    preferred; it's pure frontend (`desktop/src/`) + a small Rust status-field
@@ -562,7 +562,7 @@ refuses). This determines whether Windows needs its OWN "Trust HTTPS" GUI button
 needed, the way macOS's B4(b) ORIGINALLY assumed before the live probe proved it
 wrong.
 
-**Step 1:** Once B1-B3 are live on the AI computer (10.170.3.207), enroll a test
+**Step 1:** Once B1-B3 are live on the AI computer (10.0.20.207), enroll a test
 device and read the service's own log / the `tls_provisioned` field the daemon
 already returns (`build_post_enroll_tls_plan`'s existing wiring, unchanged) to see
 whether `install-ca-cert --machine-scope` succeeded when run BY the LocalSystem
@@ -730,12 +730,12 @@ redirect-stripping recipe for headless artifact download from this box).
 **Step 1:** Push the Phase A/B/C branch, open a draft PR (or just push a branch — the
 `desktop` job doesn't require a tag) so `windows-latest` builds it.
 **Step 2:** Download the NSIS installer artifact.
-**Step 3:** Use the AI computer (10.170.3.207:7777, `trs-uiagent`, auth header
-`X-Auth: <trs-uiagent key, see /home/trs/7 - How to use ai computer.md>` — see `/home/trs/7 - How to use ai computer.md`) to:
+**Step 3:** Use the AI computer (10.0.20.207:7777, `trs-uiagent`, auth header
+`X-Auth: <trs-uiagent key, see ~/7 - How to use ai computer.md>` — see `~/7 - How to use ai computer.md`) to:
    a. Transfer the installer to that box (it has no direct file-drop endpoint in the
       documented API — check for an upload/download HTTP verb in the agent; if none
       exists, host the file briefly via a Cloudflare Tunnel or `python -m
-      http.server` reachable from 10.170.3.207 and drive Chrome's address bar via
+      http.server` reachable from 10.0.20.207 and drive Chrome's address bar via
       the documented `key`/`type` sequence to download it).
    b. Double-click-run the installer via `click`/`doubleclick` at its window
       coordinates (screenshot → vision_analyze → click, per the documented Step 3
@@ -757,7 +757,7 @@ plan error (every macOS fix this project shipped was found this way).
 #### Task D2: Linux — build + drive locally (this box has the full Tauri toolchain)
 
 **Step 1:** `cd desktop && cargo tauri build` (webkit2gtk/gtk3 already confirmed
-present on `10.69.95.13` — build there via the documented git-bundle-transfer
+present on `10.0.10.13` — build there via the documented git-bundle-transfer
 pattern in the skill if this Hermes VM itself lacks the GTK dev headers; check
 `pkg-config --exists webkit2gtk-4.1` locally first).
 **Step 2:** Install the produced `.deb`/`.AppImage` in a disposable Linux VM/container

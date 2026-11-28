@@ -94,10 +94,10 @@ expiry metadata.
 
 The full signing contract — including hex/raw-bytes secret encoding,
 clock-skew window, replay-protection notes, and every 401 failure
-code — is in [`api_v1_ztlp_secured.md`](./api_v1_ztlp_secured.md).
+code — is in [`api_v1_ztlp_secured.md`](api_v1_ztlp_secured.md).
 The Z2LS-side operator runbook, including a working Ruby snippet
 suitable for copy-paste into the Z2LS Rails app, is in
-[`z2ls_enrollment_runbook.md`](./z2ls_enrollment_runbook.md).
+[`z2ls_enrollment_runbook.md`](z2ls_enrollment_runbook.md).
 
 ### 2. Z2LS writes the token into `data_bag.yml`
 
@@ -119,7 +119,7 @@ The token is bound to a single computer name and self-expires in
 24 hours. There is no risk in committing it to Gitea — once the
 token is consumed it transitions to `exhausted` and a replay is
 rejected. (See
-[`enrollment_token_lifecycle.md`](./enrollment_token_lifecycle.md)
+[`enrollment_token_lifecycle.md`](enrollment_token_lifecycle.md)
 for the state machine and atomic single-use enforcement.)
 
 Z2LS commits the change through its normal Gitea workflow. The
@@ -128,7 +128,7 @@ managed endpoint will pick it up on its next hourly Chef pull.
 ### 3. The `ztlp` cookbook converges on the endpoint
 
 `cookbooks/ztlp/` lives in the
-[chef-recipes Gitea repo](http://10.42.42.115:3005/z2ls/chef-recipes)
+[chef-recipes Gitea repo](http://10.0.30.115:3005/z2ls/chef-recipes)
 and is described in
 [`z2ls-chef-gitea-workflow`](https://github.com/priceflex/ztlp/blob/main/docs/plans/ztlp-net-scaffolding/README.md)
 (skill: `z2ls-chef-gitea-workflow`).
@@ -163,12 +163,12 @@ The cookbook additionally invokes
 once per identity to publish an `SVC` record for the listener
 port, so other ZTLP clients can discover and connect to it by
 name (see
-[`bootstrap/docs/multi_service_gateway.md`](./multi_service_gateway.md)).
+[`bootstrap/docs/multi_service_gateway.md`](multi_service_gateway.md)).
 
 At this point the device shows up in the Bootstrap dashboard
 under **Devices** for the zone. The admin UI for managing it
 (grouping, policy assignment, revocation, suspension) is in
-[`dashboard_bspr5.md`](./dashboard_bspr5.md).
+[`dashboard_bspr5.md`](dashboard_bspr5.md).
 
 ### 5. Groups and policy
 
@@ -263,28 +263,28 @@ while everything else in the zone keeps working.
 
 Bootstrap docs (this folder):
 
-- [`enrollment_token_lifecycle.md`](./enrollment_token_lifecycle.md) — BS-PR-1
+- [`enrollment_token_lifecycle.md`](enrollment_token_lifecycle.md) — BS-PR-1
   EnrollmentToken model: 24h default lifetime, single-use, atomic
   `use!`, sweeper rake task.
-- [`api_v1_ztlp_secured.md`](./api_v1_ztlp_secured.md) — BS-PR-2
+- [`api_v1_ztlp_secured.md`](api_v1_ztlp_secured.md) — BS-PR-2
   Formal API auth contract: 6-line canonical message, 401 failure
   codes, allowlist semantics, future variants.
-- [`z2ls_enrollment_runbook.md`](./z2ls_enrollment_runbook.md) — BS-PR-3 + BS-PR-6
+- [`z2ls_enrollment_runbook.md`](z2ls_enrollment_runbook.md) — BS-PR-3 + BS-PR-6
   Integrator runbook with working Python/Ruby/curl snippets and
   end-to-end smoke test.
-- [`auto_network_on_boot.md`](./auto_network_on_boot.md) — BS-PR-4
+- [`auto_network_on_boot.md`](auto_network_on_boot.md) — BS-PR-4
   Per-tenant Bootstrap containers auto-provision the Network row
   on boot so the BS-PR-3 endpoint doesn't 503 immediately after
   onboarding.
-- [`dashboard_bspr5.md`](./dashboard_bspr5.md) — BS-PR-5
+- [`dashboard_bspr5.md`](dashboard_bspr5.md) — BS-PR-5
   Admin UI for `api_clients`, devices, groups, and device-to-device
   grants.
-- [`multi_service_gateway.md`](./multi_service_gateway.md) —
+- [`multi_service_gateway.md`](multi_service_gateway.md) —
   Device-side service discovery via NS `SVC` records.
 
 ZTLP repo:
 
-- [`docs/per_zone_hmac_design.md`](../../docs/per_zone_hmac_design.md) —
+- [`docs/architecture/per-zone-hmac.md`](../../docs/architecture/per-zone-hmac.md) —
   How the per-zone HMAC secret is provisioned, rotated, and
   consumed by the relay/gateway/bootstrap trust mesh.
 

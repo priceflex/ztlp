@@ -5,7 +5,7 @@ session to pick up cold; nothing below assumes chat context.
 Author of intent: Steven Price. "I feel like having ZTLP have permission to
 use the relay would be ideal and something we should work on in the future."
 
-Companion: /home/trs/ZTLP-MAC-PLAN-2026-09-19.md §4a (the V2 shared-secret
+Companion: ~/ZTLP-MAC-PLAN-2026-09-19.md §4a (the V2 shared-secret
 stopgap the Mac client ships with until V3 lands).
 
 ────────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ E4. Relay frame layout today (relay/lib/ztlp_relay/udp_listener.ex).
     Verification: `ZtlpRelay.HmacSecrets.verify_with_policy(zone_id,
     signed_data, hmac)` -> {:ok, :primary|:grace|:legacy|:unverified_dev|
     :unverified_staging} | error. Mode `ZTLP_RELAY_HMAC_MODE` prod (default,
-    fail-closed) | staging | dev. Design doc: docs/per_zone_hmac_design.md.
+    fail-closed) | staging | dev. Design doc: docs/architecture/per-zone-hmac.md.
     The V1->V2 migration (docs/plans/2026-05-24-zone-keyed-gateway-
     register-IMPL.md) is the template for how a new frame type is added
     with both accepted in parallel.
@@ -182,7 +182,7 @@ breaks V2 users until the final flip.
 
 W1 Spec + wire fixtures
    - Write the byte-exact V3 layouts into proto/src/tunnel.rs docs and
-     docs/per_zone_hmac_design.md (new section). Generate golden test
+     docs/architecture/per-zone-hmac.md (new section). Generate golden test
      vectors (Rust) checked into interop/ so Elixir tests use the same
      bytes (see skill ztlp-rust-elixir-interop; the interop suite is the
      parity gate).
@@ -249,7 +249,7 @@ Q5 Steven's call: is Option 2 (offline grants) needed at all, or is
 ────────────────────────────────────────────────────────────────────
 ## 6. FIRST 5 MINUTES OF THE V3 SESSION
 ────────────────────────────────────────────────────────────────────
-1. Read this file and docs/per_zone_hmac_design.md and
+1. Read this file and docs/architecture/per-zone-hmac.md and
    docs/plans/2026-05-24-zone-keyed-gateway-register-IMPL.md (the V2
    template).
 2. Answer Q1 by reading ns/lib/ztlp_ns/enrollment.ex:20-100 and
@@ -257,7 +257,7 @@ Q5 Steven's call: is Option 2 (offline grants) needed at all, or is
 3. Branch from main: `relay-auth-v3-identity`. Do NOT branch from
    macos-simple-direct-connect.
 4. W1 golden vectors first. Ask Steven before every commit/push.
-5. Repo: /home/trs/ztlp (Linux, Rust + Elixir tests run here; see skill
+5. Repo: ~/ztlp (Linux, Rust + Elixir tests run here; see skill
    ztlp-elixir-ci-debug). Demo stack for W7: Lightsail 44.240.16.59
-   (ssh -i /home/trs/.ssh/ztlp-defcon-demo.pem ubuntu@44.240.16.59),
+   (ssh -i ~/.ssh/ztlp-defcon-demo.pem ubuntu@44.240.16.59),
    compose ~/ztlp/demo/defcon-cloud-compose.yml.

@@ -225,7 +225,12 @@ pub fn recv_fd(sock: &UnixStream, buf: &mut [u8]) -> io::Result<(usize, Option<O
 /// UID of the process on the other end of a Unix stream.
 #[allow(unsafe_code)] // libc sendmsg/recvmsg/getpeereid; crate is otherwise deny(unsafe_code)
 pub fn peer_uid(sock: &UnixStream) -> io::Result<u32> {
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd"
+    ))]
     unsafe {
         let mut uid: libc::uid_t = 0;
         let mut gid: libc::gid_t = 0;

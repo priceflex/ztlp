@@ -160,6 +160,13 @@ pub struct TlsConfig {
     /// Automatically request certs for new hostnames (default: true).
     /// Note: requires a running CA and NS connectivity.
     pub auto_issue: bool,
+
+    /// Address of the HTTPS health responder (`https://ztlp-health.ztlp:8443/`)
+    /// and the address the resolver answers for that name. Unset = the
+    /// platform default: `127.100.255.2` on Windows and macOS, no responder
+    /// elsewhere. A host whose clients cannot reach this agent's loopback
+    /// (the iOS tunnel) sets a tunnel address here.
+    pub health_ip: Option<String>,
 }
 
 impl Default for TlsConfig {
@@ -168,6 +175,7 @@ impl Default for TlsConfig {
             enabled: true,
             cert_dir: "~/.ztlp/certs".to_string(),
             auto_issue: true,
+            health_ip: None,
         }
     }
 }

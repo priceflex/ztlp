@@ -306,22 +306,22 @@
 
   // ── Page routing configuration ────────────────────────
   const PAGES = {
-    'get-started':      { file: 'docs/GETTING-STARTED.md',         title: 'Get Started',       label: 'Getting Started' },
-    'use-cases':        { file: 'docs/USE-CASES.md',              title: 'Use Cases',         label: 'Real-World Scenarios' },
-    'architecture':     { file: 'docs/ARCHITECTURE.md',           title: 'Architecture',      label: 'Architecture Overview' },
-    'threat-model':     { file: 'docs/THREAT-MODEL.md',           title: 'Threat Model',      label: 'Threat Model' },
-    'spec':             { file: 'README.md',                      title: 'Specification',     label: 'Specification' },
-    'go-sdk':           { file: 'docs/GO-SDK.md',                 title: 'Go SDK',            label: 'Go Client SDK' },
-    'cli':              { file: 'docs/CLI-REF.md',                title: 'CLI Reference',     label: 'CLI Reference' },
-    'cli-docs':         { file: 'docs/CLI.md',                    title: 'CLI Guide',         label: 'CLI Guide' },
-    'deployment':       { file: 'docs/DEPLOYMENT.md',             title: 'Deployment',        label: 'Docker & Deployment' },
+    'get-started':      { file: 'docs/getting-started/quick-start.md',         title: 'Get Started',       label: 'Getting Started' },
+    'use-cases':        { file: 'docs/getting-started/use-cases.md',              title: 'Use Cases',         label: 'Real-World Scenarios' },
+    'architecture':     { file: 'docs/architecture/overview.md',           title: 'Architecture',      label: 'Architecture Overview' },
+    'threat-model':     { file: 'docs/architecture/threat-model.md',           title: 'Threat Model',      label: 'Threat Model' },
+    'spec':             { file: 'docs/reference/specification.md',                      title: 'Specification',     label: 'Specification' },
+    'go-sdk':           { file: 'docs/reference/go-sdk.md',                 title: 'Go SDK',            label: 'Go Client SDK' },
+    'cli':              { file: 'docs/reference/cli-quick-reference.md',                title: 'CLI Reference',     label: 'CLI Reference' },
+    'cli-docs':         { file: 'docs/reference/cli.md',                    title: 'CLI Guide',         label: 'CLI Guide' },
+    'deployment':       { file: 'docs/operations/deployment.md',             title: 'Deployment',        label: 'Docker & Deployment' },
     'vaultwarden':      { file: 'examples/vaultwarden/README.md', title: 'Vaultwarden Example', label: 'Password Manager Example' },
-    'identity-docs':    { file: 'docs/IDENTITY.md',               title: 'Identity Model',     label: 'Identity & Access' },
-    'docker-docs':      { file: 'docs/DOCKER.md',                 title: 'Docker Reference',   label: 'Docker Setup' },
-    'credential-docs':  { file: 'docs/CREDENTIAL-RENEWAL.md',     title: 'Credential Renewal', label: 'Credential Lifecycle' },
-    'relay-vip':        { file: 'docs/RELAY-VIP-ARCHITECTURE.md', title: 'Relay VIP Architecture', label: 'Relay VIP' },
-    'ops-runbook':      { file: 'docs/OPS-RUNBOOK.md',            title: 'Ops Runbook',        label: 'Operations' },
-    'key-management':   { file: 'docs/KEY-MANAGEMENT.md',         title: 'Key Management',     label: 'Key Management' },
+    'identity-docs':    { file: 'docs/architecture/identity.md',               title: 'Identity Model',     label: 'Identity & Access' },
+    'docker-docs':      { file: 'docs/getting-started/docker.md',                 title: 'Docker Reference',   label: 'Docker Setup' },
+    'credential-docs':  { file: 'docs/architecture/credential-renewal.md',     title: 'Credential Renewal', label: 'Credential Lifecycle' },
+    'relay-vip':        { file: 'docs/architecture/relay-vip.md', title: 'Relay VIP Architecture', label: 'Relay VIP' },
+    'ops-runbook':      { file: 'docs/operations/runbook.md',            title: 'Ops Runbook',        label: 'Operations' },
+    'key-management':   { file: 'docs/operations/key-management.md',         title: 'Key Management',     label: 'Key Management' },
     'fullstack':        { file: 'fullstack/README.md',            title: 'Full Stack Demo',    label: 'Full Stack Demo' },
   };
   const DEFAULT_PAGE = 'spec';
@@ -483,7 +483,7 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       let md = await res.text();
 
-      // Extract version info from README.md
+      // Extract version info from the specification
       if (pageKey === 'spec') {
         extractMeta(md);
         // Strip front matter
@@ -580,7 +580,7 @@
   const initialHash = window.location.hash.replace('#', '');
 
   if (initialPage !== null && initialPage !== 'spec') {
-    fetch('README.md').then(r => r.text()).then(md => extractMeta(md)).catch(() => {});
+    fetch('docs/reference/specification.md').then(r => r.text()).then(md => extractMeta(md)).catch(() => {});
   }
   loadPage(initialPage || DEFAULT_PAGE).then(() => {
     // If the hash was a section anchor (not a page key), scroll to it

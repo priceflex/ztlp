@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- **iPhone app (in development).** `ios/` now holds a native app that runs the
+  same Rust agent as the desktops inside a packet tunnel extension: enroll by
+  QR code or pasted token, then open `https://name.zone.ztlp` in Safari with
+  the app closed. The agent is reached through a small C interface
+  (`proto/include/ztlp_ios.h`). See `ios/README.md` and
+  `docs/plans/2026-11-27-ios-native-agent.md`. Not part of a release yet.
+
+- **New agent options, all off by default; desktop behaviour is unchanged
+  unless they are set.**
+  - `[tunnel] profile = "mobile"` uses small flow-control windows (256 KiB per
+    stream, 8 MiB per connection) for memory-limited hosts. The default,
+    `"desktop"`, keeps the existing windows.
+  - `[tunnel] reuse_connections = true` shares one connection per site across
+    requests instead of opening one per request. Shared connections are
+    re-made when the host reports a network change, with the relay dialed
+    alongside the direct path.
+  - `[dns] single_address = "<ip>"` (with `single_address_https_port` and
+    `single_address_http_port`) serves every site from one address and picks
+    the site by TLS server name or HTTP `Host` header, for platforms where a
+    per-site address pool is not available. Web traffic only.
+  - `[dns] tcp = true` also answers `.ztlp` lookups over TCP.
+
+- **`ztlp setup` enrollment logic moved into the library** (`agent::enroll`) so
+  the iPhone app and the command line share it. The command and its output are
+  unchanged.
+
+- **Documentation reorganised.** The root README is now a short project page;
+  the protocol specification moved to `docs/reference/specification.md`.
+  Documents are grouped by topic under `docs/` with an index in
+  `docs/README.md`, and session notes and completed plans were removed. Links
+  to old document paths no longer resolve.
+
+- **Repository no longer tracks build output** (`desktop/target-cross*`) or
+  local test logs.
+
 - **NS endpoint-auth ownership check is now O(1) instead of O(N) (fixes #137).**
   `ZtlpNs.EndpointAuth.find_registered_pubkey/1` previously copied and linearly
   scanned the entire record table (`Store.list/0`) on every signed PEER_ENDPOINTS

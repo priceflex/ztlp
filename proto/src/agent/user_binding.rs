@@ -66,6 +66,12 @@ pub fn current_user_sid() -> Result<String, BindingError> {
 
 #[cfg(unix)]
 fn current_user_sid_unix() -> Result<String, BindingError> {
+    // iOS has no fork/exec (and no `id`): never try to spawn there.
+    if cfg!(target_os = "ios") {
+        return Err(BindingError::ResolutionFailed(
+            "OS-user binding is not available on iOS".to_string(),
+        ));
+    }
     let output = Command::new("id")
         .arg("-u")
         .output()

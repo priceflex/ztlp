@@ -11,7 +11,7 @@ Steven's remembered flow does exist, but mostly in older Z2LS registration code,
 The strongest match is:
 
 ```text
-/home/trs/z2ls/z2ls_registration_api
+~/z2ls/z2ls_registration_api
 ```
 
 That older app implements:
@@ -39,7 +39,7 @@ What is missing is the clean public `ztlp.net` launcher that ties these together
 Path:
 
 ```text
-/home/trs/projects/ztlp/ztlp.net
+~/projects/ztlp/ztlp.net
 ```
 
 Old contents were only ngrok-local-bootstrap plumbing:
@@ -67,26 +67,26 @@ Action taken in this reset:
 Primary project:
 
 ```text
-/home/trs/z2ls/z2ls_registration_api
+~/z2ls/z2ls_registration_api
 ```
 
 Duplicate/archive copy:
 
 ```text
-/home/trs/z2ls-master-docpush/z2ls_registration_api
+~/z2ls-master-docpush/z2ls_registration_api
 ```
 
 Key files:
 
 ```text
-/home/trs/z2ls/z2ls_registration_api/README.md
-/home/trs/z2ls/z2ls_registration_api/app/controllers/api/v1/clients_controller.rb
-/home/trs/z2ls/z2ls_registration_api/app/controllers/completions_controller.rb
-/home/trs/z2ls/z2ls_registration_api/app/views/completions/show.html.erb
-/home/trs/z2ls/z2ls_registration_api/app/models/registration.rb
-/home/trs/z2ls/z2ls_registration_api/app/models/ztcm_registration.rb
-/home/trs/z2ls/docs/registration_api_contract.md
-/home/trs/z2ls/WARP.md
+~/z2ls/z2ls_registration_api/README.md
+~/z2ls/z2ls_registration_api/app/controllers/api/v1/clients_controller.rb
+~/z2ls/z2ls_registration_api/app/controllers/completions_controller.rb
+~/z2ls/z2ls_registration_api/app/views/completions/show.html.erb
+~/z2ls/z2ls_registration_api/app/models/registration.rb
+~/z2ls/z2ls_registration_api/app/models/ztcm_registration.rb
+~/z2ls/docs/registration_api_contract.md
+~/z2ls/WARP.md
 ```
 
 Flow:
@@ -117,7 +117,7 @@ How to reuse this for ZTLP:
 Path:
 
 ```text
-/home/trs/projects/ztlp/bootstrap
+~/projects/ztlp/bootstrap
 ```
 
 Important files:
@@ -159,8 +159,8 @@ Caveats found:
 Important files:
 
 ```text
-/home/trs/projects/ztlp/proto/src/enrollment.rs
-/home/trs/projects/ztlp/proto/src/bin/ztlp-cli.rs
+~/projects/ztlp/proto/src/enrollment.rs
+~/projects/ztlp/proto/src/bin/ztlp-cli.rs
 ```
 
 Capabilities found:
@@ -184,9 +184,9 @@ Useful facts:
 Important files:
 
 ```text
-/home/trs/projects/ztlp/ns/lib/ztlp_ns/server.ex
-/home/trs/projects/ztlp/ns/lib/ztlp_ns/enrollment.ex
-/home/trs/projects/ztlp/ns/lib/ztlp_ns/metrics_server.ex
+~/projects/ztlp/ns/lib/ztlp_ns/server.ex
+~/projects/ztlp/ns/lib/ztlp_ns/enrollment.ex
+~/projects/ztlp/ns/lib/ztlp_ns/metrics_server.ex
 ```
 
 Capabilities found:
@@ -207,12 +207,12 @@ Caveat:
 Desktop/Tauri:
 
 ```text
-/home/trs/projects/ztlp/desktop
-/home/trs/projects/ztlp/desktop/src/components/enrollment.js
-/home/trs/projects/ztlp/desktop/src-tauri/src/commands.rs
-/home/trs/projects/ztlp/desktop/src-tauri/src/tunnel.rs
-/home/trs/projects/ztlp/.github/workflows/desktop-build.yml
-/home/trs/projects/ztlp/.github/workflows/release.yml
+~/projects/ztlp/desktop
+~/projects/ztlp/desktop/src/components/enrollment.js
+~/projects/ztlp/desktop/src-tauri/src/commands.rs
+~/projects/ztlp/desktop/src-tauri/src/tunnel.rs
+~/projects/ztlp/.github/workflows/desktop-build.yml
+~/projects/ztlp/.github/workflows/release.yml
 ```
 
 Capabilities:
@@ -228,9 +228,9 @@ Caveat:
 macOS:
 
 ```text
-/home/trs/projects/ztlp/macos/ZTLP/ZTLP/Views/OnboardingView.swift
-/home/trs/projects/ztlp/macos/ZTLP/ZTLP/Views/EnrollmentView.swift
-/home/trs/projects/ztlp/macos/ZTLP/ZTLP/ViewModels/EnrollmentViewModel.swift
+~/projects/ztlp/macos/ZTLP/ZTLP/Views/OnboardingView.swift
+~/projects/ztlp/macos/ZTLP/ZTLP/Views/EnrollmentView.swift
+~/projects/ztlp/macos/ZTLP/ZTLP/ViewModels/EnrollmentViewModel.swift
 ```
 
 Capabilities:
@@ -244,10 +244,10 @@ Capabilities:
 Important files:
 
 ```text
-/home/trs/projects/ztlp/docs/CLI-REF.md
-/home/trs/projects/ztlp/.github/workflows/release.yml
-/home/trs/projects/ztlp/.github/workflows/desktop-build.yml
-/home/trs/projects/ztlp/desktop/README.md
+~/projects/ztlp/docs/CLI-REF.md
+~/projects/ztlp/.github/workflows/release.yml
+~/projects/ztlp/.github/workflows/desktop-build.yml
+~/projects/ztlp/desktop/README.md
 ```
 
 Existing release workflow builds:

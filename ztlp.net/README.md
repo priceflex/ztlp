@@ -115,14 +115,14 @@ Current default release: `v-before-nebula-collapse`. Override with `ZTLP_RELEASE
 Run the unit tests:
 
 ```bash
-cd /home/trs/projects/ztlp/ztlp.net
+cd ~/projects/ztlp/ztlp.net
 python3 -m unittest discover -s tests -v
 ```
 
 Run the app without Docker:
 
 ```bash
-cd /home/trs/projects/ztlp/ztlp.net
+cd ~/projects/ztlp/ztlp.net
 LAUNCH_BIND_HOST=127.0.0.1 LAUNCH_BIND_PORT=8080 python3 -m launch_app.app
 curl -fsS http://127.0.0.1:8080/health
 ```
@@ -130,7 +130,7 @@ curl -fsS http://127.0.0.1:8080/health
 Run the Docker preview:
 
 ```bash
-cd /home/trs/projects/ztlp/ztlp.net
+cd ~/projects/ztlp/ztlp.net
 docker compose config
 docker compose up --build
 ```
@@ -141,7 +141,7 @@ The Docker preview binds `${LAUNCH_PORT:-8080}:8080` and uses the `ztlp_launch_d
 Create a private bootstrap instance scaffold:
 
 ```bash
-cd /home/trs/projects/ztlp/ztlp.net
+cd ~/projects/ztlp/ztlp.net
 bin/launch create acme --org "Acme Corp" --email admin@example.com --zone acme.ztlp
 ```
 
@@ -168,7 +168,7 @@ bin/launch stop acme
 The older Z2LS registration flow that matches Steven's memory is here:
 
 ```text
-/home/trs/z2ls/z2ls_registration_api
+~/z2ls/z2ls_registration_api
 ```
 
 It already implements:

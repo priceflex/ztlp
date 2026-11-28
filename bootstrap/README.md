@@ -37,7 +37,7 @@ Domain/deployment assets for `www.ztlp.net` live in the repo-level `ztlp.net/` f
 For local product testing through ngrok:
 
 ```bash
-cd /home/trs/projects/ztlp/ztlp.net
+cd ~/projects/ztlp/ztlp.net
 cp .env.local.example .env.local
 # edit .env.local and set NGROK_AUTHTOKEN
 bin/run-local-ngrok
